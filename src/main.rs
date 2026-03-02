@@ -36,7 +36,7 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_root: PathBuf) -> Res
     app.refresh_data().await;
 
     loop {
-        terminal.draw(|f| ui::render(&app, f))?;
+        terminal.draw(|f| ui::render(&mut app, f))?;
 
         if let Some(evt) = events.next().await {
             match evt {

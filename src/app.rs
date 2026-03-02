@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::widgets::ListState;
 use strum::{Display, EnumIter, FromRepr, IntoEnumIterator};
 
 use crate::data::DataStore;
@@ -35,7 +36,7 @@ pub struct App {
     pub current_tab: Tab,
     pub data: DataStore,
     pub repo_root: PathBuf,
-    pub list_index: usize,
+    pub list_state: ListState,
 }
 
 impl App {
@@ -48,6 +49,9 @@ impl App {
 
     pub async fn refresh_data(&mut self) {
         self.data.refresh(&self.repo_root).await;
+        if self.list_state.selected().is_none() && self.current_list_len() > 0 {
+            self.list_state.select(Some(0));
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -55,11 +59,11 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => {
                 self.current_tab = self.current_tab.next();
-                self.list_index = 0;
+                self.list_state.select(Some(0));
             }
             KeyCode::BackTab => {
                 self.current_tab = self.current_tab.prev();
-                self.list_index = 0;
+                self.list_state.select(Some(0));
             }
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
@@ -73,14 +77,15 @@ impl App {
     }
 
     fn select_next(&mut self) {
-        let len = self.current_list_len();
-        if len > 0 {
-            self.list_index = (self.list_index + 1).min(len - 1);
+        if self.current_list_len() > 0 {
+            self.list_state.select_next();
         }
     }
 
     fn select_prev(&mut self) {
-        self.list_index = self.list_index.saturating_sub(1);
+        if self.current_list_len() > 0 {
+            self.list_state.select_previous();
+        }
     }
 
     fn current_list_len(&self) -> usize {
