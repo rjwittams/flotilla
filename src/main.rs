@@ -4,32 +4,82 @@ use color_eyre::Result;
 use crossterm::event::{EventStream, KeyCode, KeyEventKind};
 use futures::{FutureExt, StreamExt};
 use ratatui::{
-    layout::{Constraint, Layout},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Style, Stylize},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Paragraph, Tabs},
     DefaultTerminal, Frame,
 };
+use strum::{Display, EnumIter, FromRepr, IntoEnumIterator};
+
+#[derive(Default, Clone, Copy, Display, FromRepr, EnumIter, PartialEq)]
+enum Tab {
+    #[default]
+    #[strum(to_string = "Worktrees")]
+    Worktrees,
+    #[strum(to_string = "PRs")]
+    Prs,
+    #[strum(to_string = "Issues")]
+    Issues,
+    #[strum(to_string = "Sessions")]
+    Sessions,
+}
+
+impl Tab {
+    fn next(self) -> Self {
+        let i = (self as usize + 1) % Self::iter().count();
+        Self::from_repr(i).unwrap_or(self)
+    }
+    fn prev(self) -> Self {
+        let count = Self::iter().count();
+        let i = (self as usize + count - 1) % count;
+        Self::from_repr(i).unwrap_or(self)
+    }
+}
 
 #[derive(Default)]
 struct App {
     should_quit: bool,
+    current_tab: Tab,
 }
 
 impl App {
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Tab => self.current_tab = self.current_tab.next(),
+            KeyCode::BackTab => self.current_tab = self.current_tab.prev(),
             _ => {}
         }
     }
 
     fn render(&self, frame: &mut Frame) {
-        let area = frame.area();
-        let block = Block::bordered().title(" cmux-controller ");
-        let text = Paragraph::new("Press q to quit")
-            .block(block)
-            .style(Style::default().fg(Color::White));
-        frame.render_widget(text, area);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),  // tab bar
+                Constraint::Min(0),    // main content
+                Constraint::Length(1), // status bar
+            ])
+            .split(frame.area());
+
+        // Tab bar
+        let titles = Tab::iter().map(|t| t.to_string());
+        let tabs = Tabs::new(titles)
+            .select(self.current_tab as usize)
+            .highlight_style(Style::default().bold().fg(Color::Cyan))
+            .divider(" | ")
+            .block(Block::bordered().title(" cmux-controller "));
+        frame.render_widget(tabs, chunks[0]);
+
+        // Main content (placeholder)
+        let content = Paragraph::new(format!("Tab: {}", self.current_tab))
+            .block(Block::bordered());
+        frame.render_widget(content, chunks[1]);
+
+        // Status bar
+        let status = Paragraph::new(" tab:switch  q:quit")
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(status, chunks[2]);
     }
 }
 
