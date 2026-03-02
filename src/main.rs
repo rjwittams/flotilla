@@ -1,30 +1,56 @@
 mod app;
+mod data;
 mod event;
 mod ui;
 
+use std::path::PathBuf;
 use std::time::Duration;
 use color_eyre::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
+
+    // Detect repo root
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()?;
+    let repo_root = if output.status.success() {
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+    } else {
+        eprintln!("Error: not in a git repository");
+        std::process::exit(1);
+    };
+
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal).await;
+    let result = run(&mut terminal, repo_root).await;
     ratatui::restore();
     result
 }
 
-async fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
-    let mut app = app::App::default();
+async fn run(terminal: &mut ratatui::DefaultTerminal, repo_root: PathBuf) -> Result<()> {
+    let mut app = app::App::new(repo_root);
     let mut events = event::EventHandler::new(Duration::from_millis(250));
+
+    // Initial data load
+    app.refresh_data().await;
 
     loop {
         terminal.draw(|f| ui::render(&app, f))?;
 
         if let Some(evt) = events.next().await {
             match evt {
-                event::Event::Key(k) => app.handle_key(k),
-                event::Event::Tick => app.tick(),
+                event::Event::Key(k) => {
+                    if k.code == crossterm::event::KeyCode::Char('r') {
+                        app.refresh_data().await;
+                    } else {
+                        app.handle_key(k);
+                    }
+                }
+                event::Event::Tick => {
+                    // Check if auto-refresh is due
+                    // (tick-based refresh will be refined later)
+                }
             }
         }
 
