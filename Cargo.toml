@@ -1,0 +1,17 @@
+[package]
+name = "cmux-controller"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+color-eyre = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive"] }
+strum = { version = "0.26", features = ["derive"] }
+tui-input = "0.10"
