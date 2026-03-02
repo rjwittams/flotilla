@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Flex, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, HighlightSpacing, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Tabs},
     Frame,
 };
 use strum::IntoEnumIterator;
@@ -23,6 +23,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     render_tabs(app, frame, chunks[0]);
     render_content(app, frame, chunks[1]);
     render_status_bar(frame, chunks[2]);
+    render_action_menu(app, frame);
 }
 
 fn render_tabs(app: &App, frame: &mut Frame, area: Rect) {
@@ -212,4 +213,39 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
         .block(Block::bordered().title(" Preview "))
         .wrap(ratatui::widgets::Wrap { trim: true });
     frame.render_widget(preview, area);
+}
+
+fn render_action_menu(app: &mut App, frame: &mut Frame) {
+    if !app.show_action_menu {
+        return;
+    }
+
+    let area = popup_area(frame.area(), 40, 40);
+    frame.render_widget(Clear, area);
+
+    let items: Vec<ListItem> = app
+        .action_menu_items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| ListItem::new(format!(" {}: {}", i + 1, item)))
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::bordered().title(" Actions "))
+        .highlight_style(Style::default().bg(Color::Blue).bold())
+        .highlight_symbol("▸ ");
+
+    let mut state = ListState::default();
+    state.select(Some(app.action_menu_index));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let [area] = Layout::vertical([Constraint::Percentage(percent_y)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [area] = Layout::horizontal([Constraint::Percentage(percent_x)])
+        .flex(Flex::Center)
+        .areas(area);
+    area
 }
