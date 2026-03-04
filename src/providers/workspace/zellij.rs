@@ -123,7 +123,13 @@ impl ZellijWorkspaceManager {
             Ok(c) => c,
             Err(_) => return ZellijState::default(),
         };
-        toml::from_str(&contents).unwrap_or_default()
+        match toml::from_str(&contents) {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!("corrupt zellij state file, treating as empty: {e}");
+                ZellijState::default()
+            }
+        }
     }
 
     /// Save state for the given session. Silently ignores errors.
@@ -140,22 +146,12 @@ impl ZellijWorkspaceManager {
         }
     }
 
-    /// Build zellij new-pane args, appending `-- cmd arg1 arg2` if command is non-empty.
-    fn append_command_args<'a>(args: &mut Vec<&'a str>, cmd_parts: &'a [String]) {
-        if !cmd_parts.is_empty() {
-            args.push("--");
-            for part in cmd_parts {
-                args.push(part.as_str());
-            }
+    /// Append `-- sh -c "command"` to args if command is non-empty.
+    /// Uses sh -c to avoid quoting issues with complex commands.
+    fn append_command_args<'a>(args: &mut Vec<&'a str>, command: &'a str) {
+        if !command.is_empty() {
+            args.extend(["--", "sh", "-c", command]);
         }
-    }
-
-    /// Split a command string into parts for zellij `-- command args` syntax.
-    fn split_command(command: &str) -> Vec<String> {
-        command
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect()
     }
 }
 
@@ -233,9 +229,8 @@ impl super::WorkspaceManager for ZellijWorkspaceManager {
 
                 // Additional surfaces in the first pane: stacked panes
                 for surface in pane.surfaces.iter().skip(1) {
-                    let cmd_parts = Self::split_command(&surface.command);
                     let mut args: Vec<&str> = vec!["new-pane", "--stacked", "--cwd", &working_dir];
-                    Self::append_command_args(&mut args, &cmd_parts);
+                    Self::append_command_args(&mut args, &surface.command);
                     Self::zellij_action(&args).await?;
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
@@ -244,22 +239,35 @@ impl super::WorkspaceManager for ZellijWorkspaceManager {
                 let direction = pane.split.as_deref().unwrap_or("right");
 
                 if let Some(surface) = pane.surfaces.first() {
-                    let cmd_parts = Self::split_command(&surface.command);
                     let mut args: Vec<&str> =
                         vec!["new-pane", "-d", direction, "--cwd", &working_dir];
-                    Self::append_command_args(&mut args, &cmd_parts);
+                    Self::append_command_args(&mut args, &surface.command);
                     Self::zellij_action(&args).await?;
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
 
                 // Additional surfaces in this pane: stacked panes
                 for surface in pane.surfaces.iter().skip(1) {
-                    let cmd_parts = Self::split_command(&surface.command);
                     let mut args: Vec<&str> = vec!["new-pane", "--stacked", "--cwd", &working_dir];
-                    Self::append_command_args(&mut args, &cmd_parts);
+                    Self::append_command_args(&mut args, &surface.command);
                     Self::zellij_action(&args).await?;
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
+            }
+        }
+
+        // Focus the designated pane: move focus back to the first pane that has focus=true.
+        // Since zellij creates panes left-to-right / top-to-bottom, we navigate back
+        // to the focus pane by counting how many panes were created after it.
+        let focus_index = rendered.panes.iter().position(|p| p.focus);
+        let total_panes: usize = rendered.panes.iter().map(|p| p.surfaces.len().max(1)).sum();
+        if let Some(fi) = focus_index {
+            // Count panes created before the focus pane
+            let panes_before: usize = rendered.panes.iter().take(fi).map(|p| p.surfaces.len().max(1)).sum();
+            // Focus is currently on the last pane; move back (total - 1 - panes_before) times
+            let moves_back = total_panes.saturating_sub(1).saturating_sub(panes_before);
+            for _ in 0..moves_back {
+                Self::zellij_action(&["move-focus", "left"]).await.ok();
             }
         }
 
