@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Flex, Layout, Rect},
-    style::{Color, Style, Stylize},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{
         Block, Cell, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Table,
@@ -9,13 +9,13 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{Action, App, ProviderStatus};
+use crate::app::{AppModel, Intent, ProviderStatus, UiMode, UiState};
 use crate::data::{SectionHeader, TableEntry, WorkItem, WorkItemKind};
 use crate::event_log::{self, LevelExt};
 use crate::providers::correlation::ItemKind as CorItemKind;
 use crate::providers::types::{ChangeRequestStatus, CorrelationKey, SessionStatus};
 
-pub fn render(app: &mut App, frame: &mut Frame) {
+pub fn render(model: &AppModel, ui: &mut UiState, frame: &mut Frame) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -25,35 +25,36 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         ])
         .split(frame.area());
 
-    render_tab_bar(app, frame, chunks[0]);
-    render_content(app, frame, chunks[1]);
-    render_status_bar(app, frame, chunks[2]);
-    render_action_menu(app, frame);
-    render_input_popup(app, frame);
-    render_delete_confirm(app, frame);
-    render_help(app, frame);
-    render_file_picker(app, frame);
+    render_tab_bar(model, ui, frame, chunks[0]);
+    render_content(model, ui, frame, chunks[1]);
+    render_status_bar(model, ui, frame, chunks[2]);
+    render_action_menu(model, ui, frame);
+    render_input_popup(ui, frame);
+    render_delete_confirm(ui, frame);
+    render_help(ui, frame);
+    render_file_picker(ui, frame);
 }
 
-fn render_tab_bar(app: &mut App, frame: &mut Frame, area: Rect) {
+fn render_tab_bar(model: &AppModel, ui: &mut UiState, frame: &mut Frame, area: Rect) {
     let flotilla_label = " flotilla ";
-    let flotilla_style = if app.show_config {
+    let flotilla_style = if ui.mode.is_config() {
         Style::default().bold().fg(Color::Black).bg(Color::White)
     } else {
         Style::default().bold().fg(Color::Black).bg(Color::Cyan)
     };
     let mut spans: Vec<Span> = vec![Span::styled(flotilla_label, flotilla_style)];
 
-    app.flotilla_tab_area = Rect::new(area.x, area.y, flotilla_label.len() as u16, 1);
-    app.tab_areas.clear();
+    ui.layout.flotilla_tab_area = Rect::new(area.x, area.y, flotilla_label.len() as u16, 1);
+    ui.layout.tab_areas.clear();
     let mut x_offset: u16 = flotilla_label.len() as u16;
 
-    for (i, path) in app.repo_order.iter().enumerate() {
-        let rs = &app.repos[path];
-        let name = App::repo_name(path);
-        let is_active = !app.show_config && i == app.active_repo;
-        let loading = if rs.data.loading { " ⟳" } else { "" };
-        let changed = if rs.has_unseen_changes { "*" } else { "" };
+    for (i, path) in model.repo_order.iter().enumerate() {
+        let rm = &model.repos[path];
+        let rui = &ui.repo_ui[path];
+        let name = AppModel::repo_name(path);
+        let is_active = !ui.mode.is_config() && i == model.active_repo;
+        let loading = if rm.data.loading { " ⟳" } else { "" };
+        let changed = if rui.has_unseen_changes { "*" } else { "" };
 
         let sep = Span::styled(" | ", Style::default().fg(Color::DarkGray));
         spans.push(sep);
@@ -61,7 +62,7 @@ fn render_tab_bar(app: &mut App, frame: &mut Frame, area: Rect) {
 
         let label = format!("{name}{changed}{loading}");
         let label_len = label.len() as u16;
-        let style = if is_active && app.drag_active {
+        let style = if is_active && ui.drag.active {
             Style::default().bold().fg(Color::Cyan).underlined()
         } else if is_active {
             Style::default().bold().fg(Color::Cyan)
@@ -70,8 +71,7 @@ fn render_tab_bar(app: &mut App, frame: &mut Frame, area: Rect) {
         };
         spans.push(Span::styled(label, style));
 
-        // Record tab area for mouse hit-testing
-        app.tab_areas.push(Rect::new(area.x + x_offset, area.y, label_len, 1));
+        ui.layout.tab_areas.push(Rect::new(area.x + x_offset, area.y, label_len, 1));
         x_offset += label_len;
     }
 
@@ -81,60 +81,75 @@ fn render_tab_bar(app: &mut App, frame: &mut Frame, area: Rect) {
     x_offset += 3;
     let add_label = Span::styled("[+]", Style::default().fg(Color::Green));
     spans.push(add_label);
-    app.add_tab_area = Rect::new(area.x + x_offset, area.y, 3, 1);
+    ui.layout.add_tab_area = Rect::new(area.x + x_offset, area.y, 3, 1);
 
     let line = Line::from(spans);
     let title = Paragraph::new(line);
     frame.render_widget(title, area);
 }
 
-fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
-    if let Some(err) = &app.status_message {
+fn active_rui<'a>(model: &AppModel, ui: &'a UiState) -> &'a crate::app::RepoUiState {
+    ui.active_repo_ui(&model.repo_order, model.active_repo)
+}
+
+fn selected_work_item<'a>(model: &'a AppModel, ui: &UiState) -> Option<&'a WorkItem> {
+    let rui = active_rui(model, ui);
+    let table_idx = rui.table_state.selected()?;
+    match model.active().data.table_entries.get(table_idx)? {
+        TableEntry::Item(item) => Some(item),
+        TableEntry::Header(_) => None,
+    }
+}
+
+fn render_status_bar(model: &AppModel, ui: &UiState, frame: &mut Frame, area: Rect) {
+    if let Some(err) = &model.status_message {
         let msg = format!(" Error: {}", err);
         let status = Paragraph::new(msg).style(Style::default().fg(Color::Red));
         frame.render_widget(status, area);
         return;
     }
 
-    let text: String = if app.show_config {
-        " j/k:scroll log  [/]:switch tab  ?:help  q:quit".into()
-    } else if app.active().show_providers {
-        " c:close providers  [/]:switch tab  ?:help  q:quit".into()
-    } else if app.generating_branch {
-        " Generating branch name...".into()
-    } else if app.show_action_menu {
-        " j/k:navigate  enter:select  esc:close".into()
-    } else if app.input_mode == crate::app::InputMode::BranchName {
-        " type branch name  enter:create  esc:cancel".into()
-    } else if app.input_mode == crate::app::InputMode::AddRepo {
-        " j/k:navigate  tab:complete  enter:select  esc:cancel".into()
-    } else if app.show_delete_confirm {
-        " y/enter:confirm  n/esc:cancel".into()
-    } else if !app.active().multi_selected.is_empty() {
-        " enter:create branch  shift+enter:toggle  esc:clear  ?:help  q:quit".into()
-    } else {
-        let mut s = " enter:open".to_string();
-        if let Some(item) = app.selected_work_item() {
-            for &action in Action::all_in_menu_order() {
-                if let Some(hint) = action.shortcut_hint() {
-                    if action.is_available(item) {
-                        s.push_str("  ");
-                        s.push_str(hint);
+    let rui = active_rui(model, ui);
+
+    let text: String = match &ui.mode {
+        UiMode::Config => " j/k:scroll log  [/]:switch tab  ?:help  q:quit".into(),
+        UiMode::BranchInput { generating: true, .. } => " Generating branch name...".into(),
+        UiMode::BranchInput { generating: false, .. } => " type branch name  enter:create  esc:cancel".into(),
+        UiMode::ActionMenu { .. } => " j/k:navigate  enter:select  esc:close".into(),
+        UiMode::FilePicker { .. } => " j/k:navigate  tab:complete  enter:select  esc:cancel".into(),
+        UiMode::DeleteConfirm { .. } => " y/enter:confirm  n/esc:cancel".into(),
+        UiMode::Help => " ?:close help  esc:close help".into(),
+        UiMode::Normal => {
+            if rui.show_providers {
+                " c:close providers  [/]:switch tab  ?:help  q:quit".into()
+            } else if !rui.multi_selected.is_empty() {
+                " enter:create branch  shift+enter:toggle  esc:clear  ?:help  q:quit".into()
+            } else {
+                let mut s = " enter:open".to_string();
+                if let Some(item) = selected_work_item(model, ui) {
+                    let labels = model.active_labels();
+                    for &intent in Intent::all_in_menu_order() {
+                        if let Some(hint) = intent.shortcut_hint(labels) {
+                            if intent.is_available(item) {
+                                s.push_str("  ");
+                                s.push_str(&hint);
+                            }
+                        }
                     }
                 }
+                s.push_str("  space:menu  n:new  r:refresh  shift+enter:select  ?:help  q:quit");
+                s
             }
         }
-        s.push_str("  space:menu  n:new  r:refresh  shift+enter:select  ?:help  q:quit");
-        s
     };
 
     let status = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(status, area);
 }
 
-fn render_content(app: &mut App, frame: &mut Frame, area: Rect) {
-    if app.show_config {
-        render_config_screen(app, frame, area);
+fn render_content(model: &AppModel, ui: &mut UiState, frame: &mut Frame, area: Rect) {
+    if ui.mode.is_config() {
+        render_config_screen(model, ui, frame, area);
         return;
     }
 
@@ -143,14 +158,13 @@ fn render_content(app: &mut App, frame: &mut Frame, area: Rect) {
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(area);
 
-    render_unified_table(app, frame, chunks[0]);
-    render_preview(app, frame, chunks[1]);
+    render_unified_table(model, ui, frame, chunks[0]);
+    render_preview(model, ui, frame, chunks[1]);
 }
 
-fn render_repo_providers(app: &App, frame: &mut Frame, area: Rect) {
-    let path = &app.repo_order[app.active_repo];
-    let rs = &app.repos[path];
-    let reg = &rs.registry;
+fn render_repo_providers(model: &AppModel, _ui: &UiState, frame: &mut Frame, area: Rect) {
+    let path = &model.repo_order[model.active_repo];
+    let reg = &model.repos[path].registry;
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -169,7 +183,7 @@ fn render_repo_providers(app: &App, frame: &mut Frame, area: Rect) {
             "Code review",
             reg.code_review.values().next().map(|v| v.display_name().to_string()),
             reg.code_review.iter().next().and_then(|(pname, _)| {
-                app.provider_statuses
+                model.provider_statuses
                     .get(&(path.clone(), "code_review".into(), pname.clone()))
                     .copied()
             }),
@@ -178,7 +192,7 @@ fn render_repo_providers(app: &App, frame: &mut Frame, area: Rect) {
             "Issue tracker",
             reg.issue_trackers.values().next().map(|v| v.display_name().to_string()),
             reg.issue_trackers.iter().next().and_then(|(pname, _)| {
-                app.provider_statuses
+                model.provider_statuses
                     .get(&(path.clone(), "issue_tracker".into(), pname.clone()))
                     .copied()
             }),
@@ -187,7 +201,7 @@ fn render_repo_providers(app: &App, frame: &mut Frame, area: Rect) {
             "Coding agent",
             reg.coding_agents.values().next().map(|v| v.display_name().to_string()),
             reg.coding_agents.iter().next().and_then(|(pname, _)| {
-                app.provider_statuses
+                model.provider_statuses
                     .get(&(path.clone(), "coding_agent".into(), pname.clone()))
                     .copied()
             }),
@@ -232,30 +246,29 @@ fn render_repo_providers(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_unified_table(app: &mut App, frame: &mut Frame, area: Rect) {
-    app.table_area = area;
+fn render_unified_table(model: &AppModel, ui: &mut UiState, frame: &mut Frame, area: Rect) {
+    ui.layout.table_area = area;
 
-    // If per-repo provider view is active, render that instead
-    if app.active().show_providers {
-        // Store the close-button area (the ✕) in the same top-right corner as the gear icon
+    let rui = active_rui(model, ui);
+    if rui.show_providers {
         let close_x = area.x + area.width.saturating_sub(5);
-        app.gear_icon_area = Rect::new(close_x, area.y, 3, 1);
-        render_repo_providers(app, frame, area);
+        ui.layout.gear_icon_area = Rect::new(close_x, area.y, 3, 1);
+        render_repo_providers(model, ui, frame, area);
         return;
     }
 
-    // Store gear icon area in top-right corner of table border
     let gear_x = area.x + area.width.saturating_sub(5);
-    app.gear_icon_area = Rect::new(gear_x, area.y, 3, 1);
+    ui.layout.gear_icon_area = Rect::new(gear_x, area.y, 3, 1);
 
+    let labels = model.active_labels();
     let header = Row::new(vec![
         Cell::from(""),
         Cell::from("Description"),
         Cell::from("Branch"),
-        Cell::from("WT"),
+        Cell::from(labels.checkouts.abbr.as_str()),
         Cell::from("WS"),
-        Cell::from("PR"),
-        Cell::from("Ses"),
+        Cell::from(labels.code_review.abbr.as_str()),
+        Cell::from(labels.sessions.abbr.as_str()),
         Cell::from("Issues"),
         Cell::from("Git"),
     ])
@@ -274,32 +287,31 @@ fn render_unified_table(app: &mut App, frame: &mut Frame, area: Rect) {
         Constraint::Length(5),
     ];
 
-    // Resolve actual column widths for truncation
-    // Account for border (2) and highlight spacing (2)
     let inner_width = area.width.saturating_sub(4);
     let col_areas = Layout::horizontal(widths).split(Rect::new(0, 0, inner_width, 1));
     let col_widths: Vec<u16> = col_areas.iter().map(|r| r.width).collect();
 
-    // Build rows from active repo state (immutable borrow)
-    let active = app.active();
-    let rows: Vec<Row> = active
+    // Build rows from active repo (immutable borrows)
+    let rm = model.active();
+    let rui = active_rui(model, ui);
+    let rows: Vec<Row> = rm
         .data
         .table_entries
         .iter()
         .enumerate()
         .map(|(table_idx, entry)| {
-            let is_multi_selected = active
+            let is_multi_selected = rm
                 .data
                 .selectable_indices
                 .iter()
                 .position(|&idx| idx == table_idx)
-                .map(|si| active.multi_selected.contains(&si))
+                .map(|si| rui.multi_selected.contains(&si))
                 .unwrap_or(false);
 
             match entry {
                 TableEntry::Header(header) => build_header_row(header),
                 TableEntry::Item(item) => {
-                    let mut row = build_item_row(item, &active.data, &col_widths);
+                    let mut row = build_item_row(item, &rm.data, &col_widths);
                     if is_multi_selected {
                         row = row.style(Style::default().bg(Color::Indexed(236)));
                     }
@@ -320,9 +332,9 @@ fn render_unified_table(app: &mut App, frame: &mut Frame, area: Rect) {
         .highlight_spacing(HighlightSpacing::Always);
 
     // Now mutably borrow for stateful render
-    let key = &app.repo_order[app.active_repo];
-    let rs = app.repos.get_mut(key).unwrap();
-    frame.render_stateful_widget(table, area, &mut rs.table_state);
+    let key = &model.repo_order[model.active_repo];
+    let rui = ui.repo_ui.get_mut(key).unwrap();
+    frame.render_stateful_widget(table, area, &mut rui.table_state);
 }
 
 fn build_header_row(header: &SectionHeader) -> Row<'static> {
@@ -473,34 +485,31 @@ fn build_item_row<'a>(item: &WorkItem, data: &crate::data::DataStore, col_widths
     ])
 }
 
-fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
-    if app.show_debug {
+fn render_preview(model: &AppModel, ui: &UiState, frame: &mut Frame, area: Rect) {
+    if ui.show_debug {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(area);
-        render_preview_content(app, frame, chunks[0]);
-        render_debug_panel(app, frame, chunks[1]);
+        render_preview_content(model, ui, frame, chunks[0]);
+        render_debug_panel(model, ui, frame, chunks[1]);
     } else {
-        render_preview_content(app, frame, area);
+        render_preview_content(model, ui, frame, area);
     }
 }
 
-fn render_preview_content(app: &App, frame: &mut Frame, area: Rect) {
-    let text = if let Some(item) = app.selected_work_item() {
+fn render_preview_content(model: &AppModel, ui: &UiState, frame: &mut Frame, area: Rect) {
+    let text = if let Some(item) = selected_work_item(model, ui) {
         let mut lines = Vec::new();
 
-        // Description
         lines.push(format!("Description: {}", item.description));
 
-        // Branch
         if let Some(branch) = &item.branch {
             lines.push(format!("Branch: {}", branch));
         }
 
-        // Checkout info
         if let Some(wt_idx) = item.worktree_idx {
-            if let Some(co) = app.active().data.checkouts.get(wt_idx) {
+            if let Some(co) = model.active().data.checkouts.get(wt_idx) {
                 lines.push(format!("Path: {}", co.path.display()));
                 if let Some(commit) = &co.last_commit {
                     let sha = if commit.short_sha.is_empty() { "?" } else { &commit.short_sha };
@@ -522,17 +531,15 @@ fn render_preview_content(app: &App, frame: &mut Frame, area: Rect) {
             }
         }
 
-        // PR info
         if let Some(pr_idx) = item.pr_idx {
-            if let Some(cr) = app.active().data.change_requests.get(pr_idx) {
+            if let Some(cr) = model.active().data.change_requests.get(pr_idx) {
                 lines.push(format!("PR #{}: {}", cr.id, cr.title));
                 lines.push(format!("State: {:?}", cr.status));
             }
         }
 
-        // Session info
         if let Some(ses_idx) = item.session_idx {
-            if let Some(ses) = app.active().data.sessions.get(ses_idx) {
+            if let Some(ses) = model.active().data.sessions.get(ses_idx) {
                 lines.push(format!("Session: {}", ses.title));
                 lines.push(format!("Status: {:?}", ses.status));
                 if let Some(ref model) = ses.model {
@@ -545,17 +552,15 @@ fn render_preview_content(app: &App, frame: &mut Frame, area: Rect) {
             }
         }
 
-        // Workspaces
         for ws_ref in &item.workspace_refs {
-            if let Some(ws) = app.active().data.workspaces.iter().find(|w| &w.ws_ref == ws_ref) {
+            if let Some(ws) = model.active().data.workspaces.iter().find(|w| &w.ws_ref == ws_ref) {
                 let name = if ws.name.is_empty() { &ws.ws_ref } else { &ws.name };
                 lines.push(format!("Workspace: {}", name));
             }
         }
 
-        // Issues
         for &issue_idx in &item.issue_idxs {
-            if let Some(issue) = app.active().data.issues.get(issue_idx) {
+            if let Some(issue) = model.active().data.issues.get(issue_idx) {
                 let labels = issue.labels.join(", ");
                 lines.push(format!("Issue #{}: {} [{}]", issue.id, issue.title, labels));
             }
@@ -581,9 +586,9 @@ fn format_correlation_key(key: &CorrelationKey) -> String {
     }
 }
 
-fn render_debug_panel(app: &App, frame: &mut Frame, area: Rect) {
-    let text = if let Some(item) = app.selected_work_item() {
-        let data = &app.active().data;
+fn render_debug_panel(model: &AppModel, ui: &UiState, frame: &mut Frame, area: Rect) {
+    let text = if let Some(item) = selected_work_item(model, ui) {
+        let data = &model.active().data;
         if let Some(group_idx) = item.correlation_group_idx {
             if let Some(group) = data.correlation_groups.get(group_idx) {
                 let mut lines = Vec::new();
@@ -620,36 +625,32 @@ fn render_debug_panel(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(panel, area);
 }
 
-fn render_action_menu(app: &mut App, frame: &mut Frame) {
-    if !app.show_action_menu {
-        return;
-    }
+fn render_action_menu(model: &AppModel, ui: &mut UiState, frame: &mut Frame) {
+    let UiMode::ActionMenu { ref items, index } = ui.mode else { return; };
 
     let area = popup_area(frame.area(), 40, 40);
-    app.menu_area = area;
+    ui.layout.menu_area = area;
     frame.render_widget(Clear, area);
 
-    let items: Vec<ListItem> = app
-        .action_menu_items
+    let labels = model.active_labels();
+    let list_items: Vec<ListItem> = items
         .iter()
         .enumerate()
-        .map(|(i, action)| ListItem::new(format!(" {}: {}", i + 1, action.label())))
+        .map(|(i, intent)| ListItem::new(format!(" {}: {}", i + 1, intent.label(labels))))
         .collect();
 
-    let list = List::new(items)
+    let list = List::new(list_items)
         .block(Block::bordered().title(" Actions "))
         .highlight_style(Style::default().bg(Color::Blue).bold())
         .highlight_symbol("▸ ");
 
     let mut state = ListState::default();
-    state.select(Some(app.action_menu_index));
+    state.select(Some(index));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_input_popup(app: &App, frame: &mut Frame) {
-    if app.input_mode != crate::app::InputMode::BranchName && !app.generating_branch {
-        return;
-    }
+fn render_input_popup(ui: &UiState, frame: &mut Frame) {
+    let UiMode::BranchInput { ref input, generating } = ui.mode else { return; };
 
     let area = popup_area(frame.area(), 50, 20);
     frame.render_widget(Clear, area);
@@ -658,46 +659,43 @@ fn render_input_popup(app: &App, frame: &mut Frame) {
     let inner_area = inner.inner(area);
     frame.render_widget(inner, area);
 
-    if app.generating_branch {
+    if generating {
         let paragraph = Paragraph::new("  Generating branch name...")
             .style(Style::default().fg(Color::Yellow));
         frame.render_widget(paragraph, inner_area);
         return;
     }
 
-    let input_text = app.input.value();
+    let input_text = input.value();
     let display = format!("> {}", input_text);
     let paragraph = Paragraph::new(display).style(Style::default().fg(Color::Cyan));
     frame.render_widget(paragraph, inner_area);
 
-    let cursor_x = inner_area.x + 2 + app.input.visual_cursor() as u16;
+    let cursor_x = inner_area.x + 2 + input.visual_cursor() as u16;
     let cursor_y = inner_area.y;
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
-fn render_delete_confirm(app: &App, frame: &mut Frame) {
-    if !app.show_delete_confirm {
-        return;
-    }
+fn render_delete_confirm(ui: &UiState, frame: &mut Frame) {
+    let UiMode::DeleteConfirm { ref info, loading } = ui.mode else { return; };
 
     let area = popup_area(frame.area(), 60, 50);
     frame.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = Vec::new();
 
-    if app.delete_confirm_loading {
+    if loading {
         lines.push(Line::from(Span::styled(
             "  Loading safety info...",
             Style::default().fg(Color::Yellow),
         )));
-    } else if let Some(info) = &app.delete_confirm_info {
+    } else if let Some(info) = info {
         lines.push(Line::from(vec![
             Span::raw("  Branch: "),
             Span::styled(&info.branch, Style::default().bold()),
         ]));
         lines.push(Line::from(""));
 
-        // PR status
         if let Some(pr_status) = &info.pr_status {
             let (status_text, color) = match pr_status.as_str() {
                 "MERGED" => ("MERGED", Color::Green),
@@ -721,7 +719,6 @@ fn render_delete_confirm(app: &App, frame: &mut Frame) {
 
         lines.push(Line::from(""));
 
-        // Uncommitted changes
         if info.has_uncommitted {
             lines.push(Line::from(Span::styled(
                 "  ⚠ Has uncommitted changes",
@@ -729,7 +726,6 @@ fn render_delete_confirm(app: &App, frame: &mut Frame) {
             )));
         }
 
-        // Unpushed commits
         if !info.unpushed_commits.is_empty() {
             lines.push(Line::from(Span::styled(
                 format!("  ⚠ {} unpushed commit(s):", info.unpushed_commits.len()),
@@ -740,7 +736,6 @@ fn render_delete_confirm(app: &App, frame: &mut Frame) {
             }
         }
 
-        // Safe indicator
         if !info.has_uncommitted
             && info.unpushed_commits.is_empty()
             && info.pr_status.as_deref() == Some("MERGED")
@@ -765,8 +760,8 @@ fn render_delete_confirm(app: &App, frame: &mut Frame) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_help(app: &App, frame: &mut Frame) {
-    if !app.show_help {
+fn render_help(ui: &UiState, frame: &mut Frame) {
+    if !matches!(ui.mode, UiMode::Help) {
         return;
     }
 
@@ -813,13 +808,11 @@ fn render_help(app: &App, frame: &mut Frame) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_file_picker(app: &mut App, frame: &mut Frame) {
-    if app.input_mode != crate::app::InputMode::AddRepo {
-        return;
-    }
+fn render_file_picker(ui: &mut UiState, frame: &mut Frame) {
+    let UiMode::FilePicker { ref input, ref dir_entries, selected } = ui.mode else { return; };
 
     let area = popup_area(frame.area(), 60, 60);
-    app.file_picker_area = area;
+    ui.layout.file_picker_area = area;
     frame.render_widget(Clear, area);
 
     let block = Block::bordered().title(" Add Repository ");
@@ -831,21 +824,17 @@ fn render_file_picker(app: &mut App, frame: &mut Frame) {
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    app.file_picker_list_area = chunks[1];
+    ui.layout.file_picker_list_area = chunks[1];
 
-    // Input line
-    let input_text = app.input.value();
+    let input_text = input.value();
     let display = format!("> {}", input_text);
     let paragraph = Paragraph::new(display).style(Style::default().fg(Color::Cyan));
     frame.render_widget(paragraph, chunks[0]);
 
-    // Cursor
-    let cursor_x = chunks[0].x + 2 + app.input.visual_cursor() as u16;
+    let cursor_x = chunks[0].x + 2 + input.visual_cursor() as u16;
     frame.set_cursor_position((cursor_x, chunks[0].y));
 
-    // Directory listing
-    let items: Vec<ListItem> = app
-        .dir_entries
+    let items: Vec<ListItem> = dir_entries
         .iter()
         .map(|entry| {
             let tag = if entry.is_added {
@@ -873,26 +862,25 @@ fn render_file_picker(app: &mut App, frame: &mut Frame) {
         .highlight_symbol("▸ ");
 
     let mut state = ListState::default();
-    if !app.dir_entries.is_empty() {
-        state.select(Some(app.dir_selected));
+    if !dir_entries.is_empty() {
+        state.select(Some(selected));
     }
     frame.render_stateful_widget(list, chunks[1], &mut state);
 }
 
-fn render_config_screen(app: &mut App, frame: &mut Frame, area: Rect) {
+fn render_config_screen(model: &AppModel, ui: &mut UiState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(area);
 
-    render_global_status(app, frame, chunks[0]);
-    render_event_log(app, frame, chunks[1]);
+    render_global_status(model, frame, chunks[0]);
+    render_event_log(model, ui, frame, chunks[1]);
 }
 
-fn render_global_status(app: &App, frame: &mut Frame, area: Rect) {
+fn render_global_status(model: &AppModel, frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
-    // Collect unique provider factories across all repos
     let mut vcs_name: Option<String> = None;
     let mut checkout_name: Option<String> = None;
     let mut code_review_name: Option<String> = None;
@@ -901,12 +889,10 @@ fn render_global_status(app: &App, frame: &mut Frame, area: Rect) {
     let mut ai_utility_name: Option<String> = None;
     let mut workspace_name: Option<String> = None;
 
-    // Coding agent auth status (aggregate across repos)
     let mut coding_agent_status: Option<ProviderStatus> = None;
 
-    for path in &app.repo_order {
-        let rs = &app.repos[path];
-        let reg = &rs.registry;
+    for path in &model.repo_order {
+        let reg = &model.repos[path].registry;
 
         if vcs_name.is_none() {
             vcs_name = reg.vcs.values().next().map(|v| v.display_name().to_string());
@@ -930,10 +916,9 @@ fn render_global_status(app: &App, frame: &mut Frame, area: Rect) {
             workspace_name = reg.workspace_manager.as_ref().map(|(_, w)| w.display_name().to_string());
         }
 
-        // Check coding agent auth from any repo
         if coding_agent_status.is_none() {
             for (pname, _) in reg.coding_agents.iter() {
-                if let Some(&status) = app.provider_statuses.get(&(path.clone(), "coding_agent".into(), pname.clone())) {
+                if let Some(&status) = model.provider_statuses.get(&(path.clone(), "coding_agent".into(), pname.clone())) {
                     coding_agent_status = Some(status);
                     break;
                 }
@@ -998,18 +983,17 @@ fn render_global_status(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_event_log(app: &mut App, frame: &mut Frame, area: Rect) {
+fn render_event_log(_model: &AppModel, ui: &mut UiState, frame: &mut Frame, area: Rect) {
     use event_log::DisplayEntry;
 
-    let filter = app.event_log_filter;
+    let filter = ui.event_log.filter;
     let entries = event_log::get_entries(&filter);
     let entry_count = entries.len();
 
-    // Auto-scroll to bottom when new entries arrive
-    if entry_count != app.event_log_count {
-        app.event_log_count = entry_count;
+    if entry_count != ui.event_log.count {
+        ui.event_log.count = entry_count;
         if entry_count > 0 {
-            app.event_log_selected = Some(entry_count - 1);
+            ui.event_log.selected = Some(entry_count - 1);
         }
     }
 
@@ -1046,11 +1030,10 @@ fn render_event_log(app: &mut App, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    // Filter label in top-right corner
     let filter_label = format!(" {} ", filter.filter_label());
     let filter_label_len = filter_label.len() as u16;
     let filter_x = area.x + area.width.saturating_sub(filter_label_len + 1);
-    app.event_log_filter_area = Rect::new(filter_x, area.y, filter_label_len, 1);
+    ui.layout.event_log_filter_area = Rect::new(filter_x, area.y, filter_label_len, 1);
 
     let list = List::new(items)
         .block(
@@ -1067,7 +1050,7 @@ fn render_event_log(app: &mut App, frame: &mut Frame, area: Rect) {
         .highlight_style(Style::default().bg(Color::Indexed(236)));
 
     let mut state = ListState::default();
-    state.select(app.event_log_selected);
+    state.select(ui.event_log.selected);
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -1075,7 +1058,6 @@ fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    // Use char count for display width (good enough for most text)
     let char_count: usize = s.chars().count();
     if char_count <= max {
         s.to_string()
