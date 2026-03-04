@@ -56,6 +56,32 @@ struct WtCommit {
     message: Option<String>,
 }
 
+impl WtWorktree {
+    fn into_checkout(self) -> Checkout {
+        let correlation_keys = vec![
+            CorrelationKey::Branch(self.branch.clone()),
+            CorrelationKey::RepoPath(self.path.clone()),
+        ];
+        Checkout {
+            branch: self.branch,
+            path: self.path,
+            is_trunk: self.is_main,
+            trunk_ahead_behind: self.main.map(|m| AheadBehind { ahead: m.ahead, behind: m.behind }),
+            remote_ahead_behind: self.remote.map(|r| AheadBehind { ahead: r.ahead, behind: r.behind }),
+            working_tree: self.working_tree.map(|w| WorkingTreeStatus {
+                staged: if w.staged { 1 } else { 0 },
+                modified: if w.modified { 1 } else { 0 },
+                untracked: if w.untracked { 1 } else { 0 },
+            }),
+            last_commit: self.commit.map(|c| CommitInfo {
+                short_sha: c.short_sha.unwrap_or_default(),
+                message: c.message.unwrap_or_default(),
+            }),
+            correlation_keys,
+        }
+    }
+}
+
 impl WtCheckoutManager {
     pub fn new() -> Self {
         Self
@@ -102,29 +128,7 @@ impl super::CheckoutManager for WtCheckoutManager {
             serde_json::from_str(json).map_err(|e| e.to_string())?;
         Ok(worktrees
             .into_iter()
-            .map(|wt| {
-                let correlation_keys = vec![
-                    CorrelationKey::Branch(wt.branch.clone()),
-                    CorrelationKey::RepoPath(wt.path.clone()),
-                ];
-                Checkout {
-                    branch: wt.branch,
-                    path: wt.path,
-                    is_trunk: wt.is_main,
-                    trunk_ahead_behind: wt.main.map(|m| AheadBehind { ahead: m.ahead, behind: m.behind }),
-                    remote_ahead_behind: wt.remote.map(|r| AheadBehind { ahead: r.ahead, behind: r.behind }),
-                    working_tree: wt.working_tree.map(|w| WorkingTreeStatus {
-                        staged: if w.staged { 1 } else { 0 },
-                        modified: if w.modified { 1 } else { 0 },
-                        untracked: if w.untracked { 1 } else { 0 },
-                    }),
-                    last_commit: wt.commit.map(|c| CommitInfo {
-                        short_sha: c.short_sha.unwrap_or_default(),
-                        message: c.message.unwrap_or_default(),
-                    }),
-                    correlation_keys,
-                }
-            })
+            .map(|wt| wt.into_checkout())
             .collect())
     }
 
@@ -151,27 +155,7 @@ impl super::CheckoutManager for WtCheckoutManager {
 
         for wt in worktrees {
             if wt.branch == branch || wt.branch.ends_with(branch) {
-                let correlation_keys = vec![
-                    CorrelationKey::Branch(wt.branch.clone()),
-                    CorrelationKey::RepoPath(wt.path.clone()),
-                ];
-                return Ok(Checkout {
-                    branch: wt.branch,
-                    path: wt.path,
-                    is_trunk: wt.is_main,
-                    trunk_ahead_behind: wt.main.map(|m| AheadBehind { ahead: m.ahead, behind: m.behind }),
-                    remote_ahead_behind: wt.remote.map(|r| AheadBehind { ahead: r.ahead, behind: r.behind }),
-                    working_tree: wt.working_tree.map(|w| WorkingTreeStatus {
-                        staged: if w.staged { 1 } else { 0 },
-                        modified: if w.modified { 1 } else { 0 },
-                        untracked: if w.untracked { 1 } else { 0 },
-                    }),
-                    last_commit: wt.commit.map(|c| CommitInfo {
-                        short_sha: c.short_sha.unwrap_or_default(),
-                        message: c.message.unwrap_or_default(),
-                    }),
-                    correlation_keys,
-                });
+                return Ok(wt.into_checkout());
             }
         }
 

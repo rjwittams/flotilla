@@ -142,7 +142,7 @@ impl DataStore {
             checkouts_fut, cr_fut, issues_fut, sessions_fut, branches_fut, merged_fut, ws_fut
         );
 
-        self.checkouts = checkouts.unwrap_or_else(|e| { errors.push(format!("worktrees: {e}")); Vec::new() });
+        self.checkouts = checkouts.unwrap_or_else(|e| { errors.push(format!("checkouts: {e}")); Vec::new() });
         self.change_requests = crs.unwrap_or_else(|e| { errors.push(format!("PRs: {e}")); Vec::new() });
         self.issues = issues.unwrap_or_else(|e| { errors.push(format!("issues: {e}")); Vec::new() });
         self.workspaces = workspaces.unwrap_or_else(|e| { errors.push(format!("workspaces: {e}")); Vec::new() });
