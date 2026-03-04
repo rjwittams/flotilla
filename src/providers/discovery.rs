@@ -12,6 +12,7 @@ use crate::providers::registry::ProviderRegistry;
 use crate::providers::vcs::git::GitVcs;
 use crate::providers::vcs::wt::WtCheckoutManager;
 use crate::providers::workspace::cmux::CmuxWorkspaceManager;
+use crate::providers::workspace::tmux::TmuxWorkspaceManager;
 use crate::providers::workspace::zellij::ZellijWorkspaceManager;
 
 /// Extract the first git remote URL for this repo.
@@ -169,6 +170,12 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
             ));
             info!("{repo_name}: Workspace mgr → zellij");
         }
+    } else if std::env::var("TMUX").is_ok() {
+        registry.workspace_manager = Some((
+            "tmux".to_string(),
+            Box::new(TmuxWorkspaceManager::new()),
+        ));
+        info!("{repo_name}: Workspace mgr → tmux");
     } else {
         // Fallback: cmux binary exists but not running inside cmux
         let cmux_bin = Path::new("/Applications/cmux.app/Contents/Resources/bin/cmux");
@@ -180,7 +187,6 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
             info!("{repo_name}: Workspace mgr → cmux (fallback)");
         }
     }
-    // TODO: check $TMUX env var for tmux workspace manager
 
     registry
 }
