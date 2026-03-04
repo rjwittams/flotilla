@@ -571,34 +571,20 @@ async fn refresh_all(app: &mut app::App) {
             rs.table_state.select(Some(rs.data.selectable_indices[clamped]));
         }
 
-        // Track per-provider statuses and log errors
+        // Copy provider health from DataStore into app-level statuses
         let name = app::App::repo_name(&path);
 
-        // Mark coding agents as ok/error based on category
-        for (pname, _) in rs.registry.coding_agents.iter() {
-            let key = (path.clone(), "coding_agent".into(), pname.clone());
-            if errors.iter().any(|e| e.category == "sessions") {
-                app.provider_statuses.insert(key, app::ProviderStatus::Error);
-            } else {
-                app.provider_statuses.insert(key, app::ProviderStatus::Ok);
-            }
-        }
-
-        // Mark code review / issue tracker based on category
-        for (pname, _) in rs.registry.code_review.iter() {
-            let key = (path.clone(), "code_review".into(), pname.clone());
-            if errors.iter().any(|e| e.category == "PRs" || e.category == "merged") {
-                app.provider_statuses.insert(key, app::ProviderStatus::Error);
-            } else {
-                app.provider_statuses.insert(key, app::ProviderStatus::Ok);
-            }
-        }
-        for (pname, _) in rs.registry.issue_trackers.iter() {
-            let key = (path.clone(), "issue_tracker".into(), pname.clone());
-            if errors.iter().any(|e| e.category == "issues") {
-                app.provider_statuses.insert(key, app::ProviderStatus::Error);
-            } else {
-                app.provider_statuses.insert(key, app::ProviderStatus::Ok);
+        for (kind, healthy) in &rs.data.provider_health {
+            let provider_name = match *kind {
+                "coding_agent" => rs.registry.coding_agents.keys().next(),
+                "code_review" => rs.registry.code_review.keys().next(),
+                "issue_tracker" => rs.registry.issue_trackers.keys().next(),
+                _ => None,
+            };
+            if let Some(pname) = provider_name {
+                let key = (path.clone(), kind.to_string(), pname.clone());
+                let status = if *healthy { app::ProviderStatus::Ok } else { app::ProviderStatus::Error };
+                app.provider_statuses.insert(key, status);
             }
         }
 

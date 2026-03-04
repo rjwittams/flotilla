@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -85,6 +85,9 @@ pub struct DataStore {
     pub loading: bool,
     /// Preserved from last correlate() for debug display.
     pub correlation_groups: Vec<CorrelatedGroup>,
+    /// Per-provider-kind health, set during refresh.
+    /// Keys: "coding_agent", "code_review", "issue_tracker"
+    pub provider_health: HashMap<&'static str, bool>,
 }
 
 impl DataStore {
@@ -166,6 +169,18 @@ impl DataStore {
         self.sessions = sessions.unwrap_or_else(|e| { errors.push(ProviderError { category: "sessions", message: e }); Vec::new() });
         self.remote_branches = branches.unwrap_or_else(|e| { errors.push(ProviderError { category: "branches", message: e }); Vec::new() });
         self.merged_branches = merged.unwrap_or_else(|e| { errors.push(ProviderError { category: "merged", message: e }); Vec::new() });
+        // Determine per-provider health from errors
+        self.provider_health.clear();
+        if registry.coding_agents.values().next().is_some() {
+            self.provider_health.insert("coding_agent", !errors.iter().any(|e| e.category == "sessions"));
+        }
+        if registry.code_review.values().next().is_some() {
+            self.provider_health.insert("code_review", !errors.iter().any(|e| e.category == "PRs" || e.category == "merged"));
+        }
+        if registry.issue_trackers.values().next().is_some() {
+            self.provider_health.insert("issue_tracker", !errors.iter().any(|e| e.category == "issues"));
+        }
+
         self.correlate();
         self.loading = false;
         errors
