@@ -23,7 +23,7 @@ async fn cmux_cmd(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Parse "OK surface:N workspace:M" → "surface:N"
+/// Parse "OK surface:N workspace:M" -> "surface:N"
 fn parse_ok_ref(output: &str) -> String {
     output
         .strip_prefix("OK ")
@@ -68,7 +68,7 @@ pub async fn create_cmux_workspace(
         .ok_or("no pane_ref on initial surface")?
         .to_string();
 
-    // Track pane name → (surface_ref for split targeting, pane_ref for tab creation)
+    // Track pane name -> (surface_ref for split targeting, pane_ref for tab creation)
     let mut pane_info: HashMap<String, (String, String)> = HashMap::new();
     let mut surface_cmds: Vec<(String, String)> = Vec::new();
     let mut active_surfaces: Vec<(String, String, usize)> = Vec::new(); // (surface_ref, pane_ref, tab_index)
@@ -202,132 +202,4 @@ pub async fn create_cmux_workspace(
     }
 
     Ok(())
-}
-
-pub async fn select_cmux_workspace(ws_ref: &str) -> Result<(), String> {
-    cmux_cmd(&["select-workspace", "--workspace", ws_ref]).await?;
-    Ok(())
-}
-
-pub async fn create_worktree(branch: &str, repo_root: &PathBuf) -> Result<PathBuf, String> {
-    let output = Command::new("wt")
-        .args(["switch", "--create", branch, "--no-cd"])
-        .current_dir(repo_root)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
-    // Get worktree path
-    let list_output = Command::new("wt")
-        .args(["list", "--format=json"])
-        .current_dir(repo_root)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let worktrees: Vec<serde_json::Value> =
-        serde_json::from_slice(&list_output.stdout).map_err(|e| e.to_string())?;
-
-    for wt in &worktrees {
-        if let Some(b) = wt.get("branch").and_then(|v| v.as_str()) {
-            if b.ends_with(branch) || b == branch {
-                if let Some(p) = wt.get("path").and_then(|v| v.as_str()) {
-                    return Ok(PathBuf::from(p));
-                }
-            }
-        }
-    }
-
-    Err("Could not find worktree path after creation".to_string())
-}
-
-pub async fn remove_worktree(branch: &str, repo_root: &PathBuf) -> Result<(), String> {
-    let output = Command::new("wt")
-        .args(["remove", branch])
-        .current_dir(repo_root)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
-}
-
-pub async fn open_pr_in_browser(pr_number: i64, repo_root: &PathBuf) -> Result<(), String> {
-    let output = Command::new("gh")
-        .args(["pr", "view", &pr_number.to_string(), "--web"])
-        .current_dir(repo_root)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
-}
-
-pub async fn generate_branch_name(
-    issues: &[(i64, &str)],
-    repo_root: &PathBuf,
-) -> Result<String, String> {
-    let issue_list: Vec<String> = issues
-        .iter()
-        .map(|(num, title)| format!("{} #{}", title, num))
-        .collect();
-
-    let prompt = if issues.len() == 1 {
-        format!(
-            "Suggest a short git branch name for this GitHub issue. \
-             Output ONLY the branch name, nothing else. Use kebab-case: {}",
-            issue_list[0]
-        )
-    } else {
-        format!(
-            "Suggest a short git branch name that covers these GitHub issues. \
-             Output ONLY the branch name, nothing else. Use kebab-case: {}",
-            issue_list.join("; ")
-        )
-    };
-
-    let output = Command::new("claude")
-        .args(["-p", &prompt])
-        .current_dir(repo_root)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if output.status.success() {
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if branch.is_empty() {
-            Err("claude returned empty output".to_string())
-        } else {
-            Ok(branch)
-        }
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
-}
-
-pub async fn open_issue_in_browser(issue_number: i64, repo_root: &PathBuf) -> Result<(), String> {
-    let output = Command::new("gh")
-        .args(["issue", "view", &issue_number.to_string(), "--web"])
-        .current_dir(repo_root)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
 }

@@ -2,8 +2,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::{LazyLock, Mutex};
+
+use crate::providers::types::{
+    ChangeRequest, CloudAgentSession, CorrelationKey, Issue, Workspace,
+};
+use crate::providers::registry::ProviderRegistry;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Worktree {
@@ -103,94 +106,13 @@ pub struct WorkItem {
     pub workspace_refs: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct CmuxWorkspace {
-    pub ws_ref: String,
-    pub name: String,
-    pub directories: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct GithubPr {
-    pub number: i64,
-    pub title: String,
-    #[serde(rename = "headRefName")]
-    pub head_ref_name: String,
-    pub state: String,
-    #[serde(rename = "updatedAt")]
-    #[allow(dead_code)]
-    pub updated_at: Option<String>,
-    #[serde(default)]
-    pub body: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct GithubIssue {
-    pub number: i64,
-    pub title: String,
-    pub labels: Vec<Label>,
-    #[serde(rename = "updatedAt")]
-    #[allow(dead_code)]
-    pub updated_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Label {
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct WebSession {
-    pub id: String,
-    pub title: String,
-    pub session_status: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub created_at: String,
-    #[serde(default)]
-    pub updated_at: String,  // used for sorting and display
-    #[serde(default)]
-    pub session_context: SessionContext,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct SessionContext {
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub outcomes: Vec<SessionOutcome>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SessionOutcome {
-    #[serde(default)]
-    pub git_info: Option<SessionGitInfo>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SessionGitInfo {
-    #[serde(default)]
-    pub branches: Vec<String>,
-}
-
-impl WebSession {
-    pub fn branch(&self) -> Option<&str> {
-        self.session_context
-            .outcomes
-            .first()
-            .and_then(|o| o.git_info.as_ref())
-            .and_then(|gi| gi.branches.first())
-            .map(|s| s.as_str())
-    }
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct DataStore {
     pub worktrees: Vec<Worktree>,
-    pub prs: Vec<GithubPr>,
-    pub issues: Vec<GithubIssue>,
-    pub cmux_workspaces: Vec<CmuxWorkspace>,
-    pub sessions: Vec<WebSession>,
+    pub change_requests: Vec<ChangeRequest>,
+    pub issues: Vec<Issue>,
+    pub workspaces: Vec<Workspace>,
+    pub sessions: Vec<CloudAgentSession>,
     pub remote_branches: Vec<String>,
     pub merged_branches: Vec<String>,
     pub table_entries: Vec<TableEntry>,
@@ -199,22 +121,69 @@ pub struct DataStore {
 }
 
 impl DataStore {
-    pub async fn refresh(&mut self, repo_root: &PathBuf) -> Vec<String> {
+    pub async fn refresh(&mut self, repo_root: &PathBuf, registry: &ProviderRegistry) -> Vec<String> {
         self.loading = true;
         let mut errors = Vec::new();
-        let (wt, prs, issues, ws, sessions, branches, merged) = tokio::join!(
-            fetch_worktrees(repo_root),
-            fetch_prs(repo_root),
-            fetch_issues(repo_root),
-            fetch_cmux_workspaces(),
-            fetch_sessions(),
-            fetch_remote_branches(repo_root),
-            fetch_merged_pr_branches(repo_root),
+
+        // Worktrees - still direct (for rich wt data)
+        let wt_fut = fetch_worktrees(repo_root);
+
+        // Change requests through registry
+        let cr_fut = async {
+            if let Some(cr) = registry.code_review.values().next() {
+                cr.list_change_requests(repo_root.as_path(), 20).await
+            } else {
+                Ok(vec![])
+            }
+        };
+
+        // Issues through registry
+        let issues_fut = async {
+            if let Some(it) = registry.issue_trackers.values().next() {
+                it.list_issues(repo_root.as_path(), 20).await
+            } else {
+                Ok(vec![])
+            }
+        };
+
+        // Sessions through registry
+        let sessions_fut = async {
+            if let Some(ca) = registry.coding_agents.values().next() {
+                ca.list_sessions().await
+            } else {
+                Ok(vec![])
+            }
+        };
+
+        // Remote branches through registry
+        let branches_fut = async {
+            if let Some(vcs) = registry.vcs.values().next() {
+                vcs.list_remote_branches(repo_root.as_path()).await
+            } else {
+                Ok(vec![])
+            }
+        };
+
+        // Merged branches - still direct (not in trait)
+        let merged_fut = fetch_merged_pr_branches(repo_root);
+
+        // Workspaces through registry
+        let ws_fut = async {
+            if let Some((_, ws_mgr)) = &registry.workspace_manager {
+                ws_mgr.list_workspaces().await
+            } else {
+                Ok(vec![])
+            }
+        };
+
+        let (wt, crs, issues, sessions, branches, merged, workspaces) = tokio::join!(
+            wt_fut, cr_fut, issues_fut, sessions_fut, branches_fut, merged_fut, ws_fut
         );
+
         self.worktrees = wt.unwrap_or_else(|e| { errors.push(format!("worktrees: {e}")); Vec::new() });
-        self.prs = prs.unwrap_or_else(|e| { errors.push(format!("PRs: {e}")); Vec::new() });
+        self.change_requests = crs.unwrap_or_else(|e| { errors.push(format!("PRs: {e}")); Vec::new() });
         self.issues = issues.unwrap_or_else(|e| { errors.push(format!("issues: {e}")); Vec::new() });
-        self.cmux_workspaces = ws.unwrap_or_else(|e| { errors.push(format!("workspaces: {e}")); Vec::new() });
+        self.workspaces = workspaces.unwrap_or_else(|e| { errors.push(format!("workspaces: {e}")); Vec::new() });
         self.sessions = sessions.unwrap_or_else(|e| { errors.push(format!("sessions: {e}")); Vec::new() });
         self.remote_branches = branches.unwrap_or_else(|e| { errors.push(format!("branches: {e}")); Vec::new() });
         self.merged_branches = merged.unwrap_or_else(|e| { errors.push(format!("merged: {e}")); Vec::new() });
@@ -224,9 +193,8 @@ impl DataStore {
     }
 
     fn find_workspaces_for_worktree(&self, wt: &Worktree) -> Vec<String> {
-        let wt_path = wt.path.to_string_lossy();
-        self.cmux_workspaces.iter().filter(|ws| {
-            ws.directories.iter().any(|dir| dir == wt_path.as_ref())
+        self.workspaces.iter().filter(|ws| {
+            ws.directories.iter().any(|dir| dir == &wt.path)
         }).map(|ws| ws.ws_ref.clone()).collect()
     }
 
@@ -252,16 +220,16 @@ impl DataStore {
             items_by_branch.insert(branch, item);
         }
 
-        // 2. Augment with PRs (or create new items)
-        for (i, pr) in self.prs.iter().enumerate() {
-            let branch = pr.head_ref_name.clone();
+        // 2. Augment with change requests (or create new items)
+        for (i, cr) in self.change_requests.iter().enumerate() {
+            let branch = cr.branch.clone();
             if let Some(item) = items_by_branch.get_mut(&branch) {
                 item.pr_idx = Some(i);
             } else {
                 let item = WorkItem {
                     kind: WorkItemKind::Pr,
                     branch: Some(branch.clone()),
-                    description: pr.title.clone(),
+                    description: cr.title.clone(),
                     worktree_idx: None,
                     is_main_worktree: false,
                     pr_idx: Some(i),
@@ -275,13 +243,7 @@ impl DataStore {
 
         // 3. Augment with sessions
         for (i, session) in self.sessions.iter().enumerate() {
-            if let Some(branch) = session.branch() {
-                // Strip refs/heads/ prefix if present, keep everything else
-                let branch = branch
-                    .strip_prefix("refs/heads/")
-                    .or_else(|| branch.strip_prefix("refs/remotes/origin/"))
-                    .unwrap_or(branch)
-                    .to_string();
+            if let Some(branch) = session_branch(session) {
                 if let Some(item) = items_by_branch.get_mut(&branch) {
                     item.session_idx = Some(i);
                 } else {
@@ -313,33 +275,19 @@ impl DataStore {
             }
         }
 
-        // 4. Link issues to PRs by parsing "Fixes/Closes/Resolves #N" from PR titles and bodies
-        let mut linked_issues: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        for pr in &self.prs {
-            let texts = [pr.title.as_str(), pr.body.as_deref().unwrap_or("")];
-            for text in texts {
-                for keyword in ["fixes", "closes", "resolves"] {
-                    let lower = text.to_lowercase();
-                    let mut search_from = 0;
-                    while let Some(pos) = lower[search_from..].find(keyword) {
-                        let after = search_from + pos + keyword.len();
-                        let rest = &text[after..];
-                        let rest = rest.trim_start();
-                        if let Some(rest) = rest.strip_prefix('#') {
-                            let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                            if let Ok(num) = num_str.parse::<i64>() {
-                                linked_issues.insert(num);
-                                // Find which branch this PR belongs to and link the issue
-                                if let Some(item) = items_by_branch.get_mut(&pr.head_ref_name) {
-                                    if let Some(issue_idx) = self.issues.iter().position(|i| i.number == num) {
-                                        if !item.issue_idxs.contains(&issue_idx) {
-                                            item.issue_idxs.push(issue_idx);
-                                        }
-                                    }
-                                }
+        // 4. Link issues to change requests using correlation keys
+        let mut linked_issues: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for cr in &self.change_requests {
+            for key in &cr.correlation_keys {
+                if let CorrelationKey::IssueRef(_, issue_id) = key {
+                    linked_issues.insert(issue_id.clone());
+                    // Find which branch this CR belongs to and link the issue
+                    if let Some(item) = items_by_branch.get_mut(&cr.branch) {
+                        if let Some(issue_idx) = self.issues.iter().position(|i| i.id == *issue_id) {
+                            if !item.issue_idxs.contains(&issue_idx) {
+                                item.issue_idxs.push(issue_idx);
                             }
                         }
-                        search_from = after;
                     }
                 }
             }
@@ -349,7 +297,7 @@ impl DataStore {
         let mut entries: Vec<TableEntry> = Vec::new();
         let mut selectable: Vec<usize> = Vec::new();
 
-        // Worktrees section — sorted by branch name
+        // Worktrees section -- sorted by branch name
         let mut wt_items: Vec<WorkItem> = items_by_branch.values()
             .filter(|item| item.kind == WorkItemKind::Worktree)
             .cloned()
@@ -363,15 +311,15 @@ impl DataStore {
             }
         }
 
-        // Sessions section — sorted by updated_at descending (most recent first)
+        // Sessions section -- sorted by updated_at descending (most recent first)
         let mut session_items: Vec<WorkItem> = items_by_branch.values()
             .filter(|item| item.kind == WorkItemKind::Session)
             .cloned()
             .chain(branchless_sessions)
             .collect();
         session_items.sort_by(|a, b| {
-            let a_time = a.session_idx.and_then(|i| self.sessions.get(i)).map(|s| s.updated_at.as_str());
-            let b_time = b.session_idx.and_then(|i| self.sessions.get(i)).map(|s| s.updated_at.as_str());
+            let a_time = a.session_idx.and_then(|i| self.sessions.get(i)).and_then(|s| s.updated_at.as_deref());
+            let b_time = b.session_idx.and_then(|i| self.sessions.get(i)).and_then(|s| s.updated_at.as_deref());
             b_time.cmp(&a_time) // descending
         });
         if !session_items.is_empty() {
@@ -382,14 +330,14 @@ impl DataStore {
             }
         }
 
-        // PRs section — sorted by PR number descending (most recent first)
+        // PRs section -- sorted by id descending (most recent first)
         let mut pr_items: Vec<WorkItem> = items_by_branch.values()
             .filter(|item| item.kind == WorkItemKind::Pr)
             .cloned()
             .collect();
         pr_items.sort_by(|a, b| {
-            let a_num = a.pr_idx.and_then(|i| self.prs.get(i)).map(|p| p.number);
-            let b_num = b.pr_idx.and_then(|i| self.prs.get(i)).map(|p| p.number);
+            let a_num = a.pr_idx.and_then(|i| self.change_requests.get(i)).and_then(|cr| cr.id.parse::<i64>().ok());
+            let b_num = b.pr_idx.and_then(|i| self.change_requests.get(i)).and_then(|cr| cr.id.parse::<i64>().ok());
             b_num.cmp(&a_num) // descending
         });
         if !pr_items.is_empty() {
@@ -400,7 +348,7 @@ impl DataStore {
             }
         }
 
-        // Remote branches section — sorted by branch name
+        // Remote branches section -- sorted by branch name
         let known_branches: std::collections::HashSet<&str> = items_by_branch.keys()
             .map(|s| s.as_str())
             .collect();
@@ -436,10 +384,10 @@ impl DataStore {
             }
         }
 
-        // Issues section — sorted by issue number descending (most recent first)
+        // Issues section -- sorted by issue id descending (most recent first)
         let mut issue_items: Vec<WorkItem> = self.issues.iter()
             .enumerate()
-            .filter(|(_, issue)| !linked_issues.contains(&issue.number))
+            .filter(|(_, issue)| !linked_issues.contains(&issue.id))
             .map(|(i, issue)| WorkItem {
                 kind: WorkItemKind::Issue,
                 branch: None,
@@ -453,8 +401,8 @@ impl DataStore {
             })
             .collect();
         issue_items.sort_by(|a, b| {
-            let a_num = a.issue_idxs.first().and_then(|&i| self.issues.get(i)).map(|iss| iss.number);
-            let b_num = b.issue_idxs.first().and_then(|&i| self.issues.get(i)).map(|iss| iss.number);
+            let a_num = a.issue_idxs.first().and_then(|&i| self.issues.get(i)).and_then(|iss| iss.id.parse::<i64>().ok());
+            let b_num = b.issue_idxs.first().and_then(|&i| self.issues.get(i)).and_then(|iss| iss.id.parse::<i64>().ok());
             b_num.cmp(&a_num) // descending
         });
         if !issue_items.is_empty() {
@@ -468,6 +416,17 @@ impl DataStore {
         self.table_entries = entries;
         self.selectable_indices = selectable;
     }
+}
+
+/// Extract branch from a session's correlation keys.
+fn session_branch(session: &CloudAgentSession) -> Option<String> {
+    session.correlation_keys.iter().find_map(|key| {
+        if let CorrelationKey::Branch(ref b) = key {
+            Some(b.clone())
+        } else {
+            None
+        }
+    })
 }
 
 async fn run_command(cmd: &str, args: &[&str], cwd: Option<&PathBuf>) -> Result<String, String> {
@@ -491,34 +450,6 @@ async fn fetch_worktrees(repo_root: &PathBuf) -> Result<Vec<Worktree>, String> {
     serde_json::from_str(&output[..json_end]).map_err(|e| e.to_string())
 }
 
-async fn fetch_prs(repo_root: &PathBuf) -> Result<Vec<GithubPr>, String> {
-    let output = run_command(
-        "gh",
-        &["pr", "list", "--json", "number,title,headRefName,state,updatedAt,body", "--limit", "20"],
-        Some(repo_root),
-    ).await?;
-    serde_json::from_str(&output).map_err(|e| e.to_string())
-}
-
-async fn fetch_remote_branches(repo_root: &PathBuf) -> Result<Vec<String>, String> {
-    // Read directly from remote — no local state modification
-    let output = run_command(
-        "git",
-        &["ls-remote", "--heads", "origin"],
-        Some(repo_root),
-    ).await?;
-    // Output format: "<sha>\trefs/heads/<branch>"
-    Ok(output
-        .lines()
-        .filter_map(|line| {
-            line.split('\t')
-                .nth(1)
-                .and_then(|r| r.strip_prefix("refs/heads/"))
-                .map(|s| s.to_string())
-        })
-        .collect())
-}
-
 async fn fetch_merged_pr_branches(repo_root: &PathBuf) -> Result<Vec<String>, String> {
     let output = run_command(
         "gh",
@@ -530,193 +461,6 @@ async fn fetch_merged_pr_branches(repo_root: &PathBuf) -> Result<Vec<String>, St
         .iter()
         .filter_map(|p| p.get("headRefName").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .collect())
-}
-
-async fn fetch_issues(repo_root: &PathBuf) -> Result<Vec<GithubIssue>, String> {
-    let output = run_command(
-        "gh",
-        &["issue", "list", "--json", "number,title,labels,updatedAt", "--limit", "20", "--state", "open"],
-        Some(repo_root),
-    ).await?;
-    serde_json::from_str(&output).map_err(|e| e.to_string())
-}
-
-#[derive(Deserialize)]
-struct OAuthCredentials {
-    #[serde(rename = "claudeAiOauth")]
-    claude_ai_oauth: OAuthToken,
-}
-
-#[derive(Deserialize, Clone)]
-struct OAuthToken {
-    #[serde(rename = "accessToken")]
-    access_token: String,
-    #[serde(rename = "expiresAt")]
-    expires_at: i64,
-}
-
-struct AuthCache {
-    token: Option<OAuthToken>,
-    org_uuid: Option<String>,
-}
-
-static AUTH_CACHE: LazyLock<Mutex<AuthCache>> = LazyLock::new(|| {
-    Mutex::new(AuthCache {
-        token: None,
-        org_uuid: None,
-    })
-});
-
-#[derive(Deserialize)]
-struct SessionsResponse {
-    data: Vec<WebSession>,
-}
-
-async fn read_oauth_token_from_keychain() -> Result<OAuthToken, String> {
-    let output = tokio::process::Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        return Err("No Claude Code credentials in keychain".to_string());
-    }
-
-    let json = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let creds: OAuthCredentials = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    Ok(creds.claude_ai_oauth)
-}
-
-async fn get_oauth_token() -> Result<OAuthToken, String> {
-    {
-        let cache = AUTH_CACHE.lock().unwrap();
-        if let Some(ref token) = cache.token {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-            if token.expires_at > now + 60 {
-                return Ok(token.clone());
-            }
-        }
-    }
-    // Token missing or expiring soon — re-read from keychain
-    let token = read_oauth_token_from_keychain().await?;
-    let mut cache = AUTH_CACHE.lock().unwrap();
-    cache.token = Some(token.clone());
-    cache.org_uuid = None; // new token might mean different user
-    Ok(token)
-}
-
-async fn get_org_uuid(token: &str) -> Result<String, String> {
-    {
-        let cache = AUTH_CACHE.lock().unwrap();
-        if let Some(ref uuid) = cache.org_uuid {
-            return Ok(uuid.clone());
-        }
-    }
-    let uuid = read_org_uuid(token).await?;
-    let mut cache = AUTH_CACHE.lock().unwrap();
-    cache.org_uuid = Some(uuid.clone());
-    Ok(uuid)
-}
-
-async fn read_org_uuid(token: &str) -> Result<String, String> {
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s",
-            "-H", &format!("Authorization: Bearer {token}"),
-            "-H", "anthropic-version: 2023-06-01",
-            "https://api.anthropic.com/api/oauth/profile",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let body = String::from_utf8_lossy(&output.stdout).to_string();
-    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-    v.get("organization")
-        .and_then(|o| o.get("uuid"))
-        .and_then(|u| u.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "No organization.uuid in profile".to_string())
-}
-
-async fn fetch_sessions() -> Result<Vec<WebSession>, String> {
-    let token = get_oauth_token().await?;
-    let org_uuid = get_org_uuid(&token.access_token).await?;
-    let token = token.access_token;
-
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s",
-            "-H", &format!("Authorization: Bearer {token}"),
-            "-H", "anthropic-beta: ccr-byoc-2025-07-29",
-            "-H", "anthropic-version: 2023-06-01",
-            "-H", &format!("x-organization-uuid: {org_uuid}"),
-            "https://api.anthropic.com/v1/sessions",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let body = String::from_utf8_lossy(&output.stdout).to_string();
-    let resp: SessionsResponse = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-
-    // Filter to non-archived sessions, sorted by updated_at descending
-    let mut sessions: Vec<WebSession> = resp
-        .data
-        .into_iter()
-        .filter(|s| s.session_status != "archived")
-        .collect();
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(sessions)
-}
-
-pub async fn archive_session(session_id: &str) -> Result<(), String> {
-    let token = get_oauth_token().await?;
-    let org_uuid = get_org_uuid(&token.access_token).await?;
-    let token = token.access_token;
-
-    let url = format!("https://api.anthropic.com/v1/sessions/{session_id}");
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s",
-            "-w", "\n%{http_code}",
-            "-X", "PATCH",
-            "-H", &format!("Authorization: Bearer {token}"),
-            "-H", "anthropic-beta: ccr-byoc-2025-07-29",
-            "-H", "anthropic-version: 2023-06-01",
-            "-H", &format!("x-organization-uuid: {org_uuid}"),
-            "-H", "content-type: application/json",
-            "-d", r#"{"session_status":"archived"}"#,
-            &url,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let body = String::from_utf8_lossy(&output.stdout).to_string();
-    let status_code: u16 = body
-        .lines()
-        .last()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-
-    if status_code >= 200 && status_code < 300 {
-        Ok(())
-    } else {
-        Err(format!("archive session failed (HTTP {}): {}", status_code, body.lines().next().unwrap_or("")))
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -731,13 +475,13 @@ pub struct DeleteConfirmInfo {
 pub async fn fetch_delete_confirm_info(
     branch: &str,
     worktree_path: Option<&PathBuf>,
-    pr_number: Option<i64>,
+    pr_number: Option<&str>,
     repo_root: &PathBuf,
 ) -> DeleteConfirmInfo {
     let branch_owned = branch.to_string();
     let repo = repo_root.clone();
     let wt_path = worktree_path.cloned();
-    let pr_num = pr_number;
+    let pr_num = pr_number.map(|s| s.to_string());
     let repo2 = repo_root.clone();
 
     let (unpushed, uncommitted, pr_info) = tokio::join!(
@@ -757,10 +501,10 @@ pub async fn fetch_delete_confirm_info(
             }
         },
         async {
-            if let Some(num) = pr_num {
+            if let Some(ref num) = pr_num {
                 run_command(
                     "gh",
-                    &["pr", "view", &num.to_string(), "--json", "state,mergeCommit"],
+                    &["pr", "view", num, "--json", "state,mergeCommit"],
                     Some(&repo2),
                 ).await.ok()
             } else {
@@ -793,26 +537,4 @@ pub async fn fetch_delete_confirm_info(
     }
 
     info
-}
-
-async fn fetch_cmux_workspaces() -> Result<Vec<CmuxWorkspace>, String> {
-    let output = run_command(
-        "/Applications/cmux.app/Contents/Resources/bin/cmux",
-        &["--json", "list-workspaces"],
-        None,
-    ).await?;
-    let parsed: serde_json::Value = serde_json::from_str(&output).map_err(|e| e.to_string())?;
-    let workspaces = parsed["workspaces"].as_array().ok_or("no workspaces array")?;
-    Ok(workspaces
-        .iter()
-        .filter_map(|ws| {
-            let ws_ref = ws["ref"].as_str()?.to_string();
-            let name = ws["title"].as_str().unwrap_or("").to_string();
-            let directories = ws["directories"]
-                .as_array()
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            Some(CmuxWorkspace { ws_ref, name, directories })
-        })
-        .collect())
 }

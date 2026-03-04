@@ -246,6 +246,7 @@ impl super::CodingAgent for ClaudeCodingAgent {
                     title: s.title,
                     status,
                     model,
+                    updated_at: Some(s.updated_at.clone()),
                     correlation_keys,
                 }
             })

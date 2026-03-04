@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::app::{Action, App};
 use crate::data::{SectionHeader, TableEntry, WorkItem, WorkItemKind};
+use crate::providers::types::{ChangeRequestStatus, SessionStatus};
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     let chunks = Layout::default()
@@ -231,10 +232,10 @@ fn build_item_row<'a>(item: &WorkItem, data: &crate::data::DataStore, col_widths
             }
         }
         WorkItemKind::Session => {
-            let status = item.session_idx.and_then(|idx| data.sessions.get(idx));
-            match status.map(|s| s.session_status.as_str()) {
-                Some("running") => ("▶", Color::Magenta),
-                Some("idle") => ("◆", Color::Magenta),
+            let session = item.session_idx.and_then(|idx| data.sessions.get(idx));
+            match session.map(|s| &s.status) {
+                Some(SessionStatus::Running) => ("▶", Color::Magenta),
+                Some(SessionStatus::Idle) => ("◆", Color::Magenta),
                 _ => ("○", Color::Magenta),
             }
         }
@@ -266,13 +267,13 @@ fn build_item_row<'a>(item: &WorkItem, data: &crate::data::DataStore, col_widths
     let branch_display = truncate(branch, branch_width);
 
     let pr_display = if let Some(pr_idx) = item.pr_idx {
-        if let Some(pr) = data.prs.get(pr_idx) {
-            let state_icon = match pr.state.as_str() {
-                "MERGED" => "✓",
-                "CLOSED" => "✗",
+        if let Some(cr) = data.change_requests.get(pr_idx) {
+            let state_icon = match cr.status {
+                ChangeRequestStatus::Merged => "✓",
+                ChangeRequestStatus::Closed => "✗",
                 _ => "",
             };
-            format!("#{}{}", pr.number, state_icon)
+            format!("#{}{}", cr.id, state_icon)
         } else {
             String::new()
         }
@@ -282,10 +283,10 @@ fn build_item_row<'a>(item: &WorkItem, data: &crate::data::DataStore, col_widths
 
     let session_display = if let Some(ses_idx) = item.session_idx {
         if let Some(ses) = data.sessions.get(ses_idx) {
-            match ses.session_status.as_str() {
-                "running" => "▶".to_string(),
-                "idle" => "◆".to_string(),
-                _ => "○".to_string(),
+            match ses.status {
+                SessionStatus::Running => "▶".to_string(),
+                SessionStatus::Idle => "◆".to_string(),
+                SessionStatus::Archived => "○".to_string(),
             }
         } else {
             String::new()
@@ -298,7 +299,7 @@ fn build_item_row<'a>(item: &WorkItem, data: &crate::data::DataStore, col_widths
         .issue_idxs
         .iter()
         .filter_map(|&idx| data.issues.get(idx))
-        .map(|i| format!("#{}", i.number))
+        .map(|i| format!("#{}", i.id))
         .collect::<Vec<_>>()
         .join(",");
 
@@ -392,9 +393,9 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
 
         // PR info
         if let Some(pr_idx) = item.pr_idx {
-            if let Some(pr) = app.active().data.prs.get(pr_idx) {
-                lines.push(format!("PR #{}: {}", pr.number, pr.title));
-                lines.push(format!("State: {}", pr.state));
+            if let Some(cr) = app.active().data.change_requests.get(pr_idx) {
+                lines.push(format!("PR #{}: {}", cr.id, cr.title));
+                lines.push(format!("State: {:?}", cr.status));
             }
         }
 
@@ -402,22 +403,20 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
         if let Some(ses_idx) = item.session_idx {
             if let Some(ses) = app.active().data.sessions.get(ses_idx) {
                 lines.push(format!("Session: {}", ses.title));
-                lines.push(format!("Status: {}", ses.session_status));
-                if !ses.session_context.model.is_empty() {
-                    lines.push(format!("Model: {}", ses.session_context.model));
+                lines.push(format!("Status: {:?}", ses.status));
+                if let Some(ref model) = ses.model {
+                    lines.push(format!("Model: {}", model));
                 }
-                let updated = ses
-                    .updated_at
-                    .split('T')
-                    .next()
-                    .unwrap_or(&ses.updated_at);
-                lines.push(format!("Updated: {}", updated));
+                if let Some(ref updated) = ses.updated_at {
+                    let display = updated.split('T').next().unwrap_or(updated);
+                    lines.push(format!("Updated: {}", display));
+                }
             }
         }
 
         // Workspaces
         for ws_ref in &item.workspace_refs {
-            if let Some(ws) = app.active().data.cmux_workspaces.iter().find(|w| &w.ws_ref == ws_ref) {
+            if let Some(ws) = app.active().data.workspaces.iter().find(|w| &w.ws_ref == ws_ref) {
                 let name = if ws.name.is_empty() { &ws.ws_ref } else { &ws.name };
                 lines.push(format!("Workspace: {}", name));
             }
@@ -426,13 +425,8 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
         // Issues
         for &issue_idx in &item.issue_idxs {
             if let Some(issue) = app.active().data.issues.get(issue_idx) {
-                let labels = issue
-                    .labels
-                    .iter()
-                    .map(|l| l.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                lines.push(format!("Issue #{}: {} [{}]", issue.number, issue.title, labels));
+                let labels = issue.labels.join(", ");
+                lines.push(format!("Issue #{}: {} [{}]", issue.id, issue.title, labels));
             }
         }
 

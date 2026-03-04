@@ -13,6 +13,7 @@ use std::time::Duration;
 use clap::Parser;
 use color_eyre::Result;
 use crossterm::{execute, event::{EnableMouseCapture, DisableMouseCapture}};
+use providers::discovery::detect_providers;
 
 /// TUI dashboard for managing development workspaces across cmux, worktrunk, and GitHub.
 #[derive(Parser)]
@@ -76,6 +77,12 @@ async fn main() -> Result<()> {
 
 async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) -> Result<()> {
     let mut app = app::App::new(repo_roots);
+
+    // Discover providers from the first repo
+    if let Some(first_repo) = app.repo_order.first().cloned() {
+        app.registry = detect_providers(&first_repo);
+    }
+
     let mut events = event::EventHandler::new(Duration::from_millis(250));
     let mut last_refresh = std::time::Instant::now();
     let refresh_interval = Duration::from_secs(10);
@@ -171,8 +178,10 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
                 }
             }
             app::PendingAction::SelectWorkspace(ws_ref) => {
-                if let Err(e) = actions::select_cmux_workspace(&ws_ref).await {
-                    app.status_message = Some(e);
+                if let Some((_, ws_mgr)) = &app.registry.workspace_manager {
+                    if let Err(e) = ws_mgr.select_workspace(&ws_ref).await {
+                        app.status_message = Some(e);
+                    }
                 }
             }
             app::PendingAction::FetchDeleteInfo(si) => {
@@ -183,14 +192,14 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
                         let wt_path = item.worktree_idx
                             .and_then(|idx| app.active().data.worktrees.get(idx))
                             .map(|wt| wt.path.clone());
-                        let pr_number = item.pr_idx
-                            .and_then(|idx| app.active().data.prs.get(idx))
-                            .map(|pr| pr.number);
+                        let pr_id = item.pr_idx
+                            .and_then(|idx| app.active().data.change_requests.get(idx))
+                            .map(|cr| cr.id.clone());
                         let repo_root = app.active_repo_root().clone();
                         let info = data::fetch_delete_confirm_info(
                             &branch,
                             wt_path.as_ref(),
-                            pr_number,
+                            pr_id.as_deref(),
                             &repo_root,
                         ).await;
                         app.delete_confirm_info = Some(info);
@@ -201,42 +210,54 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
             app::PendingAction::ConfirmDelete => {
                 if let Some(info) = app.delete_confirm_info.take() {
                     let repo = app.active_repo_root().clone();
-                    if let Err(e) = actions::remove_worktree(&info.branch, &repo).await {
-                        app.status_message = Some(e);
+                    if let Some(cm) = app.registry.checkout_managers.values().next() {
+                        if let Err(e) = cm.remove_checkout(repo.as_path(), &info.branch).await {
+                            app.status_message = Some(e);
+                        }
                     }
                     refresh_all(&mut app).await;
                 }
             }
-            app::PendingAction::OpenPr(number) => {
+            app::PendingAction::OpenPr(id) => {
                 let repo = app.active_repo_root().clone();
-                let _ = actions::open_pr_in_browser(number, &repo).await;
+                if let Some(cr) = app.registry.code_review.values().next() {
+                    let _ = cr.open_in_browser(&repo, &id).await;
+                }
             }
-            app::PendingAction::OpenIssueBrowser(number) => {
+            app::PendingAction::OpenIssueBrowser(id) => {
                 let repo = app.active_repo_root().clone();
-                let _ = actions::open_issue_in_browser(number, &repo).await;
+                if let Some(it) = app.registry.issue_trackers.values().next() {
+                    let _ = it.open_in_browser(&repo, &id).await;
+                }
             }
             app::PendingAction::CreateWorktree(branch) => {
                 let repo = app.active_repo_root().clone();
-                match actions::create_worktree(&branch, &repo).await {
-                    Ok(wt_path) => {
-                        let tmpl = template::WorkspaceTemplate::load(app.active_repo_root());
-                        if let Err(e) = actions::create_cmux_workspace(
-                            &tmpl,
-                            &wt_path,
-                            "claude",
-                            &branch,
-                        ).await {
-                            app.status_message = Some(e);
+                if let Some(cm) = app.registry.checkout_managers.values().next() {
+                    match cm.create_checkout(repo.as_path(), &branch).await {
+                        Ok(checkout) => {
+                            let tmpl = template::WorkspaceTemplate::load(app.active_repo_root());
+                            if let Err(e) = actions::create_cmux_workspace(
+                                &tmpl,
+                                &checkout.path,
+                                "claude",
+                                &branch,
+                            ).await {
+                                app.status_message = Some(e);
+                            }
                         }
+                        Err(e) => app.status_message = Some(e),
                     }
-                    Err(e) => app.status_message = Some(e),
+                } else {
+                    app.status_message = Some("No checkout manager available".to_string());
                 }
                 refresh_all(&mut app).await;
             }
             app::PendingAction::ArchiveSession(ses_idx) => {
                 if let Some(session) = app.active().data.sessions.get(ses_idx).cloned() {
-                    if let Err(e) = data::archive_session(&session.id).await {
-                        app.status_message = Some(e);
+                    if let Some(ca) = app.registry.coding_agents.values().next() {
+                        if let Err(e) = ca.archive_session(&session.id).await {
+                            app.status_message = Some(e);
+                        }
                     }
                     refresh_all(&mut app).await;
                 }
@@ -248,7 +269,11 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
                     app.active().data.worktrees.get(wt_idx).map(|wt| wt.path.clone())
                 } else if let Some(branch_name) = &branch {
                     let repo = app.active_repo_root().clone();
-                    actions::create_worktree(branch_name, &repo).await.ok()
+                    if let Some(cm) = app.registry.checkout_managers.values().next() {
+                        cm.create_checkout(repo.as_path(), branch_name).await.ok().map(|c| c.path)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };
@@ -263,22 +288,35 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
                 refresh_all(&mut app).await;
             }
             app::PendingAction::GenerateBranchName(issue_idxs) => {
-                let issues: Vec<(i64, String)> = issue_idxs
+                let issues: Vec<(String, String)> = issue_idxs
                     .iter()
                     .filter_map(|&idx| app.active().data.issues.get(idx))
-                    .map(|issue| (issue.number, issue.title.clone()))
+                    .map(|issue| (issue.id.clone(), issue.title.clone()))
                     .collect();
-                let repo = app.active_repo_root().clone();
-                let issue_refs: Vec<(i64, &str)> = issues.iter().map(|(n, t)| (*n, t.as_str())).collect();
-                match actions::generate_branch_name(&issue_refs, &repo).await {
-                    Ok(branch) => app.prefill_branch_input(&branch),
-                    Err(_) => {
-                        let fallback: Vec<String> = issues
-                            .iter()
-                            .map(|(num, _)| format!("issue-{}", num))
-                            .collect();
-                        app.prefill_branch_input(&fallback.join("-"));
+
+                if let Some(ai) = app.registry.ai_utilities.values().next() {
+                    let context: Vec<String> = issues.iter()
+                        .map(|(id, title)| format!("{} #{}", title, id))
+                        .collect();
+                    let prompt_text = if context.len() == 1 {
+                        context[0].clone()
+                    } else {
+                        context.join("; ")
+                    };
+                    match ai.generate_branch_name(&prompt_text).await {
+                        Ok(branch) => app.prefill_branch_input(&branch),
+                        Err(_) => {
+                            let fallback: Vec<String> = issues.iter()
+                                .map(|(id, _)| format!("issue-{}", id))
+                                .collect();
+                            app.prefill_branch_input(&fallback.join("-"));
+                        }
                     }
+                } else {
+                    let fallback: Vec<String> = issues.iter()
+                        .map(|(id, _)| format!("issue-{}", id))
+                        .collect();
+                    app.prefill_branch_input(&fallback.join("-"));
                 }
             }
             app::PendingAction::AddRepo(path) => {
@@ -303,19 +341,25 @@ async fn refresh_all(app: &mut app::App) {
         .map(|path| app.repos[path].data_snapshot())
         .collect();
 
-    // Refresh all repos in parallel
-    let data_stores: Vec<_> = app.repo_order.iter()
+    // Extract data stores first (mutable borrow of app.repos)
+    let items: Vec<(PathBuf, data::DataStore)> = app.repo_order.iter()
         .map(|path| {
-            let mut ds = std::mem::take(&mut app.repos.get_mut(path).unwrap().data);
-            let root = path.clone();
-            async move {
-                let errors = ds.refresh(&root).await;
-                (root, ds, errors)
-            }
+            let ds = std::mem::take(&mut app.repos.get_mut(path).unwrap().data);
+            (path.clone(), ds)
         })
         .collect();
 
-    let results = futures::future::join_all(data_stores).await;
+    // Now we can borrow registry immutably (previous mutable borrow ended with collect())
+    let registry = &app.registry;
+
+    let results = futures::future::join_all(
+        items.into_iter().map(|(root, mut ds)| {
+            async move {
+                let errors = ds.refresh(&root, registry).await;
+                (root, ds, errors)
+            }
+        })
+    ).await;
 
     let mut all_errors: Vec<String> = Vec::new();
     for (i, (path, data, errors)) in results.into_iter().enumerate() {

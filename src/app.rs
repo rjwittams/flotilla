@@ -5,6 +5,7 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as InputEventHandler;
 
 use crate::data::{DataStore, DeleteConfirmInfo, TableEntry, WorkItem, WorkItemKind};
+use crate::providers::registry::ProviderRegistry;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -39,11 +40,11 @@ impl RepoState {
         }
     }
 
-    /// Snapshot for change detection: (worktrees, prs, sessions, branches, issues)
+    /// Snapshot for change detection: (worktrees, change_requests, sessions, branches, issues)
     pub fn data_snapshot(&self) -> (usize, usize, usize, usize, usize) {
         (
             self.data.worktrees.len(),
-            self.data.prs.len(),
+            self.data.change_requests.len(),
             self.data.sessions.len(),
             self.data.remote_branches.len(),
             self.data.issues.len(),
@@ -78,8 +79,8 @@ pub enum PendingAction {
     CreateWorktree(String),
     FetchDeleteInfo(usize),
     ConfirmDelete,
-    OpenPr(i64),
-    OpenIssueBrowser(i64),
+    OpenPr(String),
+    OpenIssueBrowser(String),
     ArchiveSession(usize),
     GenerateBranchName(Vec<usize>),
     /// Teleport into a web session (creates worktree + workspace as needed)
@@ -172,15 +173,15 @@ impl Action {
             }
             Action::OpenPr => {
                 if let Some(pr_idx) = item.pr_idx {
-                    if let Some(pr) = app.active().data.prs.get(pr_idx) {
-                        app.pending_action = PendingAction::OpenPr(pr.number);
+                    if let Some(cr) = app.active().data.change_requests.get(pr_idx) {
+                        app.pending_action = PendingAction::OpenPr(cr.id.clone());
                     }
                 }
             }
             Action::OpenIssue => {
                 if let Some(&issue_idx) = item.issue_idxs.first() {
                     if let Some(issue) = app.active().data.issues.get(issue_idx) {
-                        app.pending_action = PendingAction::OpenIssueBrowser(issue.number);
+                        app.pending_action = PendingAction::OpenIssueBrowser(issue.id.clone());
                     }
                 }
             }
@@ -234,6 +235,7 @@ pub struct App {
     pub repos: HashMap<PathBuf, RepoState>,
     pub repo_order: Vec<PathBuf>,
     pub active_repo: usize,
+    pub registry: ProviderRegistry,
     pub pending_action: PendingAction,
     pub show_action_menu: bool,
     pub action_menu_items: Vec<Action>,
@@ -338,8 +340,11 @@ impl App {
 
     #[allow(dead_code)]
     pub async fn refresh_data(&mut self) -> Vec<String> {
-        let rs = self.active_mut();
-        let errors = rs.data.refresh(&rs.repo_root).await;
+        let key = self.repo_order[self.active_repo].clone();
+        let mut ds = std::mem::take(&mut self.repos.get_mut(&key).unwrap().data);
+        let errors = ds.refresh(&key, &self.registry).await;
+        let rs = self.repos.get_mut(&key).unwrap();
+        rs.data = ds;
         // Restore selection or pick first
         if rs.data.selectable_indices.is_empty() {
             rs.selected_selectable_idx = None;

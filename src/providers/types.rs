@@ -75,6 +75,7 @@ pub struct CloudAgentSession {
     pub title: String,
     pub status: SessionStatus,
     pub model: Option<String>,
+    pub updated_at: Option<String>,
     pub correlation_keys: Vec<CorrelationKey>,
 }
 
