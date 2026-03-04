@@ -2,8 +2,9 @@
 //!
 //! Run with: cargo run --example debug_sessions -- --repo-root ~/dev/reticulate
 
-use cmux_controller::providers::discovery::detect_providers;
-use cmux_controller::data::DataStore;
+use flotilla::providers::discovery::{detect_providers, first_remote_url, extract_repo_slug};
+use flotilla::providers::types::RepoCriteria;
+use flotilla::data::DataStore;
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -28,8 +29,11 @@ async fn main() {
 
     // Step 2: Refresh data
     println!("\n=== Step 2: DataStore::refresh() ===");
+    let repo_slug = first_remote_url(&repo_root).and_then(|u| extract_repo_slug(&u));
+    let criteria = RepoCriteria { repo_slug };
+    println!("  repo_criteria: {:?}", criteria);
     let mut ds = DataStore::default();
-    let errors = ds.refresh(&repo_root, &registry).await;
+    let errors = ds.refresh(&repo_root, &registry, &criteria).await;
     if !errors.is_empty() {
         println!("  ERRORS:");
         for e in &errors {
@@ -64,10 +68,10 @@ async fn main() {
     println!("\n=== Step 3: Table entries after correlate() ===");
     for (i, entry) in ds.table_entries.iter().enumerate() {
         match entry {
-            cmux_controller::data::TableEntry::Header(h) => {
+            flotilla::data::TableEntry::Header(h) => {
                 println!("  [{i}] HEADER: {h}");
             }
-            cmux_controller::data::TableEntry::Item(item) => {
+            flotilla::data::TableEntry::Item(item) => {
                 println!("  [{i}] {:?} desc={:?} branch={:?} wt={:?} pr={:?} ses={:?} ws={:?}",
                     item.kind, item.description, item.branch,
                     item.worktree_idx, item.pr_idx, item.session_idx, item.workspace_refs);

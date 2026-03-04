@@ -5,10 +5,19 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as InputEventHandler;
 
 use crate::data::{DataStore, DeleteConfirmInfo, TableEntry, WorkItem, WorkItemKind};
+use crate::providers::discovery;
 use crate::providers::registry::ProviderRegistry;
+use crate::providers::types::RepoCriteria;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+/// Per-provider auth/health status from last refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderStatus {
+    Ok,
+    Error,
+}
 
 #[derive(Default, PartialEq)]
 pub enum InputMode {
@@ -22,23 +31,29 @@ pub struct RepoState {
     #[allow(dead_code)]
     pub repo_root: PathBuf,
     pub registry: ProviderRegistry,
+    pub repo_criteria: RepoCriteria,
     pub data: DataStore,
     pub table_state: TableState,
     pub selected_selectable_idx: Option<usize>,
     pub has_unseen_changes: bool,
     pub multi_selected: BTreeSet<usize>,
+    pub show_providers: bool,
 }
 
 impl RepoState {
     pub fn new(repo_root: PathBuf, registry: ProviderRegistry) -> Self {
+        let repo_slug = discovery::first_remote_url(&repo_root)
+            .and_then(|u| discovery::extract_repo_slug(&u));
         Self {
             repo_root,
             registry,
+            repo_criteria: RepoCriteria { repo_slug },
             data: DataStore::default(),
             table_state: TableState::default(),
             selected_selectable_idx: None,
             has_unseen_changes: false,
             multi_selected: BTreeSet::new(),
+            show_providers: false,
         }
     }
 
@@ -231,7 +246,6 @@ impl Action {
     }
 }
 
-#[derive(Default)]
 pub struct App {
     pub should_quit: bool,
     pub repos: HashMap<PathBuf, RepoState>,
@@ -254,6 +268,10 @@ pub struct App {
     // Tab bar areas for mouse hit-testing (set by UI render)
     pub tab_areas: Vec<Rect>,
     pub add_tab_area: Rect,
+    // Tab drag state
+    pub dragging_tab: Option<usize>,
+    pub drag_start_x: u16,
+    pub drag_active: bool,
     // Double-click detection
     last_click_time: Option<Instant>,
     last_click_selectable_idx: Option<usize>,
@@ -261,11 +279,71 @@ pub struct App {
     pub generating_branch: bool,
     // Transient status/error message (cleared on next action)
     pub status_message: Option<String>,
+    // Debug panel: show correlation details
+    pub show_debug: bool,
+    // Config/status screen (flotilla pseudo-tab)
+    pub show_config: bool,
+    pub flotilla_tab_area: Rect,
+    /// Per-repo, per-provider auth status from last refresh.
+    /// Key: (repo_path, provider_category, provider_name)
+    pub provider_statuses: HashMap<(PathBuf, String, String), ProviderStatus>,
+    // Per-repo provider gear icon area for mouse hit-testing
+    pub gear_icon_area: Rect,
+    // Event log scroll state (used on config screen)
+    pub event_log_selected: Option<usize>,
+    pub event_log_count: usize,
+    pub event_log_filter: tracing::Level,
+    pub event_log_filter_area: Rect,
     // File picker state
     pub dir_entries: Vec<DirEntry>,
     pub dir_selected: usize,
     pub file_picker_area: Rect,
     pub file_picker_list_area: Rect,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            event_log_filter: tracing::Level::INFO,
+            should_quit: false,
+            repos: Default::default(),
+            repo_order: Default::default(),
+            active_repo: 0,
+            pending_action: Default::default(),
+            show_action_menu: false,
+            action_menu_items: Default::default(),
+            action_menu_index: 0,
+            input_mode: Default::default(),
+            input: Default::default(),
+            show_help: false,
+            table_area: Default::default(),
+            show_delete_confirm: false,
+            delete_confirm_info: None,
+            delete_confirm_loading: false,
+            menu_area: Default::default(),
+            tab_areas: Default::default(),
+            add_tab_area: Default::default(),
+            dragging_tab: None,
+            drag_start_x: 0,
+            drag_active: false,
+            last_click_time: None,
+            last_click_selectable_idx: None,
+            generating_branch: false,
+            status_message: None,
+            show_debug: false,
+            show_config: false,
+            flotilla_tab_area: Default::default(),
+            provider_statuses: Default::default(),
+            gear_icon_area: Default::default(),
+            event_log_selected: None,
+            event_log_count: 0,
+            event_log_filter_area: Default::default(),
+            dir_entries: Default::default(),
+            dir_selected: 0,
+            file_picker_area: Default::default(),
+            file_picker_list_area: Default::default(),
+        }
+    }
 }
 
 impl App {
@@ -319,6 +397,7 @@ impl App {
 
     pub fn switch_tab(&mut self, idx: usize) {
         if idx < self.repo_order.len() {
+            self.show_config = false;
             self.active_repo = idx;
             let key = &self.repo_order[idx];
             self.repos.get_mut(key).unwrap().has_unseen_changes = false;
@@ -326,19 +405,49 @@ impl App {
     }
 
     pub fn next_tab(&mut self) {
-        if !self.repo_order.is_empty() {
-            self.switch_tab((self.active_repo + 1) % self.repo_order.len());
+        if self.repo_order.is_empty() {
+            return;
+        }
+        if self.show_config {
+            self.show_config = false;
+            self.active_repo = 0;
+        } else if self.active_repo < self.repo_order.len() - 1 {
+            self.switch_tab(self.active_repo + 1);
+        } else {
+            self.show_config = true;
         }
     }
 
     pub fn prev_tab(&mut self) {
-        if !self.repo_order.is_empty() {
-            self.switch_tab(
-                self.active_repo
-                    .checked_sub(1)
-                    .unwrap_or(self.repo_order.len() - 1),
-            );
+        if self.repo_order.is_empty() {
+            return;
         }
+        if self.show_config {
+            self.show_config = false;
+            self.active_repo = self.repo_order.len() - 1;
+        } else if self.active_repo > 0 {
+            self.switch_tab(self.active_repo - 1);
+        } else {
+            self.show_config = true;
+        }
+    }
+
+    /// Move the active tab left (delta = -1) or right (delta = 1).
+    /// Returns true if the order changed.
+    pub fn move_tab(&mut self, delta: isize) -> bool {
+        let len = self.repo_order.len();
+        if len < 2 {
+            return false;
+        }
+        let cur = self.active_repo;
+        let new_idx = cur as isize + delta;
+        if new_idx < 0 || new_idx >= len as isize {
+            return false;
+        }
+        let new_idx = new_idx as usize;
+        self.repo_order.swap(cur, new_idx);
+        self.active_repo = new_idx;
+        true
     }
 
     #[allow(dead_code)]
@@ -347,7 +456,8 @@ impl App {
         let rs = self.repos.get_mut(&key).unwrap();
         let mut ds = std::mem::take(&mut rs.data);
         let reg = std::mem::take(&mut rs.registry);
-        let errors = ds.refresh(&key, &reg).await;
+        let criteria = rs.repo_criteria.clone();
+        let errors = ds.refresh(&key, &reg, &criteria).await;
         let rs = self.repos.get_mut(&key).unwrap();
         rs.registry = reg;
         rs.data = ds;
@@ -376,6 +486,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Clear status/error message on any keypress
+        self.status_message = None;
+
         // Help toggle works everywhere
         if key.code == KeyCode::Char('?') {
             self.show_help = !self.show_help;
@@ -403,10 +516,40 @@ impl App {
             self.handle_input_key(key);
             return;
         }
+        // Config screen: j/k scroll the event log
+        if self.show_config {
+            match key.code {
+                KeyCode::Char('q') => self.should_quit = true,
+                KeyCode::Esc => self.should_quit = true,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if let Some(sel) = self.event_log_selected {
+                        if sel + 1 < self.event_log_count {
+                            self.event_log_selected = Some(sel + 1);
+                        }
+                    } else if self.event_log_count > 0 {
+                        self.event_log_selected = Some(self.event_log_count - 1);
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if let Some(sel) = self.event_log_selected {
+                        if sel > 0 {
+                            self.event_log_selected = Some(sel - 1);
+                        }
+                    }
+                }
+                KeyCode::Char('[') => self.prev_tab(),
+                KeyCode::Char(']') => self.next_tab(),
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => {
-                if !self.active().multi_selected.is_empty() {
+                if self.active().show_providers {
+                    self.active_mut().show_providers = false;
+                } else if !self.active().multi_selected.is_empty() {
                     self.active_mut().multi_selected.clear();
                 } else {
                     self.should_quit = true;
@@ -428,9 +571,24 @@ impl App {
                 self.input.reset();
             }
             KeyCode::Char('d') => self.dispatch_if_available(Action::RemoveWorktree),
+            KeyCode::Char('D') => self.show_debug = !self.show_debug,
             KeyCode::Char('p') => self.dispatch_if_available(Action::OpenPr),
             KeyCode::Char('[') => self.prev_tab(),
             KeyCode::Char(']') => self.next_tab(),
+            KeyCode::Char('{') => {
+                if !self.show_config && self.move_tab(-1) {
+                    crate::config::save_tab_order(&self.repo_order);
+                }
+            }
+            KeyCode::Char('}') => {
+                if !self.show_config && self.move_tab(1) {
+                    crate::config::save_tab_order(&self.repo_order);
+                }
+            }
+            KeyCode::Char('c') => {
+                let sp = self.active().show_providers;
+                self.active_mut().show_providers = !sp;
+            }
             KeyCode::Char('a') => {
                 self.input_mode = InputMode::AddRepo;
                 self.input.reset();
@@ -448,6 +606,11 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Clear status/error message on any click
+        if matches!(mouse.kind, MouseEventKind::Down(_)) {
+            self.status_message = None;
+        }
+
         // When popups are open, intercept clicks
         if self.show_action_menu {
             self.handle_menu_mouse(mouse);

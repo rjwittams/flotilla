@@ -9,9 +9,11 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{Action, App};
+use crate::app::{Action, App, ProviderStatus};
 use crate::data::{SectionHeader, TableEntry, WorkItem, WorkItemKind};
-use crate::providers::types::{ChangeRequestStatus, SessionStatus};
+use crate::event_log::{self, LevelExt};
+use crate::providers::correlation::ItemKind as CorItemKind;
+use crate::providers::types::{ChangeRequestStatus, CorrelationKey, SessionStatus};
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     let chunks = Layout::default()
@@ -34,17 +36,22 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 }
 
 fn render_tab_bar(app: &mut App, frame: &mut Frame, area: Rect) {
-    let mut spans: Vec<Span> = vec![
-        Span::styled(" cmux ", Style::default().bold().fg(Color::Cyan)),
-    ];
+    let flotilla_label = " flotilla ";
+    let flotilla_style = if app.show_config {
+        Style::default().bold().fg(Color::Black).bg(Color::White)
+    } else {
+        Style::default().bold().fg(Color::Black).bg(Color::Cyan)
+    };
+    let mut spans: Vec<Span> = vec![Span::styled(flotilla_label, flotilla_style)];
 
+    app.flotilla_tab_area = Rect::new(area.x, area.y, flotilla_label.len() as u16, 1);
     app.tab_areas.clear();
-    let mut x_offset: u16 = 6; // length of " cmux "
+    let mut x_offset: u16 = flotilla_label.len() as u16;
 
     for (i, path) in app.repo_order.iter().enumerate() {
         let rs = &app.repos[path];
         let name = App::repo_name(path);
-        let is_active = i == app.active_repo;
+        let is_active = !app.show_config && i == app.active_repo;
         let loading = if rs.data.loading { " ⟳" } else { "" };
         let changed = if rs.has_unseen_changes { "*" } else { "" };
 
@@ -54,7 +61,9 @@ fn render_tab_bar(app: &mut App, frame: &mut Frame, area: Rect) {
 
         let label = format!("{name}{changed}{loading}");
         let label_len = label.len() as u16;
-        let style = if is_active {
+        let style = if is_active && app.drag_active {
+            Style::default().bold().fg(Color::Cyan).underlined()
+        } else if is_active {
             Style::default().bold().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -87,7 +96,11 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let text: String = if app.generating_branch {
+    let text: String = if app.show_config {
+        " j/k:scroll log  [/]:switch tab  ?:help  q:quit".into()
+    } else if app.active().show_providers {
+        " c:close providers  [/]:switch tab  ?:help  q:quit".into()
+    } else if app.generating_branch {
         " Generating branch name...".into()
     } else if app.show_action_menu {
         " j/k:navigate  enter:select  esc:close".into()
@@ -120,6 +133,11 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_content(app: &mut App, frame: &mut Frame, area: Rect) {
+    if app.show_config {
+        render_config_screen(app, frame, area);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -129,15 +147,113 @@ fn render_content(app: &mut App, frame: &mut Frame, area: Rect) {
     render_preview(app, frame, chunks[1]);
 }
 
+fn render_repo_providers(app: &App, frame: &mut Frame, area: Rect) {
+    let path = &app.repo_order[app.active_repo];
+    let rs = &app.repos[path];
+    let reg = &rs.registry;
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    let categories: Vec<(&str, Option<String>, Option<ProviderStatus>)> = vec![
+        (
+            "VCS",
+            reg.vcs.values().next().map(|v| v.display_name().to_string()),
+            None,
+        ),
+        (
+            "Checkout mgr",
+            reg.checkout_managers.values().next().map(|v| v.display_name().to_string()),
+            None,
+        ),
+        (
+            "Code review",
+            reg.code_review.values().next().map(|v| v.display_name().to_string()),
+            reg.code_review.iter().next().and_then(|(pname, _)| {
+                app.provider_statuses
+                    .get(&(path.clone(), "code_review".into(), pname.clone()))
+                    .copied()
+            }),
+        ),
+        (
+            "Issue tracker",
+            reg.issue_trackers.values().next().map(|v| v.display_name().to_string()),
+            reg.issue_trackers.iter().next().and_then(|(pname, _)| {
+                app.provider_statuses
+                    .get(&(path.clone(), "issue_tracker".into(), pname.clone()))
+                    .copied()
+            }),
+        ),
+        (
+            "Coding agent",
+            reg.coding_agents.values().next().map(|v| v.display_name().to_string()),
+            reg.coding_agents.iter().next().and_then(|(pname, _)| {
+                app.provider_statuses
+                    .get(&(path.clone(), "coding_agent".into(), pname.clone()))
+                    .copied()
+            }),
+        ),
+        (
+            "AI utility",
+            reg.ai_utilities.values().next().map(|v| v.display_name().to_string()),
+            None,
+        ),
+        (
+            "Workspace mgr",
+            reg.workspace_manager.as_ref().map(|(_, w)| w.display_name().to_string()),
+            None,
+        ),
+    ];
+
+    for (category, provider, status) in categories {
+        let value = match (&provider, status) {
+            (Some(name), Some(ProviderStatus::Ok)) => format!("{} ✓", name),
+            (Some(name), Some(ProviderStatus::Error)) => format!("{} ✗", name),
+            (Some(name), None) => name.clone(),
+            (None, _) => "—".to_string(),
+        };
+        let value_style = match status {
+            Some(ProviderStatus::Ok) => Style::default().fg(Color::Green),
+            Some(ProviderStatus::Error) => Style::default().fg(Color::Red),
+            _ if provider.is_some() => Style::default().fg(Color::White),
+            _ => Style::default().fg(Color::DarkGray),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<16}", category), Style::default().fg(Color::DarkGray)),
+            Span::styled(value, value_style),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title_top(Line::from(" ✕ ").right_aligned())
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, area);
+}
+
 fn render_unified_table(app: &mut App, frame: &mut Frame, area: Rect) {
     app.table_area = area;
+
+    // If per-repo provider view is active, render that instead
+    if app.active().show_providers {
+        // Store the close-button area (the ✕) in the same top-right corner as the gear icon
+        let close_x = area.x + area.width.saturating_sub(5);
+        app.gear_icon_area = Rect::new(close_x, area.y, 3, 1);
+        render_repo_providers(app, frame, area);
+        return;
+    }
+
+    // Store gear icon area in top-right corner of table border
+    let gear_x = area.x + area.width.saturating_sub(5);
+    app.gear_icon_area = Rect::new(gear_x, area.y, 3, 1);
 
     let header = Row::new(vec![
         Cell::from(""),
         Cell::from("Description"),
+        Cell::from("Branch"),
         Cell::from("WT"),
         Cell::from("WS"),
-        Cell::from("Branch"),
         Cell::from("PR"),
         Cell::from("Ses"),
         Cell::from("Issues"),
@@ -149,9 +265,9 @@ fn render_unified_table(app: &mut App, frame: &mut Frame, area: Rect) {
     let widths = [
         Constraint::Length(3),
         Constraint::Min(15),
-        Constraint::Length(3),
-        Constraint::Length(3),
         Constraint::Length(25),
+        Constraint::Length(3),
+        Constraint::Length(3),
         Constraint::Length(10),
         Constraint::Length(4),
         Constraint::Length(10),
@@ -195,7 +311,10 @@ fn render_unified_table(app: &mut App, frame: &mut Frame, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered())
+        .block(
+            Block::bordered()
+                .title_top(Line::from(" ⚙ ").right_aligned())
+        )
         .row_highlight_style(Style::default().bg(Color::DarkGray).bold())
         .highlight_symbol("▸ ")
         .highlight_spacing(HighlightSpacing::Always);
@@ -245,7 +364,7 @@ fn build_item_row<'a>(item: &WorkItem, data: &crate::data::DataStore, col_widths
     };
 
     let desc_width = col_widths.get(1).copied().unwrap_or(15) as usize;
-    let branch_width = col_widths.get(4).copied().unwrap_or(25) as usize;
+    let branch_width = col_widths.get(2).copied().unwrap_or(25) as usize;
 
     let description = truncate(&item.description, desc_width);
 
@@ -330,16 +449,16 @@ fn build_item_row<'a>(item: &WorkItem, data: &crate::data::DataStore, col_widths
         Cell::from(Span::styled(format!(" {icon}"), Style::default().fg(icon_color))),
         Cell::from(description),
         Cell::from(Span::styled(
+            branch_display,
+            Style::default().fg(Color::Cyan),
+        )),
+        Cell::from(Span::styled(
             wt_indicator.to_string(),
             Style::default().fg(Color::Green),
         )),
         Cell::from(Span::styled(
             ws_indicator,
             Style::default().fg(Color::Green),
-        )),
-        Cell::from(Span::styled(
-            branch_display,
-            Style::default().fg(Color::Cyan),
         )),
         Cell::from(Span::styled(pr_display, Style::default().fg(Color::Blue))),
         Cell::from(Span::styled(
@@ -355,6 +474,19 @@ fn build_item_row<'a>(item: &WorkItem, data: &crate::data::DataStore, col_widths
 }
 
 fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
+    if app.show_debug {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        render_preview_content(app, frame, chunks[0]);
+        render_debug_panel(app, frame, chunks[1]);
+    } else {
+        render_preview_content(app, frame, area);
+    }
+}
+
+fn render_preview_content(app: &App, frame: &mut Frame, area: Rect) {
     let text = if let Some(item) = app.selected_work_item() {
         let mut lines = Vec::new();
 
@@ -438,6 +570,54 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
         .block(Block::bordered().title(" Preview "))
         .wrap(Wrap { trim: true });
     frame.render_widget(preview, area);
+}
+
+fn format_correlation_key(key: &CorrelationKey) -> String {
+    match key {
+        CorrelationKey::Branch(b) => format!("Branch({})", b),
+        CorrelationKey::CheckoutPath(p) => format!("Path({})", p.display()),
+        CorrelationKey::ChangeRequestRef(provider, id) => format!("PR({}/{})", provider, id),
+        CorrelationKey::SessionRef(provider, id) => format!("Ses({}/{})", provider, id),
+    }
+}
+
+fn render_debug_panel(app: &App, frame: &mut Frame, area: Rect) {
+    let text = if let Some(item) = app.selected_work_item() {
+        let data = &app.active().data;
+        if let Some(group_idx) = item.correlation_group_idx {
+            if let Some(group) = data.correlation_groups.get(group_idx) {
+                let mut lines = Vec::new();
+                lines.push(format!("Group #{} ({} items)", group_idx, group.items.len()));
+                lines.push(String::new());
+
+                for ci in &group.items {
+                    let kind_label = match ci.kind {
+                        CorItemKind::Checkout => "Checkout",
+                        CorItemKind::ChangeRequest => "PR",
+                        CorItemKind::CloudSession => "Session",
+                        CorItemKind::Workspace => "Workspace",
+                    };
+                    lines.push(format!("{}: {} [idx={}]", kind_label, ci.title, ci.source_index));
+                    for key in &ci.correlation_keys {
+                        lines.push(format!("  {}", format_correlation_key(key)));
+                    }
+                }
+
+                lines.join("\n")
+            } else {
+                "No group data".into()
+            }
+        } else {
+            "Not correlated (standalone)".into()
+        }
+    } else {
+        String::new()
+    };
+
+    let panel = Paragraph::new(text)
+        .block(Block::bordered().title(" Correlation Debug (D to toggle) "))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(panel, area);
 }
 
 fn render_action_menu(app: &mut App, frame: &mut Frame) {
@@ -617,9 +797,12 @@ fn render_help(app: &App, frame: &mut Frame) {
         Line::from(""),
         Line::from(Span::styled("Repos", Style::default().bold())),
         Line::from("  [ / ]            Switch repo tab"),
+        Line::from("  { / }            Move repo tab left/right"),
+        Line::from("  Drag tab         Reorder tabs"),
         Line::from("  a                Add repository"),
         Line::from(""),
         Line::from(Span::styled("General", Style::default().bold())),
+        Line::from("  D                Toggle correlation debug panel"),
         Line::from("  ?                Toggle this help"),
         Line::from("  q / Esc          Quit"),
     ];
@@ -694,6 +877,198 @@ fn render_file_picker(app: &mut App, frame: &mut Frame) {
         state.select(Some(app.dir_selected));
     }
     frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+fn render_config_screen(app: &mut App, frame: &mut Frame, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    render_global_status(app, frame, chunks[0]);
+    render_event_log(app, frame, chunks[1]);
+}
+
+fn render_global_status(app: &App, frame: &mut Frame, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Collect unique provider factories across all repos
+    let mut vcs_name: Option<String> = None;
+    let mut checkout_name: Option<String> = None;
+    let mut code_review_name: Option<String> = None;
+    let mut issue_tracker_name: Option<String> = None;
+    let mut coding_agent_name: Option<String> = None;
+    let mut ai_utility_name: Option<String> = None;
+    let mut workspace_name: Option<String> = None;
+
+    // Coding agent auth status (aggregate across repos)
+    let mut coding_agent_status: Option<ProviderStatus> = None;
+
+    for path in &app.repo_order {
+        let rs = &app.repos[path];
+        let reg = &rs.registry;
+
+        if vcs_name.is_none() {
+            vcs_name = reg.vcs.values().next().map(|v| v.display_name().to_string());
+        }
+        if checkout_name.is_none() {
+            checkout_name = reg.checkout_managers.values().next().map(|v| v.display_name().to_string());
+        }
+        if code_review_name.is_none() {
+            code_review_name = reg.code_review.values().next().map(|v| v.display_name().to_string());
+        }
+        if issue_tracker_name.is_none() {
+            issue_tracker_name = reg.issue_trackers.values().next().map(|v| v.display_name().to_string());
+        }
+        if coding_agent_name.is_none() {
+            coding_agent_name = reg.coding_agents.values().next().map(|v| v.display_name().to_string());
+        }
+        if ai_utility_name.is_none() {
+            ai_utility_name = reg.ai_utilities.values().next().map(|v| v.display_name().to_string());
+        }
+        if workspace_name.is_none() {
+            workspace_name = reg.workspace_manager.as_ref().map(|(_, w)| w.display_name().to_string());
+        }
+
+        // Check coding agent auth from any repo
+        if coding_agent_status.is_none() {
+            for (pname, _) in reg.coding_agents.iter() {
+                if let Some(&status) = app.provider_statuses.get(&(path.clone(), "coding_agent".into(), pname.clone())) {
+                    coding_agent_status = Some(status);
+                    break;
+                }
+            }
+        }
+    }
+
+    lines.push(Line::from(Span::styled(
+        "── Provider Factories ──",
+        Style::default().fg(Color::Yellow).bold(),
+    )));
+
+    let factories: Vec<(&str, &Option<String>)> = vec![
+        ("VCS", &vcs_name),
+        ("Checkout mgr", &checkout_name),
+        ("Code review", &code_review_name),
+        ("Issue tracker", &issue_tracker_name),
+        ("Coding agent", &coding_agent_name),
+        ("AI utility", &ai_utility_name),
+        ("Workspace mgr", &workspace_name),
+    ];
+
+    for (category, name) in factories {
+        let value = name.as_deref().unwrap_or("—");
+        let style = if name.is_some() {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<16}", category), Style::default().fg(Color::DarkGray)),
+            Span::styled(value, style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "── Coding Agent Status ──",
+        Style::default().fg(Color::Yellow).bold(),
+    )));
+
+    if let Some(agent_name) = &coding_agent_name {
+        let (status_text, color) = match coding_agent_status {
+            Some(ProviderStatus::Ok) => ("✓ authenticated", Color::Green),
+            Some(ProviderStatus::Error) => ("✗ auth error", Color::Red),
+            None => ("? unknown", Color::DarkGray),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<16}", agent_name), Style::default().fg(Color::DarkGray)),
+            Span::styled(status_text, Style::default().fg(color)),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  No coding agent configured",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(Block::bordered())
+        .wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, area);
+}
+
+fn render_event_log(app: &mut App, frame: &mut Frame, area: Rect) {
+    use event_log::DisplayEntry;
+
+    let filter = app.event_log_filter;
+    let entries = event_log::get_entries(&filter);
+    let entry_count = entries.len();
+
+    // Auto-scroll to bottom when new entries arrive
+    if entry_count != app.event_log_count {
+        app.event_log_count = entry_count;
+        if entry_count > 0 {
+            app.event_log_selected = Some(entry_count - 1);
+        }
+    }
+
+    let items: Vec<ListItem> = entries
+        .iter()
+        .map(|display_entry| match display_entry {
+            DisplayEntry::Log(entry) => {
+                let (h, m, s) = entry.hms;
+                let timestamp = format!("{h:02}:{m:02}:{s:02}");
+
+                let level_color = match entry.level {
+                    tracing::Level::ERROR => Color::Red,
+                    tracing::Level::WARN => Color::Yellow,
+                    tracing::Level::DEBUG => Color::Cyan,
+                    tracing::Level::TRACE => Color::DarkGray,
+                    _ => Color::DarkGray,
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", timestamp), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{:<5} ", entry.level),
+                        Style::default().fg(level_color),
+                    ),
+                    Span::raw(&entry.message),
+                ]))
+            }
+            DisplayEntry::RetentionMarker(level) => {
+                ListItem::new(Line::from(Span::styled(
+                    format!("── {level} retention starts here ──"),
+                    Style::default().fg(Color::DarkGray),
+                )))
+            }
+        })
+        .collect();
+
+    // Filter label in top-right corner
+    let filter_label = format!(" {} ", filter.filter_label());
+    let filter_label_len = filter_label.len() as u16;
+    let filter_x = area.x + area.width.saturating_sub(filter_label_len + 1);
+    app.event_log_filter_area = Rect::new(filter_x, area.y, filter_label_len, 1);
+
+    let list = List::new(items)
+        .block(
+            Block::bordered()
+                .title(" Event Log ")
+                .title_top(
+                    Line::from(Span::styled(
+                        filter_label,
+                        Style::default().fg(Color::DarkGray),
+                    ))
+                    .right_aligned(),
+                ),
+        )
+        .highlight_style(Style::default().bg(Color::Indexed(236)));
+
+    let mut state = ListState::default();
+    state.select(app.event_log_selected);
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn truncate(s: &str, max: usize) -> String {

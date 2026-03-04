@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::providers::correlation::{self, CorrelatedItem, CorrelatedGroup, ItemKind as CorItemKind};
 use crate::providers::types::{
-    AssociationKey, ChangeRequest, Checkout, CloudAgentSession, Issue, Workspace,
+    AssociationKey, ChangeRequest, Checkout, CloudAgentSession, Issue, RepoCriteria, Workspace,
 };
 use crate::providers::registry::ProviderRegistry;
 
@@ -55,6 +55,8 @@ pub struct WorkItem {
     pub session_idx: Option<usize>,
     pub issue_idxs: Vec<usize>,
     pub workspace_refs: Vec<String>,
+    /// Index into DataStore::correlation_groups for debug display.
+    pub correlation_group_idx: Option<usize>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -69,10 +71,12 @@ pub struct DataStore {
     pub table_entries: Vec<TableEntry>,
     pub selectable_indices: Vec<usize>,
     pub loading: bool,
+    /// Preserved from last correlate() for debug display.
+    pub correlation_groups: Vec<CorrelatedGroup>,
 }
 
 impl DataStore {
-    pub async fn refresh(&mut self, repo_root: &Path, registry: &ProviderRegistry) -> Vec<String> {
+    pub async fn refresh(&mut self, repo_root: &Path, registry: &ProviderRegistry, criteria: &RepoCriteria) -> Vec<String> {
         self.loading = true;
         let mut errors = Vec::new();
 
@@ -106,7 +110,7 @@ impl DataStore {
         // Sessions through registry
         let sessions_fut = async {
             if let Some(ca) = registry.coding_agents.values().next() {
-                ca.list_sessions().await
+                ca.list_sessions(criteria).await
             } else {
                 Ok(vec![])
             }
@@ -158,7 +162,7 @@ impl DataStore {
     /// Convert a correlation group into a WorkItem.
     /// Returns None for groups that contain only workspaces (no checkout, PR, or session).
     /// Issues are NOT in groups — they are linked post-correlation via IssueRef.
-    fn group_to_work_item(&self, group: &CorrelatedGroup) -> Option<WorkItem> {
+    fn group_to_work_item(&self, group: &CorrelatedGroup, group_idx: usize) -> Option<WorkItem> {
         let mut worktree_idx: Option<usize> = None;
         let mut pr_idx: Option<usize> = None;
         let mut session_idx: Option<usize> = None;
@@ -203,18 +207,21 @@ impl DataStore {
 
         let branch = group.branch().map(|s| s.to_string());
 
-        let description = match kind {
-            WorkItemKind::Checkout => branch.clone().unwrap_or_default(),
-            WorkItemKind::Pr => pr_idx
-                .and_then(|i| self.change_requests.get(i))
-                .map(|cr| cr.title.clone())
-                .unwrap_or_default(),
-            WorkItemKind::Session => session_idx
-                .and_then(|i| self.sessions.get(i))
-                .map(|s| s.title.clone())
-                .unwrap_or_default(),
-            _ => branch.clone().unwrap_or_default(),
-        };
+        // Pick the most descriptive text: PR title > session title > branch name.
+        // PR titles are usually human-written summaries; session titles next;
+        // branch names are terse identifiers and the fallback.
+        let pr_title = pr_idx
+            .and_then(|i| self.change_requests.get(i))
+            .map(|cr| cr.title.clone())
+            .filter(|t| !t.is_empty());
+        let session_title = session_idx
+            .and_then(|i| self.sessions.get(i))
+            .map(|s| s.title.clone())
+            .filter(|t| !t.is_empty());
+        let description = pr_title
+            .or(session_title)
+            .or_else(|| branch.clone())
+            .unwrap_or_default();
 
         Some(WorkItem {
             kind,
@@ -226,6 +233,7 @@ impl DataStore {
             session_idx,
             issue_idxs: Vec::new(), // populated post-correlation
             workspace_refs,
+            correlation_group_idx: Some(group_idx),
         })
     }
 
@@ -288,8 +296,8 @@ impl DataStore {
         let mut pr_items: Vec<WorkItem> = Vec::new();
         let mut linked_issue_indices: HashSet<usize> = HashSet::new();
 
-        for group in &groups {
-            let mut work_item = match self.group_to_work_item(group) {
+        for (group_idx, group) in groups.iter().enumerate() {
+            let mut work_item = match self.group_to_work_item(group, group_idx) {
                 Some(wi) => wi,
                 None => continue, // workspace-only groups
             };
@@ -390,6 +398,7 @@ impl DataStore {
                     session_idx: None,
                     issue_idxs: Vec::new(),
                     workspace_refs: Vec::new(),
+                    correlation_group_idx: None,
                 }
             })
             .collect();
@@ -416,6 +425,7 @@ impl DataStore {
                 session_idx: None,
                 issue_idxs: vec![i],
                 workspace_refs: Vec::new(),
+                correlation_group_idx: None,
             })
             .collect();
         issue_items.sort_by(|a, b| {
@@ -433,6 +443,7 @@ impl DataStore {
 
         self.table_entries = entries;
         self.selectable_indices = selectable;
+        self.correlation_groups = groups;
     }
 }
 
