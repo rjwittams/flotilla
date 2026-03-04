@@ -10,8 +10,10 @@ use crate::providers::coding_agent::claude::ClaudeCodingAgent;
 use crate::providers::issue_tracker::github::GitHubIssueTracker;
 use crate::providers::registry::ProviderRegistry;
 use crate::providers::vcs::git::GitVcs;
+use crate::providers::vcs::git_worktree::GitCheckoutManager;
 use crate::providers::vcs::wt::WtCheckoutManager;
 use crate::providers::workspace::cmux::CmuxWorkspaceManager;
+use crate::config;
 
 /// Extract the first git remote URL for this repo.
 pub fn first_remote_url(repo_root: &Path) -> Option<String> {
@@ -110,14 +112,36 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
         info!("{repo_name}: VCS → git");
     }
 
-    // 2. Checkout manager: wt
-    if command_exists("wt", &["--version"]) {
-        registry
-            .checkout_managers
-            .insert("git".to_string(), Box::new(WtCheckoutManager::new()));
-        info!("{repo_name}: Checkout mgr → wt");
+    // 2. Checkout manager: config-driven provider selection
+    let co_config = config::resolve_checkouts_config(repo_root);
+    match co_config.provider.as_str() {
+        "wt" => {
+            registry
+                .checkout_managers
+                .insert("git".to_string(), Box::new(WtCheckoutManager::new()));
+            info!("{repo_name}: Checkout mgr → wt (forced)");
+        }
+        "git" => {
+            registry
+                .checkout_managers
+                .insert("git".to_string(), Box::new(GitCheckoutManager::new(co_config)));
+            info!("{repo_name}: Checkout mgr → git (forced)");
+        }
+        _ => {
+            // Auto: try wt first, fall back to git
+            if command_exists("wt", &["--version"]) {
+                registry
+                    .checkout_managers
+                    .insert("git".to_string(), Box::new(WtCheckoutManager::new()));
+                info!("{repo_name}: Checkout mgr → wt");
+            } else {
+                registry
+                    .checkout_managers
+                    .insert("git".to_string(), Box::new(GitCheckoutManager::new(co_config)));
+                info!("{repo_name}: Checkout mgr → git (fallback)");
+            }
+        }
     }
-    // TODO: fallback to plain git worktree manager when wt is not available
 
     // 3. Remote host detection -> code review & issue tracker
     if let Some(ref host) = detect_remote_host(repo_root) {

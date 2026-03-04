@@ -170,7 +170,7 @@ impl GitCheckoutManager {
 }
 
 fn parse_ahead_behind(output: &str) -> Option<AheadBehind> {
-    let parts: Vec<&str> = output.trim().split_whitespace().collect();
+    let parts: Vec<&str> = output.split_whitespace().collect();
     if parts.len() == 2 {
         Some(AheadBehind {
             ahead: parts[0].parse().ok()?,
