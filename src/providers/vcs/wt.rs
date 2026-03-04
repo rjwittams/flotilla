@@ -84,6 +84,12 @@ impl WtWorktree {
 
 use crate::providers::run_cmd;
 
+impl Default for WtCheckoutManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WtCheckoutManager {
     pub fn new() -> Self {
         Self

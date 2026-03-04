@@ -6,6 +6,12 @@ pub struct GitVcs;
 
 use crate::providers::run_cmd;
 
+impl Default for GitVcs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GitVcs {
     pub fn new() -> Self {
         Self

@@ -10,6 +10,12 @@ const CMUX_BIN: &str = "/Applications/cmux.app/Contents/Resources/bin/cmux";
 
 pub struct CmuxWorkspaceManager;
 
+impl Default for CmuxWorkspaceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CmuxWorkspaceManager {
     pub fn new() -> Self {
         Self

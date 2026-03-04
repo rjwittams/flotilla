@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::Stdio;
 
+use super::command_exists;
 use crate::providers::ai_utility::claude::ClaudeAiUtility;
 use crate::providers::code_review::github::GitHubCodeReview;
 use crate::providers::coding_agent::claude::ClaudeCodingAgent;
@@ -9,17 +10,6 @@ use crate::providers::registry::ProviderRegistry;
 use crate::providers::vcs::git::GitVcs;
 use crate::providers::vcs::wt::WtCheckoutManager;
 use crate::providers::workspace::cmux::CmuxWorkspaceManager;
-
-/// Run a command silently, returning true if it exits successfully.
-fn command_exists(cmd: &str, args: &[&str]) -> bool {
-    std::process::Command::new(cmd)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 /// Run `git remote get-url origin` and check if the URL contains a known host.
 /// Returns "github" or "gitlab" if matched, None otherwise.

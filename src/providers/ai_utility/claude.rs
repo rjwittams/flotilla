@@ -3,6 +3,12 @@ use tokio::process::Command;
 
 pub struct ClaudeAiUtility;
 
+impl Default for ClaudeAiUtility {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ClaudeAiUtility {
     pub fn new() -> Self {
         Self

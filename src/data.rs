@@ -156,8 +156,9 @@ impl DataStore {
     }
 
     /// Convert a correlation group into a WorkItem.
+    /// Returns None for groups that contain only workspaces (no checkout, PR, or session).
     /// Issues are NOT in groups — they are linked post-correlation via IssueRef.
-    fn group_to_work_item(&self, group: &CorrelatedGroup) -> WorkItem {
+    fn group_to_work_item(&self, group: &CorrelatedGroup) -> Option<WorkItem> {
         let mut worktree_idx: Option<usize> = None;
         let mut pr_idx: Option<usize> = None;
         let mut session_idx: Option<usize> = None;
@@ -193,8 +194,11 @@ impl DataStore {
             WorkItemKind::Checkout
         } else if pr_idx.is_some() {
             WorkItemKind::Pr
-        } else {
+        } else if session_idx.is_some() {
             WorkItemKind::Session
+        } else {
+            // Workspace-only groups don't represent a work stream
+            return None;
         };
 
         let branch = group.branch().map(|s| s.to_string());
@@ -212,7 +216,7 @@ impl DataStore {
             _ => branch.clone().unwrap_or_default(),
         };
 
-        WorkItem {
+        Some(WorkItem {
             kind,
             branch,
             description,
@@ -222,7 +226,7 @@ impl DataStore {
             session_idx,
             issue_idxs: Vec::new(), // populated post-correlation
             workspace_refs,
-        }
+        })
     }
 
     fn correlate(&mut self) {
@@ -285,7 +289,10 @@ impl DataStore {
         let mut linked_issue_indices: HashSet<usize> = HashSet::new();
 
         for group in &groups {
-            let mut work_item = self.group_to_work_item(group);
+            let mut work_item = match self.group_to_work_item(group) {
+                Some(wi) => wi,
+                None => continue, // workspace-only groups
+            };
 
             // Post-correlation: link issues via association keys on change requests
             if let Some(pr_i) = work_item.pr_idx {
