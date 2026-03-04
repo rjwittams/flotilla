@@ -1,61 +1,11 @@
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
 use crate::providers::types::{
-    ChangeRequest, CloudAgentSession, CorrelationKey, Issue, Workspace,
+    ChangeRequest, Checkout, CloudAgentSession, CorrelationKey, Issue, Workspace,
 };
 use crate::providers::registry::ProviderRegistry;
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Worktree {
-    pub branch: String,
-    pub path: PathBuf,
-    #[serde(default)]
-    pub is_main: bool,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub is_current: bool,
-    #[allow(dead_code)]
-    pub main_state: Option<String>,
-    pub main: Option<AheadBehind>,
-    pub remote: Option<RemoteStatus>,
-    pub working_tree: Option<WorkingTree>,
-    pub commit: Option<CommitInfo>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AheadBehind {
-    pub ahead: i64,
-    pub behind: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct RemoteStatus {
-    #[allow(dead_code)]
-    pub name: Option<String>,
-    #[allow(dead_code)]
-    pub branch: Option<String>,
-    pub ahead: i64,
-    pub behind: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct WorkingTree {
-    #[serde(default)]
-    pub staged: bool,
-    #[serde(default)]
-    pub modified: bool,
-    #[serde(default)]
-    pub untracked: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CommitInfo {
-    pub short_sha: Option<String>,
-    pub message: Option<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WorkItemKind {
@@ -108,7 +58,7 @@ pub struct WorkItem {
 
 #[derive(Debug, Default, Clone)]
 pub struct DataStore {
-    pub worktrees: Vec<Worktree>,
+    pub checkouts: Vec<Checkout>,
     pub change_requests: Vec<ChangeRequest>,
     pub issues: Vec<Issue>,
     pub workspaces: Vec<Workspace>,
@@ -125,8 +75,14 @@ impl DataStore {
         self.loading = true;
         let mut errors = Vec::new();
 
-        // Worktrees - still direct (for rich wt data)
-        let wt_fut = fetch_worktrees(repo_root);
+        // Checkouts through registry
+        let checkouts_fut = async {
+            if let Some(cm) = registry.checkout_managers.values().next() {
+                cm.list_checkouts(repo_root.as_path()).await
+            } else {
+                Ok(vec![])
+            }
+        };
 
         // Change requests through registry
         let cr_fut = async {
@@ -182,11 +138,11 @@ impl DataStore {
             }
         };
 
-        let (wt, crs, issues, sessions, branches, merged, workspaces) = tokio::join!(
-            wt_fut, cr_fut, issues_fut, sessions_fut, branches_fut, merged_fut, ws_fut
+        let (checkouts, crs, issues, sessions, branches, merged, workspaces) = tokio::join!(
+            checkouts_fut, cr_fut, issues_fut, sessions_fut, branches_fut, merged_fut, ws_fut
         );
 
-        self.worktrees = wt.unwrap_or_else(|e| { errors.push(format!("worktrees: {e}")); Vec::new() });
+        self.checkouts = checkouts.unwrap_or_else(|e| { errors.push(format!("worktrees: {e}")); Vec::new() });
         self.change_requests = crs.unwrap_or_else(|e| { errors.push(format!("PRs: {e}")); Vec::new() });
         self.issues = issues.unwrap_or_else(|e| { errors.push(format!("issues: {e}")); Vec::new() });
         self.workspaces = workspaces.unwrap_or_else(|e| { errors.push(format!("workspaces: {e}")); Vec::new() });
@@ -198,9 +154,9 @@ impl DataStore {
         errors
     }
 
-    fn find_workspaces_for_worktree(&self, wt: &Worktree) -> Vec<String> {
+    fn find_workspaces_for_checkout(&self, co: &Checkout) -> Vec<String> {
         self.workspaces.iter().filter(|ws| {
-            ws.directories.iter().any(|dir| dir == &wt.path)
+            ws.directories.iter().any(|dir| dir == &co.path)
         }).map(|ws| ws.ws_ref.clone()).collect()
     }
 
@@ -208,16 +164,16 @@ impl DataStore {
         let mut items_by_branch: HashMap<String, WorkItem> = HashMap::new();
         let mut branchless_sessions: Vec<WorkItem> = Vec::new();
 
-        // 1. Insert worktrees (primary items)
-        for (i, wt) in self.worktrees.iter().enumerate() {
-            let branch = wt.branch.clone();
-            let ws_refs = self.find_workspaces_for_worktree(wt);
+        // 1. Insert checkouts (primary items)
+        for (i, co) in self.checkouts.iter().enumerate() {
+            let branch = co.branch.clone();
+            let ws_refs = self.find_workspaces_for_checkout(co);
             let item = WorkItem {
                 kind: WorkItemKind::Worktree,
                 branch: Some(branch.clone()),
                 description: branch.clone(),
                 worktree_idx: Some(i),
-                is_main_worktree: wt.is_main,
+                is_main_worktree: co.is_trunk,
                 pr_idx: None,
                 session_idx: None,
                 issue_idxs: Vec::new(),
@@ -447,13 +403,6 @@ async fn run_command(cmd: &str, args: &[&str], cwd: Option<&PathBuf>) -> Result<
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
-}
-
-async fn fetch_worktrees(repo_root: &PathBuf) -> Result<Vec<Worktree>, String> {
-    let output = run_command("wt", &["list", "--format=json"], Some(repo_root)).await?;
-    // wt may append ANSI escape codes after the JSON; strip them
-    let json_end = output.rfind(']').map(|i| i + 1).unwrap_or(output.len());
-    serde_json::from_str(&output[..json_end]).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Default)]

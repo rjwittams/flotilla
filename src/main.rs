@@ -156,9 +156,9 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
         }
         match pending {
             app::PendingAction::SwitchWorktree(i) => {
-                if let Some(wt) = app.active().data.worktrees.get(i).cloned() {
+                if let Some(co) = app.active().data.checkouts.get(i).cloned() {
                     let ws_result = if let Some((_, ws_mgr)) = &app.active().registry.workspace_manager {
-                        let config = workspace_config(app.active_repo_root(), &wt.branch, &wt.path, "claude");
+                        let config = workspace_config(app.active_repo_root(), &co.branch, &co.path, "claude");
                         Some(ws_mgr.create_workspace(&config).await)
                     } else {
                         None
@@ -182,8 +182,8 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
                     if let Some(data::TableEntry::Item(item)) = app.active().data.table_entries.get(table_idx).cloned() {
                         let branch = item.branch.clone().unwrap_or_default();
                         let wt_path = item.worktree_idx
-                            .and_then(|idx| app.active().data.worktrees.get(idx))
-                            .map(|wt| wt.path.clone());
+                            .and_then(|idx| app.active().data.checkouts.get(idx))
+                            .map(|co| co.path.clone());
                         let pr_id = item.pr_idx
                             .and_then(|idx| app.active().data.change_requests.get(idx))
                             .map(|cr| cr.id.clone());
@@ -265,7 +265,7 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
             app::PendingAction::TeleportSession { session_id, branch, worktree_idx } => {
                 let teleport_cmd = format!("claude --teleport {}", session_id);
                 let wt_path = if let Some(wt_idx) = worktree_idx {
-                    app.active().data.worktrees.get(wt_idx).map(|wt| wt.path.clone())
+                    app.active().data.checkouts.get(wt_idx).map(|co| co.path.clone())
                 } else if let Some(branch_name) = &branch {
                     let repo = app.active_repo_root().clone();
                     let checkout_result = if let Some(cm) = app.active().registry.checkout_managers.values().next() {

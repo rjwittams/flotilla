@@ -45,7 +45,7 @@ impl RepoState {
     /// Snapshot for change detection: (worktrees, change_requests, sessions, branches, issues)
     pub fn data_snapshot(&self) -> (usize, usize, usize, usize, usize) {
         (
-            self.data.worktrees.len(),
+            self.data.checkouts.len(),
             self.data.change_requests.len(),
             self.data.sessions.len(),
             self.data.remote_branches.len(),

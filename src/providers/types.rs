@@ -21,6 +21,10 @@ pub struct Checkout {
     pub branch: String,
     pub path: PathBuf,
     pub is_trunk: bool,
+    pub trunk_ahead_behind: Option<AheadBehind>,
+    pub remote_ahead_behind: Option<AheadBehind>,
+    pub working_tree: Option<WorkingTreeStatus>,
+    pub last_commit: Option<CommitInfo>,
     pub correlation_keys: Vec<CorrelationKey>,
 }
 

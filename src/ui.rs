@@ -304,18 +304,18 @@ fn build_item_row<'a>(item: &WorkItem, data: &crate::data::DataStore, col_widths
         .join(",");
 
     let git_display = if let Some(wt_idx) = item.worktree_idx {
-        if let Some(wt) = data.worktrees.get(wt_idx) {
+        if let Some(co) = data.checkouts.get(wt_idx) {
             let mut s = String::new();
-            if wt.working_tree.as_ref().is_some_and(|w| w.modified) {
+            if co.working_tree.as_ref().is_some_and(|w| w.modified > 0) {
                 s.push('M');
             }
-            if wt.working_tree.as_ref().is_some_and(|w| w.staged) {
+            if co.working_tree.as_ref().is_some_and(|w| w.staged > 0) {
                 s.push('S');
             }
-            if wt.working_tree.as_ref().is_some_and(|w| w.untracked) {
+            if co.working_tree.as_ref().is_some_and(|w| w.untracked > 0) {
                 s.push('?');
             }
-            if wt.main.as_ref().is_some_and(|m| m.ahead > 0) {
+            if co.trunk_ahead_behind.as_ref().is_some_and(|m| m.ahead > 0) {
                 s.push('↑');
             }
             s
@@ -366,21 +366,20 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
             lines.push(format!("Branch: {}", branch));
         }
 
-        // Worktree info
+        // Checkout info
         if let Some(wt_idx) = item.worktree_idx {
-            if let Some(wt) = app.active().data.worktrees.get(wt_idx) {
-                lines.push(format!("Path: {}", wt.path.display()));
-                if let Some(commit) = &wt.commit {
-                    let sha = commit.short_sha.as_deref().unwrap_or("?");
-                    let msg = commit.message.as_deref().unwrap_or("");
-                    lines.push(format!("Commit: {} {}", sha, msg));
+            if let Some(co) = app.active().data.checkouts.get(wt_idx) {
+                lines.push(format!("Path: {}", co.path.display()));
+                if let Some(commit) = &co.last_commit {
+                    let sha = if commit.short_sha.is_empty() { "?" } else { &commit.short_sha };
+                    lines.push(format!("Commit: {} {}", sha, commit.message));
                 }
-                if let Some(main) = &wt.main {
+                if let Some(main) = &co.trunk_ahead_behind {
                     if main.ahead > 0 || main.behind > 0 {
                         lines.push(format!("vs main: +{} -{}", main.ahead, main.behind));
                     }
                 }
-                if let Some(remote) = &wt.remote {
+                if let Some(remote) = &co.remote_ahead_behind {
                     if remote.ahead > 0 || remote.behind > 0 {
                         lines.push(format!(
                             "vs remote: +{} -{}",
