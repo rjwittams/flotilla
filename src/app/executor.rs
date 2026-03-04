@@ -68,7 +68,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
                 None
             };
             if let Some(info) = delete_info {
-                info!("deleting worktree {}", info.branch);
+                info!("deleting {} {}", app.model.active_labels().checkouts.noun, info.branch);
                 let repo = app.model.active_repo_root().clone();
                 let result = if let Some(cm) = app.model.active().registry.checkout_managers.values().next() {
                     Some(cm.remove_checkout(repo.as_path(), &info.branch).await)
@@ -82,7 +82,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
             }
         }
         Command::OpenPr(id) => {
-            debug!("opening PR {id} in browser");
+            debug!("opening {} {id} in browser", app.model.active_labels().code_review.abbr);
             let repo = app.model.active_repo_root().clone();
             if let Some(cr) = app.model.active().registry.code_review.values().next() {
                 let _ = cr.open_in_browser(&repo, &id).await;
@@ -96,7 +96,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
             }
         }
         Command::CreateWorktree(branch) => {
-            info!("creating worktree {branch}");
+            info!("creating {} {branch}", app.model.active_labels().checkouts.noun);
             let repo = app.model.active_repo_root().clone();
             let checkout_result = if let Some(cm) = app.model.active().registry.checkout_managers.values().next() {
                 Some(cm.create_checkout(repo.as_path(), &branch).await)
@@ -105,7 +105,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
             };
             match checkout_result {
                 Some(Ok(checkout)) => {
-                    info!("created worktree at {}", checkout.path.display());
+                    info!("created {} at {}", app.model.active_labels().checkouts.noun, checkout.path.display());
                     let ws_result = if let Some((_, ws_mgr)) = &app.model.active().registry.workspace_manager {
                         let config = workspace_config(app.model.active_repo_root(), &branch, &checkout.path, "claude");
                         Some(ws_mgr.create_workspace(&config).await)
