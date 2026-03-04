@@ -33,12 +33,19 @@ fn shell_command_string(cmd: &str, args: &[&str]) -> String {
 /// Shared helper: run a command via the user's login shell and return stdout
 /// on success, stderr on failure. Using a login shell ensures the user's PATH,
 /// aliases, and shell configuration are available.
+///
+/// Stdin is detached (piped to /dev/null) so shell init scripts cannot
+/// read from or reset the parent's terminal — critical when the parent
+/// is a TUI in raw mode with mouse capture enabled.
 pub(crate) async fn run_cmd(cmd: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
     let shell = user_shell();
     let cmd_str = shell_command_string(cmd, args);
     let output = tokio::process::Command::new(&shell)
         .args(["-lc", &cmd_str])
         .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .output()
         .await
         .map_err(|e| e.to_string())?;
@@ -52,11 +59,14 @@ pub(crate) async fn run_cmd(cmd: &str, args: &[&str], cwd: &Path) -> Result<Stri
 /// Check if a command exists and runs successfully via the user's interactive
 /// login shell. Using `-ic` ensures aliases from .zshrc/.bashrc are available
 /// (e.g. `claude` is often installed as a shell alias).
+///
+/// All stdio is detached so the shell cannot interfere with the parent terminal.
 pub(crate) fn command_exists(cmd: &str, args: &[&str]) -> bool {
     let shell = user_shell();
     let cmd_str = shell_command_string(cmd, args);
     std::process::Command::new(&shell)
         .args(["-ic", &cmd_str])
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

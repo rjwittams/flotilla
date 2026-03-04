@@ -24,6 +24,7 @@ impl CmuxWorkspaceManager {
     async fn cmux_cmd(args: &[&str]) -> Result<String, String> {
         let output = Command::new(CMUX_BIN)
             .args(args)
+            .stdin(std::process::Stdio::null())
             .output()
             .await
             .map_err(|e| e.to_string())?;

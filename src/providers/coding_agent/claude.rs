@@ -100,6 +100,8 @@ impl WebSession {
 async fn read_oauth_token_from_keychain() -> Result<OAuthToken, String> {
     let output = tokio::process::Command::new("security")
         .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .stdin(Stdio::null())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
@@ -157,6 +159,7 @@ async fn read_org_uuid(token: &str) -> Result<String, String> {
             "-H", "anthropic-version: 2023-06-01",
             "https://api.anthropic.com/api/oauth/profile",
         ])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()

@@ -438,7 +438,8 @@ impl DataStore {
 
 async fn run_command(cmd: &str, args: &[&str], cwd: Option<&PathBuf>) -> Result<String, String> {
     let mut command = tokio::process::Command::new(cmd);
-    command.args(args);
+    command.args(args)
+        .stdin(std::process::Stdio::null());
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
