@@ -6,3 +6,4 @@ pub mod coding_agent;
 pub mod ai_utility;
 pub mod workspace;
 pub mod registry;
+pub mod correlation;
