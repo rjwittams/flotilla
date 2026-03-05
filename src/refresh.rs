@@ -99,7 +99,6 @@ impl Drop for RepoRefreshHandle {
 }
 
 /// Fetch all provider data into the given ProviderData struct.
-/// This is the core refresh logic extracted from DataStore::refresh().
 async fn refresh_providers(
     pd: &mut ProviderData,
     repo_root: &Path,

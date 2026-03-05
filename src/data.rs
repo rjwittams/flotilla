@@ -67,7 +67,7 @@ pub struct TableView {
 pub struct DataStore {
     pub providers: ProviderData,
     pub loading: bool,
-    /// Preserved from last correlate() for debug display.
+    /// Set from the latest background refresh snapshot, for debug display.
     pub correlation_groups: Vec<CorrelatedGroup>,
 }
 
