@@ -451,4 +451,17 @@ branch refs/heads/feature
         let path = mgr.render_worktree_path(repo, "fix\\backslash").unwrap();
         assert_eq!(path, PathBuf::from("/tmp/worktrees/myrepo.fix-backslash"));
     }
+
+    #[test]
+    fn render_worktree_path_relative_template() {
+        let config = CheckoutsConfig {
+            path: "worktrees/{{ branch | sanitize }}".to_string(),
+            ..Default::default()
+        };
+        let mgr = GitCheckoutManager::new(config);
+        let repo = Path::new("/home/user/myrepo");
+
+        let path = mgr.render_worktree_path(repo, "dev/thing").unwrap();
+        assert_eq!(path, PathBuf::from("/home/user/myrepo/worktrees/dev-thing"));
+    }
 }
