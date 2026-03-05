@@ -1,0 +1,63 @@
+{
+  "permissions": {
+    "allow": [
+      "# === Version Control ===",
+      "Bash(git *)",
+      "Bash(gh *)",
+
+      "# === Package Management & Build ===",
+      "Bash(cargo *)",
+      "Bash(rustup *)",
+      "Bash(npx *)",
+
+      "# === Python ===",
+      "Bash(python3 *)",
+
+      "# === File & Search Utilities ===",
+      "Bash(ls *)",
+      "Bash(eza *)",
+      "Bash(fd *)",
+      "Bash(find *)",
+      "Bash(cat *)",
+      "Bash(echo *)",
+      "Bash(du *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(chmod *)",
+      "Bash(xargs *)",
+      "Bash(awk *)",
+      "Bash(jq *)",
+      "Bash(yq *)",
+
+      "# === Project Scripts ===",
+      "Bash(./scripts/*)",
+      "Bash(bash *)",
+      "Bash(source *)",
+
+      "# === Process Management ===",
+      "Bash(kill *)",
+      "Bash(lsof *)",
+      "Bash(pkill *)",
+
+      "# === Introspection ===",
+      "Bash(* --version)",
+      "Bash(* --help)",
+
+      "# === MCP: Playwright ===",
+      "mcp__playwright__*",
+
+      "# === Web Access ===",
+      "WebSearch",
+      "WebFetch(domain:docs.github.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.rs)"
+    ],
+    "deny": [
+      "Bash(sudo *)",
+      "Bash(rm -rf /)",
+      "Bash(curl * | sh)",
+      "Bash(curl * | bash)"
+    ]
+  }
+}
