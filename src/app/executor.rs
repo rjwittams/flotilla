@@ -37,9 +37,9 @@ pub async fn execute(cmd: Command, app: &mut App) {
             }
         }
         Command::FetchDeleteInfo(si) => {
-            let table_idx = app.model.active().data.selectable_indices.get(si).copied();
+            let table_idx = app.model.active().data.table_view.selectable_indices.get(si).copied();
             if let Some(table_idx) = table_idx {
-                if let Some(data::TableEntry::Item(item)) = app.model.active().data.table_entries.get(table_idx).cloned() {
+                if let Some(data::TableEntry::Item(item)) = app.model.active().data.table_view.table_entries.get(table_idx).cloned() {
                     let branch = item.branch.clone().unwrap_or_default();
                     let wt_path = item.worktree_idx
                         .and_then(|idx| app.model.active().data.providers.checkouts.get(idx))
@@ -318,16 +318,16 @@ pub async fn refresh_all(app: &mut App) {
 
         // Restore selection (UI state)
         let rui = app.ui.repo_ui.get_mut(&path).unwrap();
-        if rm.data.selectable_indices.is_empty() {
+        if rm.data.table_view.selectable_indices.is_empty() {
             rui.selected_selectable_idx = None;
             rui.table_state.select(None);
         } else if rui.selected_selectable_idx.is_none() {
             rui.selected_selectable_idx = Some(0);
-            rui.table_state.select(Some(rm.data.selectable_indices[0]));
+            rui.table_state.select(Some(rm.data.table_view.selectable_indices[0]));
         } else if let Some(si) = rui.selected_selectable_idx {
-            let clamped = si.min(rm.data.selectable_indices.len() - 1);
+            let clamped = si.min(rm.data.table_view.selectable_indices.len() - 1);
             rui.selected_selectable_idx = Some(clamped);
-            rui.table_state.select(Some(rm.data.selectable_indices[clamped]));
+            rui.table_state.select(Some(rm.data.table_view.selectable_indices[clamped]));
         }
 
         // Copy provider health from DataStore into model-level statuses

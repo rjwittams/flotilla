@@ -98,7 +98,7 @@ fn active_rui<'a>(model: &AppModel, ui: &'a UiState) -> &'a crate::app::RepoUiSt
 fn selected_work_item<'a>(model: &'a AppModel, ui: &UiState) -> Option<&'a WorkItem> {
     let rui = active_rui(model, ui);
     let table_idx = rui.table_state.selected()?;
-    match model.active().data.table_entries.get(table_idx)? {
+    match model.active().data.table_view.table_entries.get(table_idx)? {
         TableEntry::Item(item) => Some(item),
         TableEntry::Header(_) => None,
     }
@@ -299,12 +299,14 @@ fn render_unified_table(model: &AppModel, ui: &mut UiState, frame: &mut Frame, a
     let rui = active_rui(model, ui);
     let rows: Vec<Row> = rm
         .data
+        .table_view
         .table_entries
         .iter()
         .enumerate()
         .map(|(table_idx, entry)| {
             let is_multi_selected = rm
                 .data
+                .table_view
                 .selectable_indices
                 .iter()
                 .position(|&idx| idx == table_idx)

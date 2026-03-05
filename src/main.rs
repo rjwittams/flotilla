@@ -1,4 +1,5 @@
 mod app;
+mod correlated_data;
 mod data;
 mod event;
 mod event_log;

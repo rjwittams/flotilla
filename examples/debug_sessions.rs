@@ -66,7 +66,7 @@ async fn main() {
 
     // Step 3: Show resulting table entries
     println!("\n=== Step 3: Table entries after correlate() ===");
-    for (i, entry) in ds.table_entries.iter().enumerate() {
+    for (i, entry) in ds.table_view.table_entries.iter().enumerate() {
         match entry {
             flotilla::data::TableEntry::Header(h) => {
                 println!("  [{i}] HEADER: {h}");
