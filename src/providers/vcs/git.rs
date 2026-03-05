@@ -18,8 +18,7 @@ impl GitVcs {
     }
 }
 
-#[allow(dead_code)]
-const TRUNK_NAMES: &[&str] = &["main", "master", "trunk"];
+use super::TRUNK_NAMES;
 
 #[async_trait]
 impl super::Vcs for GitVcs {

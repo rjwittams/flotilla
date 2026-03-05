@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use crate::providers::types::*;
 
+pub const TRUNK_NAMES: &[&str] = &["main", "master", "trunk"];
+
 #[allow(dead_code)]
 #[async_trait]
 pub trait Vcs: Send + Sync {

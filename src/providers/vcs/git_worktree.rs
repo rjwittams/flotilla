@@ -106,7 +106,7 @@ impl GitCheckoutManager {
             }
         }
         // Fallback: check which common trunk names exist locally
-        for name in &["main", "master", "trunk"] {
+        for name in super::TRUNK_NAMES {
             if run_cmd(
                 "git",
                 &["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")],
@@ -427,5 +427,28 @@ branch refs/heads/feature
         assert_eq!(wt.staged, 0);
         assert_eq!(wt.modified, 0);
         assert_eq!(wt.untracked, 0);
+    }
+
+    #[test]
+    fn render_worktree_path_default_template() {
+        let config = CheckoutsConfig::default();
+        let mgr = GitCheckoutManager::new(config);
+        let repo = Path::new("/home/user/myrepo");
+
+        let path = mgr.render_worktree_path(repo, "feature/my-branch").unwrap();
+        assert_eq!(path, PathBuf::from("/home/user/myrepo/../myrepo.feature-my-branch"));
+    }
+
+    #[test]
+    fn render_worktree_path_absolute_template() {
+        let config = CheckoutsConfig {
+            path: "/tmp/worktrees/{{ repo }}.{{ branch | sanitize }}".to_string(),
+            ..Default::default()
+        };
+        let mgr = GitCheckoutManager::new(config);
+        let repo = Path::new("/home/user/myrepo");
+
+        let path = mgr.render_worktree_path(repo, "fix\\backslash").unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/worktrees/myrepo.fix-backslash"));
     }
 }
