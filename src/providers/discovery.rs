@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use super::{command_exists, resolve_claude_path};
-use tracing::info;
+use tracing::{info, warn};
 use crate::providers::ai_utility::claude::ClaudeAiUtility;
 use crate::providers::code_review::github::GitHubCodeReview;
 use crate::providers::coding_agent::claude::ClaudeCodingAgent;
@@ -162,18 +162,21 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
     // 3. Remote host detection -> code review & issue tracker
     if let Some(ref host) = detect_remote_host(repo_root) {
         if host == "github" && command_exists("gh", &["--version"]) {
-            let slug = detect_repo_slug(repo_root).unwrap_or_default();
-            let api = Arc::new(GhApiClient::new());
-            registry.code_review.insert(
-                "github".to_string(),
-                Arc::new(GitHubCodeReview::new("github".to_string(), slug.clone(), Arc::clone(&api))),
-            );
-            registry.issue_trackers.insert(
-                "github".to_string(),
-                Arc::new(GitHubIssueTracker::new("github".to_string(), slug, api)),
-            );
-            info!("{repo_name}: Code review → GitHub");
-            info!("{repo_name}: Issue tracker → GitHub");
+            if let Some(slug) = detect_repo_slug(repo_root) {
+                let api = Arc::new(GhApiClient::new());
+                registry.code_review.insert(
+                    "github".to_string(),
+                    Arc::new(GitHubCodeReview::new("github".to_string(), slug.clone(), Arc::clone(&api))),
+                );
+                registry.issue_trackers.insert(
+                    "github".to_string(),
+                    Arc::new(GitHubIssueTracker::new("github".to_string(), slug, api)),
+                );
+                info!("{repo_name}: Code review → GitHub");
+                info!("{repo_name}: Issue tracker → GitHub");
+            } else {
+                warn!("{repo_name}: GitHub detected but could not determine repo slug — skipping GitHub providers");
+            }
         }
         // TODO: GitLab support
     }

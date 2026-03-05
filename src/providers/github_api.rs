@@ -47,15 +47,14 @@ struct CacheEntry {
 }
 
 /// Client that wraps `gh api` with ETag-based conditional request caching.
+#[derive(Default)]
 pub struct GhApiClient {
     cache: Mutex<HashMap<String, CacheEntry>>,
 }
 
 impl GhApiClient {
     pub fn new() -> Self {
-        Self {
-            cache: Mutex::new(HashMap::new()),
-        }
+        Self::default()
     }
 
     /// Fetch a GitHub API endpoint, using cached ETag for conditional requests.
