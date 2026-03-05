@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use tui_input::Input;
 
-use crate::data::DeleteConfirmInfo;
+use crate::data::{DeleteConfirmInfo, TableView};
 use super::intent::Intent;
 
 #[derive(Clone)]
@@ -51,6 +51,7 @@ impl UiMode {
 /// Per-repo UI state (selection, table widget state, visual flags).
 #[derive(Default)]
 pub struct RepoUiState {
+    pub table_view: TableView,
     pub table_state: TableState,
     pub selected_selectable_idx: Option<usize>,
     pub has_unseen_changes: bool,
@@ -145,10 +146,5 @@ impl UiState {
 
     pub fn active_repo_ui(&self, repo_order: &[PathBuf], active_repo: usize) -> &RepoUiState {
         &self.repo_ui[&repo_order[active_repo]]
-    }
-
-    pub fn active_repo_ui_mut(&mut self, repo_order: &[PathBuf], active_repo: usize) -> &mut RepoUiState {
-        let key = &repo_order[active_repo];
-        self.repo_ui.get_mut(key).unwrap()
     }
 }

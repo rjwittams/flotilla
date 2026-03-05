@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::data::DataStore;
 use crate::providers::discovery;
 use crate::providers::registry::ProviderRegistry;
 use crate::providers::types::RepoCriteria;
+use crate::refresh::RepoRefreshHandle;
 
 /// Per-provider auth/health status from last refresh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +52,41 @@ pub struct RepoLabels {
     pub sessions: CategoryLabels,
 }
 
+impl RepoLabels {
+    pub fn from_registry(registry: &ProviderRegistry) -> Self {
+        Self {
+            checkouts: registry.checkout_managers.values().next()
+                .map(|cm| CategoryLabels {
+                    section: cm.section_label().into(),
+                    noun: cm.item_noun().into(),
+                    abbr: cm.abbreviation().into(),
+                })
+                .unwrap_or_default(),
+            code_review: registry.code_review.values().next()
+                .map(|cr| CategoryLabels {
+                    section: cr.section_label().into(),
+                    noun: cr.item_noun().into(),
+                    abbr: cr.abbreviation().into(),
+                })
+                .unwrap_or_default(),
+            issues: registry.issue_trackers.values().next()
+                .map(|it| CategoryLabels {
+                    section: it.section_label().into(),
+                    noun: it.item_noun().into(),
+                    abbr: it.abbreviation().into(),
+                })
+                .unwrap_or_default(),
+            sessions: registry.coding_agents.values().next()
+                .map(|ca| CategoryLabels {
+                    section: ca.section_label().into(),
+                    noun: ca.item_noun().into(),
+                    abbr: ca.abbreviation().into(),
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
 /// Domain and config state — no UI concerns.
 #[derive(Default)]
 pub struct AppModel {
@@ -58,7 +96,6 @@ pub struct AppModel {
     /// Per-repo, per-provider auth status from last refresh.
     /// Key: (repo_path, provider_category, provider_name)
     pub provider_statuses: HashMap<(PathBuf, String, String), ProviderStatus>,
-    pub labels: HashMap<PathBuf, RepoLabels>,
     pub status_message: Option<String>,
 }
 
@@ -76,19 +113,15 @@ impl AppModel {
         Self {
             repos,
             repo_order: order,
-            ..Default::default()
+            provider_statuses: HashMap::new(),
+            active_repo: 0,
+            status_message: None,
         }
     }
 
     /// Reference to the active repo model.
     pub fn active(&self) -> &RepoModel {
         &self.repos[&self.repo_order[self.active_repo]]
-    }
-
-    /// Mutable reference to the active repo model.
-    pub fn active_mut(&mut self) -> &mut RepoModel {
-        let key = &self.repo_order[self.active_repo];
-        self.repos.get_mut(key).unwrap()
     }
 
     /// Path of the active repo.
@@ -104,8 +137,7 @@ impl AppModel {
     }
 
     pub fn active_labels(&self) -> &RepoLabels {
-        static DEFAULT: std::sync::LazyLock<RepoLabels> = std::sync::LazyLock::new(RepoLabels::default);
-        self.labels.get(&self.repo_order[self.active_repo]).unwrap_or(&DEFAULT)
+        &self.active().labels
     }
 
     pub fn add_repo(&mut self, path: PathBuf) {
@@ -119,32 +151,30 @@ impl AppModel {
 
 /// Domain data for a single repository — no UI concerns.
 pub struct RepoModel {
-    pub repo_root: PathBuf,
-    pub registry: ProviderRegistry,
-    pub repo_criteria: RepoCriteria,
+    pub registry: Arc<ProviderRegistry>,
     pub data: DataStore,
+    pub labels: RepoLabels,
+    pub refresh_handle: Option<RepoRefreshHandle>,
 }
 
 impl RepoModel {
     pub fn new(repo_root: PathBuf, registry: ProviderRegistry) -> Self {
         let repo_slug = discovery::first_remote_url(&repo_root)
             .and_then(|u| discovery::extract_repo_slug(&u));
-        Self {
+        let labels = RepoLabels::from_registry(&registry);
+        let registry = Arc::new(registry);
+        let criteria = RepoCriteria { repo_slug };
+        let refresh_handle = RepoRefreshHandle::spawn(
             repo_root,
+            registry.clone(),
+            criteria,
+            Duration::from_secs(10),
+        );
+        Self {
             registry,
-            repo_criteria: RepoCriteria { repo_slug },
             data: DataStore::default(),
+            labels,
+            refresh_handle: Some(refresh_handle),
         }
-    }
-
-    /// Snapshot for change detection: (worktrees, change_requests, sessions, branches, issues)
-    pub fn data_snapshot(&self) -> (usize, usize, usize, usize, usize) {
-        (
-            self.data.providers.checkouts.len(),
-            self.data.providers.change_requests.len(),
-            self.data.providers.sessions.len(),
-            self.data.providers.remote_branches.len(),
-            self.data.providers.issues.len(),
-        )
     }
 }

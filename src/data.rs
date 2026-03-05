@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::provider_data::ProviderData;
 use crate::providers::correlation::{self, CorrelatedItem, CorrelatedGroup, ItemKind as CorItemKind};
-use crate::providers::types::{AssociationKey, RepoCriteria};
-use crate::providers::registry::ProviderRegistry;
+use crate::providers::types::AssociationKey;
 
 #[derive(Debug, Clone)]
 pub struct ProviderError {
@@ -67,7 +66,6 @@ pub struct TableView {
 #[derive(Debug, Default, Clone)]
 pub struct DataStore {
     pub providers: ProviderData,
-    pub table_view: TableView,
     pub loading: bool,
     /// Preserved from last correlate() for debug display.
     pub correlation_groups: Vec<CorrelatedGroup>,
@@ -91,118 +89,6 @@ impl Default for SectionLabels {
     }
 }
 
-impl DataStore {
-    pub async fn refresh(&mut self, repo_root: &Path, registry: &ProviderRegistry, criteria: &RepoCriteria) -> Vec<ProviderError> {
-        self.loading = true;
-        let mut errors = Vec::new();
-
-        // Checkouts through registry
-        let checkouts_fut = async {
-            if let Some(cm) = registry.checkout_managers.values().next() {
-                cm.list_checkouts(repo_root).await
-            } else {
-                Ok(vec![])
-            }
-        };
-
-        // Change requests through registry
-        let cr_fut = async {
-            if let Some(cr) = registry.code_review.values().next() {
-                cr.list_change_requests(repo_root, 20).await
-            } else {
-                Ok(vec![])
-            }
-        };
-
-        // Issues through registry
-        let issues_fut = async {
-            if let Some(it) = registry.issue_trackers.values().next() {
-                it.list_issues(repo_root, 20).await
-            } else {
-                Ok(vec![])
-            }
-        };
-
-        // Sessions through registry
-        let sessions_fut = async {
-            if let Some(ca) = registry.coding_agents.values().next() {
-                ca.list_sessions(criteria).await
-            } else {
-                Ok(vec![])
-            }
-        };
-
-        // Remote branches through registry
-        let branches_fut = async {
-            if let Some(vcs) = registry.vcs.values().next() {
-                vcs.list_remote_branches(repo_root).await
-            } else {
-                Ok(vec![])
-            }
-        };
-
-        // Merged branches through registry
-        let merged_fut = async {
-            if let Some(cr) = registry.code_review.values().next() {
-                cr.list_merged_branch_names(repo_root, 50).await
-            } else {
-                Ok(vec![])
-            }
-        };
-
-        // Workspaces through registry
-        let ws_fut = async {
-            if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                ws_mgr.list_workspaces().await
-            } else {
-                Ok(vec![])
-            }
-        };
-
-        let (checkouts, crs, issues, sessions, branches, merged, workspaces) = tokio::join!(
-            checkouts_fut, cr_fut, issues_fut, sessions_fut, branches_fut, merged_fut, ws_fut
-        );
-
-        self.providers.checkouts = checkouts.unwrap_or_else(|e| { errors.push(ProviderError { category: "checkouts", message: e }); Vec::new() });
-        self.providers.change_requests = crs.unwrap_or_else(|e| { errors.push(ProviderError { category: "PRs", message: e }); Vec::new() });
-        self.providers.issues = issues.unwrap_or_else(|e| { errors.push(ProviderError { category: "issues", message: e }); Vec::new() });
-        self.providers.workspaces = workspaces.unwrap_or_else(|e| { errors.push(ProviderError { category: "workspaces", message: e }); Vec::new() });
-        self.providers.sessions = sessions.unwrap_or_else(|e| { errors.push(ProviderError { category: "sessions", message: e }); Vec::new() });
-        self.providers.remote_branches = branches.unwrap_or_else(|e| { errors.push(ProviderError { category: "branches", message: e }); Vec::new() });
-        self.providers.merged_branches = merged.unwrap_or_else(|e| { errors.push(ProviderError { category: "merged", message: e }); Vec::new() });
-        // Determine per-provider health from errors
-        self.providers.provider_health.clear();
-        if registry.coding_agents.values().next().is_some() {
-            self.providers.provider_health.insert("coding_agent", !errors.iter().any(|e| e.category == "sessions"));
-        }
-        if registry.code_review.values().next().is_some() {
-            self.providers.provider_health.insert("code_review", !errors.iter().any(|e| e.category == "PRs" || e.category == "merged"));
-        }
-        if registry.issue_trackers.values().next().is_some() {
-            self.providers.provider_health.insert("issue_tracker", !errors.iter().any(|e| e.category == "issues"));
-        }
-
-        let section_labels = SectionLabels {
-            checkouts: registry.checkout_managers.values().next()
-                .map(|cm| cm.section_label().to_string())
-                .unwrap_or_else(|| "Checkouts".into()),
-            code_review: registry.code_review.values().next()
-                .map(|cr| cr.section_label().to_string())
-                .unwrap_or_else(|| "Change Requests".into()),
-            issues: registry.issue_trackers.values().next()
-                .map(|it| it.section_label().to_string())
-                .unwrap_or_else(|| "Issues".into()),
-            sessions: registry.coding_agents.values().next()
-                .map(|ca| ca.section_label().to_string())
-                .unwrap_or_else(|| "Sessions".into()),
-        };
-        let (work_items, groups) = correlate(&self.providers);
-        self.table_view = build_table_view(&work_items, &self.providers, &section_labels);
-        self.correlation_groups = groups;
-        self.loading = false;
-        errors
-    }
-}
 
 /// Convert a correlation group into a WorkItem.
 /// Returns None for groups that contain only workspaces (no checkout, PR, or session).

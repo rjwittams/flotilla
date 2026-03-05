@@ -1,11 +1,9 @@
-use std::path::PathBuf;
 use tracing::{info, debug, error};
 
 use crate::data;
 use crate::config;
 use crate::providers;
 use super::command::Command;
-use super::model::AppModel;
 use super::ui_state::UiMode;
 use super::App;
 
@@ -25,7 +23,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
                 if let Some(Err(e)) = ws_result {
                     app.model.status_message = Some(e);
                 }
-                refresh_all(app).await;
+                trigger_active_refresh(app);
             }
         }
         Command::SelectWorkspace(ws_ref) => {
@@ -37,9 +35,9 @@ pub async fn execute(cmd: Command, app: &mut App) {
             }
         }
         Command::FetchDeleteInfo(si) => {
-            let table_idx = app.model.active().data.table_view.selectable_indices.get(si).copied();
+            let table_idx = app.active_ui().table_view.selectable_indices.get(si).copied();
             if let Some(table_idx) = table_idx {
-                if let Some(data::TableEntry::Item(item)) = app.model.active().data.table_view.table_entries.get(table_idx).cloned() {
+                if let Some(data::TableEntry::Item(item)) = app.active_ui().table_view.table_entries.get(table_idx).cloned() {
                     let branch = item.branch.clone().unwrap_or_default();
                     let wt_path = item.worktree_idx
                         .and_then(|idx| app.model.active().data.providers.checkouts.get(idx))
@@ -78,7 +76,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
                 if let Some(Err(e)) = result {
                     app.model.status_message = Some(e);
                 }
-                refresh_all(app).await;
+                trigger_active_refresh(app);
             }
         }
         Command::OpenPr(id) => {
@@ -122,7 +120,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
                 }
                 None => app.model.status_message = Some("No checkout manager available".to_string()),
             }
-            refresh_all(app).await;
+            trigger_active_refresh(app);
         }
         Command::ArchiveSession(ses_idx) => {
             if let Some(session) = app.model.active().data.providers.sessions.get(ses_idx).cloned() {
@@ -135,7 +133,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
                 if let Some(Err(e)) = result {
                     app.model.status_message = Some(e);
                 }
-                refresh_all(app).await;
+                trigger_active_refresh(app);
             }
         }
         Command::TeleportSession { session_id, branch, worktree_idx } => {
@@ -167,7 +165,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
                     app.model.status_message = Some(e);
                 }
             }
-            refresh_all(app).await;
+            trigger_active_refresh(app);
         }
         Command::GenerateBranchName(issue_idxs) => {
             let issues: Vec<(String, String)> = issue_idxs
@@ -209,7 +207,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
             app.add_repo(path);
             app.switch_tab(app.model.repo_order.len() - 1);
             config::save_tab_order(&app.model.repo_order);
-            refresh_all(app).await;
+            trigger_active_refresh(app);
         }
     }
 }
@@ -235,133 +233,9 @@ pub fn workspace_config(
     }
 }
 
-pub async fn refresh_all(app: &mut App) {
-    let t = std::time::Instant::now();
-    // Snapshot all repos for change detection
-    let snapshots: Vec<_> = app.model.repo_order.iter()
-        .map(|path| app.model.repos[path].data_snapshot())
-        .collect();
-
-    // Extract data stores AND registries (both moved out)
-    let items: Vec<(PathBuf, data::DataStore, providers::registry::ProviderRegistry, providers::types::RepoCriteria)> = app.model.repo_order.iter()
-        .map(|path| {
-            let rm = app.model.repos.get_mut(path).unwrap();
-            let ds = std::mem::take(&mut rm.data);
-            let reg = std::mem::take(&mut rm.registry);
-            let criteria = rm.repo_criteria.clone();
-            (path.clone(), ds, reg, criteria)
-        })
-        .collect();
-
-    let results = futures::future::join_all(
-        items.into_iter().map(|(root, mut ds, registry, criteria)| {
-            async move {
-                let errors = ds.refresh(&root, &registry, &criteria).await;
-                (root, ds, registry, errors)
-            }
-        })
-    ).await;
-
-    let mut all_errors: Vec<String> = Vec::new();
-    for (i, (path, data, registry, errors)) in results.into_iter().enumerate() {
-        let rm = app.model.repos.get_mut(&path).unwrap();
-        rm.data = data;
-        rm.registry = registry;
-
-        // Deregister issue tracker if issues are disabled on this repo
-        let issues_disabled = errors.iter().any(|e|
-            e.category == "issues" && e.message.contains("has disabled issues")
-        );
-        if issues_disabled {
-            rm.registry.issue_trackers.clear();
-            rm.data.providers.provider_health.remove("issue_tracker");
-        }
-
-        // Populate labels from provider traits
-        let repo_labels = super::model::RepoLabels {
-            checkouts: rm.registry.checkout_managers.values().next()
-                .map(|cm| super::model::CategoryLabels {
-                    section: cm.section_label().into(),
-                    noun: cm.item_noun().into(),
-                    abbr: cm.abbreviation().into(),
-                })
-                .unwrap_or_default(),
-            code_review: rm.registry.code_review.values().next()
-                .map(|cr| super::model::CategoryLabels {
-                    section: cr.section_label().into(),
-                    noun: cr.item_noun().into(),
-                    abbr: cr.abbreviation().into(),
-                })
-                .unwrap_or_default(),
-            issues: rm.registry.issue_trackers.values().next()
-                .map(|it| super::model::CategoryLabels {
-                    section: it.section_label().into(),
-                    noun: it.item_noun().into(),
-                    abbr: it.abbreviation().into(),
-                })
-                .unwrap_or_default(),
-            sessions: rm.registry.coding_agents.values().next()
-                .map(|ca| super::model::CategoryLabels {
-                    section: ca.section_label().into(),
-                    noun: ca.item_noun().into(),
-                    abbr: ca.abbreviation().into(),
-                })
-                .unwrap_or_default(),
-        };
-        app.model.labels.insert(path.clone(), repo_labels);
-
-        // Change detection
-        let new_snapshot = rm.data_snapshot();
-        if snapshots[i] != new_snapshot && i != app.model.active_repo {
-            app.ui.repo_ui.get_mut(&path).unwrap().has_unseen_changes = true;
-        }
-
-        // Restore selection (UI state)
-        let rui = app.ui.repo_ui.get_mut(&path).unwrap();
-        if rm.data.table_view.selectable_indices.is_empty() {
-            rui.selected_selectable_idx = None;
-            rui.table_state.select(None);
-        } else if rui.selected_selectable_idx.is_none() {
-            rui.selected_selectable_idx = Some(0);
-            rui.table_state.select(Some(rm.data.table_view.selectable_indices[0]));
-        } else if let Some(si) = rui.selected_selectable_idx {
-            let clamped = si.min(rm.data.table_view.selectable_indices.len() - 1);
-            rui.selected_selectable_idx = Some(clamped);
-            rui.table_state.select(Some(rm.data.table_view.selectable_indices[clamped]));
-        }
-
-        // Copy provider health from DataStore into model-level statuses
-        let name = AppModel::repo_name(&path);
-
-        for (kind, healthy) in &rm.data.providers.provider_health {
-            let provider_name = match *kind {
-                "coding_agent" => rm.registry.coding_agents.keys().next(),
-                "code_review" => rm.registry.code_review.keys().next(),
-                "issue_tracker" => rm.registry.issue_trackers.keys().next(),
-                _ => None,
-            };
-            if let Some(pname) = provider_name {
-                let key = (path.clone(), kind.to_string(), pname.clone());
-                let status = if *healthy { super::ProviderStatus::Ok } else { super::ProviderStatus::Error };
-                app.model.provider_statuses.insert(key, status);
-            }
-        }
-
-        if !errors.is_empty() {
-            for e in &errors {
-                if issues_disabled && e.category == "issues" {
-                    debug!("{name}: issues disabled, deregistered issue tracker");
-                    continue;
-                }
-                error!("{name}: {}: {}", e.category, e.message);
-                all_errors.push(format!("{name}: {}: {}", e.category, e.message));
-            }
-        }
-    }
-
-    debug!("refresh complete in {:.0?}", t.elapsed());
-
-    if !all_errors.is_empty() {
-        app.model.status_message = Some(all_errors.join("; "));
+/// Trigger an immediate background refresh on the active repo.
+fn trigger_active_refresh(app: &App) {
+    if let Some(handle) = &app.model.active().refresh_handle {
+        handle.trigger_refresh();
     }
 }

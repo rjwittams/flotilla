@@ -50,7 +50,7 @@ impl App {
 
     pub fn selected_work_item(&self) -> Option<&WorkItem> {
         let table_idx = self.active_ui().table_state.selected()?;
-        match self.model.active().data.table_view.table_entries.get(table_idx)? {
+        match self.active_ui().table_view.table_entries.get(table_idx)? {
             TableEntry::Item(item) => Some(item),
             TableEntry::Header(_) => None,
         }
@@ -268,7 +268,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 if mouse.modifiers.contains(KeyModifiers::SHIFT) {
                     if let Some(si) = self.row_at_mouse(mouse.column, mouse.row) {
-                        let table_idx = self.model.active().data.table_view.selectable_indices[si];
+                        let table_idx = self.active_ui().table_view.selectable_indices[si];
                         self.active_ui_mut().selected_selectable_idx = Some(si);
                         self.active_ui_mut().table_state.select(Some(table_idx));
                         self.toggle_multi_select();
@@ -283,7 +283,7 @@ impl App {
                         .unwrap_or(false)
                         && self.ui.double_click.last_selectable_idx == Some(si);
 
-                    let table_idx = self.model.active().data.table_view.selectable_indices[si];
+                    let table_idx = self.active_ui().table_view.selectable_indices[si];
                     self.active_ui_mut().selected_selectable_idx = Some(si);
                     self.active_ui_mut().table_state.select(Some(table_idx));
 
@@ -299,7 +299,7 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 if let Some(si) = self.row_at_mouse(mouse.column, mouse.row) {
-                    let table_idx = self.model.active().data.table_view.selectable_indices[si];
+                    let table_idx = self.active_ui().table_view.selectable_indices[si];
                     self.active_ui_mut().selected_selectable_idx = Some(si);
                     self.active_ui_mut().table_state.select(Some(table_idx));
                     self.open_action_menu();
@@ -353,9 +353,7 @@ impl App {
             let data_row = row_in_table - 2;
             let offset = self.active_ui().table_state.offset();
             let actual_row = data_row + offset;
-            self.model
-                .active()
-                .data
+            self.active_ui()
                 .table_view
                 .selectable_indices
                 .iter()
@@ -397,16 +395,16 @@ impl App {
         let mut all_issue_idxs: Vec<usize> = Vec::new();
         let multi_selected: BTreeSet<usize> = self.active_ui().multi_selected.clone();
         for &si in &multi_selected {
-            if let Some(&table_idx) = self.model.active().data.table_view.selectable_indices.get(si) {
-                if let Some(TableEntry::Item(item)) = self.model.active().data.table_view.table_entries.get(table_idx) {
+            if let Some(&table_idx) = self.active_ui().table_view.selectable_indices.get(si) {
+                if let Some(TableEntry::Item(item)) = self.active_ui().table_view.table_entries.get(table_idx) {
                     all_issue_idxs.extend(&item.issue_idxs);
                 }
             }
         }
         if let Some(si) = self.active_ui().selected_selectable_idx {
             if !multi_selected.contains(&si) {
-                if let Some(&table_idx) = self.model.active().data.table_view.selectable_indices.get(si) {
-                    if let Some(TableEntry::Item(item)) = self.model.active().data.table_view.table_entries.get(table_idx) {
+                if let Some(&table_idx) = self.active_ui().table_view.selectable_indices.get(si) {
+                    if let Some(TableEntry::Item(item)) = self.active_ui().table_view.table_entries.get(table_idx) {
                         all_issue_idxs.extend(&item.issue_idxs);
                     }
                 }
@@ -710,7 +708,7 @@ impl App {
     }
 
     fn select_next(&mut self) {
-        let indices = &self.model.active().data.table_view.selectable_indices;
+        let indices = &self.active_ui().table_view.selectable_indices;
         if indices.is_empty() {
             return;
         }
@@ -720,13 +718,13 @@ impl App {
             Some(si) => si,
             None => 0,
         };
-        let table_idx = self.model.active().data.table_view.selectable_indices[next];
+        let table_idx = self.active_ui().table_view.selectable_indices[next];
         self.active_ui_mut().selected_selectable_idx = Some(next);
         self.active_ui_mut().table_state.select(Some(table_idx));
     }
 
     fn select_prev(&mut self) {
-        let indices = &self.model.active().data.table_view.selectable_indices;
+        let indices = &self.active_ui().table_view.selectable_indices;
         if indices.is_empty() {
             return;
         }
@@ -736,7 +734,7 @@ impl App {
             Some(si) => si,
             None => 0,
         };
-        let table_idx = self.model.active().data.table_view.selectable_indices[prev];
+        let table_idx = self.active_ui().table_view.selectable_indices[prev];
         self.active_ui_mut().selected_selectable_idx = Some(prev);
         self.active_ui_mut().table_state.select(Some(table_idx));
     }

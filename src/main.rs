@@ -1,9 +1,9 @@
 mod app;
-mod correlated_data;
 mod data;
 mod event;
 mod event_log;
 mod provider_data;
+mod refresh;
 mod template;
 mod ui;
 mod config;
@@ -62,10 +62,11 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
     }
 
     let mut events = event::EventHandler::new(Duration::from_millis(250));
-    let mut last_refresh = std::time::Instant::now() - Duration::from_secs(60);
-    let refresh_interval = Duration::from_secs(10);
 
     loop {
+        // Drain any new snapshots from background refresh tasks
+        drain_snapshots(&mut app);
+
         terminal.draw(|f| ui::render(&app.model, &mut app.ui, f))?;
 
         if let Some(evt) = events.next().await {
@@ -73,8 +74,10 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
                 event::Event::Key(k) => {
                     let is_normal = matches!(app.ui.mode, app::UiMode::Normal);
                     if k.code == crossterm::event::KeyCode::Char('r') && is_normal {
-                        app::executor::refresh_all(&mut app).await;
-                        last_refresh = std::time::Instant::now();
+                        // Trigger immediate refresh on active repo
+                        if let Some(handle) = &app.model.active().refresh_handle {
+                            handle.trigger_refresh();
+                        }
                     } else {
                         app.handle_key(k);
                     }
@@ -183,12 +186,7 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
                         }
                     }
                 }
-                event::Event::Tick => {
-                    if last_refresh.elapsed() >= refresh_interval {
-                        app::executor::refresh_all(&mut app).await;
-                        last_refresh = std::time::Instant::now();
-                    }
-                }
+                event::Event::Tick => {}
             }
         }
 
@@ -202,6 +200,93 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
         }
     }
     Ok(())
+}
+
+/// Check all repo watch channels for new snapshots and apply them.
+fn drain_snapshots(app: &mut app::App) {
+    let app::App { model, ui, .. } = app;
+    let app::AppModel { repos, repo_order, provider_statuses, active_repo, .. } = model;
+
+    for (i, path) in repo_order.iter().enumerate() {
+        let rm = repos.get_mut(path).unwrap();
+        let Some(ref mut handle) = rm.refresh_handle else { continue };
+        if !handle.snapshot_rx.has_changed().unwrap_or(false) {
+            continue;
+        }
+
+        let snapshot = handle.snapshot_rx.borrow_and_update().clone();
+
+        // Apply snapshot to DataStore
+        rm.data.providers = (*snapshot.providers).clone();
+        rm.data.correlation_groups = snapshot.correlation_groups.clone();
+
+        rm.data.loading = false;
+
+        // Build table view (needs section labels from registry)
+        let section_labels = data::SectionLabels {
+            checkouts: rm.labels.checkouts.section.clone(),
+            code_review: rm.labels.code_review.section.clone(),
+            issues: rm.labels.issues.section.clone(),
+            sessions: rm.labels.sessions.section.clone(),
+        };
+        let table_view = data::build_table_view(&snapshot.work_items, &snapshot.providers, &section_labels);
+
+        // Handle issues_disabled — can't mutate Arc<ProviderRegistry>,
+        // just suppress display-side effects
+        let issues_disabled = snapshot.errors.iter().any(|e|
+            e.category == "issues" && e.message.contains("has disabled issues")
+        );
+        if issues_disabled {
+            rm.data.providers.provider_health.remove("issue_tracker");
+        }
+
+        // Provider health -> model-level statuses
+        for (kind, healthy) in &rm.data.providers.provider_health {
+            let provider_name = match *kind {
+                "coding_agent" => rm.registry.coding_agents.keys().next(),
+                "code_review" => rm.registry.code_review.keys().next(),
+                "issue_tracker" => rm.registry.issue_trackers.keys().next(),
+                _ => None,
+            };
+            if let Some(pname) = provider_name {
+                let key = (path.clone(), kind.to_string(), pname.clone());
+                let status = if *healthy { app::ProviderStatus::Ok } else { app::ProviderStatus::Error };
+                provider_statuses.insert(key, status);
+            }
+        }
+
+        // Change detection badge for inactive tabs
+        if i != *active_repo {
+            if let Some(rui) = ui.repo_ui.get_mut(path) {
+                rui.has_unseen_changes = true;
+            }
+        }
+
+        // Store table view on UI state and restore selection
+        if let Some(rui) = ui.repo_ui.get_mut(path) {
+            rui.table_view = table_view;
+            if rui.table_view.selectable_indices.is_empty() {
+                rui.selected_selectable_idx = None;
+                rui.table_state.select(None);
+            } else if rui.selected_selectable_idx.is_none() {
+                rui.selected_selectable_idx = Some(0);
+                rui.table_state.select(Some(rui.table_view.selectable_indices[0]));
+            } else if let Some(si) = rui.selected_selectable_idx {
+                let clamped = si.min(rui.table_view.selectable_indices.len() - 1);
+                rui.selected_selectable_idx = Some(clamped);
+                rui.table_state.select(Some(rui.table_view.selectable_indices[clamped]));
+            }
+        }
+
+        // Log errors
+        if !snapshot.errors.is_empty() {
+            let name = app::AppModel::repo_name(path);
+            for e in &snapshot.errors {
+                if issues_disabled && e.category == "issues" { continue; }
+                tracing::error!("{name}: {}: {}", e.category, e.message);
+            }
+        }
+    }
 }
 
 fn show_splash(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
