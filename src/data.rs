@@ -1,8 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::provider_data::ProviderData;
