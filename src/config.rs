@@ -49,7 +49,7 @@ impl CheckoutsConfig {
 /// Full repo config file including optional overrides.
 #[derive(Debug, Default, Deserialize)]
 pub struct RepoFileConfig {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Required field so TOML parsing accepts existing repo files
     pub path: String,
     #[serde(default)]
     pub vcs: RepoVcsConfig,

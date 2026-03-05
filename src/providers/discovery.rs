@@ -118,10 +118,17 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
     let co_config = config::resolve_checkouts_config(repo_root);
     match co_config.provider.as_str() {
         "wt" => {
-            registry
-                .checkout_managers
-                .insert("git".to_string(), Box::new(WtCheckoutManager::new()));
-            info!("{repo_name}: Checkout mgr → wt (forced)");
+            if command_exists("wt", &["--version"]) {
+                registry
+                    .checkout_managers
+                    .insert("git".to_string(), Box::new(WtCheckoutManager::new()));
+                info!("{repo_name}: Checkout mgr → wt (forced)");
+            } else {
+                tracing::warn!("{repo_name}: provider = \"wt\" but wt not found in PATH, falling back to git");
+                registry
+                    .checkout_managers
+                    .insert("git".to_string(), Box::new(GitCheckoutManager::new(co_config)));
+            }
         }
         "git" => {
             registry

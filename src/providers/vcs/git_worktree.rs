@@ -217,7 +217,7 @@ fn parse_working_tree(output: &str) -> WorkingTreeStatus {
         if x == b'?' {
             untracked += 1;
         } else {
-            if x != b' ' && x != b'?' {
+            if x != b' ' {
                 staged += 1;
             }
             if y != b' ' && y != b'?' {
@@ -324,7 +324,7 @@ impl super::CheckoutManager for GitCheckoutManager {
 
         run_cmd(
             "git",
-            &["worktree", "remove", wt_str],
+            &["worktree", "remove", "--force", wt_str],
             repo_root,
         )
         .await?;
