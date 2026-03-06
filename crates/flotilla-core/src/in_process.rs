@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{broadcast, RwLock};
@@ -35,7 +36,11 @@ pub struct InProcessDaemon {
 
 impl InProcessDaemon {
     /// Create a new in-process daemon tracking the given repo paths.
-    pub async fn new(repo_paths: Vec<PathBuf>) -> Self {
+    ///
+    /// Returns `Arc<Self>` because a background poll task is spawned that
+    /// holds a reference. The poll loop checks every 100ms for new refresh
+    /// snapshots and broadcasts `DaemonEvent::Snapshot` for each change.
+    pub async fn new(repo_paths: Vec<PathBuf>) -> Arc<Self> {
         let (event_tx, _) = broadcast::channel(256);
         let mut repos = HashMap::new();
         let mut order = Vec::new();
@@ -58,11 +63,24 @@ impl InProcessDaemon {
             order.push(path);
         }
 
-        Self {
+        let daemon = Arc::new(Self {
             repos: RwLock::new(repos),
             repo_order: RwLock::new(order),
             event_tx,
-        }
+        });
+
+        // Spawn self-driving poll loop
+        let d = daemon.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                d.poll_snapshots().await;
+            }
+        });
+
+        daemon
     }
 
     /// Poll all repos for new refresh snapshots.
@@ -71,9 +89,8 @@ impl InProcessDaemon {
     /// update internal state, increment the sequence number, and broadcast
     /// a `DaemonEvent::Snapshot`.
     ///
-    /// This should be called periodically by the event loop (replaces
-    /// `drain_snapshots()` from main.rs).
-    pub async fn poll_snapshots(&self) {
+    /// Called automatically by the background poll loop spawned in `new()`.
+    async fn poll_snapshots(&self) {
         let mut repos = self.repos.write().await;
 
         for (path, state) in repos.iter_mut() {
