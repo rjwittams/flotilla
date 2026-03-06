@@ -2,17 +2,17 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 pub enum Command {
-    SwitchWorktree(usize),
+    SwitchWorktree(PathBuf),
     SelectWorkspace(String),
     CreateWorktree { branch: String, create_branch: bool },
     FetchDeleteInfo(usize),
     ConfirmDelete,
     OpenPr(String),
     OpenIssueBrowser(String),
-    ArchiveSession(usize),
-    GenerateBranchName(Vec<usize>),
+    ArchiveSession(String),
+    GenerateBranchName(Vec<String>),
     /// Teleport into a web session (creates worktree + workspace as needed)
-    TeleportSession { session_id: String, branch: Option<String>, worktree_idx: Option<usize> },
+    TeleportSession { session_id: String, branch: Option<String>, checkout_key: Option<PathBuf> },
     AddRepo(PathBuf),
 }
 

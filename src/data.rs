@@ -48,11 +48,11 @@ pub struct WorkItem {
     pub kind: WorkItemKind,
     pub branch: Option<String>,
     pub description: String,
-    pub worktree_idx: Option<usize>,
+    pub checkout_key: Option<PathBuf>,
     pub is_main_worktree: bool,
-    pub pr_idx: Option<usize>,
-    pub session_idx: Option<usize>,
-    pub issue_idxs: Vec<usize>,
+    pub pr_key: Option<String>,
+    pub session_key: Option<String>,
+    pub issue_keys: Vec<String>,
     pub workspace_refs: Vec<String>,
     /// Index into correlation_groups for debug display.
     pub correlation_group_idx: Option<usize>,
@@ -95,53 +95,44 @@ impl Default for SectionLabels {
 /// Convert a correlation group into a WorkItem.
 /// Returns None for groups that contain only workspaces (no checkout, PR, or session).
 fn group_to_work_item(providers: &ProviderData, group: &CorrelatedGroup, group_idx: usize) -> Option<WorkItem> {
-    let mut worktree_idx: Option<usize> = None;
-    let mut pr_idx: Option<usize> = None;
-    let mut session_idx: Option<usize> = None;
+    let mut checkout_key: Option<PathBuf> = None;
+    let mut pr_key: Option<String> = None;
+    let mut session_key: Option<String> = None;
     let mut workspace_refs: Vec<String> = Vec::new();
     let mut is_main_worktree = false;
 
     for item in &group.items {
-        match item.kind {
-            CorItemKind::Checkout => {
-                if let ProviderItemKey::Checkout(ref path) = item.source_key {
-                    if let Some(idx) = providers.checkouts.iter().position(|co| &co.path == path) {
-                        worktree_idx = Some(idx);
-                        is_main_worktree = providers.checkouts[idx].is_trunk;
+        match (&item.kind, &item.source_key) {
+            (CorItemKind::Checkout, ProviderItemKey::Checkout(path)) => {
+                if checkout_key.is_none() {
+                    checkout_key = Some(path.clone());
+                    if let Some(co) = providers.checkouts.get(path) {
+                        is_main_worktree = co.is_trunk;
                     }
                 }
             }
-            CorItemKind::ChangeRequest => {
-                if let ProviderItemKey::ChangeRequest(ref id) = item.source_key {
-                    if let Some(idx) = providers.change_requests.iter().position(|cr| &cr.id == id) {
-                        pr_idx = Some(idx);
-                    }
+            (CorItemKind::ChangeRequest, ProviderItemKey::ChangeRequest(id)) => {
+                pr_key = Some(id.clone());
+            }
+            (CorItemKind::CloudSession, ProviderItemKey::Session(id)) => {
+                if session_key.is_none() {
+                    session_key = Some(id.clone());
                 }
             }
-            CorItemKind::CloudSession => {
-                if session_idx.is_none() {
-                    if let ProviderItemKey::Session(ref id) = item.source_key {
-                        if let Some(idx) = providers.sessions.iter().position(|s| &s.id == id) {
-                            session_idx = Some(idx);
-                        }
-                    }
+            (CorItemKind::Workspace, ProviderItemKey::Workspace(ws_ref)) => {
+                if providers.workspaces.contains_key(ws_ref.as_str()) {
+                    workspace_refs.push(ws_ref.clone());
                 }
             }
-            CorItemKind::Workspace => {
-                if let ProviderItemKey::Workspace(ref ws_ref) = item.source_key {
-                    if let Some(ws) = providers.workspaces.iter().find(|ws| &ws.ws_ref == ws_ref) {
-                        workspace_refs.push(ws.ws_ref.clone());
-                    }
-                }
-            }
+            _ => {}
         }
     }
 
-    let kind = if worktree_idx.is_some() {
+    let kind = if checkout_key.is_some() {
         WorkItemKind::Checkout
-    } else if pr_idx.is_some() {
+    } else if pr_key.is_some() {
         WorkItemKind::Pr
-    } else if session_idx.is_some() {
+    } else if session_key.is_some() {
         WorkItemKind::Session
     } else {
         return None;
@@ -149,12 +140,12 @@ fn group_to_work_item(providers: &ProviderData, group: &CorrelatedGroup, group_i
 
     let branch = group.branch().map(|s| s.to_string());
 
-    let pr_title = pr_idx
-        .and_then(|i| providers.change_requests.get(i))
+    let pr_title = pr_key.as_ref()
+        .and_then(|k| providers.change_requests.get(k.as_str()))
         .map(|cr| cr.title.clone())
         .filter(|t| !t.is_empty());
-    let session_title = session_idx
-        .and_then(|i| providers.sessions.get(i))
+    let session_title = session_key.as_ref()
+        .and_then(|k| providers.sessions.get(k.as_str()))
         .map(|s| s.title.clone())
         .filter(|t| !t.is_empty());
     let description = pr_title
@@ -166,11 +157,11 @@ fn group_to_work_item(providers: &ProviderData, group: &CorrelatedGroup, group_i
         kind,
         branch,
         description,
-        worktree_idx,
+        checkout_key,
         is_main_worktree,
-        pr_idx,
-        session_idx,
-        issue_idxs: Vec::new(),
+        pr_key,
+        session_key,
+        issue_keys: Vec::new(),
         workspace_refs,
         correlation_group_idx: Some(group_idx),
     })
@@ -182,43 +173,43 @@ pub fn correlate(providers: &ProviderData) -> (Vec<WorkItem>, Vec<CorrelatedGrou
     // Phase 1: Build CorrelatedItems from identity-keyed sources.
     let mut items: Vec<CorrelatedItem> = Vec::new();
 
-    for (_i, co) in providers.checkouts.iter().enumerate() {
+    for (path, co) in &providers.checkouts {
         items.push(CorrelatedItem {
             provider_name: "checkout".to_string(),
             kind: CorItemKind::Checkout,
             title: co.branch.clone(),
             correlation_keys: co.correlation_keys.clone(),
-            source_key: ProviderItemKey::Checkout(co.path.clone()),
+            source_key: ProviderItemKey::Checkout(path.clone()),
         });
     }
 
-    for (_i, cr) in providers.change_requests.iter().enumerate() {
+    for (id, cr) in &providers.change_requests {
         items.push(CorrelatedItem {
             provider_name: "change_request".to_string(),
             kind: CorItemKind::ChangeRequest,
             title: cr.title.clone(),
             correlation_keys: cr.correlation_keys.clone(),
-            source_key: ProviderItemKey::ChangeRequest(cr.id.clone()),
+            source_key: ProviderItemKey::ChangeRequest(id.clone()),
         });
     }
 
-    for (_i, session) in providers.sessions.iter().enumerate() {
+    for (id, session) in &providers.sessions {
         items.push(CorrelatedItem {
             provider_name: "session".to_string(),
             kind: CorItemKind::CloudSession,
             title: session.title.clone(),
             correlation_keys: session.correlation_keys.clone(),
-            source_key: ProviderItemKey::Session(session.id.clone()),
+            source_key: ProviderItemKey::Session(id.clone()),
         });
     }
 
-    for (_i, ws) in providers.workspaces.iter().enumerate() {
+    for (ws_ref, ws) in &providers.workspaces {
         items.push(CorrelatedItem {
             provider_name: "workspace".to_string(),
             kind: CorItemKind::Workspace,
             title: ws.name.clone(),
             correlation_keys: ws.correlation_keys.clone(),
-            source_key: ProviderItemKey::Workspace(ws.ws_ref.clone()),
+            source_key: ProviderItemKey::Workspace(ws_ref.clone()),
         });
     }
 
@@ -227,7 +218,7 @@ pub fn correlate(providers: &ProviderData) -> (Vec<WorkItem>, Vec<CorrelatedGrou
 
     // Phase 3: Convert groups to WorkItems
     let mut work_items: Vec<WorkItem> = Vec::new();
-    let mut linked_issue_indices: HashSet<usize> = HashSet::new();
+    let mut linked_issue_keys: HashSet<String> = HashSet::new();
 
     for (group_idx, group) in groups.iter().enumerate() {
         let mut work_item = match group_to_work_item(providers, group, group_idx) {
@@ -236,15 +227,15 @@ pub fn correlate(providers: &ProviderData) -> (Vec<WorkItem>, Vec<CorrelatedGrou
         };
 
         // Post-correlation: link issues via association keys on change requests
-        if let Some(pr_i) = work_item.pr_idx {
-            if let Some(cr) = providers.change_requests.get(pr_i) {
+        if let Some(ref pr_key) = work_item.pr_key {
+            if let Some(cr) = providers.change_requests.get(pr_key.as_str()) {
                 for key in &cr.association_keys {
                     let AssociationKey::IssueRef(_, issue_id) = key;
-                    if let Some(issue_idx) = providers.issues.iter().position(|i| &i.id == issue_id) {
-                        if !work_item.issue_idxs.contains(&issue_idx) {
-                            work_item.issue_idxs.push(issue_idx);
-                            linked_issue_indices.insert(issue_idx);
-                        }
+                    if providers.issues.contains_key(issue_id.as_str())
+                        && !work_item.issue_keys.contains(issue_id)
+                    {
+                        work_item.issue_keys.push(issue_id.clone());
+                        linked_issue_keys.insert(issue_id.clone());
                     }
                 }
             }
@@ -254,17 +245,17 @@ pub fn correlate(providers: &ProviderData) -> (Vec<WorkItem>, Vec<CorrelatedGrou
     }
 
     // Add standalone issues (not linked to any PR)
-    for (i, issue) in providers.issues.iter().enumerate() {
-        if !linked_issue_indices.contains(&i) {
+    for (id, issue) in &providers.issues {
+        if !linked_issue_keys.contains(id.as_str()) {
             work_items.push(WorkItem {
                 kind: WorkItemKind::Issue,
                 branch: None,
                 description: issue.title.clone(),
-                worktree_idx: None,
+                checkout_key: None,
                 is_main_worktree: false,
-                pr_idx: None,
-                session_idx: None,
-                issue_idxs: vec![i],
+                pr_key: None,
+                session_key: None,
+                issue_keys: vec![id.clone()],
                 workspace_refs: Vec::new(),
                 correlation_group_idx: None,
             });
@@ -287,11 +278,11 @@ pub fn correlate(providers: &ProviderData) -> (Vec<WorkItem>, Vec<CorrelatedGrou
                 kind: WorkItemKind::RemoteBranch,
                 branch: Some(b.clone()),
                 description: b.clone(),
-                worktree_idx: None,
+                checkout_key: None,
                 is_main_worktree: false,
-                pr_idx: None,
-                session_idx: None,
-                issue_idxs: Vec::new(),
+                pr_key: None,
+                session_key: None,
+                issue_keys: Vec::new(),
                 workspace_refs: Vec::new(),
                 correlation_group_idx: None,
             });
@@ -334,8 +325,8 @@ pub fn build_table_view(work_items: &[WorkItem], providers: &ProviderData, label
 
     // Sessions -- sorted by updated_at descending
     session_items.sort_by(|a, b| {
-        let a_time = a.session_idx.and_then(|i| providers.sessions.get(i)).and_then(|s| s.updated_at.as_deref());
-        let b_time = b.session_idx.and_then(|i| providers.sessions.get(i)).and_then(|s| s.updated_at.as_deref());
+        let a_time = a.session_key.as_ref().and_then(|k| providers.sessions.get(k.as_str())).and_then(|s| s.updated_at.as_deref());
+        let b_time = b.session_key.as_ref().and_then(|k| providers.sessions.get(k.as_str())).and_then(|s| s.updated_at.as_deref());
         b_time.cmp(&a_time)
     });
     if !session_items.is_empty() {
@@ -348,8 +339,8 @@ pub fn build_table_view(work_items: &[WorkItem], providers: &ProviderData, label
 
     // PRs -- sorted by id descending
     pr_items.sort_by(|a, b| {
-        let a_num = a.pr_idx.and_then(|i| providers.change_requests.get(i)).and_then(|cr| cr.id.parse::<i64>().ok());
-        let b_num = b.pr_idx.and_then(|i| providers.change_requests.get(i)).and_then(|cr| cr.id.parse::<i64>().ok());
+        let a_num = a.pr_key.as_ref().and_then(|k| k.parse::<i64>().ok());
+        let b_num = b.pr_key.as_ref().and_then(|k| k.parse::<i64>().ok());
         b_num.cmp(&a_num)
     });
     if !pr_items.is_empty() {
@@ -372,8 +363,8 @@ pub fn build_table_view(work_items: &[WorkItem], providers: &ProviderData, label
 
     // Issues -- sorted by id descending
     issue_items.sort_by(|a, b| {
-        let a_num = a.issue_idxs.first().and_then(|&i| providers.issues.get(i)).and_then(|iss| iss.id.parse::<i64>().ok());
-        let b_num = b.issue_idxs.first().and_then(|&i| providers.issues.get(i)).and_then(|iss| iss.id.parse::<i64>().ok());
+        let a_num = a.issue_keys.first().and_then(|k| k.parse::<i64>().ok());
+        let b_num = b.issue_keys.first().and_then(|k| k.parse::<i64>().ok());
         b_num.cmp(&a_num)
     });
     if !issue_items.is_empty() {
