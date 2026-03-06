@@ -2,7 +2,7 @@ pub mod executor;
 pub mod intent;
 pub mod ui_state;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use tui_input::backend::crossterm::EventHandler as InputEventHandler;
 use tui_input::Input;
 
@@ -216,14 +216,9 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
             KeyCode::Char('r') => {} // refresh handled in main loop
-            KeyCode::Char(' ') => self.open_action_menu(),
-            KeyCode::Enter => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.toggle_multi_select();
-                } else {
-                    self.action_enter();
-                }
-            }
+            KeyCode::Char(' ') => self.toggle_multi_select(),
+            KeyCode::Char('.') => self.open_action_menu(),
+            KeyCode::Enter => self.action_enter(),
             KeyCode::Char('n') => {
                 self.ui.mode = UiMode::BranchInput {
                     input: Input::default(),
@@ -291,16 +286,6 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                    if let Some(si) = self.row_at_mouse(mouse.column, mouse.row) {
-                        let table_idx = self.active_ui().table_view.selectable_indices[si];
-                        self.active_ui_mut().selected_selectable_idx = Some(si);
-                        self.active_ui_mut().table_state.select(Some(table_idx));
-                        self.toggle_multi_select();
-                    }
-                    return;
-                }
-
                 if let Some(si) = self.row_at_mouse(mouse.column, mouse.row) {
                     let now = Instant::now();
                     let is_double_click = self
