@@ -301,15 +301,14 @@ fn render_unified_table(model: &AppModel, ui: &mut UiState, frame: &mut Frame, a
         .table_view
         .table_entries
         .iter()
-        .enumerate()
-        .map(|(table_idx, entry)| {
-            let is_multi_selected = rui
-                .table_view
-                .selectable_indices
-                .iter()
-                .position(|&idx| idx == table_idx)
-                .map(|si| rui.multi_selected.contains(&si))
-                .unwrap_or(false);
+        .map(|entry| {
+            let is_multi_selected = if let TableEntry::Item(ref item) = entry {
+                item.identity()
+                    .map(|id| rui.multi_selected.contains(&id))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
 
             match entry {
                 TableEntry::Header(header) => build_header_row(header),

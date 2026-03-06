@@ -28,6 +28,27 @@ pub enum WorkItemKind {
     Issue,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WorkItemIdentity {
+    Checkout(PathBuf),
+    ChangeRequest(String),
+    Session(String),
+    Issue(String),
+    RemoteBranch(String),
+}
+
+impl WorkItem {
+    pub fn identity(&self) -> Option<WorkItemIdentity> {
+        match self.kind {
+            WorkItemKind::Checkout => self.checkout_key.clone().map(WorkItemIdentity::Checkout),
+            WorkItemKind::Pr => self.pr_key.clone().map(WorkItemIdentity::ChangeRequest),
+            WorkItemKind::Session => self.session_key.clone().map(WorkItemIdentity::Session),
+            WorkItemKind::Issue => self.issue_keys.first().cloned().map(WorkItemIdentity::Issue),
+            WorkItemKind::RemoteBranch => self.branch.clone().map(WorkItemIdentity::RemoteBranch),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SectionHeader(pub String);
 
@@ -403,6 +424,66 @@ pub struct DeleteConfirmInfo {
     pub merge_commit_sha: Option<String>,
     pub unpushed_commits: Vec<String>,
     pub has_uncommitted: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_work_item() -> WorkItem {
+        WorkItem {
+            kind: WorkItemKind::Checkout,
+            branch: None,
+            description: String::new(),
+            checkout_key: None,
+            is_main_worktree: false,
+            pr_key: None,
+            session_key: None,
+            issue_keys: Vec::new(),
+            workspace_refs: Vec::new(),
+            correlation_group_idx: None,
+        }
+    }
+
+    #[test]
+    fn identity_checkout() {
+        let wi = WorkItem {
+            kind: WorkItemKind::Checkout,
+            checkout_key: Some(PathBuf::from("/tmp/foo")),
+            ..default_work_item()
+        };
+        assert_eq!(wi.identity(), Some(WorkItemIdentity::Checkout(PathBuf::from("/tmp/foo"))));
+    }
+
+    #[test]
+    fn identity_pr() {
+        let wi = WorkItem {
+            kind: WorkItemKind::Pr,
+            pr_key: Some("42".to_string()),
+            ..default_work_item()
+        };
+        assert_eq!(wi.identity(), Some(WorkItemIdentity::ChangeRequest("42".to_string())));
+    }
+
+    #[test]
+    fn identity_issue() {
+        let wi = WorkItem {
+            kind: WorkItemKind::Issue,
+            issue_keys: vec!["7".to_string()],
+            ..default_work_item()
+        };
+        assert_eq!(wi.identity(), Some(WorkItemIdentity::Issue("7".to_string())));
+    }
+
+    #[test]
+    fn identity_remote_branch() {
+        let wi = WorkItem {
+            kind: WorkItemKind::RemoteBranch,
+            branch: Some("feature/x".to_string()),
+            ..default_work_item()
+        };
+        assert_eq!(wi.identity(), Some(WorkItemIdentity::RemoteBranch("feature/x".to_string())));
+    }
 }
 
 pub async fn fetch_delete_confirm_info(
