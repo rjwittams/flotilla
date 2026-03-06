@@ -1,0 +1,274 @@
+//! In-process daemon implementation.
+//!
+//! `InProcessDaemon` owns repos, runs refresh loops, executes commands,
+//! and broadcasts events — all within the same process.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use tokio::sync::{broadcast, RwLock};
+use tracing::info;
+
+use flotilla_protocol::{CommandResult, DaemonEvent, ProtoCommand, RepoInfo, Snapshot};
+
+use crate::config;
+use crate::convert::snapshot_to_proto;
+use crate::daemon::DaemonHandle;
+use crate::executor;
+use crate::model::{AppModel, RepoModel};
+use crate::refresh::RefreshSnapshot;
+
+struct RepoState {
+    model: RepoModel,
+    seq: u64,
+    last_snapshot: Arc<RefreshSnapshot>,
+}
+
+pub struct InProcessDaemon {
+    repos: RwLock<HashMap<PathBuf, RepoState>>,
+    repo_order: RwLock<Vec<PathBuf>>,
+    event_tx: broadcast::Sender<DaemonEvent>,
+}
+
+impl InProcessDaemon {
+    /// Create a new in-process daemon tracking the given repo paths.
+    pub fn new(repo_paths: Vec<PathBuf>) -> Self {
+        let (event_tx, _) = broadcast::channel(256);
+        let mut repos = HashMap::new();
+        let mut order = Vec::new();
+
+        for path in repo_paths {
+            if repos.contains_key(&path) {
+                continue;
+            }
+            let registry = crate::providers::discovery::detect_providers(&path);
+            let model = RepoModel::new(path.clone(), registry);
+            repos.insert(
+                path.clone(),
+                RepoState {
+                    model,
+                    seq: 0,
+                    last_snapshot: Arc::new(RefreshSnapshot::default()),
+                },
+            );
+            order.push(path);
+        }
+
+        Self {
+            repos: RwLock::new(repos),
+            repo_order: RwLock::new(order),
+            event_tx,
+        }
+    }
+
+    /// Poll all repos for new refresh snapshots.
+    ///
+    /// For each repo whose background refresh has produced a new snapshot,
+    /// update internal state, increment the sequence number, and broadcast
+    /// a `DaemonEvent::Snapshot`.
+    ///
+    /// This should be called periodically by the event loop (replaces
+    /// `drain_snapshots()` from main.rs).
+    pub async fn poll_snapshots(&self) {
+        let mut repos = self.repos.write().await;
+
+        for (path, state) in repos.iter_mut() {
+            let Some(ref mut handle) = state.model.refresh_handle else {
+                continue;
+            };
+            if !handle.snapshot_rx.has_changed().unwrap_or(false) {
+                continue;
+            }
+
+            let snapshot = handle.snapshot_rx.borrow_and_update().clone();
+
+            // Update the model's DataStore with the new provider data
+            state.model.data.providers = Arc::clone(&snapshot.providers);
+            state.model.data.correlation_groups = snapshot.correlation_groups.clone();
+            state.model.data.provider_health = snapshot.provider_health.clone();
+            state.model.data.loading = false;
+
+            // Handle issues_disabled — tell the background task to stop querying,
+            // and suppress from provider health display
+            let issues_disabled = snapshot
+                .errors
+                .iter()
+                .any(|e| e.category == "issues" && e.message.contains("has disabled issues"));
+            if issues_disabled {
+                state.model.data.provider_health.remove("issue_tracker");
+                handle
+                    .skip_issues
+                    .store(true, Ordering::Relaxed);
+            }
+
+            // Increment sequence and store snapshot
+            state.seq += 1;
+            state.last_snapshot = snapshot.clone();
+
+            // Build and broadcast proto snapshot
+            let proto_snapshot = snapshot_to_proto(path, state.seq, &snapshot);
+            // Ignore send errors (no receivers is fine)
+            let _ = self.event_tx.send(DaemonEvent::Snapshot(proto_snapshot));
+        }
+    }
+}
+
+#[async_trait]
+impl DaemonHandle for InProcessDaemon {
+    fn subscribe(&self) -> broadcast::Receiver<DaemonEvent> {
+        self.event_tx.subscribe()
+    }
+
+    async fn get_state(&self, repo: &Path) -> Result<Snapshot, String> {
+        let repos = self.repos.read().await;
+        let state = repos
+            .get(repo)
+            .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
+        let snapshot = snapshot_to_proto(&repo.to_path_buf(), state.seq, &state.last_snapshot);
+        Ok(snapshot)
+    }
+
+    async fn list_repos(&self) -> Result<Vec<RepoInfo>, String> {
+        let repos = self.repos.read().await;
+        let order = self.repo_order.read().await;
+        let mut result = Vec::new();
+        for path in order.iter() {
+            if let Some(state) = repos.get(path) {
+                result.push(RepoInfo {
+                    path: path.clone(),
+                    name: AppModel::repo_name(path),
+                    provider_health: state
+                        .model
+                        .data
+                        .provider_health
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), *v))
+                        .collect(),
+                    loading: state.model.data.loading,
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    async fn execute(&self, repo: &Path, command: ProtoCommand) -> Result<CommandResult, String> {
+        // Extract the data we need under a read lock, then drop it before the async work
+        let (registry, providers_data, repo_root) = {
+            let repos = self.repos.read().await;
+            let state = repos
+                .get(repo)
+                .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
+            (
+                Arc::clone(&state.model.registry),
+                Arc::clone(&state.model.data.providers),
+                repo.to_path_buf(),
+            )
+        };
+
+        let result = executor::execute(command, &repo_root, &registry, &providers_data).await;
+
+        // Trigger a refresh after command execution
+        {
+            let repos = self.repos.read().await;
+            if let Some(state) = repos.get(repo) {
+                if let Some(ref handle) = state.model.refresh_handle {
+                    handle.trigger_refresh();
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    async fn refresh(&self, repo: &Path) -> Result<(), String> {
+        let repos = self.repos.read().await;
+        let state = repos
+            .get(repo)
+            .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
+        if let Some(ref handle) = state.model.refresh_handle {
+            handle.trigger_refresh();
+        }
+        Ok(())
+    }
+
+    async fn add_repo(&self, path: &Path) -> Result<(), String> {
+        let path = path.to_path_buf();
+
+        // Check if already tracked
+        {
+            let repos = self.repos.read().await;
+            if repos.contains_key(&path) {
+                return Ok(());
+            }
+        }
+
+        // Create the model (this spawns provider detection and refresh loop)
+        let registry = crate::providers::discovery::detect_providers(&path);
+        let model = RepoModel::new(path.clone(), registry);
+
+        let repo_info = RepoInfo {
+            path: path.clone(),
+            name: AppModel::repo_name(&path),
+            provider_health: model
+                .data
+                .provider_health
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
+            loading: true,
+        };
+
+        // Insert under write lock
+        {
+            let mut repos = self.repos.write().await;
+            let mut order = self.repo_order.write().await;
+            repos.insert(
+                path.clone(),
+                RepoState {
+                    model,
+                    seq: 0,
+                    last_snapshot: Arc::new(RefreshSnapshot::default()),
+                },
+            );
+            order.push(path.clone());
+        }
+
+        // Persist to config
+        config::save_repo(&path);
+        let order = self.repo_order.read().await;
+        config::save_tab_order(&order);
+
+        info!("added repo {}", path.display());
+        let _ = self.event_tx.send(DaemonEvent::RepoAdded(repo_info));
+
+        Ok(())
+    }
+
+    async fn remove_repo(&self, path: &Path) -> Result<(), String> {
+        let path = path.to_path_buf();
+
+        {
+            let mut repos = self.repos.write().await;
+            let mut order = self.repo_order.write().await;
+            if repos.remove(&path).is_none() {
+                return Err(format!("repo not tracked: {}", path.display()));
+            }
+            order.retain(|p| p != &path);
+        }
+
+        // Persist to config
+        config::remove_repo(&path);
+        let order = self.repo_order.read().await;
+        config::save_tab_order(&order);
+
+        info!("removed repo {}", path.display());
+        let _ = self
+            .event_tx
+            .send(DaemonEvent::RepoRemoved { path });
+
+        Ok(())
+    }
+}
