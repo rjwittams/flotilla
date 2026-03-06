@@ -1,6 +1,6 @@
 use crate::providers::types::*;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ProviderData {
     pub checkouts: Vec<Checkout>,
     pub change_requests: Vec<ChangeRequest>,
