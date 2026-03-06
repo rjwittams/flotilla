@@ -7,18 +7,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{broadcast, RwLock};
 use tracing::info;
 
-use flotilla_protocol::{CommandResult, DaemonEvent, ProtoCommand, RepoInfo, Snapshot};
+use flotilla_protocol::{Command, CommandResult, DaemonEvent, RepoInfo, Snapshot};
 
 use crate::config;
 use crate::convert::snapshot_to_proto;
 use crate::daemon::DaemonHandle;
 use crate::executor;
-use crate::model::{AppModel, RepoModel};
+use crate::model::{provider_names_from_registry, repo_name, RepoModel};
 use crate::refresh::RefreshSnapshot;
 
 struct RepoState {
@@ -35,7 +36,11 @@ pub struct InProcessDaemon {
 
 impl InProcessDaemon {
     /// Create a new in-process daemon tracking the given repo paths.
-    pub async fn new(repo_paths: Vec<PathBuf>) -> Self {
+    ///
+    /// Returns `Arc<Self>` because a background poll task is spawned that
+    /// holds a reference. The poll loop checks every 100ms for new refresh
+    /// snapshots and broadcasts `DaemonEvent::Snapshot` for each change.
+    pub async fn new(repo_paths: Vec<PathBuf>) -> Arc<Self> {
         let (event_tx, _) = broadcast::channel(256);
         let mut repos = HashMap::new();
         let mut order = Vec::new();
@@ -46,7 +51,7 @@ impl InProcessDaemon {
             }
             let (registry, repo_slug) = crate::providers::discovery::detect_providers(&path).await;
             let mut model = RepoModel::new(path.clone(), registry, repo_slug);
-            model.loading = true;
+            model.data.loading = true;
             repos.insert(
                 path.clone(),
                 RepoState {
@@ -58,11 +63,24 @@ impl InProcessDaemon {
             order.push(path);
         }
 
-        Self {
+        let daemon = Arc::new(Self {
             repos: RwLock::new(repos),
             repo_order: RwLock::new(order),
             event_tx,
-        }
+        });
+
+        // Spawn self-driving poll loop
+        let d = daemon.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                d.poll_snapshots().await;
+            }
+        });
+
+        daemon
     }
 
     /// Poll all repos for new refresh snapshots.
@@ -71,9 +89,8 @@ impl InProcessDaemon {
     /// update internal state, increment the sequence number, and broadcast
     /// a `DaemonEvent::Snapshot`.
     ///
-    /// This should be called periodically by the event loop (replaces
-    /// `drain_snapshots()` from main.rs).
-    pub async fn poll_snapshots(&self) {
+    /// Called automatically by the background poll loop spawned in `new()`.
+    async fn poll_snapshots(&self) {
         let mut repos = self.repos.write().await;
 
         for (path, state) in repos.iter_mut() {
@@ -84,11 +101,11 @@ impl InProcessDaemon {
 
             let snapshot = handle.snapshot_rx.borrow_and_update().clone();
 
-            // Update the model with the new provider data
-            state.model.providers = Arc::clone(&snapshot.providers);
-            state.model.correlation_groups = snapshot.correlation_groups.clone();
-            state.model.provider_health = snapshot.provider_health.clone();
-            state.model.loading = false;
+            // Update the model's DataStore with the new provider data
+            state.model.data.providers = Arc::clone(&snapshot.providers);
+            state.model.data.correlation_groups = snapshot.correlation_groups.clone();
+            state.model.data.provider_health = snapshot.provider_health.clone();
+            state.model.data.loading = false;
 
             // Handle issues_disabled — tell the background task to stop querying,
             // and suppress from provider health display
@@ -97,7 +114,7 @@ impl InProcessDaemon {
                 .iter()
                 .any(|e| e.category == "issues" && e.message.contains("has disabled issues"));
             if issues_disabled {
-                state.model.provider_health.remove("issue_tracker");
+                state.model.data.provider_health.remove("issue_tracker");
                 handle.skip_issues.store(true, Ordering::Relaxed);
             }
 
@@ -108,7 +125,9 @@ impl InProcessDaemon {
             // Build and broadcast proto snapshot
             let proto_snapshot = snapshot_to_proto(path, state.seq, &snapshot);
             // Ignore send errors (no receivers is fine)
-            let _ = self.event_tx.send(DaemonEvent::Snapshot(proto_snapshot));
+            let _ = self
+                .event_tx
+                .send(DaemonEvent::Snapshot(Box::new(proto_snapshot)));
         }
     }
 }
@@ -136,21 +155,24 @@ impl DaemonHandle for InProcessDaemon {
             if let Some(state) = repos.get(path) {
                 result.push(RepoInfo {
                     path: path.clone(),
-                    name: AppModel::repo_name(path),
+                    name: repo_name(path),
+                    labels: state.model.labels.clone(),
+                    provider_names: provider_names_from_registry(&state.model.registry),
                     provider_health: state
                         .model
+                        .data
                         .provider_health
                         .iter()
                         .map(|(k, v)| (k.to_string(), *v))
                         .collect(),
-                    loading: state.model.loading,
+                    loading: state.model.data.loading,
                 });
             }
         }
         Ok(result)
     }
 
-    async fn execute(&self, repo: &Path, command: ProtoCommand) -> Result<CommandResult, String> {
+    async fn execute(&self, repo: &Path, command: Command) -> Result<CommandResult, String> {
         // Extract the data we need under a read lock, then drop it before the async work
         let (registry, providers_data, repo_root) = {
             let repos = self.repos.read().await;
@@ -159,7 +181,7 @@ impl DaemonHandle for InProcessDaemon {
                 .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
             (
                 Arc::clone(&state.model.registry),
-                Arc::clone(&state.model.providers),
+                Arc::clone(&state.model.data.providers),
                 repo.to_path_buf(),
             )
         };
@@ -200,12 +222,15 @@ impl DaemonHandle for InProcessDaemon {
         // Create the model outside the lock (spawns provider detection and refresh)
         let (registry, repo_slug) = crate::providers::discovery::detect_providers(&path).await;
         let mut model = RepoModel::new(path.clone(), registry, repo_slug);
-        model.loading = true;
+        model.data.loading = true;
 
         let repo_info = RepoInfo {
             path: path.clone(),
-            name: AppModel::repo_name(&path),
+            name: repo_name(&path),
+            labels: model.labels.clone(),
+            provider_names: provider_names_from_registry(&model.registry),
             provider_health: model
+                .data
                 .provider_health
                 .iter()
                 .map(|(k, v)| (k.to_string(), *v))
@@ -237,7 +262,9 @@ impl DaemonHandle for InProcessDaemon {
         config::save_tab_order(&order);
 
         info!("added repo {}", path.display());
-        let _ = self.event_tx.send(DaemonEvent::RepoAdded(repo_info));
+        let _ = self
+            .event_tx
+            .send(DaemonEvent::RepoAdded(Box::new(repo_info)));
 
         Ok(())
     }
