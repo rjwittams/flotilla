@@ -59,7 +59,7 @@ fn render_tab_bar(model: &AppModel, ui: &mut UiState, frame: &mut Frame, area: R
         let rui = &ui.repo_ui[path];
         let name = AppModel::repo_name(path);
         let is_active = !ui.mode.is_config() && i == model.active_repo;
-        let loading = if rm.data.loading { " ⟳" } else { "" };
+        let loading = if rm.loading { " ⟳" } else { "" };
         let changed = if rui.has_unseen_changes { "*" } else { "" };
 
         let sep = Span::styled(" | ", Style::default().fg(Color::DarkGray));
@@ -350,7 +350,7 @@ fn render_unified_table(model: &AppModel, ui: &mut UiState, frame: &mut Frame, a
             match entry {
                 TableEntry::Header(header) => build_header_row(header),
                 TableEntry::Item(item) => {
-                    let mut row = build_item_row(item, &rm.data, &col_widths);
+                    let mut row = build_item_row(item, &rm.providers, &col_widths);
                     if is_multi_selected {
                         row = row.style(Style::default().bg(Color::Indexed(236)));
                     }
@@ -391,7 +391,7 @@ fn build_header_row(header: &SectionHeader) -> Row<'static> {
 
 fn build_item_row<'a>(
     item: &WorkItem,
-    data: &flotilla_core::data::DataStore,
+    providers: &std::sync::Arc<flotilla_core::provider_data::ProviderData>,
     col_widths: &[u16],
 ) -> Row<'a> {
     let (icon, icon_color) = match item.kind() {
@@ -403,9 +403,7 @@ fn build_item_row<'a>(
             }
         }
         WorkItemKind::Session => {
-            let session = item
-                .session_key()
-                .and_then(|k| data.providers.sessions.get(k));
+            let session = item.session_key().and_then(|k| providers.sessions.get(k));
             match session.map(|s| &s.status) {
                 Some(SessionStatus::Running) => ("▶", Color::Magenta),
                 Some(SessionStatus::Idle) => ("◆", Color::Magenta),
@@ -440,7 +438,7 @@ fn build_item_row<'a>(
     let branch_display = truncate(branch, branch_width);
 
     let pr_display = if let Some(pr_key) = item.pr_key() {
-        if let Some(cr) = data.providers.change_requests.get(pr_key) {
+        if let Some(cr) = providers.change_requests.get(pr_key) {
             let state_icon = match cr.status {
                 ChangeRequestStatus::Merged => "✓",
                 ChangeRequestStatus::Closed => "✗",
@@ -455,7 +453,7 @@ fn build_item_row<'a>(
     };
 
     let session_display = if let Some(ses_key) = item.session_key() {
-        if let Some(ses) = data.providers.sessions.get(ses_key) {
+        if let Some(ses) = providers.sessions.get(ses_key) {
             match ses.status {
                 SessionStatus::Running => "▶".to_string(),
                 SessionStatus::Idle => "◆".to_string(),
@@ -471,13 +469,13 @@ fn build_item_row<'a>(
     let issues_display = item
         .issue_keys()
         .iter()
-        .filter_map(|k| data.providers.issues.get(k.as_str()))
+        .filter_map(|k| providers.issues.get(k.as_str()))
         .map(|i| format!("#{}", i.id))
         .collect::<Vec<_>>()
         .join(",");
 
     let git_display = if let Some(wt_key) = item.checkout_key() {
-        if let Some(co) = data.providers.checkouts.get(wt_key) {
+        if let Some(co) = providers.checkouts.get(wt_key) {
             let mut s = String::new();
             if co.working_tree.as_ref().is_some_and(|w| w.modified > 0) {
                 s.push('M');
@@ -554,7 +552,7 @@ fn render_preview_content(model: &AppModel, ui: &UiState, frame: &mut Frame, are
         }
 
         if let Some(wt_key) = item.checkout_key() {
-            if let Some(co) = model.active().data.providers.checkouts.get(wt_key) {
+            if let Some(co) = model.active().providers.checkouts.get(wt_key) {
                 lines.push(format!("Path: {}", co.path.display()));
                 if let Some(commit) = &co.last_commit {
                     let sha = if commit.short_sha.is_empty() {
@@ -578,7 +576,7 @@ fn render_preview_content(model: &AppModel, ui: &UiState, frame: &mut Frame, are
         }
 
         if let Some(pr_key) = item.pr_key() {
-            if let Some(cr) = model.active().data.providers.change_requests.get(pr_key) {
+            if let Some(cr) = model.active().providers.change_requests.get(pr_key) {
                 lines.push(format!(
                     "{} #{}: {}",
                     model.active_labels().code_review.abbr,
@@ -590,7 +588,7 @@ fn render_preview_content(model: &AppModel, ui: &UiState, frame: &mut Frame, are
         }
 
         if let Some(ses_key) = item.session_key() {
-            if let Some(ses) = model.active().data.providers.sessions.get(ses_key) {
+            if let Some(ses) = model.active().providers.sessions.get(ses_key) {
                 lines.push(format!("Session: {}", ses.title));
                 lines.push(format!("Status: {:?}", ses.status));
                 if let Some(ref model) = ses.model {
@@ -604,13 +602,7 @@ fn render_preview_content(model: &AppModel, ui: &UiState, frame: &mut Frame, are
         }
 
         for ws_ref in item.workspace_refs() {
-            if let Some(ws) = model
-                .active()
-                .data
-                .providers
-                .workspaces
-                .get(ws_ref.as_str())
-            {
+            if let Some(ws) = model.active().providers.workspaces.get(ws_ref.as_str()) {
                 let name = if ws.name.is_empty() {
                     &ws.ws_ref
                 } else {
@@ -621,7 +613,7 @@ fn render_preview_content(model: &AppModel, ui: &UiState, frame: &mut Frame, are
         }
 
         for issue_key in item.issue_keys() {
-            if let Some(issue) = model.active().data.providers.issues.get(issue_key.as_str()) {
+            if let Some(issue) = model.active().providers.issues.get(issue_key.as_str()) {
                 let labels = issue.labels.join(", ");
                 lines.push(format!("Issue #{}: {} [{}]", issue.id, issue.title, labels));
             }
@@ -649,9 +641,9 @@ fn format_correlation_key(key: &CorrelationKey) -> String {
 
 fn render_debug_panel(model: &AppModel, ui: &UiState, frame: &mut Frame, area: Rect) {
     let text = if let Some(item) = selected_work_item(model, ui) {
-        let data = &model.active().data;
+        let active = model.active();
         if let Some(group_idx) = item.correlation_group_idx() {
-            if let Some(group) = data.correlation_groups.get(group_idx) {
+            if let Some(group) = active.correlation_groups.get(group_idx) {
                 let mut lines = Vec::new();
                 lines.push(format!(
                     "Group #{} ({} items)",
