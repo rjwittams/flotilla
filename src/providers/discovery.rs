@@ -25,7 +25,7 @@ pub async fn first_remote_url(repo_root: &Path) -> Option<String> {
         .args(["remote"])
         .current_dir(repo_root)
         .stdin(Stdio::null())
-        .stdout(std::process::Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
         .await
@@ -45,7 +45,7 @@ pub async fn first_remote_url(repo_root: &Path) -> Option<String> {
             .args(["remote", "get-url", remote])
             .current_dir(repo_root)
             .stdin(Stdio::null())
-            .stdout(std::process::Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
             .await
