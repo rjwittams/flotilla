@@ -462,7 +462,7 @@ impl App {
         let items: Vec<Intent> = Intent::all_in_menu_order()
             .iter()
             .copied()
-            .filter(|a| a.is_available(&item))
+            .filter(|a| a.is_available(&item) && a.resolve(&item, self).is_some())
             .collect();
 
         if items.is_empty() {
