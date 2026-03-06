@@ -340,7 +340,9 @@ impl App {
                 *index = item_idx;
             }
             self.execute_menu_action();
-            self.ui.mode = UiMode::Normal;
+            if matches!(self.ui.mode, UiMode::ActionMenu { .. }) {
+                self.ui.mode = UiMode::Normal;
+            }
         }
     }
 
