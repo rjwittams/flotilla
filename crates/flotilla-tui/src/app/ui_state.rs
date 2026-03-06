@@ -6,7 +6,8 @@ use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use tui_input::Input;
 
-use flotilla_core::data::{GroupedWorkItems, WorkItemIdentity};
+use flotilla_core::data::GroupedWorkItems;
+use flotilla_protocol::WorkItemIdentity;
 use flotilla_protocol::DeleteInfo;
 use super::intent::Intent;
 

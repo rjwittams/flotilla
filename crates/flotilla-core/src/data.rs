@@ -35,7 +35,7 @@ impl fmt::Display for SectionHeader {
 #[derive(Debug, Clone)]
 pub enum GroupEntry {
     Header(SectionHeader),
-    Item(CorrelationResult),
+    Item(flotilla_protocol::WorkItem),
 }
 
 #[derive(Debug, Clone)]
@@ -440,15 +440,18 @@ pub fn correlate(providers: &ProviderData) -> (Vec<CorrelationResult>, Vec<Corre
 }
 
 /// Phase 4: Sort work items into sections and build table entries.
-pub fn group_work_items(work_items: &[CorrelationResult], providers: &ProviderData, labels: &SectionLabels) -> GroupedWorkItems {
-    let mut checkout_items: Vec<&CorrelationResult> = Vec::new();
-    let mut session_items: Vec<&CorrelationResult> = Vec::new();
-    let mut pr_items: Vec<&CorrelationResult> = Vec::new();
-    let mut remote_items: Vec<&CorrelationResult> = Vec::new();
-    let mut issue_items: Vec<&CorrelationResult> = Vec::new();
+///
+/// Accepts protocol `WorkItem` (flat, serializable) so this function can be
+/// used both in-process (core side) and in the TUI after receiving a Snapshot.
+pub fn group_work_items(work_items: &[flotilla_protocol::WorkItem], providers: &ProviderData, labels: &SectionLabels) -> GroupedWorkItems {
+    let mut checkout_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
+    let mut session_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
+    let mut pr_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
+    let mut remote_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
+    let mut issue_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
 
     for item in work_items {
-        match item.kind() {
+        match item.kind {
             WorkItemKind::Checkout => checkout_items.push(item),
             WorkItemKind::Session => session_items.push(item),
             WorkItemKind::Pr => pr_items.push(item),
@@ -461,7 +464,7 @@ pub fn group_work_items(work_items: &[CorrelationResult], providers: &ProviderDa
     let mut selectable: Vec<usize> = Vec::new();
 
     // Checkouts -- sorted by branch name ascending
-    checkout_items.sort_by(|a, b| a.branch().cmp(&b.branch()));
+    checkout_items.sort_by(|a, b| a.branch.cmp(&b.branch));
     if !checkout_items.is_empty() {
         entries.push(GroupEntry::Header(SectionHeader(labels.checkouts.clone())));
         for item in checkout_items {
@@ -472,8 +475,8 @@ pub fn group_work_items(work_items: &[CorrelationResult], providers: &ProviderDa
 
     // Sessions -- sorted by updated_at descending
     session_items.sort_by(|a, b| {
-        let a_time = a.session_key().and_then(|k| providers.sessions.get(k)).and_then(|s| s.updated_at.as_deref());
-        let b_time = b.session_key().and_then(|k| providers.sessions.get(k)).and_then(|s| s.updated_at.as_deref());
+        let a_time = a.session_key.as_deref().and_then(|k| providers.sessions.get(k)).and_then(|s| s.updated_at.as_deref());
+        let b_time = b.session_key.as_deref().and_then(|k| providers.sessions.get(k)).and_then(|s| s.updated_at.as_deref());
         b_time.cmp(&a_time)
     });
     if !session_items.is_empty() {
@@ -486,8 +489,8 @@ pub fn group_work_items(work_items: &[CorrelationResult], providers: &ProviderDa
 
     // PRs -- sorted by id descending
     pr_items.sort_by(|a, b| {
-        let a_num = a.pr_key().and_then(|k| k.parse::<i64>().ok());
-        let b_num = b.pr_key().and_then(|k| k.parse::<i64>().ok());
+        let a_num = a.pr_key.as_deref().and_then(|k| k.parse::<i64>().ok());
+        let b_num = b.pr_key.as_deref().and_then(|k| k.parse::<i64>().ok());
         b_num.cmp(&a_num)
     });
     if !pr_items.is_empty() {
@@ -499,7 +502,7 @@ pub fn group_work_items(work_items: &[CorrelationResult], providers: &ProviderDa
     }
 
     // Remote branches -- sorted by branch name
-    remote_items.sort_by(|a, b| a.branch().cmp(&b.branch()));
+    remote_items.sort_by(|a, b| a.branch.cmp(&b.branch));
     if !remote_items.is_empty() {
         entries.push(GroupEntry::Header(SectionHeader("Remote Branches".into())));
         for item in remote_items {
@@ -510,8 +513,8 @@ pub fn group_work_items(work_items: &[CorrelationResult], providers: &ProviderDa
 
     // Issues -- sorted by id descending
     issue_items.sort_by(|a, b| {
-        let a_num = a.issue_keys().first().and_then(|k| k.parse::<i64>().ok());
-        let b_num = b.issue_keys().first().and_then(|k| k.parse::<i64>().ok());
+        let a_num = a.issue_keys.first().and_then(|k| k.parse::<i64>().ok());
+        let b_num = b.issue_keys.first().and_then(|k| k.parse::<i64>().ok());
         b_num.cmp(&a_num)
     });
     if !issue_items.is_empty() {
