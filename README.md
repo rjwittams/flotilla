@@ -14,13 +14,13 @@ Available tools are auto-detected from your environment, with configurable overr
 
 | Category | Focus | WIP | Future |
 |----------|-------|-----|--------|
-| Version control | [git](https://git-scm.com/) | | [jj](https://martinvonz.github.io/jj/) (#45) |
+| Version control | [git](https://git-scm.com/) | | [jj](https://jj-vcs.github.io/jj/latest/) (#45) |
 | Checkouts | [git worktrees](https://git-scm.com/docs/git-worktree), [worktrunk](https://worktrunk.dev/) | | jj workspaces (#45), local clones (#44) |
 | Code review | [GitHub](https://github.com/) PRs | | [GitLab](https://gitlab.com/) MRs (#49) |
 | Issue tracking | [GitHub Issues](https://github.com/features/issues) | | [Linear](https://linear.app/) (#51), [Jira](https://www.atlassian.com/software/jira) (#50) |
 | Cloud coding agents | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions | | [Codex](https://openai.com/index/introducing-codex/) (#52), others (#53) |
 | Workspace managers | [cmux](https://github.com/rjwittams/cmux) | [tmux](https://tmux.github.io/) (#54), [zellij](https://zellij.dev/) (#55) | |
-| AI delegation (e.g branch naming) | Claude Code | | LLM APIs (#56), [ollama](https://ollama.com/) |
+| AI delegation (e.g branch naming) | Claude Code | | LLM APIs (#56), [ollama](https://ollama.com/) (#56) |
 
 ## How it works
 
