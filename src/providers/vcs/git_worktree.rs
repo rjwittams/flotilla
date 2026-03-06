@@ -191,6 +191,7 @@ impl GitCheckoutManager {
             working_tree: wt_status,
             last_commit: commit,
             correlation_keys,
+            association_keys: Vec::new(),
         }
     }
 }

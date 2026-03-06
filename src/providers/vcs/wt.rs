@@ -79,6 +79,7 @@ impl WtWorktree {
                 message: c.message.unwrap_or_default(),
             }),
             correlation_keys,
+            association_keys: Vec::new(),
         }
     }
 }
