@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Commands the client can send to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
 pub enum ProtoCommand {
     SwitchWorktree {
         path: PathBuf,
@@ -56,6 +57,7 @@ pub enum ProtoCommand {
 
 /// Result returned from command execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum CommandResult {
     Ok,
     WorktreeCreated { branch: String },

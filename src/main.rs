@@ -49,6 +49,8 @@ async fn main() -> Result<()> {
     result
 }
 
+// Step 2 (#47) will replace direct AppModel usage with InProcessDaemon (or SocketDaemon).
+// Currently the TUI manages repos via AppModel and drain_snapshots() below.
 async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) -> Result<()> {
     let t = std::time::Instant::now();
     let mut app = app::App::new(repo_roots).await;

@@ -298,6 +298,8 @@ pub async fn execute(
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
                     let config = workspace_config(repo_root, name, &path, &teleport_cmd);
                     if let Err(e) = ws_mgr.create_workspace(&config).await {
+                        // Unlike CreateWorktree, teleport fails entirely if the workspace
+                        // can't be created — the checkout may already have existed.
                         return CommandResult::Error { message: e };
                     }
                 }
@@ -320,7 +322,7 @@ pub async fn execute(
 }
 
 /// Build a WorkspaceConfig from repo/branch/dir/command.
-pub fn workspace_config(
+pub(crate) fn workspace_config(
     repo_root: &Path,
     name: &str,
     working_dir: &Path,
