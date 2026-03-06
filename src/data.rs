@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::provider_data::ProviderData;
-use crate::providers::correlation::{self, CorrelatedItem, CorrelatedGroup, ItemKind as CorItemKind};
+use crate::providers::correlation::{self, CorrelatedItem, CorrelatedGroup, ItemKind as CorItemKind, ProviderItemKey};
 use crate::providers::types::AssociationKey;
 
 #[derive(Debug, Clone)]
@@ -104,22 +104,34 @@ fn group_to_work_item(providers: &ProviderData, group: &CorrelatedGroup, group_i
     for item in &group.items {
         match item.kind {
             CorItemKind::Checkout => {
-                worktree_idx = Some(item.source_index);
-                if let Some(co) = providers.checkouts.get(item.source_index) {
-                    is_main_worktree = co.is_trunk;
+                if let ProviderItemKey::Checkout(ref path) = item.source_key {
+                    if let Some(idx) = providers.checkouts.iter().position(|co| &co.path == path) {
+                        worktree_idx = Some(idx);
+                        is_main_worktree = providers.checkouts[idx].is_trunk;
+                    }
                 }
             }
             CorItemKind::ChangeRequest => {
-                pr_idx = Some(item.source_index);
+                if let ProviderItemKey::ChangeRequest(ref id) = item.source_key {
+                    if let Some(idx) = providers.change_requests.iter().position(|cr| &cr.id == id) {
+                        pr_idx = Some(idx);
+                    }
+                }
             }
             CorItemKind::CloudSession => {
                 if session_idx.is_none() {
-                    session_idx = Some(item.source_index);
+                    if let ProviderItemKey::Session(ref id) = item.source_key {
+                        if let Some(idx) = providers.sessions.iter().position(|s| &s.id == id) {
+                            session_idx = Some(idx);
+                        }
+                    }
                 }
             }
             CorItemKind::Workspace => {
-                if let Some(ws) = providers.workspaces.get(item.source_index) {
-                    workspace_refs.push(ws.ws_ref.clone());
+                if let ProviderItemKey::Workspace(ref ws_ref) = item.source_key {
+                    if let Some(ws) = providers.workspaces.iter().find(|ws| &ws.ws_ref == ws_ref) {
+                        workspace_refs.push(ws.ws_ref.clone());
+                    }
                 }
             }
         }
@@ -170,43 +182,43 @@ pub fn correlate(providers: &ProviderData) -> (Vec<WorkItem>, Vec<CorrelatedGrou
     // Phase 1: Build CorrelatedItems from identity-keyed sources.
     let mut items: Vec<CorrelatedItem> = Vec::new();
 
-    for (i, co) in providers.checkouts.iter().enumerate() {
+    for (_i, co) in providers.checkouts.iter().enumerate() {
         items.push(CorrelatedItem {
             provider_name: "checkout".to_string(),
             kind: CorItemKind::Checkout,
             title: co.branch.clone(),
             correlation_keys: co.correlation_keys.clone(),
-            source_index: i,
+            source_key: ProviderItemKey::Checkout(co.path.clone()),
         });
     }
 
-    for (i, cr) in providers.change_requests.iter().enumerate() {
+    for (_i, cr) in providers.change_requests.iter().enumerate() {
         items.push(CorrelatedItem {
             provider_name: "change_request".to_string(),
             kind: CorItemKind::ChangeRequest,
             title: cr.title.clone(),
             correlation_keys: cr.correlation_keys.clone(),
-            source_index: i,
+            source_key: ProviderItemKey::ChangeRequest(cr.id.clone()),
         });
     }
 
-    for (i, session) in providers.sessions.iter().enumerate() {
+    for (_i, session) in providers.sessions.iter().enumerate() {
         items.push(CorrelatedItem {
             provider_name: "session".to_string(),
             kind: CorItemKind::CloudSession,
             title: session.title.clone(),
             correlation_keys: session.correlation_keys.clone(),
-            source_index: i,
+            source_key: ProviderItemKey::Session(session.id.clone()),
         });
     }
 
-    for (i, ws) in providers.workspaces.iter().enumerate() {
+    for (_i, ws) in providers.workspaces.iter().enumerate() {
         items.push(CorrelatedItem {
             provider_name: "workspace".to_string(),
             kind: CorItemKind::Workspace,
             title: ws.name.clone(),
             correlation_keys: ws.correlation_keys.clone(),
-            source_index: i,
+            source_key: ProviderItemKey::Workspace(ws.ws_ref.clone()),
         });
     }
 

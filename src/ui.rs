@@ -605,7 +605,7 @@ fn render_debug_panel(model: &AppModel, ui: &UiState, frame: &mut Frame, area: R
                         CorItemKind::CloudSession => "Session",
                         CorItemKind::Workspace => "Workspace",
                     };
-                    lines.push(format!("{}: {} [idx={}]", kind_label, ci.title, ci.source_index));
+                    lines.push(format!("{}: {} [key={:?}]", kind_label, ci.title, ci.source_key));
                     for key in &ci.correlation_keys {
                         lines.push(format!("  {}", format_correlation_key(key)));
                     }
