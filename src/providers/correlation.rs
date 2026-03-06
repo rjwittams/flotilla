@@ -97,10 +97,17 @@ impl UnionFind {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Item kinds that must be unique within a correlated group.
+/// A union that would produce two items of a singleton kind is refused.
+fn is_singleton_kind(kind: &ItemKind) -> bool {
+    matches!(kind, ItemKind::Checkout | ItemKind::ChangeRequest)
+}
+
 /// Groups items that share any `CorrelationKey` value, transitively.
 ///
 /// If item A shares a key with item B, and B shares a *different* key with C,
-/// then A, B and C all end up in the same group.
+/// then A, B and C all end up in the same group — unless the merge would
+/// combine two items of a singleton kind (e.g. two Checkouts).
 pub fn correlate(items: Vec<CorrelatedItem>) -> Vec<CorrelatedGroup> {
     if items.is_empty() {
         return Vec::new();
@@ -109,6 +116,15 @@ pub fn correlate(items: Vec<CorrelatedItem>) -> Vec<CorrelatedGroup> {
     let n = items.len();
     let mut uf = UnionFind::new(n);
 
+    // Track which singleton kinds are present in each group (by root).
+    // Value is a set of singleton ItemKinds in that group.
+    let mut group_singletons: HashMap<usize, Vec<ItemKind>> = HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        if is_singleton_kind(&item.kind) {
+            group_singletons.entry(idx).or_default().push(item.kind.clone());
+        }
+    }
+
     // Map each correlation key to the first item index that carried it.
     let mut key_to_item: HashMap<CorrelationKey, usize> = HashMap::new();
 
@@ -116,7 +132,29 @@ pub fn correlate(items: Vec<CorrelatedItem>) -> Vec<CorrelatedGroup> {
         for key in &item.correlation_keys {
             match key_to_item.get(key) {
                 Some(&first_idx) => {
-                    uf.union(first_idx, idx);
+                    let root_a = uf.find(first_idx);
+                    let root_b = uf.find(idx);
+                    if root_a == root_b {
+                        continue; // already in the same group
+                    }
+                    // Check if merging would combine two singleton kinds
+                    let singletons_a = group_singletons.get(&root_a);
+                    let singletons_b = group_singletons.get(&root_b);
+                    let would_conflict = if let (Some(sa), Some(sb)) = (singletons_a, singletons_b) {
+                        sa.iter().any(|k| sb.contains(k))
+                    } else {
+                        false
+                    };
+                    if would_conflict {
+                        continue; // refuse the union
+                    }
+                    uf.union(root_a, root_b);
+                    // Merge singleton tracking under the new root
+                    let new_root = uf.find(root_a);
+                    let other = if new_root == root_a { root_b } else { root_a };
+                    if let Some(moved) = group_singletons.remove(&other) {
+                        group_singletons.entry(new_root).or_default().extend(moved);
+                    }
                 }
                 None => {
                     key_to_item.insert(key.clone(), idx);
@@ -310,5 +348,100 @@ mod tests {
         assert_eq!(groups[0].items.len(), 2);
         assert!(groups[0].has(&ItemKind::Checkout));
         assert!(groups[0].has(&ItemKind::Workspace));
+    }
+
+    #[test]
+    fn two_checkouts_never_merge() {
+        // A workspace with paths matching two different checkouts should NOT
+        // cause those checkouts to merge into one group.
+        let main_path = PathBuf::from("/code/project");
+        let feat_path = PathBuf::from("/code/project.feat-x");
+        let items = vec![
+            item(
+                "git",
+                ItemKind::Checkout,
+                "main",
+                vec![
+                    CorrelationKey::Branch("main".into()),
+                    CorrelationKey::CheckoutPath(main_path.clone()),
+                ],
+            ),
+            item(
+                "git",
+                ItemKind::Checkout,
+                "feat-x",
+                vec![
+                    CorrelationKey::Branch("feat-x".into()),
+                    CorrelationKey::CheckoutPath(feat_path.clone()),
+                ],
+            ),
+            item(
+                "cmux",
+                ItemKind::Workspace,
+                "buggy-workspace",
+                // Workspace reports both paths (buggy multiplexer)
+                vec![
+                    CorrelationKey::CheckoutPath(feat_path),
+                    CorrelationKey::CheckoutPath(main_path),
+                ],
+            ),
+        ];
+
+        let groups = correlate(items);
+        // The workspace should attach to one checkout, not bridge them
+        assert_eq!(groups.len(), 2, "two checkouts must stay in separate groups");
+        // One group has 2 items (checkout + workspace), the other has 1 (checkout alone)
+        let mut sizes: Vec<usize> = groups.iter().map(|g| g.items.len()).collect();
+        sizes.sort();
+        assert_eq!(sizes, vec![1, 2]);
+    }
+
+    #[test]
+    fn two_change_requests_never_merge() {
+        let items = vec![
+            item(
+                "github",
+                ItemKind::ChangeRequest,
+                "PR #1",
+                vec![CorrelationKey::Branch("shared-branch".into())],
+            ),
+            item(
+                "github",
+                ItemKind::ChangeRequest,
+                "PR #2",
+                vec![CorrelationKey::Branch("shared-branch".into())],
+            ),
+        ];
+
+        let groups = correlate(items);
+        assert_eq!(groups.len(), 2, "two change requests must stay separate");
+    }
+
+    #[test]
+    fn multiple_sessions_can_merge() {
+        let items = vec![
+            item(
+                "git",
+                ItemKind::Checkout,
+                "feat-x",
+                vec![CorrelationKey::Branch("feat-x".into())],
+            ),
+            item(
+                "claude",
+                ItemKind::CloudSession,
+                "session-1",
+                vec![CorrelationKey::Branch("feat-x".into())],
+            ),
+            item(
+                "claude",
+                ItemKind::CloudSession,
+                "session-2",
+                vec![CorrelationKey::Branch("feat-x".into())],
+            ),
+        ];
+
+        let groups = correlate(items);
+        assert_eq!(groups.len(), 1, "multiple sessions can share a group");
+        assert_eq!(groups[0].items.len(), 3);
     }
 }
