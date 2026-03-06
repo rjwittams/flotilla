@@ -503,6 +503,7 @@ impl App {
         }
 
         if key.code == KeyCode::Esc {
+            self.pending_issue_ids.clear();
             self.ui.mode = UiMode::Normal;
             return;
         }
