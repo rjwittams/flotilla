@@ -38,7 +38,6 @@ pub enum WorkItemIdentity {
 }
 
 
-
 #[derive(Debug, Clone)]
 pub struct SectionHeader(pub String);
 
@@ -236,7 +235,6 @@ impl Default for SectionLabels {
         }
     }
 }
-
 
 /// Convert a correlation group into a WorkItem.
 /// Returns None for groups that contain only workspaces (no checkout, PR, or session).
@@ -610,6 +608,21 @@ mod tests {
             correlation_group_idx: 0,
         });
         assert_eq!(wi.identity(), Some(WorkItemIdentity::ChangeRequest("42".to_string())));
+    }
+
+    #[test]
+    fn identity_session() {
+        let wi = WorkItem::Correlated(CorrelatedWorkItem {
+            anchor: CorrelatedAnchor::Session("sess-1".to_string()),
+            branch: None,
+            description: String::new(),
+            linked_pr: None,
+            linked_session: None,
+            linked_issues: Vec::new(),
+            workspace_refs: Vec::new(),
+            correlation_group_idx: 0,
+        });
+        assert_eq!(wi.identity(), Some(WorkItemIdentity::Session("sess-1".to_string())));
     }
 
     #[test]
