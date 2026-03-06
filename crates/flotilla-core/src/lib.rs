@@ -1,5 +1,7 @@
 pub mod command;
 pub mod config;
+pub mod convert;
+pub mod daemon;
 pub mod data;
 pub mod model;
 pub mod provider_data;
