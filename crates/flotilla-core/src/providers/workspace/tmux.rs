@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -130,11 +130,25 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
         let output = Self::tmux_cmd(&["list-windows", "-F", "#{window_name}"]).await?;
         let window_names: Vec<&str> = output.lines().filter(|l| !l.is_empty()).collect();
 
-        // Load state for enrichment
-        let state = match Self::session_name().await {
-            Ok(s) => Self::load_state(&s),
-            Err(_) => TmuxState::default(),
+        // Load state for enrichment, pruning stale entries
+        let (session, mut state) = match Self::session_name().await {
+            Ok(s) => {
+                let st = Self::load_state(&s);
+                (Some(s), st)
+            }
+            Err(_) => (None, TmuxState::default()),
         };
+
+        let live_names: HashSet<&str> = window_names.iter().copied().collect();
+        let before_len = state.windows.len();
+        state
+            .windows
+            .retain(|name, _| live_names.contains(name.as_str()));
+        if state.windows.len() != before_len {
+            if let Some(ref session) = session {
+                Self::save_state(session, &state);
+            }
+        }
 
         let workspaces = window_names
             .into_iter()
