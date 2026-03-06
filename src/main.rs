@@ -261,21 +261,7 @@ fn drain_snapshots(app: &mut app::App) {
         }
 
         // Change detection badge for inactive tabs — only if data actually changed
-        let old_snapshot = (
-            old_providers.checkouts.len(),
-            old_providers.change_requests.len(),
-            old_providers.sessions.len(),
-            old_providers.remote_branches.len(),
-            old_providers.issues.len(),
-        );
-        let new_snapshot = (
-            rm.data.providers.checkouts.len(),
-            rm.data.providers.change_requests.len(),
-            rm.data.providers.sessions.len(),
-            rm.data.providers.remote_branches.len(),
-            rm.data.providers.issues.len(),
-        );
-        if i != *active_repo && old_snapshot != new_snapshot {
+        if i != *active_repo && *old_providers != *rm.data.providers {
             if let Some(rui) = ui.repo_ui.get_mut(path) {
                 rui.has_unseen_changes = true;
             }
