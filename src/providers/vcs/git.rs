@@ -163,24 +163,6 @@ impl super::Vcs for GitVcs {
     ) -> Result<WorkingTreeStatus, String> {
         let output = run_cmd("git", &["status", "--porcelain"], checkout_path)
             .await?;
-        let mut status = WorkingTreeStatus::default();
-        for line in output.lines() {
-            if line.len() < 2 {
-                continue;
-            }
-            let index = line.as_bytes()[0];
-            let worktree = line.as_bytes()[1];
-            if index == b'?' && worktree == b'?' {
-                status.untracked += 1;
-            } else {
-                if index != b' ' && index != b'?' {
-                    status.staged += 1;
-                }
-                if worktree != b' ' && worktree != b'?' {
-                    status.modified += 1;
-                }
-            }
-        }
-        Ok(status)
+        Ok(super::parse_porcelain_status(&output))
     }
 }

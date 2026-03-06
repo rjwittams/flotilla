@@ -31,22 +31,23 @@ pub(crate) async fn run_cmd(cmd: &str, args: &[&str], cwd: &Path) -> Result<Stri
 }
 
 /// Check if a command is available by running it directly.
-pub(crate) fn command_exists(cmd: &str, args: &[&str]) -> bool {
-    std::process::Command::new(cmd)
+pub(crate) async fn command_exists(cmd: &str, args: &[&str]) -> bool {
+    tokio::process::Command::new(cmd)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
+        .await
         .map(|s| s.success())
         .unwrap_or(false)
 }
 
 /// Resolve the path to the `claude` CLI binary.
 /// Checks PATH first, then known installation locations.
-pub(crate) fn resolve_claude_path() -> Option<String> {
+pub(crate) async fn resolve_claude_path() -> Option<String> {
     // Try PATH directly
-    if command_exists("claude", &["--version"]) {
+    if command_exists("claude", &["--version"]).await {
         return Some("claude".to_string());
     }
     // Known installation paths
@@ -54,7 +55,7 @@ pub(crate) fn resolve_claude_path() -> Option<String> {
         dirs::home_dir().map(|h| h.join(".claude/local/claude")),
     ];
     for path in known_paths.into_iter().flatten() {
-        if path.is_file() && command_exists(path.to_str().unwrap_or(""), &["--version"]) {
+        if path.is_file() && command_exists(path.to_str().unwrap_or(""), &["--version"]).await {
             return Some(path.to_string_lossy().to_string());
         }
     }

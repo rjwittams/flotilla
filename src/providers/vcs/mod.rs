@@ -40,6 +40,41 @@ pub struct VcsBundle {
     pub checkout_manager: Box<dyn CheckoutManager>,
 }
 
+/// Parse `git status --porcelain` output into a `WorkingTreeStatus`.
+///
+/// Each line has a two-character status prefix: X Y, where X is the index
+/// (staging area) status and Y is the working-tree status.  `??` means
+/// untracked.  This is the single canonical implementation used by both
+/// the `Vcs` and `CheckoutManager` providers.
+pub(crate) fn parse_porcelain_status(output: &str) -> WorkingTreeStatus {
+    let mut staged = 0usize;
+    let mut modified = 0usize;
+    let mut untracked = 0usize;
+    for line in output.lines() {
+        let bytes = line.as_bytes();
+        if bytes.len() < 2 {
+            continue;
+        }
+        let x = bytes[0];
+        let y = bytes[1];
+        if x == b'?' {
+            untracked += 1;
+        } else {
+            if x != b' ' {
+                staged += 1;
+            }
+            if y != b' ' && y != b'?' {
+                modified += 1;
+            }
+        }
+    }
+    WorkingTreeStatus {
+        staged,
+        modified,
+        untracked,
+    }
+}
+
 /// Parse the output of `git config --get-regexp 'branch\.<branch>\.flotilla\.issues\.'`
 /// into association keys. Each line has the format:
 /// `branch.<name>.flotilla.issues.<provider> id1,id2,...`

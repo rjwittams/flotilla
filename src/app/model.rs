@@ -100,13 +100,15 @@ pub struct AppModel {
 }
 
 impl AppModel {
-    pub fn new(repo_paths: Vec<PathBuf>) -> Self {
+    pub async fn new(repo_paths: Vec<PathBuf>) -> Self {
         let mut repos = HashMap::new();
         let mut order = Vec::new();
         for path in repo_paths {
             if !repos.contains_key(&path) {
-                let registry = crate::providers::discovery::detect_providers(&path);
-                repos.insert(path.clone(), RepoModel::new(path.clone(), registry));
+                let registry = crate::providers::discovery::detect_providers(&path).await;
+                let repo_slug = discovery::first_remote_url(&path).await
+                    .and_then(|u| discovery::extract_repo_slug(&u));
+                repos.insert(path.clone(), RepoModel::new(path.clone(), registry, repo_slug));
                 order.push(path);
             }
         }
@@ -140,10 +142,12 @@ impl AppModel {
         &self.active().labels
     }
 
-    pub fn add_repo(&mut self, path: PathBuf) {
+    pub async fn add_repo(&mut self, path: PathBuf) {
         if !self.repos.contains_key(&path) {
-            let registry = crate::providers::discovery::detect_providers(&path);
-            self.repos.insert(path.clone(), RepoModel::new(path.clone(), registry));
+            let registry = crate::providers::discovery::detect_providers(&path).await;
+            let repo_slug = discovery::first_remote_url(&path).await
+                .and_then(|u| discovery::extract_repo_slug(&u));
+            self.repos.insert(path.clone(), RepoModel::new(path.clone(), registry, repo_slug));
             self.repo_order.push(path);
         }
     }
@@ -158,9 +162,7 @@ pub struct RepoModel {
 }
 
 impl RepoModel {
-    pub fn new(repo_root: PathBuf, registry: ProviderRegistry) -> Self {
-        let repo_slug = discovery::first_remote_url(&repo_root)
-            .and_then(|u| discovery::extract_repo_slug(&u));
+    pub fn new(repo_root: PathBuf, registry: ProviderRegistry, repo_slug: Option<String>) -> Self {
         let labels = RepoLabels::from_registry(&registry);
         let registry = Arc::new(registry);
         let criteria = RepoCriteria { repo_slug };

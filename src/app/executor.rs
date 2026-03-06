@@ -175,7 +175,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
         }
         Command::TeleportSession { session_id, branch, checkout_key } => {
             info!("teleporting to session {session_id}");
-            let claude_bin = providers::resolve_claude_path().unwrap_or_else(|| "claude".into());
+            let claude_bin = providers::resolve_claude_path().await.unwrap_or_else(|| "claude".into());
             let teleport_cmd = format!("{} --teleport {}", claude_bin, session_id);
             let wt_path = if let Some(ref key) = checkout_key {
                 app.model.active().data.providers.checkouts.get(key).map(|co| co.path.clone())
@@ -250,7 +250,7 @@ pub async fn execute(cmd: Command, app: &mut App) {
         Command::AddRepo(path) => {
             info!("adding repo {}", path.display());
             config::save_repo(&path);
-            app.add_repo(path);
+            app.add_repo(path).await;
             app.switch_tab(app.model.repo_order.len() - 1);
             config::save_tab_order(&app.model.repo_order);
             trigger_active_refresh(app);

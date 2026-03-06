@@ -25,8 +25,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(repos: Vec<PathBuf>) -> Self {
-        let model = AppModel::new(repos);
+    pub async fn new(repos: Vec<PathBuf>) -> Self {
+        let model = AppModel::new(repos).await;
         let ui = UiState::new(&model.repo_order);
         Self {
             model,
@@ -55,9 +55,9 @@ impl App {
         }
     }
 
-    pub fn add_repo(&mut self, path: PathBuf) {
+    pub async fn add_repo(&mut self, path: PathBuf) {
         if !self.model.repos.contains_key(&path) {
-            self.model.add_repo(path.clone());
+            self.model.add_repo(path.clone()).await;
             self.ui.repo_ui.insert(path, RepoUiState::default());
         }
     }

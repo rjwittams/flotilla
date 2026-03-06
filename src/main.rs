@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
 
 async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) -> Result<()> {
     let t = std::time::Instant::now();
-    let mut app = app::App::new(repo_roots);
+    let mut app = app::App::new(repo_roots).await;
     info!("provider detection in {:.0?}", t.elapsed());
 
     // Mark all repos as loading so ⟳ shows on first render
