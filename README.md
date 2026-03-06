@@ -6,28 +6,28 @@ Development fleet management. Agents, branches, PRs, and workspaces across every
 
 ![screenshot](assets/screenshot.png)
 
-Each row correlates a branch with its PR, agent sessions, and workspace automatically.
+FLotilla in cmux: Each row correlates a branch with its PR, agent sessions, and workspace automatically.
 
-## Providers
+## Integrations
 
-Flotilla uses a provider-based architecture. Available tools are auto-detected from your environment, with configurable overrides.
+Available tools are auto-detected from your environment, with configurable overrides.
 
 | Category | Focus | WIP | Future |
 |----------|-------|-----|--------|
 | Version control | git | | jj |
-| Checkouts | git worktrees, wt | | jj workspaces |
+| Checkouts | git worktrees, worktrunk | | jj workspaces |
 | Code review | GitHub PRs | | GitLab MRs |
 | Issue tracking | GitHub Issues | | Linear, Jira |
-| Coding agents | Claude Code sessions | | Codex, other LLMs |
-| Workspaces | cmux | tmux, zellij | |
-| AI utilities | Claude (branch naming) | | |
+| Cloud coding agents | Claude Code sessions | | Codex, other LLMs |
+| Workspace Managers | cmux | tmux, zellij | |
+| AI delegation (e.g branch naming) | Claude code | | LLM apis, ollama |
 
 ## How it works
 
-- **Auto-discovery**: detects tools from your environment, with configurable overrides. Git repo, GitHub remote, Claude CLI, terminal multiplexer — whatever is available gets used.
-- **Correlation**: items sharing a branch name, checkout path, or session reference merge into one work item. One row per unit of work.
-- **Providers**: pluggable traits per category. Multiple providers of the same type can coexist (e.g. GitHub Issues alongside Linear).
-- **Workspace templates**: `.flotilla/workspace.yaml` defines pane layouts. One keystroke creates a multi-agent workspace.
+- **Auto-discovery**: detects tools from your environment, with configurable overrides.
+- **Providers**: Provider implementations collect fragments of data and surface available actions. Multiple providers of the same type can coexist (e.g. GitHub Issues alongside Linear).
+- **Correlation**: Fragments sharing identity are transitively merged into unified work items. One row per unit of work.
+- **Workspace templates**: `.flotilla/workspace.yaml` defines pane layouts. One keystroke creates a multi-agent workspace. Native layouts (e.g KDL for Zellij) to come.
 - **Multi-repo**: each repo is a tab with its own detected providers.
 
 ## Quickstart
@@ -42,7 +42,11 @@ Repo root is auto-detected from the current directory. Multiple repos can be man
 
 ## Future direction
 
-The TUI is the first interface. The intention is to add a web dashboard and multi-host coordination — your laptop, build servers, cloud VMs — so you can see what's running from anywhere. Further out: coordinating agents, not just monitoring them.
+- Web dashboard (alternative/in addition to TUI)
+- Persistent sessions
+- Multi-host coordination - coordinate across your development hosts with a unified view. Hand off sessions to hosts with appropriate resources. 
+- User oriented filtering for large team repos
+- Agent integrations - expose fleet functionality to agents - e.g transferring work items/agent sessions to a host with required resources, like a local GPU or ios simulator. 
 
 ## Documentation
 
@@ -53,4 +57,4 @@ The TUI is the first interface. The intention is to add a web dashboard and mult
 
 ---
 
-This project makes extensive use of generative AI — in its development, documentation, and artwork (including the splash image).
+This project makes extensive use of generative AI — including artwork. 
