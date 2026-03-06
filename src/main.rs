@@ -188,8 +188,8 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
             }
         }
 
-        // Process command queue
-        while let Some(cmd) = app.commands.take_next() {
+        // Process proto command queue — routed through daemon-side executor
+        while let Some(cmd) = app.proto_commands.take_next() {
             app::executor::execute(cmd, &mut app).await;
         }
 
