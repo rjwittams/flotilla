@@ -5,7 +5,7 @@ use std::sync::Mutex;
 const MAX_PER_PAGE: usize = 100;
 
 /// Clamp a limit to GitHub's max per_page (100), warning if truncated.
-pub(crate) fn clamp_per_page(limit: usize) -> usize {
+pub fn clamp_per_page(limit: usize) -> usize {
     if limit > MAX_PER_PAGE {
         tracing::warn!("GitHub API per_page capped at {MAX_PER_PAGE} (requested {limit})");
         MAX_PER_PAGE
@@ -15,14 +15,14 @@ pub(crate) fn clamp_per_page(limit: usize) -> usize {
 }
 
 /// Parsed response from `gh api --include`.
-pub(crate) struct GhApiResponse {
+pub struct GhApiResponse {
     pub status: u16,
     pub etag: Option<String>,
     pub body: String,
 }
 
 /// Parse the combined headers+body output from `gh api --include`.
-pub(crate) fn parse_gh_api_response(raw: &str) -> GhApiResponse {
+pub fn parse_gh_api_response(raw: &str) -> GhApiResponse {
     // Split on first blank line (headers end with \r\n\r\n or \n\n)
     let (header_section, body) = if let Some(pos) = raw.find("\r\n\r\n") {
         (&raw[..pos], raw[pos + 4..].trim().to_string())

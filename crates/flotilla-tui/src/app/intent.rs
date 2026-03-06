@@ -1,5 +1,5 @@
-use crate::data::{WorkItem, WorkItemKind};
-use super::command::Command;
+use flotilla_core::data::{WorkItem, WorkItemKind};
+use flotilla_protocol::ProtoCommand;
 use super::App;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +17,7 @@ pub enum Intent {
 }
 
 impl Intent {
-    pub fn label(&self, labels: &super::model::RepoLabels) -> String {
+    pub fn label(&self, labels: &flotilla_core::model::RepoLabels) -> String {
         match self {
             Intent::SwitchToWorkspace => "Switch to workspace".into(),
             Intent::CreateWorkspace => "Create workspace".into(),
@@ -49,7 +49,7 @@ impl Intent {
         }
     }
 
-    pub fn shortcut_hint(&self, labels: &super::model::RepoLabels) -> Option<String> {
+    pub fn shortcut_hint(&self, labels: &flotilla_core::model::RepoLabels) -> Option<String> {
         match self {
             Intent::RemoveWorktree => Some(format!("d:remove {}", labels.checkouts.noun)),
             Intent::OpenPr => Some(format!("p:show {}", labels.code_review.abbr)),
@@ -57,24 +57,27 @@ impl Intent {
         }
     }
 
-    /// Resolve an intent into a concrete command, given the current item and app state.
+    /// Resolve an intent into a concrete ProtoCommand, given the current item and app state.
     /// Returns None if the intent can't be resolved (missing data).
-    pub fn resolve(&self, item: &WorkItem, app: &App) -> Option<Command> {
+    pub fn resolve(&self, item: &WorkItem, app: &App) -> Option<ProtoCommand> {
         match self {
             Intent::SwitchToWorkspace => {
-                item.workspace_refs().first().map(|ws_ref| Command::SelectWorkspace(ws_ref.clone()))
+                item.workspace_refs().first().map(|ws_ref| ProtoCommand::SelectWorkspace { ws_ref: ws_ref.clone() })
             }
             Intent::CreateWorkspace => {
-                item.checkout_key().map(|p| Command::SwitchWorktree(p.to_path_buf()))
+                item.checkout_key().map(|p| ProtoCommand::SwitchWorktree { path: p.to_path_buf() })
             }
             Intent::RemoveWorktree => {
                 if item.kind() != WorkItemKind::Checkout || item.is_main_worktree() {
                     return None;
                 }
-                app.active_ui().selected_selectable_idx.map(Command::FetchDeleteInfo)
+                let branch = item.branch()?.to_string();
+                let worktree_path = item.checkout_key().map(|p| p.to_path_buf());
+                let pr_number = item.pr_key().map(|s| s.to_string());
+                Some(ProtoCommand::FetchDeleteInfo { branch, worktree_path, pr_number })
             }
             Intent::CreateWorktreeAndWorkspace => {
-                item.branch().map(|branch| Command::CreateWorktree {
+                item.branch().map(|branch| ProtoCommand::CreateWorktree {
                     branch: branch.to_string(),
                     create_branch: item.kind() != WorkItemKind::RemoteBranch && item.kind() != WorkItemKind::Pr,
                     issue_ids: Vec::new(),
@@ -82,16 +85,16 @@ impl Intent {
             }
             Intent::GenerateBranchName => {
                 if !item.issue_keys().is_empty() {
-                    Some(Command::GenerateBranchName(item.issue_keys().to_vec()))
+                    Some(ProtoCommand::GenerateBranchName { issue_keys: item.issue_keys().to_vec() })
                 } else {
                     None
                 }
             }
             Intent::OpenPr => {
-                item.pr_key().map(|k| Command::OpenPr(k.to_string()))
+                item.pr_key().map(|k| ProtoCommand::OpenPr { id: k.to_string() })
             }
             Intent::OpenIssue => {
-                item.issue_keys().first().map(|k| Command::OpenIssueBrowser(k.clone()))
+                item.issue_keys().first().map(|k| ProtoCommand::OpenIssueBrowser { id: k.clone() })
             }
             Intent::LinkIssuesToPr => {
                 let pr_key = item.pr_key()?;
@@ -103,13 +106,13 @@ impl Intent {
                 // Find issue IDs from checkout that aren't already on the PR
                 let pr_issue_ids: std::collections::HashSet<&str> = cr.association_keys.iter()
                     .map(|k| {
-                        let crate::providers::types::AssociationKey::IssueRef(_, id) = k;
+                        let flotilla_core::providers::types::AssociationKey::IssueRef(_, id) = k;
                         id.as_str()
                     })
                     .collect();
                 let missing: Vec<String> = co.association_keys.iter()
                     .filter_map(|k| {
-                        let crate::providers::types::AssociationKey::IssueRef(_, id) = k;
+                        let flotilla_core::providers::types::AssociationKey::IssueRef(_, id) = k;
                         if !pr_issue_ids.contains(id.as_str()) {
                             Some(id.clone())
                         } else {
@@ -121,11 +124,11 @@ impl Intent {
                 if missing.is_empty() {
                     return None;
                 }
-                Some(Command::LinkIssuesToPr { pr_id: cr.id.clone(), issue_ids: missing })
+                Some(ProtoCommand::LinkIssuesToPr { pr_id: cr.id.clone(), issue_ids: missing })
             }
             Intent::TeleportSession => {
                 item.session_key().map(|k| {
-                    Command::TeleportSession {
+                    ProtoCommand::TeleportSession {
                         session_id: k.to_string(),
                         branch: item.branch().map(|b| b.to_string()),
                         checkout_key: item.checkout_key().map(|p| p.to_path_buf()),
@@ -133,7 +136,7 @@ impl Intent {
                 })
             }
             Intent::ArchiveSession => {
-                item.session_key().map(|k| Command::ArchiveSession(k.to_string()))
+                item.session_key().map(|k| ProtoCommand::ArchiveSession { session_id: k.to_string() })
             }
         }
     }

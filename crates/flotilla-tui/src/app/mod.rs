@@ -1,26 +1,39 @@
-pub mod command;
 pub mod executor;
 pub mod intent;
-pub mod model;
 pub mod ui_state;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler as InputEventHandler;
 
-use crate::data::{TableEntry, WorkItem};
+use flotilla_core::data::{TableEntry, WorkItem};
+use flotilla_protocol::ProtoCommand;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
 
-pub use command::{Command, CommandQueue};
 pub use intent::Intent;
-pub use model::{AppModel, ProviderStatus};
+pub use flotilla_core::model::{AppModel, ProviderStatus};
 pub use ui_state::{DirEntry, TabId, UiMode, UiState, RepoUiState};
+
+#[derive(Default)]
+pub struct ProtoCommandQueue {
+    queue: VecDeque<ProtoCommand>,
+}
+
+impl ProtoCommandQueue {
+    pub fn push(&mut self, cmd: ProtoCommand) {
+        self.queue.push_back(cmd);
+    }
+    pub fn take_next(&mut self) -> Option<ProtoCommand> {
+        self.queue.pop_front()
+    }
+}
 
 pub struct App {
     pub model: AppModel,
     pub ui: UiState,
-    pub commands: CommandQueue,
+    pub proto_commands: ProtoCommandQueue,
     pub should_quit: bool,
 }
 
@@ -31,7 +44,7 @@ impl App {
         Self {
             model,
             ui,
-            commands: Default::default(),
+            proto_commands: Default::default(),
             should_quit: false,
         }
     }
@@ -214,12 +227,12 @@ impl App {
             KeyCode::Char(']') => self.next_tab(),
             KeyCode::Char('{') => {
                 if !self.ui.mode.is_config() && self.move_tab(-1) {
-                    crate::config::save_tab_order(&self.model.repo_order);
+                    flotilla_core::config::save_tab_order(&self.model.repo_order);
                 }
             }
             KeyCode::Char('}') => {
                 if !self.ui.mode.is_config() && self.move_tab(1) {
-                    crate::config::save_tab_order(&self.model.repo_order);
+                    flotilla_core::config::save_tab_order(&self.model.repo_order);
                 }
             }
             KeyCode::Char('c') => {
@@ -426,7 +439,7 @@ impl App {
                 generating: true,
                 pending_issue_ids: Vec::new(),
             };
-            self.commands.push(Command::GenerateBranchName(all_issue_keys));
+            self.proto_commands.push(ProtoCommand::GenerateBranchName { issue_keys: all_issue_keys });
         }
         self.active_ui_mut().multi_selected.clear();
     }
@@ -458,7 +471,7 @@ impl App {
                 }
                 _ => {}
             }
-            self.commands.push(cmd);
+            self.proto_commands.push(cmd);
         }
     }
 
@@ -525,7 +538,7 @@ impl App {
                 return;
             };
             if !branch.is_empty() {
-                self.commands.push(Command::CreateWorktree { branch, create_branch: true, issue_ids });
+                self.proto_commands.push(ProtoCommand::CreateWorktree { branch, create_branch: true, issue_ids });
             }
             self.ui.mode = UiMode::Normal;
             return;
@@ -605,7 +618,7 @@ impl App {
         if entry.is_git_repo && !entry.is_added {
             let path = PathBuf::from(format!("{}{}", base, entry.name));
             let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-            self.commands.push(Command::AddRepo(canonical));
+            self.proto_commands.push(ProtoCommand::AddRepo { path: canonical });
             self.ui.mode = UiMode::Normal;
         } else if entry.is_dir {
             let new_path = format!("{}{}/", base, entry.name);
@@ -700,7 +713,10 @@ impl App {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
                 if !loading {
-                    self.commands.push(Command::ConfirmDelete);
+                    // Extract branch from DeleteConfirmInfo and send RemoveCheckout
+                    if let UiMode::DeleteConfirm { info: Some(ref info), .. } = self.ui.mode {
+                        self.proto_commands.push(ProtoCommand::RemoveCheckout { branch: info.branch.clone() });
+                    }
                     self.ui.mode = UiMode::Normal;
                 }
             }

@@ -1017,24 +1017,66 @@ dependencies = [
 name = "flotilla"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "clap",
  "color-eyre",
  "crossterm 0.28.1",
- "dirs",
- "futures",
+ "flotilla-core",
+ "flotilla-tui",
  "image",
- "indexmap",
- "minijinja",
  "ratatui 0.30.0",
  "ratatui-image",
+ "tokio",
+ "tracing",
+ "tui-input",
+]
+
+[[package]]
+name = "flotilla-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "color-eyre",
+ "dirs",
+ "flotilla-protocol",
+ "futures",
+ "indexmap",
+ "minijinja",
  "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
- "time",
  "tokio",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "flotilla-daemon"
+version = "0.1.0"
+
+[[package]]
+name = "flotilla-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "flotilla-tui"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "crossterm 0.28.1",
+ "dirs",
+ "flotilla-core",
+ "flotilla-protocol",
+ "futures",
+ "image",
+ "ratatui 0.30.0",
+ "ratatui-image",
+ "time",
+ "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

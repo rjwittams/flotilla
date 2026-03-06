@@ -1,13 +1,11 @@
-mod app;
-mod data;
-mod event;
-mod event_log;
-mod provider_data;
-mod refresh;
-mod template;
-mod ui;
-mod config;
-mod providers;
+use flotilla_tui::app;
+use flotilla_tui::event;
+use flotilla_tui::event_log;
+use flotilla_tui::event_log::LevelExt;
+use flotilla_tui::ui;
+use flotilla_core::config;
+use flotilla_core::data;
+use flotilla_core::providers;
 
 use std::io::stdout;
 use std::path::PathBuf;
@@ -17,7 +15,6 @@ use clap::Parser;
 use color_eyre::Result;
 use crossterm::{execute, event::{EnableMouseCapture, DisableMouseCapture}};
 use tracing::info;
-use event_log::LevelExt;
 /// Flotilla: TUI dashboard for managing development workspaces across terminal multiplexers, source code checkouts and cloud agent services.
 #[derive(Parser)]
 #[command(version)]
@@ -52,6 +49,8 @@ async fn main() -> Result<()> {
     result
 }
 
+// Step 2 (#47) will replace direct AppModel usage with InProcessDaemon (or SocketDaemon).
+// Currently the TUI manages repos via AppModel and drain_snapshots() below.
 async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) -> Result<()> {
     let t = std::time::Instant::now();
     let mut app = app::App::new(repo_roots).await;
@@ -189,8 +188,8 @@ async fn run(terminal: &mut ratatui::DefaultTerminal, repo_roots: Vec<PathBuf>) 
             }
         }
 
-        // Process command queue
-        while let Some(cmd) = app.commands.take_next() {
+        // Process proto command queue — routed through daemon-side executor
+        while let Some(cmd) = app.proto_commands.take_next() {
             app::executor::execute(cmd, &mut app).await;
         }
 
@@ -407,8 +406,8 @@ fn resolve_repo_roots(cli_roots: &[PathBuf]) -> Vec<PathBuf> {
     // 3. Auto-detect from cwd — resolve to main repo root (not worktree)
     let cwd = std::env::current_dir().ok();
     if let Some(ref cwd) = cwd {
-        use crate::providers::vcs::git::GitVcs;
-        use crate::providers::vcs::Vcs;
+        use providers::vcs::git::GitVcs;
+        use providers::vcs::Vcs;
         let git = GitVcs::new();
         if let Some(repo_root) = git.resolve_repo_root(cwd) {
             if !repo_roots.contains(&repo_root) {

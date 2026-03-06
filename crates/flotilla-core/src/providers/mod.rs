@@ -15,7 +15,7 @@ use std::path::Path;
 /// Shared helper: run a command directly and return stdout on success,
 /// stderr on failure. Stdin is detached so subprocesses cannot interfere
 /// with the parent terminal.
-pub(crate) async fn run_cmd(cmd: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
+pub async fn run_cmd(cmd: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
     let output = tokio::process::Command::new(cmd)
         .args(args)
         .current_dir(cwd)
@@ -31,7 +31,7 @@ pub(crate) async fn run_cmd(cmd: &str, args: &[&str], cwd: &Path) -> Result<Stri
 }
 
 /// Check if a command is available by running it directly.
-pub(crate) async fn command_exists(cmd: &str, args: &[&str]) -> bool {
+pub async fn command_exists(cmd: &str, args: &[&str]) -> bool {
     tokio::process::Command::new(cmd)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -45,7 +45,7 @@ pub(crate) async fn command_exists(cmd: &str, args: &[&str]) -> bool {
 
 /// Resolve the path to the `claude` CLI binary.
 /// Checks PATH first, then known installation locations.
-pub(crate) async fn resolve_claude_path() -> Option<String> {
+pub async fn resolve_claude_path() -> Option<String> {
     // Try PATH directly
     if command_exists("claude", &["--version"]).await {
         return Some("claude".to_string());
