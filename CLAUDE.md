@@ -72,6 +72,7 @@ Union-find over `CorrelationKey` values (`Branch`, `CheckoutPath`, `ChangeReques
 - **Enums over bools**: Prefer enum variants for state (e.g. `UiMode`, `Intent`, `WorkItemKind`).
 - **Imports**: std first, external crates, then `use crate::...`.
 - **Adding dependencies is fine** when they solve a real problem — don't reinvent the wheel.
+- **Correctness first**: Always favour correct solutions over "pragmatic" shortcuts. Get the architecture right rather than patching around structural problems.
 
 ## UI Modes
 
