@@ -19,7 +19,7 @@ use crate::config;
 use crate::convert::snapshot_to_proto;
 use crate::daemon::DaemonHandle;
 use crate::executor;
-use crate::model::{AppModel, RepoModel, provider_names_from_registry};
+use crate::model::{RepoModel, provider_names_from_registry, repo_name};
 use crate::refresh::RefreshSnapshot;
 
 struct RepoState {
@@ -155,7 +155,7 @@ impl DaemonHandle for InProcessDaemon {
             if let Some(state) = repos.get(path) {
                 result.push(RepoInfo {
                     path: path.clone(),
-                    name: AppModel::repo_name(path),
+                    name: repo_name(path),
                     labels: state.model.labels.clone(),
                     provider_names: provider_names_from_registry(&state.model.registry),
                     provider_health: state
@@ -226,7 +226,7 @@ impl DaemonHandle for InProcessDaemon {
 
         let repo_info = RepoInfo {
             path: path.clone(),
-            name: AppModel::repo_name(&path),
+            name: repo_name(&path),
             labels: model.labels.clone(),
             provider_names: provider_names_from_registry(&model.registry),
             provider_health: model

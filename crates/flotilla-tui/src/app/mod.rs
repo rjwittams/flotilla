@@ -153,14 +153,6 @@ impl App {
         rm.provider_health = snap.provider_health.clone();
         rm.loading = false;
 
-        // Handle issues_disabled
-        let issues_disabled = snap.errors.iter().any(|e|
-            e.category == "issues" && e.message.contains("has disabled issues")
-        );
-        if issues_disabled {
-            rm.provider_health.remove("issue_tracker");
-        }
-
         // Build table view
         let section_labels = SectionLabels {
             checkouts: rm.labels.checkouts.section.clone(),
@@ -237,12 +229,14 @@ impl App {
             rui.multi_selected.retain(|id| current_identities.contains(id));
         }
 
-        // Log errors
+        // Log errors, suppressing "issues disabled" since the daemon handles that
         if !snap.errors.is_empty() {
             let name = TuiModel::repo_name(&path);
             let mut all_errors: Vec<String> = Vec::new();
             for e in &snap.errors {
-                if issues_disabled && e.category == "issues" { continue; }
+                if e.category == "issues" && e.message.contains("has disabled issues") {
+                    continue;
+                }
                 tracing::error!("{name}: {}: {}", e.category, e.message);
                 all_errors.push(format!("{name}: {}: {}", e.category, e.message));
             }
