@@ -127,6 +127,7 @@ pub async fn execute(
                 merge_commit_sha: info.merge_commit_sha,
                 unpushed_commits: info.unpushed_commits,
                 has_uncommitted: info.has_uncommitted,
+                base_detection_warning: info.base_detection_warning,
             })
         }
 
@@ -274,7 +275,7 @@ pub async fn execute(
         } => {
             info!("teleporting to session {session_id}");
             let claude_bin =
-                providers::resolve_claude_path().unwrap_or_else(|| "claude".into());
+                providers::resolve_claude_path().await.unwrap_or_else(|| "claude".into());
             let teleport_cmd = format!("{} --teleport {}", claude_bin, session_id);
             let wt_path = if let Some(ref key) = checkout_key {
                 providers_data

@@ -3,7 +3,7 @@
 //! This module is the serialization boundary between the rich in-process
 //! core types and the flat, serde-friendly protocol types.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use flotilla_protocol::{
     ProtoCheckoutRef, ProtoError, ProtoWorkItem, ProtoWorkItemIdentity, ProtoWorkItemKind,
@@ -38,12 +38,7 @@ pub fn work_item_identity_to_proto(identity: &WorkItemIdentity) -> ProtoWorkItem
 pub fn work_item_to_proto(item: &WorkItem) -> ProtoWorkItem {
     let kind = work_item_kind_to_proto(item.kind());
 
-    // identity() returns Option; every variant currently produces Some,
-    // but we handle None defensively with a fallback.
-    let identity = item
-        .identity()
-        .map(|id| work_item_identity_to_proto(&id))
-        .unwrap_or_else(|| ProtoWorkItemIdentity::Checkout(PathBuf::new()));
+    let identity = work_item_identity_to_proto(&item.identity());
 
     let checkout = item.checkout().map(|co| ProtoCheckoutRef {
         key: co.key.clone(),

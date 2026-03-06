@@ -38,8 +38,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(repos: Vec<PathBuf>) -> Self {
-        let model = AppModel::new(repos);
+    pub async fn new(repos: Vec<PathBuf>) -> Self {
+        let model = AppModel::new(repos).await;
         let ui = UiState::new(&model.repo_order);
         Self {
             model,
@@ -68,9 +68,9 @@ impl App {
         }
     }
 
-    pub fn add_repo(&mut self, path: PathBuf) {
+    pub async fn add_repo(&mut self, path: PathBuf) {
         if !self.model.repos.contains_key(&path) {
-            self.model.add_repo(path.clone());
+            self.model.add_repo(path.clone()).await;
             self.ui.repo_ui.insert(path, RepoUiState::default());
         }
     }
@@ -353,7 +353,9 @@ impl App {
                 *index = item_idx;
             }
             self.execute_menu_action();
-            self.ui.mode = UiMode::Normal;
+            if matches!(self.ui.mode, UiMode::ActionMenu { .. }) {
+                self.ui.mode = UiMode::Normal;
+            }
         }
     }
 
@@ -381,11 +383,10 @@ impl App {
         if let Some(si) = self.active_ui().selected_selectable_idx {
             if let Some(&table_idx) = self.active_ui().table_view.selectable_indices.get(si) {
                 if let Some(TableEntry::Item(item)) = self.active_ui().table_view.table_entries.get(table_idx) {
-                    if let Some(identity) = item.identity() {
-                        let rui = self.active_ui_mut();
-                        if !rui.multi_selected.remove(&identity) {
-                            rui.multi_selected.insert(identity);
-                        }
+                    let identity = item.identity();
+                    let rui = self.active_ui_mut();
+                    if !rui.multi_selected.remove(&identity) {
+                        rui.multi_selected.insert(identity);
                     }
                 }
             }
@@ -417,20 +418,16 @@ impl App {
         // Collect issues from multi-selected items
         for entry in &self.active_ui().table_view.table_entries {
             if let TableEntry::Item(item) = entry {
-                if let Some(identity) = item.identity() {
-                    if multi_selected.contains(&identity) {
-                        all_issue_keys.extend(item.issue_keys().iter().cloned());
-                    }
+                if multi_selected.contains(&item.identity()) {
+                    all_issue_keys.extend(item.issue_keys().iter().cloned());
                 }
             }
         }
 
         // Also include current selection if not already in multi_selected
         if let Some(item) = self.selected_work_item() {
-            if let Some(identity) = item.identity() {
-                if !multi_selected.contains(&identity) {
-                    all_issue_keys.extend(item.issue_keys().iter().cloned());
-                }
+            if !multi_selected.contains(&item.identity()) {
+                all_issue_keys.extend(item.issue_keys().iter().cloned());
             }
         }
 
@@ -503,7 +500,11 @@ impl App {
         }
         if key.code == KeyCode::Enter {
             self.execute_menu_action();
-            self.ui.mode = UiMode::Normal;
+            // Only reset to Normal if the action didn't set a different mode
+            // (e.g. DeleteConfirm, BranchInput)
+            if matches!(self.ui.mode, UiMode::ActionMenu { .. }) {
+                self.ui.mode = UiMode::Normal;
+            }
             return;
         }
         let UiMode::ActionMenu { ref items, ref mut index } = self.ui.mode else { return; };

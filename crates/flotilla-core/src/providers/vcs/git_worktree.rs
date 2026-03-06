@@ -165,7 +165,7 @@ impl GitCheckoutManager {
                 run_cmd("git", &["status", "--porcelain"], path)
                     .await
                     .ok()
-                    .map(|out| parse_working_tree(&out))
+                    .map(|out| super::parse_porcelain_status(&out))
             },
             async {
                 run_cmd("git", &["log", "-1", "--format=%h\t%s"], path)
@@ -205,35 +205,6 @@ fn parse_ahead_behind(output: &str) -> Option<AheadBehind> {
     let ahead: i64 = parts.next()?.parse().ok()?;
     let behind: i64 = parts.next()?.parse().ok()?;
     Some(AheadBehind { ahead, behind })
-}
-
-fn parse_working_tree(output: &str) -> WorkingTreeStatus {
-    let mut staged = 0usize;
-    let mut modified = 0usize;
-    let mut untracked = 0usize;
-    for line in output.lines() {
-        let bytes = line.as_bytes();
-        if bytes.len() < 2 {
-            continue;
-        }
-        let x = bytes[0];
-        let y = bytes[1];
-        if x == b'?' {
-            untracked += 1;
-        } else {
-            if x != b' ' {
-                staged += 1;
-            }
-            if y != b' ' && y != b'?' {
-                modified += 1;
-            }
-        }
-    }
-    WorkingTreeStatus {
-        staged,
-        modified,
-        untracked,
-    }
 }
 
 #[async_trait]
@@ -420,7 +391,7 @@ branch refs/heads/feature
     #[test]
     fn parse_working_tree_mixed() {
         let output = "M  src/main.rs\n?? new_file.rs\nA  added.rs\n M modified.rs\n";
-        let wt = parse_working_tree(output);
+        let wt = crate::providers::vcs::parse_porcelain_status(output);
         assert_eq!(wt.staged, 2); // M and A in index column
         assert_eq!(wt.modified, 1); // M in worktree column
         assert_eq!(wt.untracked, 1); // ??
@@ -428,7 +399,7 @@ branch refs/heads/feature
 
     #[test]
     fn parse_working_tree_empty() {
-        let wt = parse_working_tree("");
+        let wt = crate::providers::vcs::parse_porcelain_status("");
         assert_eq!(wt.staged, 0);
         assert_eq!(wt.modified, 0);
         assert_eq!(wt.untracked, 0);

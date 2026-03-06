@@ -3,6 +3,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use super::{command_exists, resolve_claude_path};
+use tokio::process::Command;
 use tracing::{info, warn};
 use crate::providers::ai_utility::claude::ClaudeAiUtility;
 use crate::providers::code_review::github::GitHubCodeReview;
@@ -19,14 +20,15 @@ use crate::providers::workspace::tmux::TmuxWorkspaceManager;
 use crate::providers::workspace::zellij::ZellijWorkspaceManager;
 
 /// Extract the first git remote URL for this repo.
-pub fn first_remote_url(repo_root: &Path) -> Option<String> {
-    let remotes_output = std::process::Command::new("git")
+pub async fn first_remote_url(repo_root: &Path) -> Option<String> {
+    let remotes_output = Command::new("git")
         .args(["remote"])
         .current_dir(repo_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
+        .await
         .ok()?;
 
     if !remotes_output.status.success() {
@@ -39,13 +41,14 @@ pub fn first_remote_url(repo_root: &Path) -> Option<String> {
         if remote.is_empty() {
             continue;
         }
-        let url_output = std::process::Command::new("git")
+        let url_output = Command::new("git")
             .args(["remote", "get-url", remote])
             .current_dir(repo_root)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
+            .await
             .ok();
 
         if let Some(output) = url_output {
@@ -99,7 +102,7 @@ pub fn extract_repo_slug(url: &str) -> Option<String> {
 /// 4. Coding agent: check for `claude` CLI
 /// 5. AI utility: check for `claude` CLI
 /// 6. Workspace manager: check for cmux binary
-pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
+pub async fn detect_providers(repo_root: &Path) -> (ProviderRegistry, Option<String>) {
     let mut registry = ProviderRegistry::new();
     let repo_name = repo_root
         .file_name()
@@ -118,7 +121,7 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
     let co_config = config::resolve_checkouts_config(repo_root);
     match co_config.provider.as_str() {
         "wt" => {
-            if command_exists("wt", &["--version"]) {
+            if command_exists("wt", &["--version"]).await {
                 registry
                     .checkout_managers
                     .insert("git".to_string(), Arc::new(WtCheckoutManager::new()));
@@ -138,7 +141,7 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
         }
         _ => {
             // Auto: try wt first, fall back to git
-            if command_exists("wt", &["--version"]) {
+            if command_exists("wt", &["--version"]).await {
                 registry
                     .checkout_managers
                     .insert("git".to_string(), Arc::new(WtCheckoutManager::new()));
@@ -153,10 +156,11 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
     }
 
     // 3. Remote host detection -> code review & issue tracker
-    let remote_url = first_remote_url(repo_root);
+    let remote_url = first_remote_url(repo_root).await;
+    let repo_slug = remote_url.as_deref().and_then(extract_repo_slug);
     if let Some(ref host) = remote_url.as_deref().and_then(detect_host_from_url) {
-        if host == "github" && command_exists("gh", &["--version"]) {
-            if let Some(slug) = remote_url.as_deref().and_then(extract_repo_slug) {
+        if host == "github" && command_exists("gh", &["--version"]).await {
+            if let Some(slug) = repo_slug.clone() {
                 let api = Arc::new(GhApiClient::new());
                 registry.code_review.insert(
                     "github".to_string(),
@@ -176,7 +180,7 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
     }
 
     // 4. Coding agent & AI utility: claude
-    if let Some(claude_bin) = resolve_claude_path() {
+    if let Some(claude_bin) = resolve_claude_path().await {
         registry.coding_agents.insert(
             "claude".to_string(),
             Arc::new(ClaudeCodingAgent::new("claude".to_string())),
@@ -200,7 +204,7 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
             info!("{repo_name}: Workspace mgr → cmux");
         }
     } else if std::env::var("ZELLIJ").is_ok() {
-        if ZellijWorkspaceManager::check_version().is_ok() {
+        if ZellijWorkspaceManager::check_version().await.is_ok() {
             registry.workspace_manager = Some((
                 "zellij".to_string(),
                 Arc::new(ZellijWorkspaceManager::new()),
@@ -225,5 +229,5 @@ pub fn detect_providers(repo_root: &Path) -> ProviderRegistry {
         }
     }
 
-    registry
+    (registry, repo_slug)
 }

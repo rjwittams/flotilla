@@ -20,7 +20,7 @@ pub async fn execute(cmd: ProtoCommand, app: &mut App) {
         let path = path.clone();
         info!("adding repo {}", path.display());
         config::save_repo(&path);
-        app.add_repo(path);
+        app.add_repo(path).await;
         app.switch_tab(app.model.repo_order.len() - 1);
         config::save_tab_order(&app.model.repo_order);
         trigger_active_refresh(app);
@@ -58,6 +58,7 @@ fn handle_result(result: CommandResult, app: &mut App) {
                     merge_commit_sha: info.merge_commit_sha,
                     unpushed_commits: info.unpushed_commits,
                     has_uncommitted: info.has_uncommitted,
+                    base_detection_warning: info.base_detection_warning,
                 }),
                 loading: false,
             };
@@ -70,7 +71,5 @@ fn handle_result(result: CommandResult, app: &mut App) {
 
 /// Trigger an immediate background refresh on the active repo.
 fn trigger_active_refresh(app: &App) {
-    if let Some(handle) = &app.model.active().refresh_handle {
-        handle.trigger_refresh();
-    }
+    app.model.active().refresh_handle.trigger_refresh();
 }

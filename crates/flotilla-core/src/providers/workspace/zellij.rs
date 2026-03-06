@@ -62,11 +62,12 @@ impl ZellijWorkspaceManager {
 
     /// Check that `zellij --version` reports >= 0.40.
     /// Parses output like "zellij 0.42.2".
-    pub fn check_version() -> Result<(), String> {
-        let output = std::process::Command::new("zellij")
+    pub async fn check_version() -> Result<(), String> {
+        let output = Command::new("zellij")
             .arg("--version")
             .stdin(std::process::Stdio::null())
             .output()
+            .await
             .map_err(|e| format!("failed to run zellij --version: {e}"))?;
 
         let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();

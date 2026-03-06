@@ -71,4 +71,5 @@ pub struct ProtoDeleteInfo {
     pub merge_commit_sha: Option<String>,
     pub unpushed_commits: Vec<String>,
     pub has_uncommitted: bool,
+    pub base_detection_warning: Option<String>,
 }

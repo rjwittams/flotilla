@@ -141,6 +141,7 @@ mod tests {
                 merge_commit_sha: Some("abc123".to_string()),
                 unpushed_commits: vec!["def456".to_string()],
                 has_uncommitted: false,
+                base_detection_warning: None,
             }),
             CommandResult::Error {
                 message: "something went wrong".to_string(),

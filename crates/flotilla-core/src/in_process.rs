@@ -35,7 +35,7 @@ pub struct InProcessDaemon {
 
 impl InProcessDaemon {
     /// Create a new in-process daemon tracking the given repo paths.
-    pub fn new(repo_paths: Vec<PathBuf>) -> Self {
+    pub async fn new(repo_paths: Vec<PathBuf>) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         let mut repos = HashMap::new();
         let mut order = Vec::new();
@@ -44,8 +44,8 @@ impl InProcessDaemon {
             if repos.contains_key(&path) {
                 continue;
             }
-            let registry = crate::providers::discovery::detect_providers(&path);
-            let model = RepoModel::new(path.clone(), registry);
+            let (registry, repo_slug) = crate::providers::discovery::detect_providers(&path).await;
+            let model = RepoModel::new(path.clone(), registry, repo_slug);
             repos.insert(
                 path.clone(),
                 RepoState {
@@ -76,9 +76,7 @@ impl InProcessDaemon {
         let mut repos = self.repos.write().await;
 
         for (path, state) in repos.iter_mut() {
-            let Some(ref mut handle) = state.model.refresh_handle else {
-                continue;
-            };
+            let handle = &mut state.model.refresh_handle;
             if !handle.snapshot_rx.has_changed().unwrap_or(false) {
                 continue;
             }
@@ -174,9 +172,7 @@ impl DaemonHandle for InProcessDaemon {
         {
             let repos = self.repos.read().await;
             if let Some(state) = repos.get(repo) {
-                if let Some(ref handle) = state.model.refresh_handle {
-                    handle.trigger_refresh();
-                }
+                state.model.refresh_handle.trigger_refresh();
             }
         }
 
@@ -188,9 +184,7 @@ impl DaemonHandle for InProcessDaemon {
         let state = repos
             .get(repo)
             .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
-        if let Some(ref handle) = state.model.refresh_handle {
-            handle.trigger_refresh();
-        }
+        state.model.refresh_handle.trigger_refresh();
         Ok(())
     }
 
@@ -206,8 +200,8 @@ impl DaemonHandle for InProcessDaemon {
         }
 
         // Create the model (this spawns provider detection and refresh loop)
-        let registry = crate::providers::discovery::detect_providers(&path);
-        let model = RepoModel::new(path.clone(), registry);
+        let (registry, repo_slug) = crate::providers::discovery::detect_providers(&path).await;
+        let model = RepoModel::new(path.clone(), registry, repo_slug);
 
         let repo_info = RepoInfo {
             path: path.clone(),
