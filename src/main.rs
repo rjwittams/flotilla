@@ -275,6 +275,7 @@ fn drain_snapshots(app: &mut app::App) {
                 });
 
             rui.table_view = table_view;
+            *rui.table_state.offset_mut() = 0;
 
             // Restore selection by identity
             if rui.table_view.selectable_indices.is_empty() {
