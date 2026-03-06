@@ -859,7 +859,7 @@ fn render_help(model: &AppModel, ui: &UiState, frame: &mut Frame) {
         Line::from(Span::styled("Actions", Style::default().bold())),
         Line::from("  Enter            Open workspace (switch/create as needed)"),
         Line::from("  Double-click     Same as Enter"),
-        Line::from("  Space            Action menu (all available actions)"),
+        Line::from("  .                Action menu (all available actions)"),
         Line::from("  Right-click      Action menu"),
         Line::from(format!(
             "  n                New branch (enter name, creates {})",
@@ -879,8 +879,7 @@ fn render_help(model: &AppModel, ui: &UiState, frame: &mut Frame) {
             "Multi-select (issues)",
             Style::default().bold(),
         )),
-        Line::from("  Shift+Enter      Toggle selection on current item"),
-        Line::from("  Shift+Click      Toggle selection on clicked item"),
+        Line::from("  Space            Toggle selection on current item"),
         Line::from("  Enter            Generate branch name for all selected"),
         Line::from("  Esc              Clear selection"),
         Line::from(""),
