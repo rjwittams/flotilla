@@ -11,6 +11,7 @@ pub enum Intent {
     GenerateBranchName,
     OpenPr,
     OpenIssue,
+    LinkIssuesToPr,
     TeleportSession,
     ArchiveSession,
 }
@@ -25,6 +26,7 @@ impl Intent {
             Intent::GenerateBranchName => "Generate branch name".into(),
             Intent::OpenPr => format!("Open {} in browser", labels.code_review.noun),
             Intent::OpenIssue => "Open issue in browser".into(),
+            Intent::LinkIssuesToPr => format!("Link issues to {}", labels.code_review.noun),
             Intent::TeleportSession => "Teleport session".into(),
             Intent::ArchiveSession => "Archive session".into(),
         }
@@ -39,6 +41,7 @@ impl Intent {
             Intent::GenerateBranchName => item.branch.is_none() && !item.issue_idxs.is_empty(),
             Intent::OpenPr => item.pr_idx.is_some(),
             Intent::OpenIssue => !item.issue_idxs.is_empty(),
+            Intent::LinkIssuesToPr => item.pr_idx.is_some() && item.worktree_idx.is_some(),
             Intent::TeleportSession => item.session_idx.is_some(),
             Intent::ArchiveSession => item.session_idx.is_some(),
         }
@@ -94,6 +97,36 @@ impl Intent {
                         .map(|issue| Command::OpenIssueBrowser(issue.id.clone()))
                 })
             }
+            Intent::LinkIssuesToPr => {
+                let pr_idx = item.pr_idx?;
+                let co_idx = item.worktree_idx?;
+                let data = &app.model.active().data.providers;
+                let cr = data.change_requests.get(pr_idx)?;
+                let co = data.checkouts.get(co_idx)?;
+
+                // Find issue IDs from checkout that aren't already on the PR
+                let pr_issue_ids: std::collections::HashSet<&str> = cr.association_keys.iter()
+                    .map(|k| {
+                        let crate::providers::types::AssociationKey::IssueRef(_, id) = k;
+                        id.as_str()
+                    })
+                    .collect();
+                let missing: Vec<String> = co.association_keys.iter()
+                    .filter_map(|k| {
+                        let crate::providers::types::AssociationKey::IssueRef(_, id) = k;
+                        if !pr_issue_ids.contains(id.as_str()) {
+                            Some(id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if missing.is_empty() {
+                    return None;
+                }
+                Some(Command::LinkIssuesToPr { pr_id: cr.id.clone(), issue_ids: missing })
+            }
             Intent::TeleportSession => {
                 item.session_idx.and_then(|ses_idx| {
                     app.model.active().data.providers.sessions.get(ses_idx).map(|session| {
@@ -120,6 +153,7 @@ impl Intent {
             Intent::GenerateBranchName,
             Intent::OpenPr,
             Intent::OpenIssue,
+            Intent::LinkIssuesToPr,
             Intent::TeleportSession,
             Intent::ArchiveSession,
         ]

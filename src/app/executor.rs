@@ -93,6 +93,43 @@ pub async fn execute(cmd: Command, app: &mut App) {
                 let _ = it.open_in_browser(&repo, &id).await;
             }
         }
+        Command::LinkIssuesToPr { pr_id, issue_ids } => {
+            info!("linking issues {:?} to PR #{pr_id}", issue_ids);
+            let repo = app.model.active_repo_root().clone();
+            let body_result = providers::run_cmd(
+                "gh",
+                &["pr", "view", &pr_id, "--json", "body", "--jq", ".body"],
+                &repo,
+            ).await;
+            match body_result {
+                Ok(current_body) => {
+                    let fixes_lines: Vec<String> = issue_ids.iter()
+                        .map(|id| format!("Fixes #{id}"))
+                        .collect();
+                    let new_body = if current_body.trim().is_empty() {
+                        fixes_lines.join("\n")
+                    } else {
+                        format!("{}\n\n{}", current_body.trim(), fixes_lines.join("\n"))
+                    };
+                    let result = providers::run_cmd(
+                        "gh",
+                        &["pr", "edit", &pr_id, "--body", &new_body],
+                        &repo,
+                    ).await;
+                    if let Err(e) = result {
+                        error!("failed to edit PR: {e}");
+                        app.model.status_message = Some(e);
+                    } else {
+                        info!("linked issues to PR #{pr_id}");
+                    }
+                }
+                Err(e) => {
+                    error!("failed to read PR body: {e}");
+                    app.model.status_message = Some(e);
+                }
+            }
+            trigger_active_refresh(app);
+        }
         Command::CreateWorktree { branch, create_branch, issue_ids } => {
             info!("creating {} {branch}", app.model.active_labels().checkouts.noun);
             let repo = app.model.active_repo_root().clone();

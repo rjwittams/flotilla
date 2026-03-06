@@ -9,6 +9,7 @@ pub enum Command {
     ConfirmDelete,
     OpenPr(String),
     OpenIssueBrowser(String),
+    LinkIssuesToPr { pr_id: String, issue_ids: Vec<String> },
     ArchiveSession(usize),
     GenerateBranchName(Vec<usize>),
     /// Teleport into a web session (creates worktree + workspace as needed)
