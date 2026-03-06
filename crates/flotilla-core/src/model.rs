@@ -100,14 +100,24 @@ pub struct AppModel {
 
 impl AppModel {
     pub async fn new(repo_paths: Vec<PathBuf>) -> Self {
-        let mut repos = HashMap::new();
+        // Deduplicate while preserving order
         let mut order = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for path in repo_paths {
-            if !repos.contains_key(&path) {
-                repos.insert(path.clone(), Self::build_repo_model(path.clone()).await);
+            if seen.insert(path.clone()) {
                 order.push(path);
             }
         }
+
+        // Detect providers for all repos in parallel
+        let futures: Vec<_> = order
+            .iter()
+            .map(|path| Self::build_repo_model(path.clone()))
+            .collect();
+        let models = futures::future::join_all(futures).await;
+
+        let repos = order.iter().cloned().zip(models).collect();
+
         Self {
             repos,
             repo_order: order,
