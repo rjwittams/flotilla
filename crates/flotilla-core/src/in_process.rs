@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -118,17 +117,6 @@ impl InProcessDaemon {
             state.model.data.correlation_groups = snapshot.correlation_groups.clone();
             state.model.data.provider_health = snapshot.provider_health.clone();
             state.model.data.loading = false;
-
-            // Handle issues_disabled — tell the background task to stop querying,
-            // and suppress from provider health display
-            let issues_disabled = snapshot
-                .errors
-                .iter()
-                .any(|e| e.category == "issues" && e.message.contains("has disabled issues"));
-            if issues_disabled {
-                state.model.data.provider_health.remove("issue_tracker");
-                handle.skip_issues.store(true, Ordering::Relaxed);
-            }
 
             // Increment sequence and store snapshot
             state.seq += 1;

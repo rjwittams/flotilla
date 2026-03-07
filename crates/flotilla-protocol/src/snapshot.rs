@@ -213,6 +213,9 @@ mod tests {
             providers: ProviderData::default(),
             provider_health: HashMap::new(),
             errors: vec![],
+            issue_total: None,
+            issue_has_more: false,
+            issue_search_results: None,
         };
         let json = serde_json::to_string(&empty).expect("serialize");
         let decoded_empty: Snapshot = serde_json::from_str(&json).expect("deserialize");
@@ -259,6 +262,9 @@ mod tests {
                 category: "github".into(),
                 message: "not found".into(),
             }],
+            issue_total: None,
+            issue_has_more: false,
+            issue_search_results: None,
         };
         let json = serde_json::to_string(&populated).expect("serialize");
         let decoded_populated: Snapshot = serde_json::from_str(&json).expect("deserialize");
