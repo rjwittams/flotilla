@@ -1030,6 +1030,7 @@ dependencies = [
  "flotilla-daemon",
  "flotilla-tui",
  "image",
+ "libc",
  "ratatui 0.30.0",
  "ratatui-image",
  "serde_json",

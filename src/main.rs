@@ -106,6 +106,11 @@ async fn run_tui(cli: Cli) -> Result<()> {
         daemon as Arc<dyn DaemonHandle>
     } else {
         // Socket mode — connect or auto-spawn
+        if !cli.repo_root.is_empty() {
+            eprintln!(
+                "Warning: --repo-root is ignored in socket mode (repos are managed by the daemon)"
+            );
+        }
         let socket_path = cli.socket_path();
         let daemon = connect_or_spawn(&socket_path, &cli)
             .await
@@ -303,7 +308,15 @@ async fn connect_or_spawn(
     if let Some(ref socket) = cli.socket {
         cmd.arg("--socket").arg(socket);
     }
-    // Detach: redirect stdio, log stderr to file for debugging
+    // Detach: own session so Ctrl-C doesn't kill daemon with TUI
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    // Redirect stdio, log stderr to file for debugging
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     let log_file = cli.config_dir().join("daemon.log");
