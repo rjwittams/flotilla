@@ -344,8 +344,34 @@ async fn run_daemon(cli: &Cli, timeout_secs: u64) -> Result<()> {
     server.run().await.map_err(|e| color_eyre::eyre::eyre!(e))
 }
 
-async fn run_status(_cli: &Cli) -> Result<()> {
-    todo!("Task 9: status subcommand")
+async fn run_status(cli: &Cli) -> Result<()> {
+    let socket_path = cli.socket_path();
+    let daemon = SocketDaemon::connect(&socket_path)
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("cannot connect to daemon: {e}"))?;
+
+    let repos = daemon.list_repos().await
+        .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+
+    if repos.is_empty() {
+        println!("No repos tracked.");
+        return Ok(());
+    }
+
+    for repo in &repos {
+        let name = &repo.name;
+        let path = repo.path.display();
+        let health: Vec<String> = repo.provider_health.iter()
+            .map(|(k, v)| format!("{k}: {}", if *v { "ok" } else { "error" }))
+            .collect();
+        let loading = if repo.loading { " (loading)" } else { "" };
+        println!("{name}{loading}  {path}");
+        if !health.is_empty() {
+            println!("  providers: {}", health.join(", "));
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_watch(_cli: &Cli) -> Result<()> {
