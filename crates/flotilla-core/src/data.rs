@@ -266,7 +266,11 @@ fn group_to_work_item(
     }
 
     let (anchor, linked_change_request, linked_session) = if let Some(co) = checkout_ref {
-        (CorrelatedAnchor::Checkout(co), change_request_key, session_key)
+        (
+            CorrelatedAnchor::Checkout(co),
+            change_request_key,
+            session_key,
+        )
     } else if let Some(key) = change_request_key {
         (CorrelatedAnchor::Pr(key), None, session_key)
     } else if let Some(key) = session_key {
@@ -523,8 +527,14 @@ pub fn group_work_items(
 
     // PRs -- sorted by id descending
     pr_items.sort_by(|a, b| {
-        let a_num = a.change_request_key.as_deref().and_then(|k| k.parse::<i64>().ok());
-        let b_num = b.change_request_key.as_deref().and_then(|k| k.parse::<i64>().ok());
+        let a_num = a
+            .change_request_key
+            .as_deref()
+            .and_then(|k| k.parse::<i64>().ok());
+        let b_num = b
+            .change_request_key
+            .as_deref()
+            .and_then(|k| k.parse::<i64>().ok());
         b_num.cmp(&a_num)
     });
     if !pr_items.is_empty() {

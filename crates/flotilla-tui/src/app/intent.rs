@@ -27,7 +27,9 @@ impl Intent {
             Intent::GenerateBranchName => "Generate branch name".into(),
             Intent::OpenChangeRequest => format!("Open {} in browser", labels.code_review.noun),
             Intent::OpenIssue => "Open issue in browser".into(),
-            Intent::LinkIssuesToChangeRequest => format!("Link issues to {}", labels.code_review.noun),
+            Intent::LinkIssuesToChangeRequest => {
+                format!("Link issues to {}", labels.code_review.noun)
+            }
             Intent::TeleportSession => "Teleport session".into(),
             Intent::ArchiveSession => "Archive session".into(),
         }
@@ -75,9 +77,12 @@ impl Intent {
                         ws_ref: ws_ref.clone(),
                     })
             }
-            Intent::CreateWorkspace => item.checkout_key().map(|p| Command::CreateWorkspaceForCheckout {
-                checkout_path: p.to_path_buf(),
-            }),
+            Intent::CreateWorkspace => {
+                item.checkout_key()
+                    .map(|p| Command::CreateWorkspaceForCheckout {
+                        checkout_path: p.to_path_buf(),
+                    })
+            }
             Intent::RemoveCheckout => {
                 if item.kind != WorkItemKind::Checkout || item.is_main_checkout {
                     return None;

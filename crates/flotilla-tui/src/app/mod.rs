@@ -1024,7 +1024,7 @@ impl App {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
                 if !loading {
-                    // Extract branch from DeleteInfo and send RemoveCheckout
+                    // Extract branch from CheckoutStatus and send RemoveCheckout
                     if let UiMode::DeleteConfirm {
                         info: Some(ref info),
                         ..
