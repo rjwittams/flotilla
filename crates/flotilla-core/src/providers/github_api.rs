@@ -87,6 +87,10 @@ impl GhApiClient {
 
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
+        // Uses Command directly (not CommandRunner) because `gh api --include`
+        // writes HTTP headers to stdout even on non-zero exit; the runner's
+        // run() would discard that output. GhApiClient is itself the mockable
+        // seam for code review / issue tracker providers.
         let output = tokio::process::Command::new("gh")
             .args(&args_refs)
             .current_dir(repo_root)

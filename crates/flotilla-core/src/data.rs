@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 // Re-export protocol types that are used throughout the crate and by consumers.
@@ -567,23 +567,10 @@ pub fn group_work_items(
     }
 }
 
-async fn run_command(cmd: &str, args: &[&str], cwd: Option<&PathBuf>) -> Result<String, String> {
-    let mut command = tokio::process::Command::new(cmd);
-    command.args(args).stdin(std::process::Stdio::null());
-    if let Some(dir) = cwd {
-        command.current_dir(dir);
-    }
-    let output = command.output().await.map_err(|e| e.to_string())?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn identity_checkout() {
@@ -733,6 +720,7 @@ pub async fn fetch_delete_confirm_info(
     worktree_path: Option<&Path>,
     pr_number: Option<&str>,
     repo_root: &Path,
+    runner: &dyn crate::providers::CommandRunner,
 ) -> DeleteInfo {
     let branch_owned = branch.to_string();
     let repo = repo_root.to_path_buf();
@@ -746,28 +734,30 @@ pub async fn fetch_delete_confirm_info(
     let (unpushed_result, uncommitted, pr_info) = tokio::join!(
         async {
             let base = async {
-                let upstream = run_command(
-                    "git",
-                    &[
-                        "rev-parse",
-                        "--abbrev-ref",
-                        &format!("{branch_for_base}@{{upstream}}"),
-                    ],
-                    Some(&repo_for_base),
-                )
-                .await;
+                let upstream = runner
+                    .run(
+                        "git",
+                        &[
+                            "rev-parse",
+                            "--abbrev-ref",
+                            &format!("{branch_for_base}@{{upstream}}"),
+                        ],
+                        &repo_for_base,
+                    )
+                    .await;
                 if let Ok(ref u) = upstream {
                     let u = u.trim();
                     if !u.is_empty() {
                         return Ok(u.to_string());
                     }
                 }
-                let remote_head = run_command(
-                    "git",
-                    &["rev-parse", "--abbrev-ref", "origin/HEAD"],
-                    Some(&repo_for_base),
-                )
-                .await;
+                let remote_head = runner
+                    .run(
+                        "git",
+                        &["rev-parse", "--abbrev-ref", "origin/HEAD"],
+                        &repo_for_base,
+                    )
+                    .await;
                 if let Ok(ref rh) = remote_head {
                     let rh = rh.trim();
                     if !rh.is_empty() {
@@ -780,17 +770,18 @@ pub async fn fetch_delete_confirm_info(
 
             match base {
                 Ok(base_ref) => {
-                    let log = run_command(
-                        "git",
-                        &[
-                            "log",
-                            &format!("{base_ref}..{branch_for_base}"),
-                            "--oneline",
-                        ],
-                        Some(&repo_for_base),
-                    )
-                    .await
-                    .unwrap_or_default();
+                    let log = runner
+                        .run(
+                            "git",
+                            &[
+                                "log",
+                                &format!("{base_ref}..{branch_for_base}"),
+                                "--oneline",
+                            ],
+                            &repo_for_base,
+                        )
+                        .await
+                        .unwrap_or_default();
                     Ok(log)
                 }
                 Err(warning) => Err(warning),
@@ -798,7 +789,8 @@ pub async fn fetch_delete_confirm_info(
         },
         async {
             if let Some(path) = &wt_path {
-                run_command("git", &["status", "--porcelain"], Some(path))
+                runner
+                    .run("git", &["status", "--porcelain"], path)
                     .await
                     .unwrap_or_default()
             } else {
@@ -807,13 +799,14 @@ pub async fn fetch_delete_confirm_info(
         },
         async {
             if let Some(ref num) = pr_num {
-                run_command(
-                    "gh",
-                    &["pr", "view", num, "--json", "state,mergeCommit"],
-                    Some(&repo2),
-                )
-                .await
-                .ok()
+                runner
+                    .run(
+                        "gh",
+                        &["pr", "view", num, "--json", "state,mergeCommit"],
+                        &repo2,
+                    )
+                    .await
+                    .ok()
             } else {
                 None
             }

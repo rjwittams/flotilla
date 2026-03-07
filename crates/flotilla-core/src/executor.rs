@@ -120,6 +120,7 @@ pub async fn execute(
                 worktree_path.as_deref(),
                 pr_number.as_deref(),
                 repo_root,
+                runner,
             )
             .await;
             CommandResult::DeleteInfo(info)
