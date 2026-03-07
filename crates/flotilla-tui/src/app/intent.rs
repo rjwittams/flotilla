@@ -61,7 +61,13 @@ impl Intent {
     pub fn shortcut_hint(&self, labels: &RepoLabels) -> Option<String> {
         match self {
             Intent::RemoveCheckout => Some(format!("d:remove {}", labels.checkouts.noun)),
-            Intent::OpenChangeRequest => Some(format!("p:show {}", labels.code_review.abbr)),
+            Intent::OpenChangeRequest => {
+                if labels.code_review.abbr.is_empty() {
+                    Some("p:show".into())
+                } else {
+                    Some(format!("p:show {}", labels.code_review.abbr))
+                }
+            }
             _ => None,
         }
     }
@@ -549,7 +555,7 @@ mod tests {
         let labels = default_labels();
         assert_eq!(
             Intent::OpenChangeRequest.shortcut_hint(&labels),
-            Some("p:show ".into())
+            Some("p:show".into())
         );
     }
 
