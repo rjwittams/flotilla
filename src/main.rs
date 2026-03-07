@@ -374,8 +374,33 @@ async fn run_status(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-async fn run_watch(_cli: &Cli) -> Result<()> {
-    todo!("Task 10: watch subcommand")
+async fn run_watch(cli: &Cli) -> Result<()> {
+    let socket_path = cli.socket_path();
+    let daemon = SocketDaemon::connect(&socket_path)
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("cannot connect to daemon: {e}"))?;
+
+    let mut rx = daemon.subscribe();
+    println!("watching events (Ctrl-C to stop)...");
+
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                let json = serde_json::to_string_pretty(&event)
+                    .unwrap_or_else(|_| format!("{event:?}"));
+                println!("{json}");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                eprintln!("warning: skipped {n} events");
+            }
+            Err(_) => {
+                eprintln!("daemon disconnected");
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn show_splash(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
