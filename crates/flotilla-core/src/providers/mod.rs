@@ -94,13 +94,12 @@ pub async fn resolve_claude_path(runner: &dyn CommandRunner) -> Option<String> {
     }
     let known_paths = [dirs::home_dir().map(|h| h.join(".claude/local/claude"))];
     for path in known_paths.into_iter().flatten() {
-        if path.is_file() {
-            if runner
+        if path.is_file()
+            && runner
                 .exists(path.to_str().unwrap_or(""), &["--version"])
                 .await
-            {
-                return Some(path.to_string_lossy().to_string());
-            }
+        {
+            return Some(path.to_string_lossy().to_string());
         }
     }
     None
