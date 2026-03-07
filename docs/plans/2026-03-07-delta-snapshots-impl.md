@@ -42,7 +42,7 @@ use crate::{
 
 /// Operation on a keyed collection entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "op")]
+#[serde(tag = "op", content = "value")]
 pub enum EntryOp<T> {
     #[serde(rename = "added")]
     Added(T),
@@ -76,6 +76,7 @@ pub enum Change {
     Branch { key: String, op: EntryOp<Branch> },
     WorkItem { identity: WorkItemIdentity, op: EntryOp<WorkItem> },
     ProviderHealth { provider: String, op: EntryOp<bool> },
+    /// Full replacement — errors lack stable identity, so keyed deltas don't apply.
     ErrorsChanged(Vec<ProviderError>),
 }
 

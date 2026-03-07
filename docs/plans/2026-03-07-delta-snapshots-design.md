@@ -20,7 +20,7 @@ This extends naturally to multi-host: the delta log is the replication unit.
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op")]
+#[serde(tag = "op", content = "value")]
 pub enum EntryOp<T> {
     Added(T),
     Updated(T),
