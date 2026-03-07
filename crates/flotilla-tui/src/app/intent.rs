@@ -566,23 +566,50 @@ mod tests {
 
     // ── all_in_menu_order tests ──
 
+    /// Exhaustive match — if a new Intent variant is added this will fail to
+    /// compile, reminding the author to add it to `all_in_menu_order()` (and
+    /// `enter_priority()` if appropriate).
+    fn all_intent_variants() -> Vec<Intent> {
+        // Intentionally no wildcard — forces a compile error on new variants.
+        [
+            Intent::SwitchToWorkspace,
+            Intent::CreateWorkspace,
+            Intent::RemoveWorktree,
+            Intent::CreateWorktreeAndWorkspace,
+            Intent::GenerateBranchName,
+            Intent::OpenPr,
+            Intent::OpenIssue,
+            Intent::LinkIssuesToPr,
+            Intent::TeleportSession,
+            Intent::ArchiveSession,
+        ]
+        .into_iter()
+        .map(|v| match v {
+            Intent::SwitchToWorkspace => v,
+            Intent::CreateWorkspace => v,
+            Intent::RemoveWorktree => v,
+            Intent::CreateWorktreeAndWorkspace => v,
+            Intent::GenerateBranchName => v,
+            Intent::OpenPr => v,
+            Intent::OpenIssue => v,
+            Intent::LinkIssuesToPr => v,
+            Intent::TeleportSession => v,
+            Intent::ArchiveSession => v,
+        })
+        .collect()
+    }
+
     #[test]
-    fn all_in_menu_order_matches_expected_sequence() {
-        assert_eq!(
-            Intent::all_in_menu_order(),
-            &[
-                Intent::SwitchToWorkspace,
-                Intent::CreateWorkspace,
-                Intent::RemoveWorktree,
-                Intent::CreateWorktreeAndWorkspace,
-                Intent::GenerateBranchName,
-                Intent::OpenPr,
-                Intent::OpenIssue,
-                Intent::LinkIssuesToPr,
-                Intent::TeleportSession,
-                Intent::ArchiveSession,
-            ]
-        );
+    fn all_in_menu_order_contains_every_variant() {
+        let all_variants = all_intent_variants();
+        let menu = Intent::all_in_menu_order();
+        for variant in &all_variants {
+            assert!(
+                menu.contains(variant),
+                "{variant:?} missing from all_in_menu_order()"
+            );
+        }
+        assert_eq!(menu.len(), all_variants.len());
     }
 
     // ── enter_priority tests ──
@@ -606,14 +633,9 @@ mod tests {
     //
     // resolve() requires &App which needs a DaemonHandle trait object. Since
     // async_trait is not a direct dependency of flotilla-tui, we build a stub
-    // using manual Pin<Box<dyn Future>> desugaring to match the #[async_trait]
-    // expansion. Most resolve() variants only read from the WorkItem and ignore
-    // App entirely; only LinkIssuesToPr reads app.model.active().providers.
-
     use flotilla_core::daemon::DaemonHandle;
     use flotilla_protocol::{CommandResult, DaemonEvent, ProviderData, RepoInfo, Snapshot};
     use std::path::Path;
-    use std::pin::Pin;
     use std::sync::Arc;
     use tokio::sync::broadcast;
 
@@ -628,94 +650,28 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl DaemonHandle for StubDaemon {
         fn subscribe(&self) -> broadcast::Receiver<DaemonEvent> {
             self.tx.subscribe()
         }
-
-        fn get_state<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            _repo: &'life1 Path,
-        ) -> Pin<
-            Box<dyn std::future::Future<Output = Result<Snapshot, String>> + Send + 'async_trait>,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async { Err("stub".into()) })
+        async fn get_state(&self, _repo: &Path) -> Result<Snapshot, String> {
+            Err("stub".into())
         }
-
-        fn list_repos<'life0, 'async_trait>(
-            &'life0 self,
-        ) -> Pin<
-            Box<
-                dyn std::future::Future<Output = Result<Vec<RepoInfo>, String>>
-                    + Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async { Ok(vec![]) })
+        async fn list_repos(&self) -> Result<Vec<RepoInfo>, String> {
+            Ok(vec![])
         }
-
-        fn execute<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            _repo: &'life1 Path,
-            _command: Command,
-        ) -> Pin<
-            Box<
-                dyn std::future::Future<Output = Result<CommandResult, String>>
-                    + Send
-                    + 'async_trait,
-            >,
-        >
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async { Ok(CommandResult::Ok) })
+        async fn execute(&self, _repo: &Path, _command: Command) -> Result<CommandResult, String> {
+            Ok(CommandResult::Ok)
         }
-
-        fn refresh<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            _repo: &'life1 Path,
-        ) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'async_trait>>
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async { Ok(()) })
+        async fn refresh(&self, _repo: &Path) -> Result<(), String> {
+            Ok(())
         }
-
-        fn add_repo<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            _path: &'life1 Path,
-        ) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'async_trait>>
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async { Ok(()) })
+        async fn add_repo(&self, _path: &Path) -> Result<(), String> {
+            Ok(())
         }
-
-        fn remove_repo<'life0, 'life1, 'async_trait>(
-            &'life0 self,
-            _path: &'life1 Path,
-        ) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'async_trait>>
-        where
-            'life0: 'async_trait,
-            'life1: 'async_trait,
-            Self: 'async_trait,
-        {
-            Box::pin(async { Ok(()) })
+        async fn remove_repo(&self, _path: &Path) -> Result<(), String> {
+            Ok(())
         }
     }
 

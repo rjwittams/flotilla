@@ -119,16 +119,7 @@ pub struct ProviderData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::{de::DeserializeOwned, Serialize};
-
-    fn assert_roundtrip<T>(value: &T)
-    where
-        T: Serialize + DeserializeOwned + std::fmt::Debug + PartialEq,
-    {
-        let json = serde_json::to_string(value).expect("serialize");
-        let decoded: T = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded, *value);
-    }
+    use crate::test_helpers::assert_roundtrip;
 
     #[test]
     fn key_types_roundtrip_all_variants() {
@@ -279,7 +270,10 @@ mod tests {
                 status: SessionStatus::Running,
                 model: Some("opus-4".into()),
                 updated_at: Some("2026-03-07T12:00:00Z".into()),
-                correlation_keys: vec![CorrelationKey::SessionRef("claude".into(), "sess-abc".into())],
+                correlation_keys: vec![CorrelationKey::SessionRef(
+                    "claude".into(),
+                    "sess-abc".into(),
+                )],
             },
             CloudAgentSession {
                 id: "s1".into(),
@@ -294,7 +288,11 @@ mod tests {
             assert_roundtrip(case);
         }
 
-        for status in [SessionStatus::Running, SessionStatus::Idle, SessionStatus::Archived] {
+        for status in [
+            SessionStatus::Running,
+            SessionStatus::Idle,
+            SessionStatus::Archived,
+        ] {
             assert_roundtrip(&status);
         }
 

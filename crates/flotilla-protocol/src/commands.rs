@@ -86,17 +86,7 @@ pub struct DeleteInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::{de::DeserializeOwned, Serialize};
-
-    fn assert_json_roundtrip<T>(value: &T)
-    where
-        T: Serialize + DeserializeOwned + std::fmt::Debug,
-    {
-        let json = serde_json::to_string(value).expect("serialize");
-        let decoded: T = serde_json::from_str(&json).expect("deserialize");
-        let json2 = serde_json::to_string(&decoded).expect("re-serialize");
-        assert_eq!(json2, json, "JSON roundtrip mismatch");
-    }
+    use crate::test_helpers::assert_json_roundtrip;
 
     #[test]
     fn command_roundtrip_covers_all_variants() {
@@ -172,7 +162,10 @@ mod tests {
             path: PathBuf::from("/x"),
         };
         let json = serde_json::to_value(&cmd).expect("serialize");
-        assert_eq!(json.get("command").and_then(|v| v.as_str()), Some("switch_worktree"));
+        assert_eq!(
+            json.get("command").and_then(|v| v.as_str()),
+            Some("switch_worktree")
+        );
     }
 
     #[test]

@@ -121,17 +121,7 @@ pub struct CheckoutRef {
 mod tests {
     use super::*;
     use crate::provider_data::ProviderData;
-    use serde::{de::DeserializeOwned, Serialize};
-
-    fn assert_roundtrip<T>(value: &T)
-    where
-        T: Serialize + DeserializeOwned + std::fmt::Debug,
-    {
-        let json = serde_json::to_string(value).expect("serialize");
-        let decoded: T = serde_json::from_str(&json).expect("deserialize");
-        let json2 = serde_json::to_string(&decoded).expect("re-serialize");
-        assert_eq!(json2, json, "JSON roundtrip mismatch");
-    }
+    use crate::test_helpers::assert_json_roundtrip as assert_roundtrip;
 
     #[test]
     fn category_labels_defaults_and_capitalization() {
@@ -197,7 +187,15 @@ mod tests {
         assert_eq!(decoded.path, PathBuf::from("/repos/test"));
         assert_eq!(decoded.name, "test");
         assert!(decoded.loading);
+        assert_eq!(decoded.provider_names.len(), 2);
         assert_eq!(decoded.provider_names["vcs"], "git");
+        assert_eq!(decoded.provider_names["code_review"], "github");
+        assert_eq!(decoded.provider_health.len(), 1);
+        assert_eq!(decoded.provider_health["git"], true);
+        assert_eq!(decoded.labels.checkouts.section, "Worktrees");
+        assert_eq!(decoded.labels.code_review.noun, "PR");
+        assert_eq!(decoded.labels.issues.abbr, "I");
+        assert_eq!(decoded.labels.sessions.section, "Sessions");
     }
 
     #[test]

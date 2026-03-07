@@ -2,6 +2,29 @@ pub mod commands;
 pub mod provider_data;
 pub mod snapshot;
 
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use serde::de::DeserializeOwned;
+    use serde::Serialize;
+
+    /// Assert JSON roundtrip via re-serialization (for types without PartialEq).
+    pub fn assert_json_roundtrip<T: Serialize + DeserializeOwned + std::fmt::Debug>(value: &T) {
+        let json = serde_json::to_string(value).expect("serialize");
+        let decoded: T = serde_json::from_str(&json).expect("deserialize");
+        let json2 = serde_json::to_string(&decoded).expect("re-serialize");
+        assert_eq!(json2, json, "JSON roundtrip mismatch");
+    }
+
+    /// Assert JSON roundtrip via PartialEq (for types that derive it).
+    pub fn assert_roundtrip<T: Serialize + DeserializeOwned + std::fmt::Debug + PartialEq>(
+        value: &T,
+    ) {
+        let json = serde_json::to_string(value).expect("serialize");
+        let decoded: T = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, *value);
+    }
+}
+
 use serde::{Deserialize, Serialize};
 
 pub use commands::{Command, CommandResult, DeleteInfo};
@@ -130,5 +153,4 @@ mod tests {
             other => panic!("expected Event, got {:?}", other),
         }
     }
-
 }
