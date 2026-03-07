@@ -72,13 +72,6 @@ impl GhApiClient {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// Convenience wrapper so callers that hold a concrete `GhApiClient` (or
-    /// `Arc<GhApiClient>`) can keep calling `client.get(…)` without importing
-    /// the `GhApi` trait.  Delegates to the trait implementation.
-    pub async fn get(&self, endpoint: &str, repo_root: &Path) -> Result<String, String> {
-        <Self as GhApi>::get(self, endpoint, repo_root).await
-    }
 }
 
 #[async_trait]

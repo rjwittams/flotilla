@@ -1,4 +1,4 @@
-use crate::providers::github_api::{clamp_per_page, GhApiClient};
+use crate::providers::github_api::{clamp_per_page, GhApi};
 use crate::providers::types::*;
 use async_trait::async_trait;
 use std::path::Path;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 pub struct GitHubCodeReview {
     provider_name: String,
     repo_slug: String,
-    api: Arc<GhApiClient>,
+    api: Arc<dyn GhApi>,
 }
 
 #[derive(Debug)]
@@ -23,7 +23,7 @@ struct GhPr {
 use crate::providers::run_cmd;
 
 impl GitHubCodeReview {
-    pub fn new(provider_name: String, repo_slug: String, api: Arc<GhApiClient>) -> Self {
+    pub fn new(provider_name: String, repo_slug: String, api: Arc<dyn GhApi>) -> Self {
         Self {
             provider_name,
             repo_slug,

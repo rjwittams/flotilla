@@ -1,4 +1,4 @@
-use crate::providers::github_api::{clamp_per_page, GhApiClient};
+use crate::providers::github_api::{clamp_per_page, GhApi};
 use crate::providers::run_cmd;
 use crate::providers::types::*;
 use async_trait::async_trait;
@@ -8,11 +8,11 @@ use std::sync::Arc;
 pub struct GitHubIssueTracker {
     provider_name: String,
     repo_slug: String,
-    api: Arc<GhApiClient>,
+    api: Arc<dyn GhApi>,
 }
 
 impl GitHubIssueTracker {
-    pub fn new(provider_name: String, repo_slug: String, api: Arc<GhApiClient>) -> Self {
+    pub fn new(provider_name: String, repo_slug: String, api: Arc<dyn GhApi>) -> Self {
         Self {
             provider_name,
             repo_slug,

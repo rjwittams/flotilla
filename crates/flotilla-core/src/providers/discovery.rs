@@ -166,7 +166,8 @@ pub async fn detect_providers(repo_root: &Path) -> (ProviderRegistry, Option<Str
     if let Some(ref host) = remote_url.as_deref().and_then(detect_host_from_url) {
         if host == "github" && command_exists("gh", &["--version"]).await {
             if let Some(slug) = repo_slug.clone() {
-                let api = Arc::new(GhApiClient::new());
+                let api: Arc<dyn crate::providers::github_api::GhApi> =
+                    Arc::new(GhApiClient::new());
                 registry.code_review.insert(
                     "github".to_string(),
                     Arc::new(GitHubCodeReview::new(
