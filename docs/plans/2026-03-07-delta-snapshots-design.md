@@ -41,17 +41,22 @@ pub enum Change {
     Branch { key: String, op: EntryOp<Branch> },
     WorkItem { identity: WorkItemIdentity, op: EntryOp<WorkItem> },
     ProviderHealth { provider: String, op: EntryOp<bool> },
+    /// Full replacement — errors lack stable identity, so keyed deltas don't apply.
     ErrorsChanged(Vec<ProviderError>),
 }
 ```
 
-### SnapshotEvent — replaces current `DaemonEvent::Snapshot`
+### DaemonEvent variants — replace current `DaemonEvent::Snapshot`
+
+No wrapper enum — full and delta are flat variants on `DaemonEvent`:
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SnapshotEvent {
-    Full { seq: u64, snapshot: Snapshot },
-    Delta { seq: u64, prev_seq: u64, changes: Vec<Change> },
+enum DaemonEvent {
+    SnapshotFull { seq: u64, repo: PathBuf, snapshot: Box<Snapshot> },
+    SnapshotDelta { seq: u64, prev_seq: u64, repo: PathBuf, changes: Vec<Change> },
+    RepoAdded(Box<RepoInfo>),
+    RepoRemoved { path: PathBuf },
+    CommandResult { repo: PathBuf, result: CommandResult },
 }
 ```
 
@@ -133,10 +138,12 @@ Work item deltas are derived: when raw provider data changes, re-correlate affec
 
 Per-repo state in the daemon:
 
+Note: holding both `materialized` and `previous` means two full snapshots per repo in memory. This is a deliberate trade-off required by the diff-based `DeltaSource` default. Once all providers emit deltas natively, `previous` can be removed.
+
 ```rust
 struct RepoState {
     materialized: Snapshot,
-    previous: Option<Snapshot>,       // for diff-based DeltaSource
+    previous: Option<Snapshot>,       // for diff-based DeltaSource; remove when native
     delta_log: VecDeque<DeltaEntry>,  // bounded, ~16 entries
     seq: u64,
 }
@@ -169,18 +176,6 @@ Returns current `materialized` snapshot — unchanged from today.
 
 ## Protocol & Wire Changes
 
-### DaemonEvent evolves
-
-```rust
-enum DaemonEvent {
-    SnapshotFull { seq: u64, repo: PathBuf, snapshot: Box<Snapshot> },
-    SnapshotDelta { seq: u64, prev_seq: u64, repo: PathBuf, changes: Vec<Change> },
-    RepoAdded(Box<RepoInfo>),
-    RepoRemoved { path: PathBuf },
-    CommandResult { repo: PathBuf, result: CommandResult },
-}
-```
-
 ### Subscribe gains seq map
 
 ```rust
@@ -194,7 +189,13 @@ On subscribe, the daemon checks each repo's delta log and sends replayed deltas 
 
 ### Broadcast model
 
-Eager/single delta: daemon computes one delta (against `seq - 1`), broadcasts it to all clients. Clients that missed events request full re-sync. Matches the current `tokio::broadcast` architecture.
+Eager/single delta: daemon computes one delta (against `seq - 1`), broadcasts it to all clients. Matches the current `tokio::broadcast` architecture.
+
+### Seq gap detection and re-sync
+
+Clients track `last_seen_seq` per repo. On each incoming `SnapshotDelta`, the client checks `prev_seq == last_seen_seq`. If not, the client has missed events (e.g., `tokio::broadcast` lagged, or brief disconnect). The client calls `get_state` for a full re-sync and resets its local seq.
+
+On subscribe, the daemon replays the delta log from `last_seen` if available. If a refresh fires between the replay and the client consuming the live broadcast, the client detects the gap via the same `prev_seq` check and re-syncs. This makes the race window self-healing.
 
 ## Client-Side Materialization
 
