@@ -12,6 +12,49 @@ pub mod workspace;
 
 use std::path::Path;
 
+use async_trait::async_trait;
+
+/// Trait abstracting command execution so providers can be tested without
+/// spawning real processes.
+#[async_trait]
+pub trait CommandRunner: Send + Sync {
+    async fn run(&self, cmd: &str, args: &[&str], cwd: &Path) -> Result<String, String>;
+    async fn exists(&self, cmd: &str, args: &[&str]) -> bool;
+}
+
+/// Production implementation that delegates to `tokio::process::Command`.
+pub struct ProcessCommandRunner;
+
+#[async_trait]
+impl CommandRunner for ProcessCommandRunner {
+    async fn run(&self, cmd: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
+        let output = tokio::process::Command::new(cmd)
+            .args(args)
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .map_err(|e| e.to_string())?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).to_string())
+        }
+    }
+
+    async fn exists(&self, cmd: &str, args: &[&str]) -> bool {
+        tokio::process::Command::new(cmd)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
 /// Shared helper: run a command directly and return stdout on success,
 /// stderr on failure. Stdin is detached so subprocesses cannot interfere
 /// with the parent terminal.
@@ -58,4 +101,29 @@ pub async fn resolve_claude_path() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn process_runner_echo() {
+        let runner = ProcessCommandRunner;
+        let result = runner.run("echo", &["hello"], &PathBuf::from("/")).await;
+        assert_eq!(result.unwrap().trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn process_runner_exists_true() {
+        let runner = ProcessCommandRunner;
+        assert!(runner.exists("echo", &["test"]).await);
+    }
+
+    #[tokio::test]
+    async fn process_runner_exists_false() {
+        let runner = ProcessCommandRunner;
+        assert!(!runner.exists("nonexistent-binary-xyz", &[]).await);
+    }
 }
