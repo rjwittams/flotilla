@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, Notify};
@@ -37,7 +36,6 @@ impl Default for RefreshSnapshot {
 pub struct RepoRefreshHandle {
     pub refresh_trigger: Arc<Notify>,
     pub snapshot_rx: watch::Receiver<Arc<RefreshSnapshot>>,
-    pub skip_issues: Arc<AtomicBool>,
     _task_handle: JoinHandle<()>,
 }
 
@@ -51,8 +49,6 @@ impl RepoRefreshHandle {
         let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(RefreshSnapshot::default()));
         let refresh_trigger = Arc::new(Notify::new());
         let trigger = refresh_trigger.clone();
-        let skip_issues = Arc::new(AtomicBool::new(false));
-        let skip_issues_clone = skip_issues.clone();
 
         let task_handle = tokio::spawn(async move {
             let mut timer = tokio::time::interval(interval);
@@ -65,14 +61,8 @@ impl RepoRefreshHandle {
 
                 // Fetch all provider data
                 let mut provider_data = ProviderData::default();
-                let errors = refresh_providers(
-                    &mut provider_data,
-                    &repo_root,
-                    &registry,
-                    &criteria,
-                    skip_issues_clone.load(Ordering::Relaxed),
-                )
-                .await;
+                let errors =
+                    refresh_providers(&mut provider_data, &repo_root, &registry, &criteria).await;
                 let provider_health = compute_provider_health(&registry, &errors);
 
                 // Correlate
@@ -98,7 +88,6 @@ impl RepoRefreshHandle {
         Self {
             refresh_trigger,
             snapshot_rx,
-            skip_issues,
             _task_handle: task_handle,
         }
     }
@@ -120,7 +109,6 @@ async fn refresh_providers(
     repo_root: &Path,
     registry: &ProviderRegistry,
     criteria: &RepoCriteria,
-    skip_issues: bool,
 ) -> Vec<RefreshError> {
     let mut errors = Vec::new();
 
@@ -135,17 +123,6 @@ async fn refresh_providers(
     let cr_fut = async {
         if let Some(cr) = registry.code_review.values().next() {
             cr.list_change_requests(repo_root, 20).await
-        } else {
-            Ok(vec![])
-        }
-    };
-
-    let issues_fut = async {
-        if skip_issues {
-            return Ok(vec![]);
-        }
-        if let Some(it) = registry.issue_trackers.values().next() {
-            it.list_issues(repo_root, 20).await
         } else {
             Ok(vec![])
         }
@@ -183,10 +160,9 @@ async fn refresh_providers(
         }
     };
 
-    let (checkouts, crs, issues, sessions, branches, merged, workspaces) = tokio::join!(
+    let (checkouts, crs, sessions, branches, merged, workspaces) = tokio::join!(
         checkouts_fut,
         cr_fut,
-        issues_fut,
         sessions_fut,
         branches_fut,
         merged_fut,
@@ -214,17 +190,6 @@ async fn refresh_providers(
         })
         .into_iter()
         .map(|cr| (cr.id.clone(), cr))
-        .collect();
-    pd.issues = issues
-        .unwrap_or_else(|e| {
-            errors.push(RefreshError {
-                category: "issues",
-                message: e,
-            });
-            Vec::new()
-        })
-        .into_iter()
-        .map(|issue| (issue.id.clone(), issue))
         .collect();
     pd.workspaces = workspaces
         .unwrap_or_else(|e| {
@@ -283,12 +248,6 @@ fn compute_provider_health(
             !errors
                 .iter()
                 .any(|e| e.category == "PRs" || e.category == "merged"),
-        );
-    }
-    if registry.issue_trackers.values().next().is_some() {
-        health.insert(
-            "issue_tracker",
-            !errors.iter().any(|e| e.category == "issues"),
         );
     }
     health
