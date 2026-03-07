@@ -5,6 +5,7 @@ use flotilla_tui::app;
 use flotilla_tui::event;
 use flotilla_tui::event_log;
 use flotilla_tui::event_log::LevelExt;
+use flotilla_tui::socket::SocketDaemon;
 use flotilla_tui::ui;
 
 use clap::Parser;
@@ -88,31 +89,37 @@ async fn run_tui(cli: Cli) -> Result<()> {
     event_log::init();
     let startup = std::time::Instant::now();
 
-    // For now, always use embedded mode (socket mode comes in Task 8)
-    let repo_roots = resolve_repo_roots(&cli.repo_root);
-    if repo_roots.is_empty() {
-        eprintln!("Error: no git repositories found (use --repo-root to specify)");
-        std::process::exit(1);
-    }
-
-    info!(
-        "config loaded: {} repo(s) in {:.0?}",
-        repo_roots.len(),
-        startup.elapsed()
-    );
-
-    let daemon = InProcessDaemon::new(repo_roots).await;
-    info!("daemon started in {:.0?}", startup.elapsed());
+    let daemon: Arc<dyn DaemonHandle> = if cli.embedded {
+        // Embedded mode — current behavior
+        let repo_roots = resolve_repo_roots(&cli.repo_root);
+        if repo_roots.is_empty() {
+            eprintln!("Error: no git repositories found (use --repo-root to specify)");
+            std::process::exit(1);
+        }
+        info!(
+            "config loaded: {} repo(s) in {:.0?}",
+            repo_roots.len(),
+            startup.elapsed()
+        );
+        let daemon = InProcessDaemon::new(repo_roots).await;
+        info!("embedded daemon started in {:.0?}", startup.elapsed());
+        daemon as Arc<dyn DaemonHandle>
+    } else {
+        // Socket mode — connect or auto-spawn
+        let socket_path = cli.socket_path();
+        let daemon = connect_or_spawn(&socket_path, &cli)
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!(e))?;
+        info!("connected to daemon in {:.0?}", startup.elapsed());
+        daemon as Arc<dyn DaemonHandle>
+    };
 
     let mut terminal = ratatui::init();
     execute!(stdout(), EnableMouseCapture)?;
     show_splash(&mut terminal)?;
 
     let repos_info = daemon.list_repos().await.unwrap_or_default();
-    let mut app = app::App::new(
-        daemon.clone() as Arc<dyn DaemonHandle>,
-        repos_info,
-    );
+    let mut app = app::App::new(daemon.clone(), repos_info);
 
     // Set up event handler and attach daemon events
     let mut events = event::EventHandler::new(Duration::from_millis(250));
@@ -272,6 +279,46 @@ async fn run_tui(cli: Cli) -> Result<()> {
     execute!(stdout(), DisableMouseCapture)?;
     ratatui::restore();
     Ok(())
+}
+
+async fn connect_or_spawn(
+    socket_path: &std::path::Path,
+    cli: &Cli,
+) -> Result<Arc<SocketDaemon>, String> {
+    // Try to connect to existing daemon
+    if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
+        return Ok(daemon);
+    }
+
+    // Clean up stale socket
+    let _ = std::fs::remove_file(socket_path);
+
+    // Spawn daemon process
+    let exe = std::env::current_exe().map_err(|e| format!("can't find self: {e}"))?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("daemon");
+    if let Some(ref config_dir) = cli.config_dir {
+        cmd.arg("--config-dir").arg(config_dir);
+    }
+    if let Some(ref socket) = cli.socket {
+        cmd.arg("--socket").arg(socket);
+    }
+    // Detach: redirect stdio, don't inherit
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    cmd.spawn().map_err(|e| format!("failed to spawn daemon: {e}"))?;
+
+    // Retry connection with backoff
+    let delays = [50, 100, 200, 400, 800];
+    for delay_ms in delays {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
+            return Ok(daemon);
+        }
+    }
+
+    Err("timed out waiting for daemon to start".into())
 }
 
 async fn run_daemon(cli: &Cli, timeout_secs: u64) -> Result<()> {
