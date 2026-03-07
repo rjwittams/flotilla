@@ -114,6 +114,57 @@ pub async fn resolve_claude_path(runner: &dyn CommandRunner) -> Option<String> {
 }
 
 #[cfg(test)]
+pub mod testing {
+    use super::*;
+    use async_trait::async_trait;
+
+    /// A mock command runner that returns canned responses in order.
+    /// Each call to `run()` pops the next response from the queue.
+    pub struct MockRunner {
+        responses: std::sync::Mutex<Vec<Result<String, String>>>,
+    }
+
+    impl MockRunner {
+        pub fn new(responses: Vec<Result<String, String>>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CommandRunner for MockRunner {
+        async fn run(&self, _cmd: &str, _args: &[&str], _cwd: &Path) -> Result<String, String> {
+            self.responses.lock().unwrap().remove(0)
+        }
+
+        async fn run_output(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: &Path,
+        ) -> Result<CommandOutput, String> {
+            match self.run(cmd, args, cwd).await {
+                Ok(stdout) => Ok(CommandOutput {
+                    stdout,
+                    stderr: String::new(),
+                    success: true,
+                }),
+                Err(stderr) => Ok(CommandOutput {
+                    stdout: String::new(),
+                    stderr,
+                    success: false,
+                }),
+            }
+        }
+
+        async fn exists(&self, _cmd: &str, _args: &[&str]) -> bool {
+            true
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
