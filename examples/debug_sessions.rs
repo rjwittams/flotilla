@@ -117,7 +117,7 @@ async fn main() {
                     item.description,
                     item.branch,
                     item.checkout_key(),
-                    item.pr_key,
+                    item.change_request_key,
                     item.session_key,
                     item.workspace_refs
                 );

@@ -76,11 +76,11 @@ pub struct WorkItem {
     pub branch: Option<String>,
     pub description: String,
     pub checkout: Option<CheckoutRef>,
-    pub pr_key: Option<String>,
+    pub change_request_key: Option<String>,
     pub session_key: Option<String>,
     pub issue_keys: Vec<String>,
     pub workspace_refs: Vec<String>,
-    pub is_main_worktree: bool,
+    pub is_main_checkout: bool,
     /// Pre-formatted debug lines describing the correlation group.
     /// Empty for standalone items.
     #[serde(default)]
@@ -97,7 +97,7 @@ impl WorkItem {
 pub enum WorkItemKind {
     Checkout,
     Session,
-    Pr,
+    ChangeRequest,
     RemoteBranch,
     Issue,
 }
@@ -114,5 +114,5 @@ pub enum WorkItemIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckoutRef {
     pub key: PathBuf,
-    pub is_main_worktree: bool,
+    pub is_main_checkout: bool,
 }
