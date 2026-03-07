@@ -126,8 +126,16 @@ impl InProcessDaemon {
             state.seq += 1;
             state.last_snapshot = snapshot.clone();
 
-            // Build and broadcast proto snapshot
-            let proto_snapshot = snapshot_to_proto(path, state.seq, &snapshot);
+            // Build and broadcast proto snapshot.
+            // Use the model's (suppressed) health map, not the raw refresh snapshot's.
+            let mut proto_snapshot = snapshot_to_proto(path, state.seq, &snapshot);
+            proto_snapshot.provider_health = state
+                .model
+                .data
+                .provider_health
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect();
             // Ignore send errors (no receivers is fine)
             let _ = self
                 .event_tx
