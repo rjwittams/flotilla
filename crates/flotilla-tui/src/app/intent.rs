@@ -711,7 +711,10 @@ mod tests {
             provider_health: std::collections::HashMap::new(),
             loading: false,
         }];
-        App::new(daemon, repos_info)
+        let config = Arc::new(flotilla_core::config::ConfigStore::with_base(
+            "/tmp/flotilla-test",
+        ));
+        App::new(daemon, repos_info, config)
     }
 
     #[test]
@@ -1050,7 +1053,10 @@ mod tests {
             provider_health: std::collections::HashMap::new(),
             loading: false,
         }];
-        let mut app = App::new(daemon, repos_info);
+        let config = Arc::new(flotilla_core::config::ConfigStore::with_base(
+            "/tmp/flotilla-test",
+        ));
+        let mut app = App::new(daemon, repos_info, config);
 
         let mut providers = ProviderData::default();
         providers.change_requests.insert(

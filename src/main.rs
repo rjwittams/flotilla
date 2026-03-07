@@ -1,4 +1,4 @@
-use flotilla_core::config;
+use flotilla_core::config::ConfigStore;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::in_process::InProcessDaemon;
 use flotilla_tui::app;
@@ -88,10 +88,11 @@ async fn main() -> Result<()> {
 async fn run_tui(cli: Cli) -> Result<()> {
     event_log::init();
     let startup = std::time::Instant::now();
+    let config = Arc::new(ConfigStore::new());
 
     let daemon: Arc<dyn DaemonHandle> = if cli.embedded {
         // Embedded mode — current behavior
-        let repo_roots = resolve_repo_roots(&cli.repo_root);
+        let repo_roots = resolve_repo_roots(&cli.repo_root, &config);
         if repo_roots.is_empty() {
             eprintln!("Error: no git repositories found (use --repo-root to specify)");
             std::process::exit(1);
@@ -101,7 +102,7 @@ async fn run_tui(cli: Cli) -> Result<()> {
             repo_roots.len(),
             startup.elapsed()
         );
-        let daemon = InProcessDaemon::new(repo_roots).await;
+        let daemon = InProcessDaemon::new(repo_roots, Arc::clone(&config)).await;
         info!("embedded daemon started in {:.0?}", startup.elapsed());
         daemon as Arc<dyn DaemonHandle>
     } else {
@@ -124,7 +125,7 @@ async fn run_tui(cli: Cli) -> Result<()> {
     show_splash(&mut terminal)?;
 
     let repos_info = daemon.list_repos().await.unwrap_or_default();
-    let mut app = app::App::new(daemon.clone(), repos_info);
+    let mut app = app::App::new(daemon.clone(), repos_info, Arc::clone(&config));
 
     // Set up event handler and attach daemon events
     let mut events = event::EventHandler::new(Duration::from_millis(250));
@@ -257,7 +258,7 @@ async fn run_tui(cli: Cli) -> Result<()> {
                         MouseEventKind::Up(MouseButton::Left) => {
                             if app.ui.drag.dragging_tab.take().is_some() {
                                 if app.ui.drag.active {
-                                    config::save_tab_order(&app.model.repo_order);
+                                    app.config.save_tab_order(&app.model.repo_order);
                                 }
                                 app.ui.drag.active = false;
                             }
@@ -354,10 +355,12 @@ async fn run_daemon(cli: &Cli, timeout_secs: u64) -> Result<()> {
     };
 
     // Load repos from config
-    let repo_roots = config::load_repos();
+    let config = Arc::new(ConfigStore::new());
+    let repo_roots = config.load_repos();
     info!("starting daemon with {} repo(s)", repo_roots.len());
 
-    let server = flotilla_daemon::server::DaemonServer::new(repo_roots, socket_path, timeout).await;
+    let server =
+        flotilla_daemon::server::DaemonServer::new(repo_roots, config, socket_path, timeout).await;
 
     server.run().await.map_err(|e| color_eyre::eyre::eyre!(e))
 }
@@ -471,7 +474,7 @@ fn show_splash(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
 
 /// Collect repo roots: persisted (in saved tab order) first, then CLI args, then auto-detect from cwd.
 /// Persists any new repos and saves tab order.
-fn resolve_repo_roots(cli_roots: &[PathBuf]) -> Vec<PathBuf> {
+fn resolve_repo_roots(cli_roots: &[PathBuf], config: &ConfigStore) -> Vec<PathBuf> {
     use flotilla_core::providers::vcs::git::GitVcs;
     use flotilla_core::providers::vcs::Vcs;
     use flotilla_core::providers::ProcessCommandRunner;
@@ -479,8 +482,8 @@ fn resolve_repo_roots(cli_roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut repo_roots: Vec<PathBuf> = Vec::new();
 
     // 1. Persisted repos in saved tab order
-    let persisted = config::load_repos();
-    let tab_order = config::load_tab_order();
+    let persisted = config.load_repos();
+    let tab_order = config.load_tab_order();
     if let Some(order) = tab_order {
         for path in &order {
             if persisted.contains(path) && !repo_roots.contains(path) {
@@ -518,9 +521,9 @@ fn resolve_repo_roots(cli_roots: &[PathBuf]) -> Vec<PathBuf> {
 
     // Persist any new repos and save tab order
     for path in &repo_roots {
-        config::save_repo(path);
+        config.save_repo(path);
     }
-    config::save_tab_order(&repo_roots);
+    config.save_tab_order(&repo_roots);
 
     repo_roots
 }

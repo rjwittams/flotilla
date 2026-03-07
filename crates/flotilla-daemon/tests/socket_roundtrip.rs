@@ -1,6 +1,8 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use flotilla_core::config::ConfigStore;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_daemon::server::DaemonServer;
 use flotilla_protocol::DaemonEvent;
@@ -21,8 +23,10 @@ async fn socket_roundtrip() {
         .to_path_buf();
 
     // Start daemon server
+    let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
     let server = DaemonServer::new(
         vec![repo.clone()],
+        config,
         socket_path.clone(),
         Duration::from_secs(300),
     )

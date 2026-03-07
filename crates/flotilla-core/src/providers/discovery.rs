@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::{resolve_claude_path, CommandRunner};
-use crate::config;
+use crate::config::ConfigStore;
 use crate::providers::ai_utility::claude::ClaudeAiUtility;
 use crate::providers::code_review::github::GitHubCodeReview;
 use crate::providers::coding_agent::claude::ClaudeCodingAgent;
@@ -79,6 +79,7 @@ pub fn extract_repo_slug(url: &str) -> Option<String> {
 /// 6. Workspace manager: check for cmux binary
 pub async fn detect_providers(
     repo_root: &Path,
+    config: &ConfigStore,
     runner: Arc<dyn CommandRunner>,
 ) -> (ProviderRegistry, Option<String>) {
     let mut registry = ProviderRegistry::new();
@@ -97,7 +98,7 @@ pub async fn detect_providers(
     }
 
     // 2. Checkout manager: config-driven provider selection
-    let co_config = config::resolve_checkouts_config(repo_root);
+    let co_config = config.resolve_checkouts_config(repo_root);
     match co_config.provider.as_str() {
         "wt" => {
             if runner.exists("wt", &["--version"]).await {
@@ -147,7 +148,8 @@ pub async fn detect_providers(
     if let Some(ref host) = remote_url.as_deref().and_then(detect_host_from_url) {
         if host == "github" && runner.exists("gh", &["--version"]).await {
             if let Some(slug) = repo_slug.clone() {
-                let api = Arc::new(GhApiClient::new(Arc::clone(&runner)));
+                let api: Arc<dyn crate::providers::github_api::GhApi> =
+                    Arc::new(GhApiClient::new(Arc::clone(&runner)));
                 registry.code_review.insert(
                     "github".to_string(),
                     Arc::new(GitHubCodeReview::new(

@@ -8,6 +8,7 @@ use tokio::net::UnixListener;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
+use flotilla_core::config::ConfigStore;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::in_process::InProcessDaemon;
 use flotilla_protocol::{Command, Message};
@@ -31,10 +32,11 @@ impl DaemonServer {
     /// `idle_timeout` — how long to wait after the last client disconnects before shutting down.
     pub async fn new(
         repo_paths: Vec<PathBuf>,
+        config: Arc<ConfigStore>,
         socket_path: PathBuf,
         idle_timeout: Duration,
     ) -> Self {
-        let daemon = InProcessDaemon::new(repo_paths).await;
+        let daemon = InProcessDaemon::new(repo_paths, config).await;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         Self {

@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::providers::CommandRunner;
 
+use async_trait::async_trait;
+
 const MAX_PER_PAGE: usize = 100;
 
 /// Clamp a limit to GitHub's max per_page (100), warning if truncated.
@@ -51,6 +53,11 @@ pub fn parse_gh_api_response(raw: &str) -> GhApiResponse {
     GhApiResponse { status, etag, body }
 }
 
+#[async_trait]
+pub trait GhApi: Send + Sync {
+    async fn get(&self, endpoint: &str, repo_root: &Path) -> Result<String, String>;
+}
+
 /// Cache entry: ETag + the JSON response body from last 200.
 struct CacheEntry {
     etag: String,
@@ -70,10 +77,13 @@ impl GhApiClient {
             runner,
         }
     }
+}
 
+#[async_trait]
+impl GhApi for GhApiClient {
     /// Fetch a GitHub API endpoint, using cached ETag for conditional requests.
     /// Returns the JSON body (from cache on 304, fresh on 200).
-    pub async fn get(&self, endpoint: &str, repo_root: &Path) -> Result<String, String> {
+    async fn get(&self, endpoint: &str, repo_root: &Path) -> Result<String, String> {
         // Build args
         let cached_etag = {
             let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
