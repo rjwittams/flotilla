@@ -1060,6 +1060,15 @@ dependencies = [
 [[package]]
 name = "flotilla-daemon"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "flotilla-core",
+ "flotilla-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "flotilla-protocol"
