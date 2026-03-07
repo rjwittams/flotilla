@@ -355,11 +355,12 @@ async fn run_daemon(cli: &Cli, timeout_secs: u64) -> Result<()> {
     };
 
     // Load repos from config
-    let config = ConfigStore::new();
+    let config = Arc::new(ConfigStore::new());
     let repo_roots = config.load_repos();
     info!("starting daemon with {} repo(s)", repo_roots.len());
 
-    let server = flotilla_daemon::server::DaemonServer::new(repo_roots, socket_path, timeout).await;
+    let server =
+        flotilla_daemon::server::DaemonServer::new(repo_roots, config, socket_path, timeout).await;
 
     server.run().await.map_err(|e| color_eyre::eyre::eyre!(e))
 }
