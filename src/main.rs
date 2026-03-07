@@ -74,6 +74,7 @@ impl Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    color_eyre::install()?;
     let cli = Cli::parse();
 
     match &cli.command {
@@ -85,7 +86,6 @@ async fn main() -> Result<()> {
 }
 
 async fn run_tui(cli: Cli) -> Result<()> {
-    color_eyre::install()?;
     event_log::init();
     let startup = std::time::Instant::now();
 
@@ -303,10 +303,15 @@ async fn connect_or_spawn(
     if let Some(ref socket) = cli.socket {
         cmd.arg("--socket").arg(socket);
     }
-    // Detach: redirect stdio, don't inherit
+    // Detach: redirect stdio, log stderr to file for debugging
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
+    let log_file = cli.config_dir().join("daemon.log");
+    let _ = std::fs::create_dir_all(cli.config_dir());
+    let stderr = std::fs::File::create(&log_file)
+        .map(std::process::Stdio::from)
+        .unwrap_or_else(|_| std::process::Stdio::null());
+    cmd.stderr(stderr);
     cmd.spawn()
         .map_err(|e| format!("failed to spawn daemon: {e}"))?;
 

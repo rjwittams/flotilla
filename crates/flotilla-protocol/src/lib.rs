@@ -95,20 +95,6 @@ impl Message {
             error: Some(message.into()),
         }
     }
-
-    /// Extract a RawResponse from a Response message.
-    /// Returns None if this is not a Response.
-    pub fn into_raw_response(self) -> Option<(u64, RawResponse)> {
-        match self {
-            Message::Response {
-                id,
-                ok,
-                data,
-                error,
-            } => Some((id, RawResponse { ok, data, error })),
-            _ => None,
-        }
-    }
 }
 
 /// Events pushed from daemon to subscribed clients.
@@ -410,32 +396,5 @@ mod tests {
             }
             other => panic!("expected Response, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn into_raw_response_extracts_from_response() {
-        let msg = Message::ok_response(10, &serde_json::json!({"key": "value"}));
-        let (id, raw) = msg.into_raw_response().expect("should be Some");
-        assert_eq!(id, 10);
-        assert!(raw.ok);
-        assert_eq!(raw.data.unwrap()["key"], "value");
-        assert!(raw.error.is_none());
-    }
-
-    #[test]
-    fn into_raw_response_returns_none_for_non_response() {
-        let request = Message::Request {
-            id: 1,
-            method: "subscribe".to_string(),
-            params: serde_json::Value::Null,
-        };
-        assert!(request.into_raw_response().is_none());
-
-        let event = Message::Event {
-            event: Box::new(DaemonEvent::RepoRemoved {
-                path: PathBuf::from("/tmp"),
-            }),
-        };
-        assert!(event.into_raw_response().is_none());
     }
 }
