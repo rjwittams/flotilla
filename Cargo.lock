@@ -1067,8 +1067,10 @@ dependencies = [
  "async-trait",
  "flotilla-core",
  "flotilla-protocol",
+ "flotilla-tui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
