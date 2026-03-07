@@ -135,9 +135,13 @@ impl super::CheckoutManager for WtCheckoutManager {
             worktrees.into_iter().map(|wt| wt.into_checkout()).collect();
 
         // Enrich with issue links from git config
-        for co in &mut checkouts {
-            co.association_keys =
-                super::read_branch_issue_links(repo_root, &co.branch, &*self.runner).await;
+        let futures: Vec<_> = checkouts
+            .iter()
+            .map(|co| super::read_branch_issue_links(repo_root, &co.branch, &*self.runner))
+            .collect();
+        let all_links = futures::future::join_all(futures).await;
+        for (co, links) in checkouts.iter_mut().zip(all_links) {
+            co.association_keys = links;
         }
 
         Ok(checkouts)

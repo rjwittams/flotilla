@@ -250,15 +250,14 @@ impl super::CheckoutManager for GitCheckoutManager {
         let entries = Self::parse_porcelain(&output);
         let default_branch = self.default_branch(repo_root).await;
 
-        let mut checkouts = Vec::with_capacity(entries.len());
-        for (path, branch) in &entries {
-            let is_trunk = *branch == default_branch;
-            checkouts.push(
+        let futures: Vec<_> = entries
+            .iter()
+            .map(|(path, branch)| {
+                let is_trunk = *branch == default_branch;
                 self.enrich_checkout(path, branch, is_trunk, &default_branch)
-                    .await,
-            );
-        }
-        Ok(checkouts)
+            })
+            .collect();
+        Ok(futures::future::join_all(futures).await)
     }
 
     async fn create_checkout(
@@ -443,7 +442,7 @@ branch refs/heads/feature
     #[test]
     fn render_worktree_path_default_template() {
         let runner: Arc<dyn crate::providers::CommandRunner> =
-            Arc::new(crate::providers::ProcessCommandRunner);
+            Arc::new(crate::providers::testing::MockRunner::new(vec![]));
         let config = CheckoutsConfig::default();
         let mgr = GitCheckoutManager::new(config, runner);
         let repo = Path::new("/home/user/myrepo");
@@ -458,7 +457,7 @@ branch refs/heads/feature
     #[test]
     fn render_worktree_path_absolute_template() {
         let runner: Arc<dyn crate::providers::CommandRunner> =
-            Arc::new(crate::providers::ProcessCommandRunner);
+            Arc::new(crate::providers::testing::MockRunner::new(vec![]));
         let config = CheckoutsConfig {
             path: "/tmp/worktrees/{{ repo }}.{{ branch | sanitize }}".to_string(),
             ..Default::default()
@@ -473,7 +472,7 @@ branch refs/heads/feature
     #[test]
     fn render_worktree_path_relative_template() {
         let runner: Arc<dyn crate::providers::CommandRunner> =
-            Arc::new(crate::providers::ProcessCommandRunner);
+            Arc::new(crate::providers::testing::MockRunner::new(vec![]));
         let config = CheckoutsConfig {
             path: "worktrees/{{ branch | sanitize }}".to_string(),
             ..Default::default()

@@ -117,17 +117,18 @@ pub async fn resolve_claude_path(runner: &dyn CommandRunner) -> Option<String> {
 pub mod testing {
     use super::*;
     use async_trait::async_trait;
+    use std::collections::VecDeque;
 
     /// A mock command runner that returns canned responses in order.
     /// Each call to `run()` pops the next response from the queue.
     pub struct MockRunner {
-        responses: std::sync::Mutex<Vec<Result<String, String>>>,
+        responses: std::sync::Mutex<VecDeque<Result<String, String>>>,
     }
 
     impl MockRunner {
         pub fn new(responses: Vec<Result<String, String>>) -> Self {
             Self {
-                responses: std::sync::Mutex::new(responses),
+                responses: std::sync::Mutex::new(responses.into()),
             }
         }
     }
@@ -135,7 +136,11 @@ pub mod testing {
     #[async_trait]
     impl CommandRunner for MockRunner {
         async fn run(&self, _cmd: &str, _args: &[&str], _cwd: &Path) -> Result<String, String> {
-            self.responses.lock().unwrap().remove(0)
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("MockRunner: no more responses")
         }
 
         async fn run_output(
