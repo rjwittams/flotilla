@@ -68,7 +68,10 @@ impl EventHandler {
                     Ok(event) => {
                         let _ = tx.send(Event::Daemon(event));
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("daemon event receiver lagged, skipped {n} events");
+                        continue;
+                    }
                     Err(_) => break,
                 }
             }
