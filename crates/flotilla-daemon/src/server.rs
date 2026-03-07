@@ -128,6 +128,10 @@ impl DaemonServer {
                         break;
                     }
                 }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("received signal — shutting down");
+                    break;
+                }
             }
         }
 
