@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
-    SwitchWorktree {
-        path: PathBuf,
+    CreateWorkspaceForCheckout {
+        checkout_path: PathBuf,
     },
     SelectWorkspace {
         ws_ref: String,
     },
-    CreateWorktree {
+    CreateCheckout {
         branch: String,
         create_branch: bool,
         issue_ids: Vec<(String, String)>,
@@ -20,19 +20,19 @@ pub enum Command {
     RemoveCheckout {
         branch: String,
     },
-    FetchDeleteInfo {
+    FetchCheckoutStatus {
         branch: String,
-        worktree_path: Option<PathBuf>,
-        pr_number: Option<String>,
+        checkout_path: Option<PathBuf>,
+        change_request_id: Option<String>,
     },
-    OpenPr {
+    OpenChangeRequest {
         id: String,
     },
-    OpenIssueBrowser {
+    OpenIssue {
         id: String,
     },
-    LinkIssuesToPr {
-        pr_id: String,
+    LinkIssuesToChangeRequest {
+        change_request_id: String,
         issue_ids: Vec<String>,
     },
     ArchiveSession {
@@ -60,23 +60,23 @@ pub enum Command {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CommandResult {
     Ok,
-    WorktreeCreated {
+    CheckoutCreated {
         branch: String,
     },
     BranchNameGenerated {
         name: String,
         issue_ids: Vec<(String, String)>,
     },
-    DeleteInfo(DeleteInfo),
+    CheckoutStatus(CheckoutStatus),
     Error {
         message: String,
     },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DeleteInfo {
+pub struct CheckoutStatus {
     pub branch: String,
-    pub pr_status: Option<String>,
+    pub change_request_status: Option<String>,
     pub merge_commit_sha: Option<String>,
     pub unpushed_commits: Vec<String>,
     pub has_uncommitted: bool,

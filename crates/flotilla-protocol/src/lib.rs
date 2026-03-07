@@ -4,7 +4,7 @@ pub mod snapshot;
 
 use serde::{Deserialize, Serialize};
 
-pub use commands::{Command, CommandResult, DeleteInfo};
+pub use commands::{CheckoutStatus, Command, CommandResult};
 pub use provider_data::{
     AheadBehind, AssociationKey, ChangeRequest, ChangeRequestStatus, Checkout, CloudAgentSession,
     CommitInfo, CorrelationKey, Issue, ProviderData, SessionStatus, WorkingTreeStatus, Workspace,
@@ -87,13 +87,13 @@ mod tests {
                 description: "Feature X".to_string(),
                 checkout: Some(CheckoutRef {
                     key: PathBuf::from("/tmp/my-repo/wt"),
-                    is_main_worktree: false,
+                    is_main_checkout: false,
                 }),
-                pr_key: Some("PR#10".to_string()),
+                change_request_key: Some("PR#10".to_string()),
                 session_key: None,
                 issue_keys: vec!["ISSUE-1".to_string()],
                 workspace_refs: vec![],
-                is_main_worktree: false,
+                is_main_checkout: false,
                 debug_group: vec![],
             }],
             providers: ProviderData::default(),
@@ -135,7 +135,7 @@ mod tests {
     fn command_result_variants_roundtrip() {
         let variants = vec![
             CommandResult::Ok,
-            CommandResult::WorktreeCreated {
+            CommandResult::CheckoutCreated {
                 branch: "feat-abc".to_string(),
             },
             CommandResult::BranchNameGenerated {
@@ -145,9 +145,9 @@ mod tests {
                     ("linear".to_string(), "ABC-123".to_string()),
                 ],
             },
-            CommandResult::DeleteInfo(DeleteInfo {
+            CommandResult::CheckoutStatus(CheckoutStatus {
                 branch: "old-branch".to_string(),
-                pr_status: Some("merged".to_string()),
+                change_request_status: Some("merged".to_string()),
                 merge_commit_sha: Some("abc123".to_string()),
                 unpushed_commits: vec!["def456".to_string()],
                 has_uncommitted: false,
@@ -167,12 +167,12 @@ mod tests {
         }
 
         // Also spot-check specific fields
-        if let CommandResult::WorktreeCreated { branch } = &variants[1] {
+        if let CommandResult::CheckoutCreated { branch } = &variants[1] {
             assert_eq!(branch, "feat-abc");
         }
-        if let CommandResult::DeleteInfo(info) = &variants[3] {
+        if let CommandResult::CheckoutStatus(info) = &variants[3] {
             assert_eq!(info.branch, "old-branch");
-            assert_eq!(info.pr_status.as_deref(), Some("merged"));
+            assert_eq!(info.change_request_status.as_deref(), Some("merged"));
             assert!(!info.has_uncommitted);
         }
     }
@@ -186,13 +186,13 @@ mod tests {
             description: "Implement login flow".to_string(),
             checkout: Some(CheckoutRef {
                 key: PathBuf::from("/repos/my-project/wt-1"),
-                is_main_worktree: false,
+                is_main_checkout: false,
             }),
-            pr_key: Some("PR#55".to_string()),
+            change_request_key: Some("PR#55".to_string()),
             session_key: Some("sess-abc".to_string()),
             issue_keys: vec!["GH-10".to_string(), "LIN-20".to_string()],
             workspace_refs: vec!["cmux-1".to_string()],
-            is_main_worktree: false,
+            is_main_checkout: false,
             debug_group: vec!["2 correlated items".to_string()],
         };
 
@@ -209,11 +209,11 @@ mod tests {
         assert!(deserialized.checkout.is_some());
         let checkout = deserialized.checkout.unwrap();
         assert_eq!(checkout.key, PathBuf::from("/repos/my-project/wt-1"));
-        assert!(!checkout.is_main_worktree);
-        assert_eq!(deserialized.pr_key.as_deref(), Some("PR#55"));
+        assert!(!checkout.is_main_checkout);
+        assert_eq!(deserialized.change_request_key.as_deref(), Some("PR#55"));
         assert_eq!(deserialized.session_key.as_deref(), Some("sess-abc"));
         assert_eq!(deserialized.issue_keys, vec!["GH-10", "LIN-20"]);
         assert_eq!(deserialized.workspace_refs, vec!["cmux-1"]);
-        assert!(!deserialized.is_main_worktree);
+        assert!(!deserialized.is_main_checkout);
     }
 }
