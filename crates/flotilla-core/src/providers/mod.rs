@@ -55,37 +55,6 @@ impl CommandRunner for ProcessCommandRunner {
     }
 }
 
-/// Shared helper: run a command directly and return stdout on success,
-/// stderr on failure. Stdin is detached so subprocesses cannot interfere
-/// with the parent terminal.
-pub async fn run_cmd(cmd: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
-    let output = tokio::process::Command::new(cmd)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
-}
-
-/// Check if a command is available by running it directly.
-pub async fn command_exists(cmd: &str, args: &[&str]) -> bool {
-    tokio::process::Command::new(cmd)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 /// Resolve the path to the `claude` CLI binary.
 /// Checks PATH first, then known installation locations.
 pub async fn resolve_claude_path(runner: &dyn CommandRunner) -> Option<String> {
