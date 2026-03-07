@@ -65,6 +65,52 @@ impl RawResponse {
     }
 }
 
+impl Message {
+    /// Build a success response with a serializable payload.
+    pub fn ok_response<T: serde::Serialize>(id: u64, data: &T) -> Self {
+        Message::Response {
+            id,
+            ok: true,
+            data: Some(serde_json::to_value(data).unwrap_or(serde_json::Value::Null)),
+            error: None,
+        }
+    }
+
+    /// Build a success response with no payload.
+    pub fn empty_ok_response(id: u64) -> Self {
+        Message::Response {
+            id,
+            ok: true,
+            data: None,
+            error: None,
+        }
+    }
+
+    /// Build an error response.
+    pub fn error_response(id: u64, message: impl Into<String>) -> Self {
+        Message::Response {
+            id,
+            ok: false,
+            data: None,
+            error: Some(message.into()),
+        }
+    }
+
+    /// Extract a RawResponse from a Response message.
+    /// Returns None if this is not a Response.
+    pub fn into_raw_response(self) -> Option<(u64, RawResponse)> {
+        match self {
+            Message::Response {
+                id,
+                ok,
+                data,
+                error,
+            } => Some((id, RawResponse { ok, data, error })),
+            _ => None,
+        }
+    }
+}
+
 /// Events pushed from daemon to subscribed clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
@@ -304,5 +350,92 @@ mod tests {
         assert_eq!(deserialized.issue_keys, vec!["GH-10", "LIN-20"]);
         assert_eq!(deserialized.workspace_refs, vec!["cmux-1"]);
         assert!(!deserialized.is_main_checkout);
+    }
+
+    #[test]
+    fn ok_response_builds_with_serialized_data() {
+        let data = serde_json::json!({"count": 42, "name": "test"});
+        let msg = Message::ok_response(7, &data);
+        match msg {
+            Message::Response {
+                id,
+                ok,
+                data,
+                error,
+            } => {
+                assert_eq!(id, 7);
+                assert!(ok);
+                let d = data.expect("should have data");
+                assert_eq!(d["count"], 42);
+                assert_eq!(d["name"], "test");
+                assert!(error.is_none());
+            }
+            other => panic!("expected Response, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn empty_ok_response_builds_with_no_data() {
+        let msg = Message::empty_ok_response(99);
+        match msg {
+            Message::Response {
+                id,
+                ok,
+                data,
+                error,
+            } => {
+                assert_eq!(id, 99);
+                assert!(ok);
+                assert!(data.is_none());
+                assert!(error.is_none());
+            }
+            other => panic!("expected Response, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn error_response_builds_with_error_message() {
+        let msg = Message::error_response(5, "something went wrong");
+        match msg {
+            Message::Response {
+                id,
+                ok,
+                data,
+                error,
+            } => {
+                assert_eq!(id, 5);
+                assert!(!ok);
+                assert!(data.is_none());
+                assert_eq!(error.as_deref(), Some("something went wrong"));
+            }
+            other => panic!("expected Response, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn into_raw_response_extracts_from_response() {
+        let msg = Message::ok_response(10, &serde_json::json!({"key": "value"}));
+        let (id, raw) = msg.into_raw_response().expect("should be Some");
+        assert_eq!(id, 10);
+        assert!(raw.ok);
+        assert_eq!(raw.data.unwrap()["key"], "value");
+        assert!(raw.error.is_none());
+    }
+
+    #[test]
+    fn into_raw_response_returns_none_for_non_response() {
+        let request = Message::Request {
+            id: 1,
+            method: "subscribe".to_string(),
+            params: serde_json::Value::Null,
+        };
+        assert!(request.into_raw_response().is_none());
+
+        let event = Message::Event {
+            event: Box::new(DaemonEvent::RepoRemoved {
+                path: PathBuf::from("/tmp"),
+            }),
+        };
+        assert!(event.into_raw_response().is_none());
     }
 }
