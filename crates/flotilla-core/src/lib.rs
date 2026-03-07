@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod data;
 pub mod executor;
 pub mod in_process;
+pub mod issue_cache;
 pub mod model;
 pub mod provider_data;
 pub mod providers;
