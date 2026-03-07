@@ -274,8 +274,27 @@ async fn run_tui(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-async fn run_daemon(_cli: &Cli, _timeout_secs: u64) -> Result<()> {
-    todo!("Task 7: daemon subcommand")
+async fn run_daemon(cli: &Cli, timeout_secs: u64) -> Result<()> {
+    // Initialize logging to stderr (no TUI here)
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
+
+    let socket_path = cli.socket_path();
+    let timeout = if timeout_secs == 0 {
+        Duration::from_secs(u64::MAX)
+    } else {
+        Duration::from_secs(timeout_secs)
+    };
+
+    // Load repos from config
+    let repo_roots = config::load_repos();
+    info!("starting daemon with {} repo(s)", repo_roots.len());
+
+    let server =
+        flotilla_daemon::server::DaemonServer::new(repo_roots, socket_path, timeout).await;
+
+    server.run().await.map_err(|e| color_eyre::eyre::eyre!(e))
 }
 
 async fn run_status(_cli: &Cli) -> Result<()> {
