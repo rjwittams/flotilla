@@ -62,7 +62,7 @@ impl Cli {
     fn config_dir(&self) -> PathBuf {
         self.config_dir
             .clone()
-            .unwrap_or_else(|| flotilla_core::config::flotilla_config_dir())
+            .unwrap_or_else(flotilla_core::config::flotilla_config_dir)
     }
 
     fn socket_path(&self) -> PathBuf {
@@ -307,7 +307,8 @@ async fn connect_or_spawn(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
-    cmd.spawn().map_err(|e| format!("failed to spawn daemon: {e}"))?;
+    cmd.spawn()
+        .map_err(|e| format!("failed to spawn daemon: {e}"))?;
 
     // Retry connection with backoff
     let delays = [50, 100, 200, 400, 800];
@@ -338,8 +339,7 @@ async fn run_daemon(cli: &Cli, timeout_secs: u64) -> Result<()> {
     let repo_roots = config::load_repos();
     info!("starting daemon with {} repo(s)", repo_roots.len());
 
-    let server =
-        flotilla_daemon::server::DaemonServer::new(repo_roots, socket_path, timeout).await;
+    let server = flotilla_daemon::server::DaemonServer::new(repo_roots, socket_path, timeout).await;
 
     server.run().await.map_err(|e| color_eyre::eyre::eyre!(e))
 }
@@ -350,7 +350,9 @@ async fn run_status(cli: &Cli) -> Result<()> {
         .await
         .map_err(|e| color_eyre::eyre::eyre!("cannot connect to daemon: {e}"))?;
 
-    let repos = daemon.list_repos().await
+    let repos = daemon
+        .list_repos()
+        .await
         .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
 
     if repos.is_empty() {
@@ -361,7 +363,9 @@ async fn run_status(cli: &Cli) -> Result<()> {
     for repo in &repos {
         let name = &repo.name;
         let path = repo.path.display();
-        let health: Vec<String> = repo.provider_health.iter()
+        let health: Vec<String> = repo
+            .provider_health
+            .iter()
             .map(|(k, v)| format!("{k}: {}", if *v { "ok" } else { "error" }))
             .collect();
         let loading = if repo.loading { " (loading)" } else { "" };
@@ -386,8 +390,8 @@ async fn run_watch(cli: &Cli) -> Result<()> {
     loop {
         match rx.recv().await {
             Ok(event) => {
-                let json = serde_json::to_string_pretty(&event)
-                    .unwrap_or_else(|_| format!("{event:?}"));
+                let json =
+                    serde_json::to_string_pretty(&event).unwrap_or_else(|_| format!("{event:?}"));
                 println!("{json}");
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

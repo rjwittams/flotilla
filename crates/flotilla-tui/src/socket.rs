@@ -10,7 +10,9 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 use tracing::{error, warn};
 
 use flotilla_core::daemon::DaemonHandle;
-use flotilla_protocol::{Command, CommandResult, DaemonEvent, Message, RawResponse, RepoInfo, Snapshot};
+use flotilla_protocol::{
+    Command, CommandResult, DaemonEvent, Message, RawResponse, RepoInfo, Snapshot,
+};
 
 pub struct SocketDaemon {
     writer: Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>,
@@ -136,8 +138,8 @@ impl SocketDaemon {
             params,
         };
 
-        let line = serde_json::to_string(&msg)
-            .map_err(|e| format!("failed to serialize request: {e}"))?;
+        let line =
+            serde_json::to_string(&msg).map_err(|e| format!("failed to serialize request: {e}"))?;
 
         {
             let mut writer = self.writer.lock().await;
@@ -155,7 +157,8 @@ impl SocketDaemon {
                 .map_err(|e| format!("failed to flush daemon socket: {e}"))?;
         }
 
-        rx.await.map_err(|_| "request cancelled (sender dropped)".to_string())
+        rx.await
+            .map_err(|_| "request cancelled (sender dropped)".to_string())
     }
 }
 
@@ -173,9 +176,7 @@ impl DaemonHandle for SocketDaemon {
     }
 
     async fn list_repos(&self) -> Result<Vec<RepoInfo>, String> {
-        let resp = self
-            .request("list_repos", serde_json::json!({}))
-            .await?;
+        let resp = self.request("list_repos", serde_json::json!({})).await?;
         resp.parse::<Vec<RepoInfo>>()
     }
 

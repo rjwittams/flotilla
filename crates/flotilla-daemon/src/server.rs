@@ -275,8 +275,7 @@ async fn dispatch_request(
                 .cloned()
                 .ok_or_else(|| "missing 'command' field".to_string())
                 .and_then(|v| {
-                    serde_json::from_value(v)
-                        .map_err(|e| format!("invalid command: {e}"))
+                    serde_json::from_value(v).map_err(|e| format!("invalid command: {e}"))
                 }) {
                 Ok(cmd) => cmd,
                 Err(e) => return Message::error_response(id, e),
