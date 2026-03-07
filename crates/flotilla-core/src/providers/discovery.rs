@@ -1,8 +1,7 @@
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::Arc;
 
-use super::{command_exists, resolve_claude_path};
+use super::{command_exists, resolve_claude_path, CommandRunner};
 use crate::config;
 use crate::providers::ai_utility::claude::ClaudeAiUtility;
 use crate::providers::code_review::github::GitHubCodeReview;
@@ -16,45 +15,21 @@ use crate::providers::vcs::wt::WtCheckoutManager;
 use crate::providers::workspace::cmux::CmuxWorkspaceManager;
 use crate::providers::workspace::tmux::TmuxWorkspaceManager;
 use crate::providers::workspace::zellij::ZellijWorkspaceManager;
-use tokio::process::Command;
 use tracing::{info, warn};
 
 /// Extract the first git remote URL for this repo.
-pub async fn first_remote_url(repo_root: &Path) -> Option<String> {
-    let remotes_output = Command::new("git")
-        .args(["remote"])
-        .current_dir(repo_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .ok()?;
-
-    if !remotes_output.status.success() {
-        return None;
-    }
-
-    let remotes = String::from_utf8_lossy(&remotes_output.stdout);
-    for remote in remotes.lines() {
+pub async fn first_remote_url(repo_root: &Path, runner: &dyn CommandRunner) -> Option<String> {
+    let remotes_output = runner.run("git", &["remote"], repo_root).await.ok()?;
+    for remote in remotes_output.lines() {
         let remote = remote.trim();
         if remote.is_empty() {
             continue;
         }
-        let url_output = Command::new("git")
-            .args(["remote", "get-url", remote])
-            .current_dir(repo_root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
+        if let Ok(url) = runner
+            .run("git", &["remote", "get-url", remote], repo_root)
             .await
-            .ok();
-
-        if let Some(output) = url_output {
-            if output.status.success() {
-                return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
-            }
+        {
+            return Some(url.trim().to_string());
         }
     }
     None

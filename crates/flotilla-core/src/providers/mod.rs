@@ -88,16 +88,19 @@ pub async fn command_exists(cmd: &str, args: &[&str]) -> bool {
 
 /// Resolve the path to the `claude` CLI binary.
 /// Checks PATH first, then known installation locations.
-pub async fn resolve_claude_path() -> Option<String> {
-    // Try PATH directly
-    if command_exists("claude", &["--version"]).await {
+pub async fn resolve_claude_path(runner: &dyn CommandRunner) -> Option<String> {
+    if runner.exists("claude", &["--version"]).await {
         return Some("claude".to_string());
     }
-    // Known installation paths
     let known_paths = [dirs::home_dir().map(|h| h.join(".claude/local/claude"))];
     for path in known_paths.into_iter().flatten() {
-        if path.is_file() && command_exists(path.to_str().unwrap_or(""), &["--version"]).await {
-            return Some(path.to_string_lossy().to_string());
+        if path.is_file() {
+            if runner
+                .exists(path.to_str().unwrap_or(""), &["--version"])
+                .await
+            {
+                return Some(path.to_string_lossy().to_string());
+            }
         }
     }
     None
