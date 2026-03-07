@@ -97,15 +97,18 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
         let rendered = template.render(&config.template_vars);
 
         // Create workspace — output is "OK workspace:N"
-        let ws_output = self.cmux_cmd(&["new-workspace", "--name", &config.name]).await?;
+        let ws_output = self
+            .cmux_cmd(&["new-workspace", "--name", &config.name])
+            .await?;
         let ws_ref = Self::parse_ok_ref(&ws_output);
         if ws_ref.is_empty() {
             return Err("cmux new-workspace returned no workspace ref".to_string());
         }
 
         // Get initial surface + pane from the new workspace
-        let panels_json =
-            self.cmux_cmd(&["--json", "list-panels", "--workspace", &ws_ref]).await?;
+        let panels_json = self
+            .cmux_cmd(&["--json", "list-panels", "--workspace", &ws_ref])
+            .await?;
         let panels: serde_json::Value =
             serde_json::from_str(&panels_json).map_err(|e| e.to_string())?;
         let first = panels["surfaces"]
@@ -144,8 +147,9 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
                 let new_surface = Self::parse_ok_ref(&split_output);
 
                 // Look up pane_ref for this new surface
-                let panels_json =
-                    self.cmux_cmd(&["--json", "list-panels", "--workspace", &ws_ref]).await?;
+                let panels_json = self
+                    .cmux_cmd(&["--json", "list-panels", "--workspace", &ws_ref])
+                    .await?;
                 let panels: serde_json::Value =
                     serde_json::from_str(&panels_json).map_err(|e| e.to_string())?;
                 let pane_ref = panels["surfaces"]
@@ -172,16 +176,17 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
                 let surface_ref = if j == 0 {
                     split_surface_ref.clone()
                 } else {
-                    let output = self.cmux_cmd(&[
-                        "new-surface",
-                        "--type",
-                        "terminal",
-                        "--pane",
-                        &pane_ref,
-                        "--workspace",
-                        &ws_ref,
-                    ])
-                    .await?;
+                    let output = self
+                        .cmux_cmd(&[
+                            "new-surface",
+                            "--type",
+                            "terminal",
+                            "--pane",
+                            &pane_ref,
+                            "--workspace",
+                            &ws_ref,
+                        ])
+                        .await?;
                     Self::parse_ok_ref(&output)
                 };
 
@@ -244,7 +249,8 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
 
         // Focus the designated pane last (for keyboard focus)
         if let Some(pane_ref) = &focus_pane {
-            self.cmux_cmd(&["focus-pane", "--pane", pane_ref, "--workspace", &ws_ref]).await?;
+            self.cmux_cmd(&["focus-pane", "--pane", pane_ref, "--workspace", &ws_ref])
+                .await?;
         }
 
         let directories = vec![config.working_directory.clone()];
@@ -264,7 +270,8 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
 
     async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {
         info!("cmux: switching to workspace {ws_ref}");
-        self.cmux_cmd(&["select-workspace", "--workspace", ws_ref]).await?;
+        self.cmux_cmd(&["select-workspace", "--workspace", ws_ref])
+            .await?;
         Ok(())
     }
 }

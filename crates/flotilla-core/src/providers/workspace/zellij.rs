@@ -207,7 +207,8 @@ impl super::WorkspaceManager for ZellijWorkspaceManager {
         let working_dir = config.working_directory.display().to_string();
 
         // Create new tab
-        self.zellij_action(&["new-tab", "--name", &config.name, "--cwd", &working_dir]).await?;
+        self.zellij_action(&["new-tab", "--name", &config.name, "--cwd", &working_dir])
+            .await?;
 
         // Small delay to let zellij process the tab creation
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;

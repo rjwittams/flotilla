@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use tracing::info;
 
 use crate::config::CheckoutsConfig;
-use crate::providers::CommandRunner;
 use crate::providers::types::*;
+use crate::providers::CommandRunner;
 
 pub struct GitCheckoutManager {
     config: CheckoutsConfig,
@@ -20,7 +20,11 @@ impl GitCheckoutManager {
         env.add_filter("sanitize", |value: String| -> String {
             value.replace(['/', '\\'], "-")
         });
-        Self { config, env, runner }
+        Self {
+            config,
+            env,
+            runner,
+        }
     }
 
     /// Render the worktree path template for a given repo and branch.
@@ -249,7 +253,10 @@ impl super::CheckoutManager for GitCheckoutManager {
         let mut checkouts = Vec::with_capacity(entries.len());
         for (path, branch) in &entries {
             let is_trunk = *branch == default_branch;
-            checkouts.push(self.enrich_checkout(path, branch, is_trunk, &default_branch).await);
+            checkouts.push(
+                self.enrich_checkout(path, branch, is_trunk, &default_branch)
+                    .await,
+            );
         }
         Ok(checkouts)
     }

@@ -135,7 +135,12 @@ async fn read_oauth_token_from_keychain(runner: &dyn CommandRunner) -> Result<OA
     let output = runner
         .run(
             "security",
-            &["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            &[
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-w",
+            ],
             Path::new("."),
         )
         .await

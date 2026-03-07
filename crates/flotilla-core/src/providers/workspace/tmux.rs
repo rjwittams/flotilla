@@ -42,7 +42,8 @@ impl TmuxWorkspaceManager {
 
     /// Return the current tmux session name.
     async fn session_name(&self) -> Result<String, String> {
-        self.tmux_cmd(&["display-message", "-p", "#{session_name}"]).await
+        self.tmux_cmd(&["display-message", "-p", "#{session_name}"])
+            .await
     }
 
     /// Return the state file path: `~/.config/flotilla/tmux/{session}/state.toml`.
@@ -110,7 +111,9 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
     }
 
     async fn list_workspaces(&self) -> Result<Vec<Workspace>, String> {
-        let output = self.tmux_cmd(&["list-windows", "-F", "#{window_name}"]).await?;
+        let output = self
+            .tmux_cmd(&["list-windows", "-F", "#{window_name}"])
+            .await?;
         let window_names: Vec<&str> = output.lines().filter(|l| !l.is_empty()).collect();
 
         // Load state for enrichment, pruning stale entries
@@ -173,7 +176,8 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
         let working_dir = config.working_directory.display().to_string();
 
         // Create new window
-        self.tmux_cmd(&["new-window", "-n", &config.name, "-c", &working_dir]).await?;
+        self.tmux_cmd(&["new-window", "-n", &config.name, "-c", &working_dir])
+            .await?;
 
         // Small delay to let tmux process window creation
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -202,7 +206,8 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
                 // First pane is the window's initial pane — send command via send-keys
                 if let Some(surface) = pane.surfaces.first() {
                     if !surface.command.is_empty() {
-                        self.tmux_cmd(&["send-keys", &surface.command, "Enter"]).await?;
+                        self.tmux_cmd(&["send-keys", &surface.command, "Enter"])
+                            .await?;
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
                 }
@@ -210,9 +215,11 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
 
                 // Additional surfaces in first pane become splits
                 for surface in pane.surfaces.iter().skip(1) {
-                    self.tmux_cmd(&["split-window", "-v", "-c", &working_dir]).await?;
+                    self.tmux_cmd(&["split-window", "-v", "-c", &working_dir])
+                        .await?;
                     if !surface.command.is_empty() {
-                        self.tmux_cmd(&["send-keys", &surface.command, "Enter"]).await?;
+                        self.tmux_cmd(&["send-keys", &surface.command, "Enter"])
+                            .await?;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     pane_count += 1;
@@ -223,9 +230,11 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
                 let flag = Self::split_flag(direction);
 
                 if let Some(surface) = pane.surfaces.first() {
-                    self.tmux_cmd(&["split-window", flag, "-c", &working_dir]).await?;
+                    self.tmux_cmd(&["split-window", flag, "-c", &working_dir])
+                        .await?;
                     if !surface.command.is_empty() {
-                        self.tmux_cmd(&["send-keys", &surface.command, "Enter"]).await?;
+                        self.tmux_cmd(&["send-keys", &surface.command, "Enter"])
+                            .await?;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     pane_count += 1;
@@ -233,9 +242,11 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
 
                 // Additional surfaces become splits
                 for surface in pane.surfaces.iter().skip(1) {
-                    self.tmux_cmd(&["split-window", "-v", "-c", &working_dir]).await?;
+                    self.tmux_cmd(&["split-window", "-v", "-c", &working_dir])
+                        .await?;
                     if !surface.command.is_empty() {
-                        self.tmux_cmd(&["send-keys", &surface.command, "Enter"]).await?;
+                        self.tmux_cmd(&["send-keys", &surface.command, "Enter"])
+                            .await?;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     pane_count += 1;
