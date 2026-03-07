@@ -23,6 +23,8 @@ pub struct GhApiResponse {
     pub status: u16,
     pub etag: Option<String>,
     pub body: String,
+    pub has_next_page: bool,
+    pub total_count: Option<u32>,
 }
 
 /// Parse the combined headers+body output from `gh api --include`.
@@ -38,6 +40,7 @@ pub fn parse_gh_api_response(raw: &str) -> GhApiResponse {
 
     let mut status = 0u16;
     let mut etag = None;
+    let mut has_next_page = false;
 
     for (i, line) in header_section.lines().enumerate() {
         if i == 0 {
@@ -47,10 +50,18 @@ pub fn parse_gh_api_response(raw: &str) -> GhApiResponse {
             }
         } else if line.len() >= 6 && line[..5].eq_ignore_ascii_case("etag:") {
             etag = Some(line[5..].trim().to_string());
+        } else if line.len() >= 6 && line[..5].eq_ignore_ascii_case("link:") {
+            has_next_page = line.contains("rel=\"next\"");
         }
     }
 
-    GhApiResponse { status, etag, body }
+    GhApiResponse {
+        status,
+        etag,
+        body,
+        has_next_page,
+        total_count: None,
+    }
 }
 
 #[async_trait]
@@ -62,6 +73,7 @@ pub trait GhApi: Send + Sync {
 struct CacheEntry {
     etag: String,
     body: String,
+    has_next_page: bool,
 }
 
 /// Client that wraps `gh api` with ETag-based conditional request caching.
@@ -84,6 +96,20 @@ impl GhApi for GhApiClient {
     /// Fetch a GitHub API endpoint, using cached ETag for conditional requests.
     /// Returns the JSON body (from cache on 304, fresh on 200).
     async fn get(&self, endpoint: &str, repo_root: &Path) -> Result<String, String> {
+        self.get_with_headers(endpoint, repo_root)
+            .await
+            .map(|r| r.body)
+    }
+}
+
+impl GhApiClient {
+    /// Fetch a GitHub API endpoint, returning the full parsed response
+    /// including pagination info. Uses ETag-based conditional request caching.
+    pub async fn get_with_headers(
+        &self,
+        endpoint: &str,
+        repo_root: &Path,
+    ) -> Result<GhApiResponse, String> {
         // Build args
         let cached_etag = {
             let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
@@ -111,7 +137,13 @@ impl GhApi for GhApiClient {
             // Serve from cache
             let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = cache.get(endpoint) {
-                return Ok(entry.body.clone());
+                return Ok(GhApiResponse {
+                    status: 304,
+                    etag: Some(entry.etag.clone()),
+                    body: entry.body.clone(),
+                    has_next_page: entry.has_next_page,
+                    total_count: None,
+                });
             }
             return Err("304 but no cached response".to_string());
         }
@@ -120,18 +152,19 @@ impl GhApi for GhApiClient {
             return Err(output.stderr);
         }
 
-        if let Some(etag) = parsed.etag {
+        if let Some(ref etag) = parsed.etag {
             let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
             cache.insert(
                 endpoint.to_string(),
                 CacheEntry {
-                    etag,
+                    etag: etag.clone(),
                     body: parsed.body.clone(),
+                    has_next_page: parsed.has_next_page,
                 },
             );
         }
 
-        Ok(parsed.body)
+        Ok(parsed)
     }
 }
 
@@ -178,5 +211,27 @@ mod tests {
         let result = parse_gh_api_response(raw);
         assert_eq!(result.etag, None);
         assert_eq!(result.body, "hello");
+    }
+
+    #[test]
+    fn parse_link_header_has_next() {
+        let raw = "HTTP/2.0 200 OK\r\nLink: <https://api.github.com/repos/foo/bar/issues?page=2>; rel=\"next\", <https://api.github.com/repos/foo/bar/issues?page=5>; rel=\"last\"\r\nEtag: \"abc\"\r\n\r\n[{\"number\":1}]";
+        let result = parse_gh_api_response(raw);
+        assert!(result.has_next_page);
+        assert_eq!(result.total_count, None);
+    }
+
+    #[test]
+    fn parse_link_header_no_next() {
+        let raw = "HTTP/2.0 200 OK\r\nLink: <https://api.github.com/repos/foo/bar/issues?page=3>; rel=\"prev\"\r\nEtag: \"abc\"\r\n\r\n[]";
+        let result = parse_gh_api_response(raw);
+        assert!(!result.has_next_page);
+    }
+
+    #[test]
+    fn parse_no_link_header() {
+        let raw = "HTTP/2.0 200 OK\r\nEtag: \"abc\"\r\n\r\n[]";
+        let result = parse_gh_api_response(raw);
+        assert!(!result.has_next_page);
     }
 }
