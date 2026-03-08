@@ -446,17 +446,12 @@ pub fn correlate(providers: &ProviderData) -> (Vec<CorrelationResult>, Vec<Corre
         .iter()
         .filter_map(|wi| wi.branch().map(|b| b.to_string()))
         .collect();
-    let merged_set: HashSet<&str> = providers
-        .merged_branches
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-    for b in &providers.remote_branches {
-        if b.as_str() != "HEAD"
+    for (b, branch_info) in &providers.branches {
+        if branch_info.status == flotilla_protocol::BranchStatus::Remote
+            && b.as_str() != "HEAD"
             && b.as_str() != "main"
             && b.as_str() != "master"
             && !known_branches.contains(b.as_str())
-            && !merged_set.contains(b.as_str())
         {
             work_items.push(CorrelationResult::Standalone(
                 StandaloneResult::RemoteBranch { branch: b.clone() },
@@ -674,7 +669,6 @@ mod tests {
             co_path.clone(),
             Checkout {
                 branch: "feat-x".to_string(),
-                path: co_path.clone(),
                 is_trunk: false,
                 trunk_ahead_behind: None,
                 remote_ahead_behind: None,
@@ -695,7 +689,6 @@ mod tests {
         providers.issues.insert(
             "42".to_string(),
             Issue {
-                id: "42".to_string(),
                 title: "Fix the thing".to_string(),
                 labels: vec![],
                 association_keys: vec![],
