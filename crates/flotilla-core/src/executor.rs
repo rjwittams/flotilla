@@ -698,6 +698,86 @@ mod tests {
         }
     }
 
+    fn runner_ok() -> MockRunner {
+        MockRunner::new(vec![])
+    }
+
+    async fn run_execute(
+        command: Command,
+        registry: &ProviderRegistry,
+        providers_data: &ProviderData,
+        runner: &MockRunner,
+    ) -> CommandResult {
+        execute(
+            command,
+            &repo_root(),
+            registry,
+            providers_data,
+            runner,
+            &config_base(),
+        )
+        .await
+    }
+
+    fn assert_error_contains(result: CommandResult, expected_substring: &str) {
+        match result {
+            CommandResult::Error { message } => {
+                assert!(
+                    message.contains(expected_substring),
+                    "expected error containing {expected_substring:?}, got {message:?}"
+                );
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    fn assert_error_eq(result: CommandResult, expected: &str) {
+        match result {
+            CommandResult::Error { message } => assert_eq!(message, expected),
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    fn assert_checkout_created_branch(result: CommandResult, expected_branch: &str) {
+        match result {
+            CommandResult::CheckoutCreated { branch } => {
+                assert_eq!(branch, expected_branch);
+            }
+            other => panic!("expected CheckoutCreated, got {:?}", other),
+        }
+    }
+
+    fn assert_checkout_status_branch(result: CommandResult, expected_branch: &str) {
+        match result {
+            CommandResult::CheckoutStatus(info) => {
+                assert_eq!(info.branch, expected_branch);
+            }
+            other => panic!("expected CheckoutStatus, got {:?}", other),
+        }
+    }
+
+    fn assert_branch_name_generated(
+        result: CommandResult,
+        expected_name: &str,
+        expected_issue_ids: &[(&str, &str)],
+    ) {
+        match result {
+            CommandResult::BranchNameGenerated { name, issue_ids } => {
+                assert_eq!(name, expected_name);
+                let expected_issue_ids: Vec<_> = expected_issue_ids
+                    .iter()
+                    .map(|(provider, id)| (provider.to_string(), id.to_string()))
+                    .collect();
+                assert_eq!(issue_ids, expected_issue_ids);
+            }
+            other => panic!("expected BranchNameGenerated, got {:?}", other),
+        }
+    }
+
+    fn assert_ok(result: CommandResult) {
+        assert!(matches!(result, CommandResult::Ok));
+    }
+
     // -----------------------------------------------------------------------
     // Tests: CreateWorkspaceForCheckout
     // -----------------------------------------------------------------------
@@ -709,21 +789,19 @@ mod tests {
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
             .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::CreateWorkspaceForCheckout {
                 checkout_path: path,
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
@@ -737,47 +815,38 @@ mod tests {
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
             .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::CreateWorkspaceForCheckout {
                 checkout_path: path,
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
     async fn create_workspace_for_checkout_not_found() {
         let registry = empty_registry();
         let data = empty_data();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::CreateWorkspaceForCheckout {
                 checkout_path: PathBuf::from("/nonexistent"),
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert!(message.contains("checkout not found"));
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_contains(result, "checkout not found");
     }
 
     #[tokio::test]
@@ -791,26 +860,19 @@ mod tests {
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
             .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::CreateWorkspaceForCheckout {
                 checkout_path: path,
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert_eq!(message, "ws creation failed");
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_eq(result, "ws creation failed");
     }
 
     // -----------------------------------------------------------------------
@@ -820,21 +882,19 @@ mod tests {
     #[tokio::test]
     async fn select_workspace_no_manager() {
         let registry = empty_registry();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::SelectWorkspace {
                 ws_ref: "my-ws".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
@@ -844,21 +904,19 @@ mod tests {
             "cmux".to_string(),
             Arc::new(MockWorkspaceManager::succeeding()),
         ));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::SelectWorkspace {
                 ws_ref: "my-ws".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
@@ -868,24 +926,19 @@ mod tests {
             "cmux".to_string(),
             Arc::new(MockWorkspaceManager::failing("select failed")),
         ));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::SelectWorkspace {
                 ws_ref: "bad-ws".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => assert_eq!(message, "select failed"),
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_eq(result, "select failed");
     }
 
     // -----------------------------------------------------------------------
@@ -895,28 +948,21 @@ mod tests {
     #[tokio::test]
     async fn create_checkout_no_manager() {
         let registry = empty_registry();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::CreateCheckout {
                 branch: "feat-x".to_string(),
                 create_branch: true,
                 issue_ids: vec![],
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert!(message.contains("No checkout manager available"));
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_contains(result, "No checkout manager available");
     }
 
     #[tokio::test]
@@ -926,28 +972,21 @@ mod tests {
             "wt".to_string(),
             Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")),
         );
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::CreateCheckout {
                 branch: "feat-x".to_string(),
                 create_branch: true,
                 issue_ids: vec![],
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::CheckoutCreated { branch } => {
-                assert_eq!(branch, "feat-x");
-            }
-            other => panic!("expected CheckoutCreated, got {:?}", other),
-        }
+        assert_checkout_created_branch(result, "feat-x");
     }
 
     #[tokio::test]
@@ -960,26 +999,19 @@ mod tests {
         // The runner needs one Ok response for the git config write
         let runner = MockRunner::new(vec![Ok(String::new())]);
 
-        let result = execute(
+        let result = run_execute(
             Command::CreateCheckout {
                 branch: "feat-x".to_string(),
                 create_branch: true,
                 issue_ids: vec![("github".to_string(), "42".to_string())],
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::CheckoutCreated { branch } => {
-                assert_eq!(branch, "feat-x");
-            }
-            other => panic!("expected CheckoutCreated, got {:?}", other),
-        }
+        assert_checkout_created_branch(result, "feat-x");
     }
 
     #[tokio::test]
@@ -989,28 +1021,21 @@ mod tests {
             "wt".to_string(),
             Arc::new(MockCheckoutManager::failing("branch already exists")),
         );
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::CreateCheckout {
                 branch: "feat-x".to_string(),
                 create_branch: true,
                 issue_ids: vec![],
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert_eq!(message, "branch already exists");
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_eq(result, "branch already exists");
     }
 
     #[tokio::test]
@@ -1024,29 +1049,22 @@ mod tests {
             "cmux".to_string(),
             Arc::new(MockWorkspaceManager::failing("ws failed")),
         ));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::CreateCheckout {
                 branch: "feat-x".to_string(),
                 create_branch: true,
                 issue_ids: vec![],
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
         // Workspace failure is logged but checkout still reports success
-        match result {
-            CommandResult::CheckoutCreated { branch } => {
-                assert_eq!(branch, "feat-x");
-            }
-            other => panic!("expected CheckoutCreated, got {:?}", other),
-        }
+        assert_checkout_created_branch(result, "feat-x");
     }
 
     // -----------------------------------------------------------------------
@@ -1056,26 +1074,19 @@ mod tests {
     #[tokio::test]
     async fn remove_checkout_no_manager() {
         let registry = empty_registry();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::RemoveCheckout {
                 branch: "old".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert!(message.contains("No checkout manager available"));
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_contains(result, "No checkout manager available");
     }
 
     #[tokio::test]
@@ -1085,21 +1096,19 @@ mod tests {
             "wt".to_string(),
             Arc::new(MockCheckoutManager::succeeding("old", "/repo/wt-old")),
         );
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::RemoveCheckout {
                 branch: "old".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
@@ -1109,26 +1118,19 @@ mod tests {
             "wt".to_string(),
             Arc::new(MockCheckoutManager::failing("cannot remove trunk")),
         );
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::RemoveCheckout {
                 branch: "main".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert_eq!(message, "cannot remove trunk");
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_eq(result, "cannot remove trunk");
     }
 
     // -----------------------------------------------------------------------
@@ -1151,26 +1153,19 @@ mod tests {
             Err("err".to_string()),
         ]);
 
-        let result = execute(
+        let result = run_execute(
             Command::FetchCheckoutStatus {
                 branch: "feat".to_string(),
                 checkout_path: Some(PathBuf::from("/repo/wt")),
                 change_request_id: Some("42".to_string()),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::CheckoutStatus(info) => {
-                assert_eq!(info.branch, "feat");
-            }
-            other => panic!("expected CheckoutStatus, got {:?}", other),
-        }
+        assert_checkout_status_branch(result, "feat");
     }
 
     // -----------------------------------------------------------------------
@@ -1180,21 +1175,19 @@ mod tests {
     #[tokio::test]
     async fn open_change_request_no_provider() {
         let registry = empty_registry();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::OpenChangeRequest {
                 id: "42".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
@@ -1203,21 +1196,19 @@ mod tests {
         registry
             .code_review
             .insert("github".to_string(), Arc::new(MockCodeReview));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::OpenChangeRequest {
                 id: "42".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     // -----------------------------------------------------------------------
@@ -1227,21 +1218,19 @@ mod tests {
     #[tokio::test]
     async fn open_issue_no_provider() {
         let registry = empty_registry();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::OpenIssue {
                 id: "10".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
@@ -1250,21 +1239,19 @@ mod tests {
         registry
             .issue_trackers
             .insert("github".to_string(), Arc::new(MockIssueTracker));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::OpenIssue {
                 id: "10".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     // -----------------------------------------------------------------------
@@ -1278,20 +1265,18 @@ mod tests {
         // Second call: gh pr edit succeeds
         let runner = MockRunner::new(vec![Ok("Existing PR body".to_string()), Ok(String::new())]);
 
-        let result = execute(
+        let result = run_execute(
             Command::LinkIssuesToChangeRequest {
                 change_request_id: "55".to_string(),
                 issue_ids: vec!["10".to_string(), "20".to_string()],
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
@@ -1302,20 +1287,18 @@ mod tests {
             Ok(String::new()),      // edit succeeds
         ]);
 
-        let result = execute(
+        let result = run_execute(
             Command::LinkIssuesToChangeRequest {
                 change_request_id: "55".to_string(),
                 issue_ids: vec!["10".to_string()],
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
@@ -1323,25 +1306,18 @@ mod tests {
         let registry = empty_registry();
         let runner = MockRunner::new(vec![Err("gh not found".to_string())]);
 
-        let result = execute(
+        let result = run_execute(
             Command::LinkIssuesToChangeRequest {
                 change_request_id: "55".to_string(),
                 issue_ids: vec!["10".to_string()],
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert_eq!(message, "gh not found");
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_eq(result, "gh not found");
     }
 
     #[tokio::test]
@@ -1352,25 +1328,18 @@ mod tests {
             Err("permission denied".to_string()),
         ]);
 
-        let result = execute(
+        let result = run_execute(
             Command::LinkIssuesToChangeRequest {
                 change_request_id: "55".to_string(),
                 issue_ids: vec!["10".to_string()],
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert_eq!(message, "permission denied");
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_eq(result, "permission denied");
     }
 
     // -----------------------------------------------------------------------
@@ -1380,26 +1349,19 @@ mod tests {
     #[tokio::test]
     async fn archive_session_not_found() {
         let registry = empty_registry();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::ArchiveSession {
                 session_id: "nonexistent".to_string(),
             },
-            &repo_root(),
             &registry,
             &empty_data(),
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert!(message.contains("session not found"));
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_contains(result, "session not found");
     }
 
     #[tokio::test]
@@ -1408,26 +1370,19 @@ mod tests {
         let mut data = empty_data();
         data.sessions
             .insert("sess-1".to_string(), make_session("sess-1"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::ArchiveSession {
                 session_id: "sess-1".to_string(),
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert!(message.contains("No coding agent available"));
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_contains(result, "No coding agent available");
     }
 
     #[tokio::test]
@@ -1440,21 +1395,19 @@ mod tests {
         let mut data = empty_data();
         data.sessions
             .insert("sess-1".to_string(), make_session("sess-1"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::ArchiveSession {
                 session_id: "sess-1".to_string(),
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
@@ -1467,26 +1420,19 @@ mod tests {
         let mut data = empty_data();
         data.sessions
             .insert("sess-1".to_string(), make_session("sess-1"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::ArchiveSession {
                 session_id: "sess-1".to_string(),
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert_eq!(message, "archive failed");
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_eq(result, "archive failed");
     }
 
     // -----------------------------------------------------------------------
@@ -1506,27 +1452,19 @@ mod tests {
         let mut data = empty_data();
         data.issues
             .insert("42".to_string(), make_issue("42", "Add login feature"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::GenerateBranchName {
                 issue_keys: vec!["42".to_string()],
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::BranchNameGenerated { name, issue_ids } => {
-                assert_eq!(name, "feat/add-login");
-                assert_eq!(issue_ids, vec![("github".to_string(), "42".to_string())]);
-            }
-            other => panic!("expected BranchNameGenerated, got {:?}", other),
-        }
+        assert_branch_name_generated(result, "feat/add-login", &[("github", "42")]);
     }
 
     #[tokio::test]
@@ -1539,27 +1477,19 @@ mod tests {
         let mut data = empty_data();
         data.issues
             .insert("42".to_string(), make_issue("42", "Add login"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::GenerateBranchName {
                 issue_keys: vec!["42".to_string()],
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::BranchNameGenerated { name, issue_ids } => {
-                assert_eq!(name, "issue-42");
-                assert_eq!(issue_ids, vec![("github".to_string(), "42".to_string())]);
-            }
-            other => panic!("expected BranchNameGenerated, got {:?}", other),
-        }
+        assert_branch_name_generated(result, "issue-42", &[("github", "42")]);
     }
 
     #[tokio::test]
@@ -1568,28 +1498,20 @@ mod tests {
         let mut data = empty_data();
         data.issues
             .insert("7".to_string(), make_issue("7", "Fix bug"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::GenerateBranchName {
                 issue_keys: vec!["7".to_string()],
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::BranchNameGenerated { name, issue_ids } => {
-                assert_eq!(name, "issue-7");
-                // No issue tracker registered, defaults to "github"
-                assert_eq!(issue_ids, vec![("github".to_string(), "7".to_string())]);
-            }
-            other => panic!("expected BranchNameGenerated, got {:?}", other),
-        }
+        // No issue tracker registered, defaults to "github"
+        assert_branch_name_generated(result, "issue-7", &[("github", "7")]);
     }
 
     #[tokio::test]
@@ -1607,61 +1529,43 @@ mod tests {
             .insert("1".to_string(), make_issue("1", "Login feature"));
         data.issues
             .insert("2".to_string(), make_issue("2", "Signup feature"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::GenerateBranchName {
                 issue_keys: vec!["1".to_string(), "2".to_string()],
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::BranchNameGenerated { name, issue_ids } => {
-                assert_eq!(name, "feat/login-and-signup");
-                assert_eq!(
-                    issue_ids,
-                    vec![
-                        ("github".to_string(), "1".to_string()),
-                        ("github".to_string(), "2".to_string()),
-                    ]
-                );
-            }
-            other => panic!("expected BranchNameGenerated, got {:?}", other),
-        }
+        assert_branch_name_generated(
+            result,
+            "feat/login-and-signup",
+            &[("github", "1"), ("github", "2")],
+        );
     }
 
     #[tokio::test]
     async fn generate_branch_name_unknown_issue_key() {
         let registry = empty_registry();
         let data = empty_data();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::GenerateBranchName {
                 issue_keys: vec!["nonexistent".to_string()],
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::BranchNameGenerated { name, issue_ids } => {
-                // No issues found, so empty fallback
-                assert_eq!(name, "");
-                assert!(issue_ids.is_empty());
-            }
-            other => panic!("expected BranchNameGenerated, got {:?}", other),
-        }
+        // No issues found, so empty fallback
+        assert_branch_name_generated(result, "", &[]);
     }
 
     // -----------------------------------------------------------------------
@@ -1680,23 +1584,21 @@ mod tests {
         data.checkouts
             .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
         // resolve_claude_path calls runner.exists which returns true for MockRunner
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::TeleportSession {
                 session_id: "sess-1".to_string(),
                 branch: Some("feat".to_string()),
                 checkout_key: Some(path),
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
@@ -1711,51 +1613,42 @@ mod tests {
             Arc::new(MockWorkspaceManager::succeeding()),
         ));
         let data = empty_data();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::TeleportSession {
                 session_id: "sess-1".to_string(),
                 branch: Some("feat".to_string()),
                 checkout_key: None,
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     #[tokio::test]
     async fn teleport_session_no_path_no_branch() {
         let registry = empty_registry();
         let data = empty_data();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::TeleportSession {
                 session_id: "sess-1".to_string(),
                 branch: None,
                 checkout_key: None,
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert!(message.contains("Could not determine checkout path"));
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_contains(result, "Could not determine checkout path");
     }
 
     #[tokio::test]
@@ -1769,28 +1662,21 @@ mod tests {
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
             .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::TeleportSession {
                 session_id: "sess-1".to_string(),
                 branch: Some("feat".to_string()),
                 checkout_key: Some(path),
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        match result {
-            CommandResult::Error { message } => {
-                assert_eq!(message, "ws failed");
-            }
-            other => panic!("expected Error, got {:?}", other),
-        }
+        assert_error_eq(result, "ws failed");
     }
 
     #[tokio::test]
@@ -1805,23 +1691,21 @@ mod tests {
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
             .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
-        let result = execute(
+        let result = run_execute(
             Command::TeleportSession {
                 session_id: "sess-1".to_string(),
                 branch: None,
                 checkout_key: Some(path),
             },
-            &repo_root(),
             &registry,
             &data,
             &runner,
-            &config_base(),
         )
         .await;
 
-        assert!(matches!(result, CommandResult::Ok));
+        assert_ok(result);
     }
 
     // -----------------------------------------------------------------------
@@ -1832,7 +1716,7 @@ mod tests {
     async fn daemon_level_commands_return_error() {
         let registry = empty_registry();
         let data = empty_data();
-        let runner = MockRunner::new(vec![]);
+        let runner = runner_ok();
 
         let daemon_commands = vec![
             Command::AddRepo {
@@ -1860,17 +1744,8 @@ mod tests {
         ];
 
         for cmd in daemon_commands {
-            let result =
-                execute(cmd, &repo_root(), &registry, &data, &runner, &config_base()).await;
-            match &result {
-                CommandResult::Error { message } => {
-                    assert!(
-                        message.contains("daemon-level command"),
-                        "expected daemon-level error, got: {message}"
-                    );
-                }
-                other => panic!("expected Error for daemon command, got {:?}", other),
-            }
+            let result = run_execute(cmd, &registry, &data, &runner).await;
+            assert_error_contains(result, "daemon-level command");
         }
     }
 
