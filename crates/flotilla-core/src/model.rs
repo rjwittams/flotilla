@@ -198,7 +198,7 @@ mod tests {
         async fn list_checkouts(
             &self,
             _: &Path,
-        ) -> Result<Vec<crate::providers::types::Checkout>, String> {
+        ) -> Result<Vec<(PathBuf, crate::providers::types::Checkout)>, String> {
             Ok(vec![])
         }
         async fn create_checkout(
@@ -206,7 +206,7 @@ mod tests {
             _: &Path,
             _: &str,
             _: bool,
-        ) -> Result<crate::providers::types::Checkout, String> {
+        ) -> Result<(PathBuf, crate::providers::types::Checkout), String> {
             Err("stub".into())
         }
         async fn remove_checkout(&self, _: &Path, _: &str) -> Result<(), String> {

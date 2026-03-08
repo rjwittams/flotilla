@@ -178,7 +178,6 @@ async fn refresh_providers(
             Vec::new()
         })
         .into_iter()
-        .map(|co| (co.path.clone(), co))
         .collect();
     pd.change_requests = crs
         .unwrap_or_else(|e| {

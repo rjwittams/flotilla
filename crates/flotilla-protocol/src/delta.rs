@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ChangeRequest, Checkout, CloudAgentSession, Issue, ProviderError, Workspace, WorkItem,
-    WorkItemIdentity,
+    ChangeRequest, Checkout, CloudAgentSession, Issue, ProviderError, WorkItem, WorkItemIdentity,
+    Workspace,
 };
 
 /// Operation on a keyed collection entry.
@@ -35,14 +35,38 @@ pub struct Branch {
 /// A single change within a delta.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Change {
-    Checkout { key: PathBuf, op: EntryOp<Checkout> },
-    ChangeRequest { key: String, op: EntryOp<ChangeRequest> },
-    Issue { key: String, op: EntryOp<Issue> },
-    Session { key: String, op: EntryOp<CloudAgentSession> },
-    Workspace { key: String, op: EntryOp<Workspace> },
-    Branch { key: String, op: EntryOp<Branch> },
-    WorkItem { identity: WorkItemIdentity, op: EntryOp<WorkItem> },
-    ProviderHealth { provider: String, op: EntryOp<bool> },
+    Checkout {
+        key: PathBuf,
+        op: EntryOp<Checkout>,
+    },
+    ChangeRequest {
+        key: String,
+        op: EntryOp<ChangeRequest>,
+    },
+    Issue {
+        key: String,
+        op: EntryOp<Issue>,
+    },
+    Session {
+        key: String,
+        op: EntryOp<CloudAgentSession>,
+    },
+    Workspace {
+        key: String,
+        op: EntryOp<Workspace>,
+    },
+    Branch {
+        key: String,
+        op: EntryOp<Branch>,
+    },
+    WorkItem {
+        identity: WorkItemIdentity,
+        op: EntryOp<WorkItem>,
+    },
+    ProviderHealth {
+        provider: String,
+        op: EntryOp<bool>,
+    },
     /// Full replacement — errors lack stable identity, so keyed deltas don't apply.
     ErrorsChanged(Vec<ProviderError>),
 }
@@ -81,7 +105,6 @@ mod tests {
         let change = Change::Checkout {
             key: PathBuf::from("/repos/wt-1"),
             op: EntryOp::Added(Checkout {
-                path: PathBuf::from("/repos/wt-1"),
                 branch: "feat-x".into(),
                 is_trunk: false,
                 trunk_ahead_behind: None,

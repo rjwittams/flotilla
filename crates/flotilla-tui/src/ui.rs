@@ -504,7 +504,7 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
 
         if let Some(wt_key) = item.checkout_key() {
             if let Some(co) = providers.checkouts.get(wt_key) {
-                lines.push(format!("Path: {}", co.path.display()));
+                lines.push(format!("Path: {}", wt_key.display()));
                 if let Some(commit) = &co.last_commit {
                     let sha = if commit.short_sha.is_empty() {
                         "?"

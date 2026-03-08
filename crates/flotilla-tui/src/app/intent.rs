@@ -1077,7 +1077,6 @@ mod tests {
             co_path.clone(),
             Checkout {
                 branch: "feat/x".into(),
-                path: co_path.clone(),
                 is_trunk: false,
                 trunk_ahead_behind: None,
                 remote_ahead_behind: None,

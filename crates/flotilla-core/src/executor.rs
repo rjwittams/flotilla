@@ -30,7 +30,7 @@ pub async fn execute(
             if let Some(co) = providers_data.checkouts.get(&checkout_path).cloned() {
                 info!("entering workspace for {}", co.branch);
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                    let config = workspace_config(repo_root, &co.branch, &co.path, "claude");
+                    let config = workspace_config(repo_root, &co.branch, &checkout_path, "claude");
                     if let Err(e) = ws_mgr.create_workspace(&config).await {
                         return CommandResult::Error { message: e };
                     }
@@ -65,15 +65,15 @@ pub async fn execute(
                 None
             };
             match checkout_result {
-                Some(Ok(checkout)) => {
+                Some(Ok((checkout_path, _checkout))) => {
                     // Write issue links to git config
                     if !issue_ids.is_empty() {
                         write_branch_issue_links(repo_root, &branch, &issue_ids, runner).await;
                     }
-                    info!("created checkout at {}", checkout.path.display());
+                    info!("created checkout at {}", checkout_path.display());
                     // Create workspace if manager available
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let config = workspace_config(repo_root, &branch, &checkout.path, "claude");
+                        let config = workspace_config(repo_root, &branch, &checkout_path, "claude");
                         if let Err(e) = ws_mgr.create_workspace(&config).await {
                             // Checkout was created but workspace failed — report as error
                             // but the checkout still exists
@@ -290,14 +290,14 @@ pub async fn execute(
                 .unwrap_or_else(|| "claude".into());
             let teleport_cmd = format!("{} --teleport {}", claude_bin, session_id);
             let wt_path = if let Some(ref key) = checkout_key {
-                providers_data.checkouts.get(key).map(|co| co.path.clone())
+                Some(key.clone())
             } else if let Some(branch_name) = &branch {
                 let checkout_result = if let Some(cm) = registry.checkout_managers.values().next() {
                     cm.create_checkout(repo_root, branch_name, false).await.ok()
                 } else {
                     None
                 };
-                checkout_result.map(|c| c.path)
+                checkout_result.map(|(path, _)| path)
             } else {
                 None
             };

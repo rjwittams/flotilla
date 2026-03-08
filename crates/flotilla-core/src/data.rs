@@ -674,7 +674,6 @@ mod tests {
             co_path.clone(),
             Checkout {
                 branch: "feat-x".to_string(),
-                path: co_path.clone(),
                 is_trunk: false,
                 trunk_ahead_behind: None,
                 remote_ahead_behind: None,
