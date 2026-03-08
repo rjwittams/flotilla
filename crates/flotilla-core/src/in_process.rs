@@ -164,7 +164,14 @@ impl InProcessDaemon {
                 errors: snapshot.errors.clone(),
                 provider_health: snapshot.provider_health.clone(),
             };
-            updates.push((path, snapshot, re_snapshot, issue_total, issue_has_more, search_results));
+            updates.push((
+                path,
+                snapshot,
+                re_snapshot,
+                issue_total,
+                issue_has_more,
+                search_results,
+            ));
         }
 
         // Apply updates under write lock and broadcast
@@ -415,8 +422,7 @@ impl DaemonHandle for InProcessDaemon {
         match &command {
             Command::SetIssueViewport { visible_count, .. } => {
                 // Fetch enough to fill the visible area with some buffer
-                self.ensure_issues_cached(repo, *visible_count * 2)
-                    .await;
+                self.ensure_issues_cached(repo, *visible_count * 2).await;
                 self.broadcast_snapshot(repo).await;
                 return Ok(CommandResult::Ok);
             }
