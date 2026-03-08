@@ -12,7 +12,9 @@ use async_trait::async_trait;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::info;
 
-use flotilla_protocol::{Command, CommandResult, DaemonEvent, Issue, RepoInfo, Snapshot};
+use flotilla_protocol::{
+    AssociationKey, Command, CommandResult, DaemonEvent, Issue, RepoInfo, Snapshot,
+};
 
 use flotilla_protocol::ProviderData;
 
@@ -24,6 +26,24 @@ use crate::issue_cache::IssueCache;
 use crate::model::{provider_names_from_registry, repo_name, RepoModel};
 use crate::providers::CommandRunner;
 use crate::refresh::RefreshSnapshot;
+
+/// Extract issue IDs referenced by association keys on change requests and checkouts.
+fn collect_linked_issue_ids(providers: &ProviderData) -> Vec<String> {
+    let mut ids = std::collections::HashSet::new();
+    for cr in providers.change_requests.values() {
+        for key in &cr.association_keys {
+            let AssociationKey::IssueRef(_, issue_id) = key;
+            ids.insert(issue_id.clone());
+        }
+    }
+    for co in providers.checkouts.values() {
+        for key in &co.association_keys {
+            let AssociationKey::IssueRef(_, issue_id) = key;
+            ids.insert(issue_id.clone());
+        }
+    }
+    ids.into_iter().collect()
+}
 
 /// Clone base providers and replace the issues field with cached issues or search results.
 fn inject_issues(
@@ -240,6 +260,12 @@ impl InProcessDaemon {
                 .event_tx
                 .send(DaemonEvent::Snapshot(Box::new(proto_snapshot)));
         }
+
+        // After broadcasting, check for linked issues that aren't cached yet
+        // and fetch/pin them. This is a separate step so it doesn't block the
+        // main snapshot broadcast path.
+        drop(repos);
+        self.fetch_missing_linked_issues().await;
     }
 
     /// Fetch issue pages until the cache has at least `desired_count` entries
@@ -333,6 +359,55 @@ impl InProcessDaemon {
             }
             Err(e) => {
                 tracing::warn!("issue search failed: {}", e);
+            }
+        }
+    }
+
+    /// Check all repos for linked issue IDs not yet in the cache, fetch and pin them.
+    async fn fetch_missing_linked_issues(&self) {
+        // Phase 1: read lock — find repos with missing linked issues
+        let fetch_tasks: Vec<_> = {
+            let repos = self.repos.read().await;
+            repos
+                .iter()
+                .filter_map(|(path, state)| {
+                    let linked_ids = collect_linked_issue_ids(&state.last_snapshot.providers);
+                    let missing = state.issue_cache.missing_ids(&linked_ids);
+                    if missing.is_empty() {
+                        return None;
+                    }
+                    Some((path.clone(), missing, Arc::clone(&state.model.registry)))
+                })
+                .collect()
+        };
+
+        if fetch_tasks.is_empty() {
+            return;
+        }
+
+        // Phase 2: fetch outside locks, then update cache and re-broadcast
+        for (path, missing, registry) in fetch_tasks {
+            let Some(tracker) = registry.issue_trackers.values().next() else {
+                continue;
+            };
+            match tracker.fetch_issues_by_id(&path, &missing).await {
+                Ok(fetched) if !fetched.is_empty() => {
+                    {
+                        let mut repos = self.repos.write().await;
+                        if let Some(state) = repos.get_mut(&path) {
+                            state.issue_cache.add_pinned(fetched);
+                        }
+                    }
+                    self.broadcast_snapshot(&path).await;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to fetch linked issues for {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
             }
         }
     }
