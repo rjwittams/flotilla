@@ -5,28 +5,75 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::info;
 
-use flotilla_protocol::{Command, CommandResult, DaemonEvent, RepoInfo, Snapshot};
+use flotilla_protocol::{Command, CommandResult, DaemonEvent, Issue, RepoInfo, Snapshot};
+
+use flotilla_protocol::ProviderData;
 
 use crate::config::ConfigStore;
 use crate::convert::snapshot_to_proto;
 use crate::daemon::DaemonHandle;
 use crate::executor;
+use crate::issue_cache::IssueCache;
 use crate::model::{provider_names_from_registry, repo_name, RepoModel};
 use crate::providers::CommandRunner;
 use crate::refresh::RefreshSnapshot;
+
+/// Clone base providers and replace the issues field with cached issues or search results.
+fn inject_issues(
+    base_providers: &ProviderData,
+    cache: &IssueCache,
+    search_results: &Option<Vec<Issue>>,
+) -> ProviderData {
+    let mut providers = base_providers.clone();
+    if let Some(ref results) = search_results {
+        providers.issues = results.iter().map(|i| (i.id.clone(), i.clone())).collect();
+    } else {
+        providers.issues = (*cache.to_index_map()).clone();
+    }
+    providers
+}
+
+/// Build a proto Snapshot by injecting issues, re-correlating, and patching issue metadata.
+fn build_repo_snapshot(
+    path: &Path,
+    seq: u64,
+    base: &RefreshSnapshot,
+    health: &HashMap<&'static str, bool>,
+    cache: &IssueCache,
+    search_results: &Option<Vec<Issue>>,
+) -> Snapshot {
+    let providers = Arc::new(inject_issues(&base.providers, cache, search_results));
+    let (work_items, correlation_groups) = crate::data::correlate(&providers);
+    let re_snapshot = RefreshSnapshot {
+        providers,
+        work_items,
+        correlation_groups,
+        errors: base.errors.clone(),
+        provider_health: base.provider_health.clone(),
+    };
+    let mut snapshot = snapshot_to_proto(path, seq, &re_snapshot);
+    snapshot.provider_health = health.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+    snapshot.issue_total = cache.total_count;
+    snapshot.issue_has_more = cache.has_more;
+    snapshot.issue_search_results = search_results.clone();
+    snapshot
+}
 
 struct RepoState {
     model: RepoModel,
     seq: u64,
     last_snapshot: Arc<RefreshSnapshot>,
+    issue_cache: IssueCache,
+    search_results: Option<Vec<Issue>>,
+    /// Serializes issue fetch operations for this repo to prevent concurrent page skips.
+    issue_fetch_mutex: Arc<Mutex<()>>,
 }
 
 pub struct InProcessDaemon {
@@ -64,6 +111,9 @@ impl InProcessDaemon {
                     model,
                     seq: 0,
                     last_snapshot: Arc::new(RefreshSnapshot::default()),
+                    issue_cache: IssueCache::new(),
+                    search_results: None,
+                    issue_fetch_mutex: Arc::new(Mutex::new(())),
                 },
             );
             order.push(path);
@@ -103,40 +153,79 @@ impl InProcessDaemon {
     ///
     /// Called automatically by the background poll loop spawned in `new()`.
     async fn poll_snapshots(&self) {
+        // Collect changed snapshots under a brief write lock (need &mut for borrow_and_update),
+        // then do correlation work outside the lock to avoid blocking other operations.
+        let changed: Vec<_> = {
+            let mut repos = self.repos.write().await;
+            repos
+                .iter_mut()
+                .filter_map(|(path, state)| {
+                    let handle = &mut state.model.refresh_handle;
+                    if !handle.snapshot_rx.has_changed().unwrap_or(false) {
+                        return None;
+                    }
+                    let snapshot = handle.snapshot_rx.borrow_and_update().clone();
+                    let providers = inject_issues(
+                        &snapshot.providers,
+                        &state.issue_cache,
+                        &state.search_results,
+                    );
+
+                    Some((
+                        path.clone(),
+                        snapshot,
+                        providers,
+                        state.issue_cache.total_count,
+                        state.issue_cache.has_more,
+                        state.search_results.clone(),
+                    ))
+                })
+                .collect()
+        };
+        // Write lock released here
+
+        if changed.is_empty() {
+            return;
+        }
+
+        // Correlate and build proto snapshots outside any lock
+        let mut updates = Vec::new();
+        for (path, snapshot, providers, issue_total, issue_has_more, search_results) in changed {
+            let providers = Arc::new(providers);
+            let (work_items, correlation_groups) = crate::data::correlate(&providers);
+
+            let re_snapshot = RefreshSnapshot {
+                providers,
+                work_items,
+                correlation_groups,
+                errors: snapshot.errors.clone(),
+                provider_health: snapshot.provider_health.clone(),
+            };
+            updates.push((
+                path,
+                snapshot,
+                re_snapshot,
+                issue_total,
+                issue_has_more,
+                search_results,
+            ));
+        }
+
+        // Apply updates under write lock and broadcast
         let mut repos = self.repos.write().await;
-
-        for (path, state) in repos.iter_mut() {
-            let handle = &mut state.model.refresh_handle;
-            if !handle.snapshot_rx.has_changed().unwrap_or(false) {
+        for (path, snapshot, re_snapshot, issue_total, issue_has_more, search_results) in updates {
+            let Some(state) = repos.get_mut(&path) else {
                 continue;
-            }
+            };
 
-            let snapshot = handle.snapshot_rx.borrow_and_update().clone();
-
-            // Update the model's DataStore with the new provider data
-            state.model.data.providers = Arc::clone(&snapshot.providers);
-            state.model.data.correlation_groups = snapshot.correlation_groups.clone();
+            state.model.data.providers = Arc::clone(&re_snapshot.providers);
+            state.model.data.correlation_groups = re_snapshot.correlation_groups.clone();
             state.model.data.provider_health = snapshot.provider_health.clone();
             state.model.data.loading = false;
-
-            // Handle issues_disabled — tell the background task to stop querying,
-            // and suppress from provider health display
-            let issues_disabled = snapshot
-                .errors
-                .iter()
-                .any(|e| e.category == "issues" && e.message.contains("has disabled issues"));
-            if issues_disabled {
-                state.model.data.provider_health.remove("issue_tracker");
-                handle.skip_issues.store(true, Ordering::Relaxed);
-            }
-
-            // Increment sequence and store snapshot
             state.seq += 1;
-            state.last_snapshot = snapshot.clone();
+            state.last_snapshot = snapshot;
 
-            // Build and broadcast proto snapshot.
-            // Use the model's (suppressed) health map, not the raw refresh snapshot's.
-            let mut proto_snapshot = snapshot_to_proto(path, state.seq, &snapshot);
+            let mut proto_snapshot = snapshot_to_proto(&path, state.seq, &re_snapshot);
             proto_snapshot.provider_health = state
                 .model
                 .data
@@ -144,11 +233,129 @@ impl InProcessDaemon {
                 .iter()
                 .map(|(k, v)| (k.to_string(), *v))
                 .collect();
-            // Ignore send errors (no receivers is fine)
+            proto_snapshot.issue_total = issue_total;
+            proto_snapshot.issue_has_more = issue_has_more;
+            proto_snapshot.issue_search_results = search_results;
             let _ = self
                 .event_tx
                 .send(DaemonEvent::Snapshot(Box::new(proto_snapshot)));
         }
+    }
+
+    /// Fetch issue pages until the cache has at least `desired_count` entries
+    /// (or no more pages are available).
+    async fn ensure_issues_cached(&self, repo: &Path, desired_count: usize) {
+        // Serialize fetches per-repo to prevent concurrent calls from reading the same
+        // next_page and skipping pages.
+        let mutex = {
+            let repos = self.repos.read().await;
+            match repos.get(repo) {
+                Some(state) => Arc::clone(&state.issue_fetch_mutex),
+                None => return,
+            }
+        };
+        let _guard = mutex.lock().await;
+        loop {
+            // Check cache state and grab registry Arc (single read lock)
+            let (page_num, registry) = {
+                let repos = self.repos.read().await;
+                let Some(state) = repos.get(repo) else {
+                    return;
+                };
+                let need = state.issue_cache.len() < desired_count && state.issue_cache.has_more;
+                if !need {
+                    break;
+                }
+                if state.model.registry.issue_trackers.is_empty() {
+                    // No tracker — stop claiming more pages are available
+                    drop(repos);
+                    let mut repos = self.repos.write().await;
+                    if let Some(state) = repos.get_mut(repo) {
+                        state.issue_cache.has_more = false;
+                    }
+                    break;
+                }
+                (
+                    state.issue_cache.next_page,
+                    Arc::clone(&state.model.registry),
+                )
+            };
+
+            // Fetch the next page outside any lock
+            let page_result = {
+                let tracker = registry.issue_trackers.values().next().unwrap();
+                tracker.list_issues_page(repo, page_num, 50).await
+            };
+
+            match page_result {
+                Ok(page) => {
+                    let mut repos = self.repos.write().await;
+                    if let Some(state) = repos.get_mut(repo) {
+                        state.issue_cache.merge_page(page);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to fetch issue page {}: {}", page_num, e);
+                    let mut repos = self.repos.write().await;
+                    if let Some(state) = repos.get_mut(repo) {
+                        state.issue_cache.has_more = false;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Run a search query against the issue tracker and store the results.
+    async fn search_issues(&self, repo: &Path, query: &str) {
+        let registry = {
+            let repos = self.repos.read().await;
+            let Some(state) = repos.get(repo) else {
+                return;
+            };
+            Arc::clone(&state.model.registry)
+        };
+
+        let result = {
+            let Some(tracker) = registry.issue_trackers.values().next() else {
+                return;
+            };
+            tracker.search_issues(repo, query, 50).await
+        };
+
+        match result {
+            Ok(issues) => {
+                info!("search returned {} issues for query", issues.len());
+                let mut repos = self.repos.write().await;
+                if let Some(state) = repos.get_mut(repo) {
+                    state.search_results = Some(issues);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("issue search failed: {}", e);
+            }
+        }
+    }
+
+    /// Re-build and broadcast a snapshot for the given repo using current cache state.
+    async fn broadcast_snapshot(&self, repo: &Path) {
+        let repos = self.repos.read().await;
+        let Some(state) = repos.get(repo) else {
+            return;
+        };
+
+        let proto_snapshot = build_repo_snapshot(
+            repo,
+            state.seq,
+            &state.last_snapshot,
+            &state.model.data.provider_health,
+            &state.issue_cache,
+            &state.search_results,
+        );
+
+        let _ = self
+            .event_tx
+            .send(DaemonEvent::Snapshot(Box::new(proto_snapshot)));
     }
 }
 
@@ -163,16 +370,15 @@ impl DaemonHandle for InProcessDaemon {
         let state = repos
             .get(repo)
             .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
-        let mut snapshot = snapshot_to_proto(repo, state.seq, &state.last_snapshot);
-        // Use the model's suppressed health map (consistent with broadcast path)
-        snapshot.provider_health = state
-            .model
-            .data
-            .provider_health
-            .iter()
-            .map(|(k, v)| (k.to_string(), *v))
-            .collect();
-        Ok(snapshot)
+
+        Ok(build_repo_snapshot(
+            repo,
+            state.seq,
+            &state.last_snapshot,
+            &state.model.data.provider_health,
+            &state.issue_cache,
+            &state.search_results,
+        ))
     }
 
     async fn list_repos(&self) -> Result<Vec<RepoInfo>, String> {
@@ -201,6 +407,36 @@ impl DaemonHandle for InProcessDaemon {
     }
 
     async fn execute(&self, repo: &Path, command: Command) -> Result<CommandResult, String> {
+        // Handle daemon-level issue commands directly
+        match &command {
+            Command::SetIssueViewport { visible_count, .. } => {
+                // Fetch enough to fill the visible area with some buffer
+                self.ensure_issues_cached(repo, *visible_count * 2).await;
+                self.broadcast_snapshot(repo).await;
+                return Ok(CommandResult::Ok);
+            }
+            Command::FetchMoreIssues { desired_count, .. } => {
+                self.ensure_issues_cached(repo, *desired_count).await;
+                self.broadcast_snapshot(repo).await;
+                return Ok(CommandResult::Ok);
+            }
+            Command::SearchIssues { query, .. } => {
+                self.search_issues(repo, query).await;
+                self.broadcast_snapshot(repo).await;
+                return Ok(CommandResult::Ok);
+            }
+            Command::ClearIssueSearch { .. } => {
+                let mut repos = self.repos.write().await;
+                if let Some(state) = repos.get_mut(repo) {
+                    state.search_results = None;
+                }
+                drop(repos);
+                self.broadcast_snapshot(repo).await;
+                return Ok(CommandResult::Ok);
+            }
+            _ => {} // fall through to executor
+        }
+
         // Extract the data we need under a read lock, then drop it before the async work
         let runner = Arc::clone(&self.runner);
         let (registry, providers_data, repo_root) = {
@@ -286,6 +522,9 @@ impl DaemonHandle for InProcessDaemon {
                     model,
                     seq: 0,
                     last_snapshot: Arc::new(RefreshSnapshot::default()),
+                    issue_cache: IssueCache::new(),
+                    search_results: None,
+                    issue_fetch_mutex: Arc::new(Mutex::new(())),
                 },
             );
             order.push(path.clone());

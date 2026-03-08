@@ -90,46 +90,67 @@ async fn run_tui(cli: Cli) -> Result<()> {
     let startup = std::time::Instant::now();
     let config = Arc::new(ConfigStore::new());
 
-    let daemon: Arc<dyn DaemonHandle> = if cli.embedded {
-        // Embedded mode — current behavior
-        let repo_roots = resolve_repo_roots(&cli.repo_root, &config);
-        if repo_roots.is_empty() {
+    // Initialize terminal and show splash immediately for fast visual feedback.
+    // Mouse capture is enabled AFTER the splash so mouse events don't cut it short.
+    let mut terminal = ratatui::init();
+
+    // Resolve repos before splash (fast — just reads config files).
+    let embedded = cli.embedded;
+    let repo_roots = if embedded {
+        let roots = resolve_repo_roots(&cli.repo_root, &config);
+        if roots.is_empty() {
+            ratatui::restore();
             eprintln!("Error: no git repositories found (use --repo-root to specify)");
             std::process::exit(1);
         }
         info!(
             "config loaded: {} repo(s) in {:.0?}",
-            repo_roots.len(),
+            roots.len(),
             startup.elapsed()
         );
-        let daemon = InProcessDaemon::new(repo_roots, Arc::clone(&config)).await;
-        info!("embedded daemon started in {:.0?}", startup.elapsed());
-        daemon as Arc<dyn DaemonHandle>
+        roots
     } else {
-        // Socket mode — connect or auto-spawn
         if !cli.repo_root.is_empty() {
             eprintln!(
                 "Warning: --repo-root is ignored in socket mode (repos are managed by the daemon)"
             );
         }
-        let socket_path = cli.socket_path();
-        let daemon = connect_or_spawn(&socket_path, &cli)
-            .await
-            .map_err(|e| color_eyre::eyre::eyre!(e))?;
-        info!("connected to daemon in {:.0?}", startup.elapsed());
-        daemon as Arc<dyn DaemonHandle>
+        vec![]
     };
 
-    let mut terminal = ratatui::init();
-    show_splash(&mut terminal).await?;
-    execute!(stdout(), EnableMouseCapture)?;
+    // Spawn daemon init on a separate task so it runs concurrently with the splash
+    // (show_splash uses blocking crossterm::event::poll calls).
+    let config_clone = Arc::clone(&config);
+    let daemon_task = tokio::spawn(async move {
+        let daemon: Arc<dyn DaemonHandle> = if embedded {
+            let d = InProcessDaemon::new(repo_roots, config_clone).await;
+            d as Arc<dyn DaemonHandle>
+        } else {
+            let socket_path = cli.socket_path();
+            connect_or_spawn(&socket_path, &cli)
+                .await
+                .map_err(|e| color_eyre::eyre::eyre!(e))
+                .expect("failed to connect to daemon")
+        };
+        info!("daemon ready in {:.0?}", startup.elapsed());
+        daemon
+    });
 
+    show_splash(&mut terminal).await?;
+    let daemon = daemon_task.await.expect("daemon init panicked");
+
+    // Subscribe and trigger a refresh for each repo so we get data immediately
+    // (the daemon's first refresh may have already been broadcast during the splash).
+    let daemon_rx = daemon.subscribe();
     let repos_info = daemon.list_repos().await.unwrap_or_default();
+    for ri in &repos_info {
+        let _ = daemon.refresh(&ri.path).await;
+    }
     let mut app = app::App::new(daemon.clone(), repos_info, Arc::clone(&config));
 
-    // Set up event handler and attach daemon events
+    execute!(stdout(), EnableMouseCapture)?;
     let mut events = event::EventHandler::new(Duration::from_millis(250));
-    events.attach_daemon(daemon.subscribe());
+    events.attach_daemon(daemon_rx);
 
     loop {
         terminal.draw(|f| ui::render(&app.model, &mut app.ui, f))?;
@@ -454,6 +475,11 @@ async fn show_splash(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         .unwrap_or_else(|_| Picker::halfblocks());
 
     let mut protocol = picker.new_resize_protocol(dyn_img);
+
+    // Drain stale terminal responses left by Picker::from_query_stdio()
+    while crossterm::event::poll(Duration::from_millis(10))? {
+        let _ = crossterm::event::read()?;
+    }
 
     // Guarantee a minimum visible time after first render (not just after splash setup).
     let min_visible = Duration::from_millis(700);

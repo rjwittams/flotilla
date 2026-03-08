@@ -51,6 +51,12 @@ pub struct TuiRepoModel {
     pub provider_names: HashMap<String, String>,
     pub provider_health: HashMap<String, bool>,
     pub loading: bool,
+    pub issue_has_more: bool,
+    pub issue_total: Option<u32>,
+    pub issue_search_active: bool,
+    pub issue_fetch_pending: bool,
+    /// Whether the initial issue fetch has been requested for this repo.
+    pub issue_initial_requested: bool,
 }
 
 /// TUI-side domain model. Mirrors the shape of core's `AppModel` but without
@@ -79,6 +85,11 @@ impl TuiModel {
                     provider_names: info.provider_names,
                     provider_health: info.provider_health,
                     loading: info.loading,
+                    issue_has_more: false,
+                    issue_total: None,
+                    issue_search_active: false,
+                    issue_fetch_pending: false,
+                    issue_initial_requested: false,
                 },
             );
             order.push(info.path);
@@ -162,6 +173,10 @@ impl App {
         let old_providers = std::mem::replace(&mut rm.providers, Arc::new(snap.providers));
         rm.provider_health = snap.provider_health.clone();
         rm.loading = false;
+        rm.issue_has_more = snap.issue_has_more;
+        rm.issue_total = snap.issue_total;
+        rm.issue_search_active = snap.issue_search_results.is_some();
+        rm.issue_fetch_pending = false;
 
         // Build table view
         let section_labels = SectionLabels {
@@ -270,6 +285,17 @@ impl App {
                 self.model.status_message = Some(all_errors.join("; "));
             }
         }
+
+        // Request initial issue fetch once per repo (on first snapshot received)
+        let rm = self.model.repos.get_mut(&path).unwrap();
+        if !rm.issue_initial_requested {
+            rm.issue_initial_requested = true;
+            let visible = self.ui.layout.table_area.height.saturating_sub(2) as usize;
+            self.proto_commands.push(Command::SetIssueViewport {
+                repo: path,
+                visible_count: visible.max(20),
+            });
+        }
     }
 
     fn handle_repo_added(&mut self, info: RepoInfo) {
@@ -285,6 +311,11 @@ impl App {
                 provider_names: info.provider_names,
                 provider_health: info.provider_health,
                 loading: info.loading,
+                issue_has_more: false,
+                issue_total: None,
+                issue_search_active: false,
+                issue_fetch_pending: false,
+                issue_initial_requested: false,
             },
         );
         self.model.repo_order.push(path.clone());
@@ -428,6 +459,7 @@ impl App {
             UiMode::ActionMenu { .. } => self.handle_menu_key(key),
             UiMode::FilePicker { .. } => self.handle_file_picker_key(key),
             UiMode::BranchInput { .. } => self.handle_branch_input_key(key),
+            UiMode::IssueSearch { .. } => self.handle_issue_search_key(key),
             UiMode::Config => self.handle_config_key(key),
             UiMode::Normal => self.handle_normal_key(key),
         }
@@ -498,6 +530,11 @@ impl App {
                     self.config.save_tab_order(&self.model.repo_order);
                 }
             }
+            KeyCode::Char('/') => {
+                self.ui.mode = UiMode::IssueSearch {
+                    input: Input::default(),
+                };
+            }
             KeyCode::Char('c') => {
                 let sp = self.active_ui().show_providers;
                 self.active_ui_mut().show_providers = !sp;
@@ -535,7 +572,10 @@ impl App {
                 self.handle_file_picker_mouse(mouse);
                 return;
             }
-            UiMode::Help | UiMode::DeleteConfirm { .. } | UiMode::BranchInput { .. } => {
+            UiMode::Help
+            | UiMode::DeleteConfirm { .. }
+            | UiMode::BranchInput { .. }
+            | UiMode::IssueSearch { .. } => {
                 return;
             }
             UiMode::Config | UiMode::Normal => {}
@@ -1033,6 +1073,34 @@ impl App {
         *dir_entries = entries;
     }
 
+    fn handle_issue_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                let repo = self.model.active_repo_root().clone();
+                self.proto_commands.push(Command::ClearIssueSearch { repo });
+                self.ui.mode = UiMode::Normal;
+            }
+            KeyCode::Enter => {
+                let query = if let UiMode::IssueSearch { ref input } = self.ui.mode {
+                    input.value().to_string()
+                } else {
+                    return;
+                };
+                if !query.is_empty() {
+                    let repo = self.model.active_repo_root().clone();
+                    self.proto_commands
+                        .push(Command::SearchIssues { repo, query });
+                }
+                self.ui.mode = UiMode::Normal;
+            }
+            _ => {
+                if let UiMode::IssueSearch { ref mut input } = self.ui.mode {
+                    input.handle_event(&crossterm::event::Event::Key(key));
+                }
+            }
+        }
+    }
+
     fn handle_delete_confirm_key(&mut self, key: KeyEvent) {
         let loading = matches!(self.ui.mode, UiMode::DeleteConfirm { loading: true, .. });
         match key.code {
@@ -1088,6 +1156,24 @@ impl App {
         let table_idx = self.active_ui().table_view.selectable_indices[next];
         self.active_ui_mut().selected_selectable_idx = Some(next);
         self.active_ui_mut().table_state.select(Some(table_idx));
+
+        // Infinite scroll: fetch more issues when near the bottom
+        let total = self.active_ui().table_view.selectable_indices.len();
+        if next + 5 >= total
+            && self.model.active().issue_has_more
+            && !self.model.active().issue_fetch_pending
+        {
+            let repo = self.model.active_repo_root().clone();
+            let issue_count = self.model.active().providers.issues.len();
+            let desired = issue_count + 50;
+            if let Some(rm) = self.model.repos.get_mut(&repo) {
+                rm.issue_fetch_pending = true;
+            }
+            self.proto_commands.push(Command::FetchMoreIssues {
+                repo,
+                desired_count: desired,
+            });
+        }
     }
 
     fn select_prev(&mut self) {
