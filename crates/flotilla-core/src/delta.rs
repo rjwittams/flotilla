@@ -117,6 +117,47 @@ pub fn diff_work_items(prev: &[WorkItem], curr: &[WorkItem]) -> Vec<Change> {
         .collect()
 }
 
+/// Apply a `SnapshotDelta` to a `Snapshot`, updating it in place.
+///
+/// Applies provider data changes, provider health changes, and issue metadata.
+/// Updates the snapshot's seq to match the delta's seq.
+/// Note: `work_items` are NOT updated (they require re-correlation which depends
+/// on the full provider registry, so callers must re-derive them if needed).
+pub fn apply_snapshot_delta(
+    snapshot: &mut flotilla_protocol::Snapshot,
+    delta: &flotilla_protocol::SnapshotDelta,
+) {
+    // Apply provider data changes
+    apply_changes(&mut snapshot.providers, delta.changes.clone());
+
+    // Apply provider health changes
+    for change in &delta.changes {
+        match change {
+            Change::ProviderHealth {
+                provider,
+                op: EntryOp::Added(v) | EntryOp::Updated(v),
+            } => {
+                snapshot.provider_health.insert(provider.clone(), *v);
+            }
+            Change::ProviderHealth {
+                provider,
+                op: EntryOp::Removed,
+            } => {
+                snapshot.provider_health.remove(provider);
+            }
+            _ => {}
+        }
+    }
+
+    // Update issue metadata
+    snapshot.issue_total = delta.issue_total;
+    snapshot.issue_has_more = delta.issue_has_more;
+    snapshot.issue_search_results = delta.issue_search_results.clone();
+
+    // Advance seq
+    snapshot.seq = delta.seq;
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
