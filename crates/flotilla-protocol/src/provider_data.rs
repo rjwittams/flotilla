@@ -53,7 +53,6 @@ pub struct WorkingTreeStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeRequest {
-    pub id: String,
     pub title: String,
     pub branch: String,
     pub status: ChangeRequestStatus,
@@ -72,7 +71,6 @@ pub enum ChangeRequestStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
-    pub id: String,
     pub title: String,
     pub labels: Vec<String>,
     pub association_keys: Vec<AssociationKey>,
@@ -80,14 +78,13 @@ pub struct Issue {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssuePage {
-    pub issues: Vec<Issue>,
+    pub issues: Vec<(String, Issue)>,
     pub total_count: Option<u32>,
     pub has_more: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudAgentSession {
-    pub id: String,
     pub title: String,
     pub status: SessionStatus,
     pub model: Option<String>,
@@ -104,7 +101,6 @@ pub enum SessionStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
-    pub ws_ref: String,
     pub name: String,
     pub directories: Vec<PathBuf>,
     pub correlation_keys: Vec<CorrelationKey>,
@@ -117,8 +113,7 @@ pub struct ProviderData {
     pub change_requests: IndexMap<String, ChangeRequest>,
     pub issues: IndexMap<String, Issue>,
     pub sessions: IndexMap<String, CloudAgentSession>,
-    pub remote_branches: Vec<String>,
-    pub merged_branches: Vec<String>,
+    pub branches: IndexMap<String, crate::delta::Branch>,
     pub workspaces: IndexMap<String, Workspace>,
 }
 
@@ -217,7 +212,6 @@ mod tests {
     fn change_request_and_status_roundtrip() {
         let cases = vec![
             ChangeRequest {
-                id: "55".into(),
                 title: "Add feature X".into(),
                 branch: "feat-x".into(),
                 status: ChangeRequestStatus::Open,
@@ -226,7 +220,6 @@ mod tests {
                 association_keys: vec![AssociationKey::IssueRef("gh".into(), "10".into())],
             },
             ChangeRequest {
-                id: "1".into(),
                 title: "T".into(),
                 branch: "b".into(),
                 status: ChangeRequestStatus::Draft,
@@ -253,13 +246,11 @@ mod tests {
     fn issue_session_and_workspace_roundtrip() {
         let issue_cases = vec![
             Issue {
-                id: "GH-42".into(),
                 title: "Fix the bug".into(),
                 labels: vec!["bug".into(), "P1".into()],
                 association_keys: vec![AssociationKey::IssueRef("gh".into(), "42".into())],
             },
             Issue {
-                id: "1".into(),
                 title: "T".into(),
                 labels: vec![],
                 association_keys: vec![],
@@ -271,7 +262,6 @@ mod tests {
 
         let session_cases = vec![
             CloudAgentSession {
-                id: "sess-abc".into(),
                 title: "Debug login flow".into(),
                 status: SessionStatus::Running,
                 model: Some("opus-4".into()),
@@ -282,7 +272,6 @@ mod tests {
                 )],
             },
             CloudAgentSession {
-                id: "s1".into(),
                 title: "T".into(),
                 status: SessionStatus::Idle,
                 model: None,
@@ -304,7 +293,6 @@ mod tests {
 
         let workspace_cases = vec![
             Workspace {
-                ws_ref: "cmux-1".into(),
                 name: "dev-session".into(),
                 directories: vec![
                     PathBuf::from("/repos/proj/wt-1"),
@@ -315,7 +303,6 @@ mod tests {
                 ))],
             },
             Workspace {
-                ws_ref: "ref".into(),
                 name: "n".into(),
                 directories: vec![],
                 correlation_keys: vec![],
@@ -333,8 +320,7 @@ mod tests {
         assert!(pd.change_requests.is_empty());
         assert!(pd.issues.is_empty());
         assert!(pd.sessions.is_empty());
-        assert!(pd.remote_branches.is_empty());
-        assert!(pd.merged_branches.is_empty());
+        assert!(pd.branches.is_empty());
         assert!(pd.workspaces.is_empty());
     }
 
@@ -344,7 +330,6 @@ mod tests {
         pd.change_requests.insert(
             "3".into(),
             ChangeRequest {
-                id: "3".into(),
                 title: "Third".into(),
                 branch: "b3".into(),
                 status: ChangeRequestStatus::Open,
@@ -356,7 +341,6 @@ mod tests {
         pd.change_requests.insert(
             "1".into(),
             ChangeRequest {
-                id: "1".into(),
                 title: "First".into(),
                 branch: "b1".into(),
                 status: ChangeRequestStatus::Draft,

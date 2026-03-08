@@ -393,7 +393,7 @@ fn build_item_row<'a>(item: &WorkItem, providers: &ProviderData, col_widths: &[u
                 ChangeRequestStatus::Closed => "✗",
                 _ => "",
             };
-            format!("#{}{}", cr.id, state_icon)
+            format!("#{}{}", pr_key, state_icon)
         } else {
             String::new()
         }
@@ -418,8 +418,7 @@ fn build_item_row<'a>(item: &WorkItem, providers: &ProviderData, col_widths: &[u
     let issues_display = item
         .issue_keys
         .iter()
-        .filter_map(|k| providers.issues.get(k.as_str()))
-        .map(|i| format!("#{}", i.id))
+        .map(|k| format!("#{}", k))
         .collect::<Vec<_>>()
         .join(",");
 
@@ -531,7 +530,7 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
                 lines.push(format!(
                     "{} #{}: {}",
                     model.active_labels().code_review.abbr,
-                    cr.id,
+                    pr_key,
                     cr.title
                 ));
                 lines.push(format!("State: {:?}", cr.status));
@@ -555,7 +554,7 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
         for ws_ref in &item.workspace_refs {
             if let Some(ws) = providers.workspaces.get(ws_ref.as_str()) {
                 let name = if ws.name.is_empty() {
-                    &ws.ws_ref
+                    ws_ref.as_str()
                 } else {
                     &ws.name
                 };
@@ -566,7 +565,10 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
         for issue_key in &item.issue_keys {
             if let Some(issue) = providers.issues.get(issue_key.as_str()) {
                 let labels = issue.labels.join(", ");
-                lines.push(format!("Issue #{}: {} [{}]", issue.id, issue.title, labels));
+                lines.push(format!(
+                    "Issue #{}: {} [{}]",
+                    issue_key, issue.title, labels
+                ));
             }
         }
 

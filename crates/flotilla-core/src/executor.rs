@@ -224,8 +224,12 @@ pub async fn execute(
         Command::GenerateBranchName { issue_keys } => {
             let issues: Vec<(String, String)> = issue_keys
                 .iter()
-                .filter_map(|k| providers_data.issues.get(k.as_str()))
-                .map(|issue| (issue.id.clone(), issue.title.clone()))
+                .filter_map(|k| {
+                    providers_data
+                        .issues
+                        .get(k.as_str())
+                        .map(|issue| (k.clone(), issue.title.clone()))
+                })
                 .collect();
 
             // Collect (provider_name, issue_id) pairs for the created branch
