@@ -1164,7 +1164,8 @@ impl App {
             && !self.model.active().issue_fetch_pending
         {
             let repo = self.model.active_repo_root().clone();
-            let desired = total + 50;
+            let issue_count = self.model.active().providers.issues.len();
+            let desired = issue_count + 50;
             if let Some(rm) = self.model.repos.get_mut(&repo) {
                 rm.issue_fetch_pending = true;
             }
