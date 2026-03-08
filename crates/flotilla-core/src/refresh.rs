@@ -234,12 +234,12 @@ async fn refresh_providers(
             );
         }
         for name in merged_names {
-            pd.branches
-                .entry(name)
-                .or_insert(Branch {
+            pd.branches.insert(
+                name,
+                Branch {
                     status: BranchStatus::Merged,
-                })
-                .status = BranchStatus::Merged;
+                },
+            );
         }
     }
 
