@@ -1,11 +1,12 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 
 use flotilla_protocol::{Issue, IssuePage};
 
 pub struct IssueCache {
-    pub entries: IndexMap<String, Issue>,
+    entries: Arc<IndexMap<String, Issue>>,
     pub next_page: u32,
     pub has_more: bool,
     pub pinned: HashSet<String>,
@@ -21,7 +22,7 @@ impl Default for IssueCache {
 impl IssueCache {
     pub fn new() -> Self {
         Self {
-            entries: IndexMap::new(),
+            entries: Arc::new(IndexMap::new()),
             next_page: 1,
             has_more: true,
             pinned: HashSet::new(),
@@ -29,9 +30,18 @@ impl IssueCache {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn merge_page(&mut self, page: IssuePage) {
+        let entries = Arc::make_mut(&mut self.entries);
         for issue in page.issues {
-            self.entries.insert(issue.id.clone(), issue);
+            entries.insert(issue.id.clone(), issue);
         }
         self.next_page += 1;
         self.has_more = page.has_more;
@@ -54,14 +64,16 @@ impl IssueCache {
     }
 
     pub fn add_pinned(&mut self, issues: Vec<Issue>) {
+        let entries = Arc::make_mut(&mut self.entries);
         for issue in issues {
             self.pinned.insert(issue.id.clone());
-            self.entries.insert(issue.id.clone(), issue);
+            entries.insert(issue.id.clone(), issue);
         }
     }
 
-    pub fn to_index_map(&self) -> IndexMap<String, Issue> {
-        self.entries.clone()
+    /// Cheap Arc clone — avoids copying the full map on every snapshot build.
+    pub fn to_index_map(&self) -> Arc<IndexMap<String, Issue>> {
+        Arc::clone(&self.entries)
     }
 }
 
@@ -87,7 +99,7 @@ mod tests {
             has_more: true,
         };
         cache.merge_page(page);
-        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.len(), 2);
         assert_eq!(cache.total_count, Some(10));
         assert!(cache.has_more);
     }
@@ -121,7 +133,7 @@ mod tests {
     fn add_pinned_inserts_and_pins() {
         let mut cache = IssueCache::new();
         cache.add_pinned(vec![issue("99")]);
-        assert!(cache.entries.contains_key("99"));
+        assert!(cache.to_index_map().contains_key("99"));
         assert!(cache.pinned.contains("99"));
     }
 
