@@ -4,12 +4,14 @@ use super::ui_state::UiMode;
 use super::App;
 use flotilla_protocol::{Command, CommandResult};
 
-/// Execute a single Command by routing through the daemon handle.
+/// Dispatch a single Command by routing through the daemon handle.
 ///
-/// Daemon-level commands (AddRepo, RemoveRepo, Refresh) are dispatched
-/// directly to the daemon. Per-repo commands go through `daemon.execute()`.
-/// Results are interpreted into UI state changes.
-pub async fn execute(cmd: Command, app: &mut App) {
+/// This function returns quickly — it sends the command to the daemon
+/// without awaiting completion. Daemon-level commands (AddRepo, RemoveRepo,
+/// Refresh) are dispatched directly. Per-repo commands go through
+/// `daemon.execute()` which returns a command ID immediately. Results
+/// arrive later via `CommandFinished` events.
+pub async fn dispatch(cmd: Command, app: &mut App) {
     app.model.status_message = None;
 
     let repo = app.model.active_repo_root().clone();

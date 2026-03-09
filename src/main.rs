@@ -295,7 +295,7 @@ async fn run_tui(cli: Cli) -> Result<()> {
 
         // Process proto command queue — routed through daemon-side executor
         while let Some(cmd) = app.proto_commands.take_next() {
-            app::executor::execute(cmd, &mut app).await;
+            app::executor::dispatch(cmd, &mut app).await;
         }
 
         if app.should_quit {
