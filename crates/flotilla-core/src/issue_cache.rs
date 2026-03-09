@@ -11,6 +11,7 @@ pub struct IssueCache {
     pub has_more: bool,
     pub pinned: HashSet<String>,
     pub total_count: Option<u32>,
+    pub last_refreshed_at: Option<String>,
 }
 
 impl Default for IssueCache {
@@ -27,6 +28,7 @@ impl IssueCache {
             has_more: true,
             pinned: HashSet::new(),
             total_count: None,
+            last_refreshed_at: None,
         }
     }
 
@@ -107,6 +109,11 @@ impl IssueCache {
         self.next_page = 1;
         self.has_more = true;
         self.total_count = None;
+        self.last_refreshed_at = None;
+    }
+
+    pub fn mark_refreshed(&mut self, timestamp: String) {
+        self.last_refreshed_at = Some(timestamp);
     }
 }
 
@@ -231,6 +238,21 @@ mod tests {
         let map = cache.to_index_map();
         assert!(map.contains_key("99"), "pinned issues survive eviction");
         assert!(!map.contains_key("1"), "non-pinned issues are evicted");
+    }
+
+    #[test]
+    fn last_refreshed_at_tracks_timestamps() {
+        let mut cache = IssueCache::new();
+        assert!(cache.last_refreshed_at.is_none());
+
+        cache.mark_refreshed("2026-03-09T12:00:00Z".to_string());
+        assert_eq!(
+            cache.last_refreshed_at.as_deref(),
+            Some("2026-03-09T12:00:00Z")
+        );
+
+        cache.reset();
+        assert!(cache.last_refreshed_at.is_none(), "reset clears timestamp");
     }
 
     #[test]
