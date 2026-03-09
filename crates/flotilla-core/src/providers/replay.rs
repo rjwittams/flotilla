@@ -409,6 +409,79 @@ fn unmask_interaction(interaction: &Interaction, masks: &Masks) -> Interaction {
     }
 }
 
+/// A `CommandRunner` that delegates to a real runner and records all interactions.
+pub struct RecordingRunner {
+    session: ReplaySession,
+    inner: Arc<dyn CommandRunner>,
+}
+
+impl RecordingRunner {
+    pub fn new(session: ReplaySession, inner: Arc<dyn CommandRunner>) -> Self {
+        Self { session, inner }
+    }
+}
+
+#[async_trait]
+impl CommandRunner for RecordingRunner {
+    async fn run(&self, cmd: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
+        let result = self.inner.run(cmd, args, cwd).await;
+
+        let (stdout, stderr, exit_code) = match &result {
+            Ok(out) => (Some(out.clone()), None, 0),
+            Err(err) => (None, Some(err.clone()), 1),
+        };
+
+        self.session.record(Interaction::Command {
+            cmd: cmd.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            cwd: cwd.to_string_lossy().to_string(),
+            stdout,
+            stderr,
+            exit_code,
+        });
+
+        result
+    }
+
+    async fn run_output(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: &Path,
+    ) -> Result<CommandOutput, String> {
+        let result = self.inner.run_output(cmd, args, cwd).await;
+
+        match &result {
+            Ok(output) => {
+                self.session.record(Interaction::Command {
+                    cmd: cmd.to_string(),
+                    args: args.iter().map(|s| s.to_string()).collect(),
+                    cwd: cwd.to_string_lossy().to_string(),
+                    stdout: Some(output.stdout.clone()),
+                    stderr: Some(output.stderr.clone()),
+                    exit_code: if output.success { 0 } else { 1 },
+                });
+            }
+            Err(err) => {
+                self.session.record(Interaction::Command {
+                    cmd: cmd.to_string(),
+                    args: args.iter().map(|s| s.to_string()).collect(),
+                    cwd: cwd.to_string_lossy().to_string(),
+                    stdout: None,
+                    stderr: Some(err.clone()),
+                    exit_code: 1,
+                });
+            }
+        }
+
+        result
+    }
+
+    async fn exists(&self, cmd: &str, args: &[&str]) -> bool {
+        self.inner.exists(cmd, args).await
+    }
+}
+
 fn mask_interaction(interaction: &Interaction, masks: &Masks) -> Interaction {
     match interaction {
         Interaction::Command {
@@ -668,5 +741,45 @@ interactions:
         assert!(!resp.has_next_page);
         assert_eq!(resp.total_count, None);
         session.assert_complete();
+    }
+
+    #[tokio::test]
+    async fn record_then_replay() {
+        use crate::providers::testing::MockRunner;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fixture_path = dir.path().join("recorded.yaml");
+
+        // Record phase: use MockRunner as the "real" backend
+        {
+            let mock = Arc::new(MockRunner::new(vec![
+                Ok("hello\n".into()),
+                Err("not found".into()),
+            ]));
+            let session = ReplaySession::recording(&fixture_path, Masks::new());
+            let recorder = RecordingRunner::new(session.clone(), mock);
+
+            let r1 = recorder.run("echo", &["hello"], Path::new("/tmp")).await;
+            assert!(r1.is_ok());
+
+            let r2 = recorder.run("missing", &[], Path::new("/tmp")).await;
+            assert!(r2.is_err());
+
+            session.save();
+        }
+
+        // Replay phase: verify the recorded fixture works
+        {
+            let session = ReplaySession::from_file(&fixture_path, Masks::new());
+            let runner = session.command_runner();
+
+            let r1 = runner.run("echo", &["hello"], Path::new("/tmp")).await;
+            assert_eq!(r1.unwrap(), "hello\n");
+
+            let r2 = runner.run("missing", &[], Path::new("/tmp")).await;
+            assert!(r2.is_err());
+
+            session.assert_complete();
+        }
     }
 }
