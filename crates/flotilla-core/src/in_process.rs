@@ -1014,7 +1014,7 @@ impl DaemonHandle for InProcessDaemon {
                         .iter()
                         .position(|entry| entry.prev_seq == client_seq);
 
-                    if let Some(_start_idx) = replay_start {
+                    if replay_start.is_some() {
                         // Delta log entries don't carry work_items, so replay
                         // as full snapshot instead of sending incomplete deltas.
                         events.push(DaemonEvent::SnapshotFull(Box::new(snapshot())));
