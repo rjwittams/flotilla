@@ -1,0 +1,8 @@
+interactions:
+  # wt remove feature/foo
+  - channel: command
+    cmd: wt
+    args: ["remove", "feature/foo"]
+    cwd: "{repo}"
+    stdout: "Removed worktree: feature/foo\n"
+    exit_code: 0

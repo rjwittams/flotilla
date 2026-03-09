@@ -1,0 +1,38 @@
+interactions:
+  # wt switch --create new-feature --no-cd
+  - channel: command
+    cmd: wt
+    args: ["switch", "--create", "new-feature", "--no-cd"]
+    cwd: "{repo}"
+    stdout: "Switched to new worktree: new-feature\n"
+    exit_code: 0
+
+  # wt list --format=json returns 3 worktrees including the new one
+  - channel: command
+    cmd: wt
+    args: ["list", "--format=json"]
+    cwd: "{repo}"
+    stdout: |
+      [
+        {
+          "branch": "main",
+          "path": "{repo}",
+          "is_main": true,
+          "is_current": false,
+          "main": null,
+          "remote": null,
+          "working_tree": null,
+          "commit": {"short_sha": "abc1234", "message": "Initial commit"}
+        },
+        {
+          "branch": "new-feature",
+          "path": "{repo}.wt/new-feature",
+          "is_main": false,
+          "is_current": true,
+          "main": {"ahead": 0, "behind": 0},
+          "remote": null,
+          "working_tree": {"staged": false, "modified": false, "untracked": false},
+          "commit": {"short_sha": "abc1234", "message": "Initial commit"}
+        }
+      ]
+    exit_code: 0

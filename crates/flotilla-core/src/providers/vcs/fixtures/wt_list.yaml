@@ -1,0 +1,46 @@
+interactions:
+  # wt list --format=json returns two worktrees with trailing ANSI codes
+  - channel: command
+    cmd: wt
+    args: ["list", "--format=json"]
+    cwd: "{repo}"
+    stdout: |
+      [
+        {
+          "branch": "main",
+          "path": "{repo}",
+          "is_main": true,
+          "is_current": false,
+          "main": null,
+          "remote": null,
+          "working_tree": null,
+          "commit": {"short_sha": "abc1234", "message": "Initial commit"}
+        },
+        {
+          "branch": "feature/foo",
+          "path": "{repo}.wt/feature-foo",
+          "is_main": false,
+          "is_current": true,
+          "main": {"ahead": 3, "behind": 1},
+          "remote": {"name": "origin", "branch": "feature/foo", "ahead": 0, "behind": 0},
+          "working_tree": {"staged": true, "modified": false, "untracked": true},
+          "commit": {"short_sha": "def5678", "message": "Add feature"}
+        }
+      ]\u001b[0m
+    exit_code: 0
+
+  # git config for main branch — no issue links configured
+  - channel: command
+    cmd: git
+    args: ["config", "--get-regexp", 'branch\.main\.flotilla\.issues\.']
+    cwd: "{repo}"
+    stderr: ""
+    exit_code: 1
+
+  # git config for feature/foo branch — no issue links configured
+  - channel: command
+    cmd: git
+    args: ["config", "--get-regexp", 'branch\.feature/foo\.flotilla\.issues\.']
+    cwd: "{repo}"
+    stderr: ""
+    exit_code: 1
