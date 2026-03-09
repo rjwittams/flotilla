@@ -1,0 +1,7 @@
+interactions:
+  - channel: command
+    cmd: git
+    args: ["status", "--porcelain"]
+    cwd: "{checkout}"
+    stdout: " M src/main.rs\nA  new.rs\n?? tmp.txt\n"
+    exit_code: 0

@@ -1,0 +1,7 @@
+interactions:
+  - channel: command
+    cmd: git
+    args: ["rev-list", "--count", "--left-right", "feature...main"]
+    cwd: "{repo}"
+    stdout: "3\t5\n"
+    exit_code: 0

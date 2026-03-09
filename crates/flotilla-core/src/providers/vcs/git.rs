@@ -245,4 +245,130 @@ mod tests {
         let branches = vcs.list_remote_branches(Path::new("/fake")).await.unwrap();
         assert!(branches.is_empty());
     }
+
+    // ── replay-based tests ──────────────────────────────────────────
+
+    use crate::providers::replay::{Masks, ReplaySession};
+
+    fn repo_masks() -> Masks {
+        let mut m = Masks::new();
+        m.add("/test/repo", "{repo}");
+        m
+    }
+
+    fn checkout_masks() -> Masks {
+        let mut m = Masks::new();
+        m.add("/test/checkout", "{checkout}");
+        m
+    }
+
+    #[tokio::test]
+    async fn replay_list_local_branches() {
+        let session = ReplaySession::from_file(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/providers/vcs/fixtures/git_branches.yaml"
+            ),
+            repo_masks(),
+        );
+        let runner = Arc::new(session.command_runner());
+        let vcs = GitVcs::new(runner);
+        let branches = vcs
+            .list_local_branches(Path::new("/test/repo"))
+            .await
+            .unwrap();
+        assert_eq!(branches.len(), 3);
+        assert_eq!(branches[0].name, "main");
+        assert!(branches[0].is_trunk);
+        assert_eq!(branches[1].name, "feature/foo");
+        assert!(!branches[1].is_trunk);
+        assert_eq!(branches[2].name, "fix-bar");
+        assert!(!branches[2].is_trunk);
+        session.assert_complete();
+    }
+
+    #[tokio::test]
+    async fn replay_list_remote_branches() {
+        let session = ReplaySession::from_file(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/providers/vcs/fixtures/git_remote_branches.yaml"
+            ),
+            repo_masks(),
+        );
+        let runner = Arc::new(session.command_runner());
+        let vcs = GitVcs::new(runner);
+        let branches = vcs
+            .list_remote_branches(Path::new("/test/repo"))
+            .await
+            .unwrap();
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0], "main");
+        assert_eq!(branches[1], "feature/foo");
+        session.assert_complete();
+    }
+
+    #[tokio::test]
+    async fn replay_commit_log() {
+        let session = ReplaySession::from_file(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/providers/vcs/fixtures/git_log.yaml"
+            ),
+            repo_masks(),
+        );
+        let runner = Arc::new(session.command_runner());
+        let vcs = GitVcs::new(runner);
+        let log = vcs
+            .commit_log(Path::new("/test/repo"), "main", 5)
+            .await
+            .unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].short_sha, "abc1234");
+        assert_eq!(log[0].message, "Initial commit");
+        assert_eq!(log[1].short_sha, "def5678");
+        assert_eq!(log[1].message, "Add feature");
+        session.assert_complete();
+    }
+
+    #[tokio::test]
+    async fn replay_ahead_behind() {
+        let session = ReplaySession::from_file(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/providers/vcs/fixtures/git_ahead_behind.yaml"
+            ),
+            repo_masks(),
+        );
+        let runner = Arc::new(session.command_runner());
+        let vcs = GitVcs::new(runner);
+        let ab = vcs
+            .ahead_behind(Path::new("/test/repo"), "feature", "main")
+            .await
+            .unwrap();
+        assert_eq!(ab.ahead, 3);
+        assert_eq!(ab.behind, 5);
+        session.assert_complete();
+    }
+
+    #[tokio::test]
+    async fn replay_working_tree_status() {
+        let session = ReplaySession::from_file(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/providers/vcs/fixtures/git_working_tree.yaml"
+            ),
+            checkout_masks(),
+        );
+        let runner = Arc::new(session.command_runner());
+        let vcs = GitVcs::new(runner);
+        let status = vcs
+            .working_tree_status(Path::new("/test/repo"), Path::new("/test/checkout"))
+            .await
+            .unwrap();
+        assert_eq!(status.modified, 1); // " M src/main.rs"
+        assert_eq!(status.staged, 1); // "A  new.rs"
+        assert_eq!(status.untracked, 1); // "?? tmp.txt"
+        session.assert_complete();
+    }
 }

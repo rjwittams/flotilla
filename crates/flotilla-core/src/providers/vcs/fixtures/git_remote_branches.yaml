@@ -1,0 +1,13 @@
+interactions:
+  - channel: command
+    cmd: git
+    args: ["remote"]
+    cwd: "{repo}"
+    stdout: "origin\n"
+    exit_code: 0
+  - channel: command
+    cmd: git
+    args: ["ls-remote", "--heads", "origin"]
+    cwd: "{repo}"
+    stdout: "abc123\trefs/heads/main\ndef456\trefs/heads/feature/foo\n"
+    exit_code: 0
