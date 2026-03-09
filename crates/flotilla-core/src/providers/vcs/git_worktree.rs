@@ -303,11 +303,7 @@ impl super::CheckoutManager for GitCheckoutManager {
             // Fetch latest default branch from origin so we branch from current remote state
             if let Err(e) = self
                 .runner
-                .run(
-                    "git",
-                    &["fetch", "origin", &default_branch],
-                    repo_root,
-                )
+                .run("git", &["fetch", "origin", &default_branch], repo_root)
                 .await
             {
                 tracing::warn!("fetch origin/{default_branch} failed (continuing from local): {e}");
