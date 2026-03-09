@@ -169,17 +169,23 @@ impl App {
                 repo,
                 description,
             } => {
-                tracing::debug!(
-                    "command {command_id} started on {}: {description}",
-                    repo.display()
+                tracing::info!("command {command_id} started: {description}");
+                self.in_flight.insert(
+                    command_id,
+                    InFlightCommand {
+                        repo,
+                        description,
+                    },
                 );
             }
             DaemonEvent::CommandFinished {
                 command_id,
-                repo,
                 result,
+                ..
             } => {
-                tracing::debug!("command {command_id} finished on {}", repo.display());
+                if let Some(_cmd) = self.in_flight.remove(&command_id) {
+                    tracing::info!("command {command_id} finished");
+                }
                 executor::handle_result(result, self);
             }
         }
