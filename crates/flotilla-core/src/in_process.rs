@@ -536,16 +536,7 @@ impl DaemonHandle for InProcessDaemon {
             _ => {}
         }
 
-        // Broadcast started
-        let description = command.description().to_string();
-        let repo_path = repo.to_path_buf();
-        let _ = self.event_tx.send(DaemonEvent::CommandStarted {
-            command_id: id,
-            repo: repo_path.clone(),
-            description,
-        });
-
-        // Gather what the spawned task needs
+        // Gather what the spawned task needs — validate repo before broadcasting
         let runner = Arc::clone(&self.runner);
         let event_tx = self.event_tx.clone();
         let (registry, providers_data, refresh_trigger) = {
@@ -559,6 +550,15 @@ impl DaemonHandle for InProcessDaemon {
                 Arc::clone(&state.model.refresh_handle.refresh_trigger),
             )
         };
+
+        // Broadcast started after repo validation (ensures no orphaned CommandStarted)
+        let description = command.description().to_string();
+        let repo_path = repo.to_path_buf();
+        let _ = self.event_tx.send(DaemonEvent::CommandStarted {
+            command_id: id,
+            repo: repo_path.clone(),
+            description,
+        });
 
         tokio::spawn(async move {
             let result =
