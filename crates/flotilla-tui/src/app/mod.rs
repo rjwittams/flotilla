@@ -150,7 +150,6 @@ fn format_error_status(errors: &[ProviderError], repo_path: &Path) -> Option<Str
     }
 }
 
-
 pub struct App {
     pub daemon: Arc<dyn DaemonHandle>,
     pub config: Arc<ConfigStore>,

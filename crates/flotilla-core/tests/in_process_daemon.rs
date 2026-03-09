@@ -39,10 +39,12 @@ async fn execute_broadcasts_lifecycle_events() {
     let mut rx = daemon.subscribe();
 
     // Execute a command that goes through the spawned task path.
-    // GenerateBranchName with empty issue_keys will hit the fallback (no AI
-    // provider) and return BranchNameGenerated with an empty name — we only
-    // care about the lifecycle events, not the command result.
-    let command = Command::GenerateBranchName { issue_keys: vec![] };
+    // ArchiveSession with a non-existent ID returns immediately with
+    // "session not found" — no external API calls, deterministic.
+    // We only care about the lifecycle events, not the command result.
+    let command = Command::ArchiveSession {
+        session_id: "nonexistent-session".into(),
+    };
     let command_id = daemon
         .execute(&repo, command)
         .await
