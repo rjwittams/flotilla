@@ -34,8 +34,19 @@ pub(crate) fn resolve_template(config: &WorkspaceConfig) -> PaneLayout {
         template::default_template()
     };
 
-    let resolved = config.resolved_commands.as_deref().unwrap_or(&[]);
-    build_pane_layout(&tmpl, resolved)
+    if let Some(resolved) = config.resolved_commands.as_deref() {
+        // Terminal pool resolved commands — build panes from those
+        build_pane_layout(&tmpl, resolved)
+    } else {
+        // No terminal pool — render template vars into content commands directly
+        let rendered = tmpl.render(&config.template_vars);
+        let fallback: Vec<(String, String)> = rendered
+            .content
+            .iter()
+            .map(|e| (e.role.clone(), e.command.clone()))
+            .collect();
+        build_pane_layout(&rendered, &fallback)
+    }
 }
 
 /// Build a `PaneLayout` from layout slots and resolved commands.

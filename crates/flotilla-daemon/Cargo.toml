@@ -15,8 +15,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3"
-flotilla-tui = { path = "../flotilla-tui" }
+flotilla-client = { path = "../flotilla-client" }
 flotilla-protocol = { path = "../flotilla-protocol" }

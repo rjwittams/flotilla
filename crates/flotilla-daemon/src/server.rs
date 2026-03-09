@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::UnixListener;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 use tracing::{error, info, warn};
 
 use flotilla_core::config::ConfigStore;
@@ -20,6 +20,7 @@ pub struct DaemonServer {
     socket_path: PathBuf,
     idle_timeout: Duration,
     client_count: Arc<AtomicUsize>,
+    client_notify: Arc<Notify>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -44,6 +45,7 @@ impl DaemonServer {
             socket_path,
             idle_timeout,
             client_count: Arc::new(AtomicUsize::new(0)),
+            client_notify: Arc::new(Notify::new()),
             shutdown_tx,
             shutdown_rx,
         }
@@ -74,27 +76,39 @@ impl DaemonServer {
         let mut shutdown_rx = self.shutdown_rx;
         let idle_timeout = self.idle_timeout;
         let socket_path = self.socket_path.clone();
+        let client_notify = self.client_notify;
 
         // Spawn idle timeout watcher
         let idle_client_count = Arc::clone(&client_count);
         let idle_shutdown_tx = shutdown_tx.clone();
+        let idle_notify = Arc::clone(&client_notify);
         tokio::spawn(async move {
-            // Wait until at least one client has connected and then disconnected,
-            // or if we start with zero clients, begin the idle timer immediately.
             loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                let count = idle_client_count.load(Ordering::SeqCst);
-                if count == 0 {
-                    info!(
-                        "no clients connected, waiting {} seconds before shutdown",
-                        idle_timeout.as_secs()
-                    );
-                    tokio::time::sleep(idle_timeout).await;
-                    // Re-check: a client may have connected during the wait
+                // Wait until zero clients
+                loop {
                     if idle_client_count.load(Ordering::SeqCst) == 0 {
-                        info!("idle timeout reached, shutting down");
-                        let _ = idle_shutdown_tx.send(true);
                         break;
+                    }
+                    idle_notify.notified().await;
+                }
+
+                info!(
+                    "no clients connected, waiting {} seconds before shutdown",
+                    idle_timeout.as_secs()
+                );
+
+                // Race: timeout vs client count change
+                tokio::select! {
+                    () = tokio::time::sleep(idle_timeout) => {
+                        if idle_client_count.load(Ordering::SeqCst) == 0 {
+                            info!("idle timeout reached, shutting down");
+                            let _ = idle_shutdown_tx.send(true);
+                            return;
+                        }
+                        // Client connected during the sleep — loop back
+                    }
+                    () = idle_notify.notified() => {
+                        // Client count changed — loop back to re-check
                     }
                 }
             }
@@ -112,15 +126,18 @@ impl DaemonServer {
                         Ok((stream, _addr)) => {
                             let count = client_count.fetch_add(1, Ordering::SeqCst) + 1;
                             info!("client connected (total: {count})");
+                            client_notify.notify_one();
 
                             let daemon = Arc::clone(&daemon);
                             let client_count = Arc::clone(&client_count);
+                            let client_notify = Arc::clone(&client_notify);
                             let shutdown_rx = shutdown_rx.clone();
 
                             tokio::spawn(async move {
                                 handle_client(stream, daemon, shutdown_rx).await;
                                 let count = client_count.fetch_sub(1, Ordering::SeqCst) - 1;
                                 info!("client disconnected (total: {count})");
+                                client_notify.notify_one();
                             });
                         }
                         Err(e) => {

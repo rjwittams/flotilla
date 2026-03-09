@@ -67,8 +67,10 @@ fn inject_issues(
             .iter()
             .map(|(id, i)| (id.clone(), i.clone()))
             .collect();
-    } else {
+    } else if !cache.is_empty() {
         providers.issues = (*cache.to_index_map()).clone();
+    } else {
+        providers.issues.clear();
     }
     providers
 }
@@ -118,6 +120,7 @@ fn choose_event(snapshot: Snapshot, delta: DeltaEntry) -> DaemonEvent {
         prev_seq: delta.prev_seq,
         repo: snapshot.repo.clone(),
         changes: delta.changes,
+        work_items: snapshot.work_items.clone(),
         issue_total: snapshot.issue_total,
         issue_has_more: snapshot.issue_has_more,
         issue_search_results: snapshot.issue_search_results.clone(),
@@ -168,6 +171,7 @@ impl RepoState {
         new_providers: &ProviderData,
         new_health: &HashMap<String, bool>,
         new_errors: &[ProviderError],
+        work_items: Vec<flotilla_protocol::snapshot::WorkItem>,
     ) -> DeltaEntry {
         let mut changes = delta::diff_provider_data(&self.last_broadcast_providers, new_providers);
 
@@ -204,6 +208,7 @@ impl RepoState {
             seq: self.seq + 1,
             prev_seq,
             changes,
+            work_items,
         };
 
         // Append to bounded log
@@ -391,6 +396,7 @@ impl InProcessDaemon {
                 &proto_snapshot.providers,
                 &proto_snapshot.provider_health,
                 &proto_snapshot.errors,
+                proto_snapshot.work_items.clone(),
             );
             debug!(
                 "repo {}: delta seq {} → {} with {} changes",
@@ -723,6 +729,7 @@ impl InProcessDaemon {
             &proto_snapshot.providers,
             &proto_snapshot.provider_health,
             &proto_snapshot.errors,
+            proto_snapshot.work_items.clone(),
         );
         state.seq += 1;
 
@@ -987,6 +994,11 @@ impl DaemonHandle for InProcessDaemon {
             let Some(state) = repos.get(path) else {
                 continue;
             };
+            // Skip repos that haven't completed their first refresh yet —
+            // broadcasting empty placeholder state would clear the loading indicator.
+            if state.seq == 0 {
+                continue;
+            }
             let snapshot = || {
                 build_repo_snapshot(
                     path,
@@ -1009,7 +1021,7 @@ impl DaemonHandle for InProcessDaemon {
                     if let Some(start_idx) = replay_start {
                         // Capture issue metadata once — it doesn't change per-entry
                         let issue_snapshot = snapshot();
-                        // Replay delta entries
+                        // Replay delta entries (each carries pre-correlated work_items)
                         for entry in state.delta_log.iter().skip(start_idx) {
                             events.push(DaemonEvent::SnapshotDelta(Box::new(
                                 flotilla_protocol::SnapshotDelta {
@@ -1017,6 +1029,7 @@ impl DaemonHandle for InProcessDaemon {
                                     prev_seq: entry.prev_seq,
                                     repo: path.clone(),
                                     changes: entry.changes.clone(),
+                                    work_items: entry.work_items.clone(),
                                     issue_total: issue_snapshot.issue_total,
                                     issue_has_more: issue_snapshot.issue_has_more,
                                     issue_search_results: issue_snapshot

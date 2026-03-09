@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+flotilla-client = { path = "../flotilla-client" }
 flotilla-core = { path = "../flotilla-core" }
 flotilla-protocol = { path = "../flotilla-protocol" }
 tokio = { workspace = true }
@@ -26,3 +27,4 @@ futures = "0.3"
 
 [dev-dependencies]
 async-trait = { workspace = true }
+tempfile = "3"

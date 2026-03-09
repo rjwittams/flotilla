@@ -300,11 +300,27 @@ impl super::CheckoutManager for GitCheckoutManager {
                 .run("git", &["worktree", "add", wt_str, branch], repo_root)
                 .await?;
         } else {
-            // Base new branch from the default branch, not HEAD of the main worktree
+            // Fetch latest default branch from origin so we branch from current remote state.
+            // Fall back to local default branch if fetch fails (offline, no remote, etc).
+            let fetch_ok = self
+                .runner
+                .run("git", &["fetch", "origin", &default_branch], repo_root)
+                .await
+                .is_ok();
+
+            let start_point = if fetch_ok {
+                format!("origin/{default_branch}")
+            } else {
+                tracing::warn!(
+                    "fetch origin/{default_branch} failed, branching from local {default_branch}"
+                );
+                default_branch.clone()
+            };
+
             self.runner
                 .run(
                     "git",
-                    &["worktree", "add", "-b", branch, wt_str, &default_branch],
+                    &["worktree", "add", "-b", branch, wt_str, &start_point],
                     repo_root,
                 )
                 .await?;

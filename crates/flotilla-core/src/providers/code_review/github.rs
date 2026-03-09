@@ -223,6 +223,111 @@ impl super::CodeReview for GitHubCodeReview {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::providers::code_review::CodeReview;
+    use crate::providers::replay::{self, Masks};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn fixture(name: &str) -> String {
+        format!(
+            "{}/src/providers/code_review/fixtures/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        )
+    }
+
+    fn repo_root_for_recording() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    fn build_api_and_runner(
+        session: &replay::ReplaySession,
+        recording: bool,
+    ) -> (
+        Arc<dyn crate::providers::github_api::GhApi>,
+        Arc<dyn crate::providers::CommandRunner>,
+    ) {
+        if recording {
+            let real_runner = Arc::new(crate::providers::ProcessCommandRunner)
+                as Arc<dyn crate::providers::CommandRunner>;
+            let real_api = Arc::new(crate::providers::github_api::GhApiClient::new(
+                real_runner.clone(),
+            ));
+            (
+                Arc::new(replay::RecordingGhApi::new(session.clone(), real_api))
+                    as Arc<dyn crate::providers::github_api::GhApi>,
+                real_runner,
+            )
+        } else {
+            (
+                Arc::new(session.gh_api()) as Arc<dyn crate::providers::github_api::GhApi>,
+                Arc::new(session.command_runner()) as Arc<dyn crate::providers::CommandRunner>,
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn record_replay_list_change_requests() {
+        let recording = replay::is_recording();
+        let repo_slug = "rjwittams/flotilla".to_string();
+        let repo_root = if recording {
+            repo_root_for_recording()
+        } else {
+            PathBuf::from("/test/repo")
+        };
+
+        let session = replay::test_session(&fixture("github_prs.yaml"), Masks::new());
+        let (api, runner) = build_api_and_runner(&session, recording);
+
+        let provider = GitHubCodeReview::new("github".into(), repo_slug, api, runner);
+        let prs = provider
+            .list_change_requests(&repo_root, 100)
+            .await
+            .unwrap();
+
+        // Currently 0 open PRs, so list may be empty — validate structure
+        for (id, cr) in &prs {
+            assert!(!id.is_empty());
+            assert!(!cr.title.is_empty());
+            assert!(!cr.branch.is_empty());
+        }
+
+        session.finish();
+    }
+
+    #[tokio::test]
+    async fn record_replay_list_merged_branch_names() {
+        let recording = replay::is_recording();
+        let repo_slug = "rjwittams/flotilla".to_string();
+        let repo_root = if recording {
+            repo_root_for_recording()
+        } else {
+            PathBuf::from("/test/repo")
+        };
+
+        let session = replay::test_session(&fixture("github_merged.yaml"), Masks::new());
+        let (api, runner) = build_api_and_runner(&session, recording);
+
+        let provider = GitHubCodeReview::new("github".into(), repo_slug, api, runner);
+        let branches = provider
+            .list_merged_branch_names(&repo_root, 5)
+            .await
+            .unwrap();
+
+        // The repo has closed/merged PRs, so we expect some results
+        for name in &branches {
+            assert!(!name.is_empty());
+        }
+
+        session.finish();
+    }
+
     #[test]
     fn parse_rest_api_pr_fields() {
         let json = r#"{
@@ -236,7 +341,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(v["number"].as_i64().unwrap(), 42);
         assert_eq!(v["head"]["ref"].as_str().unwrap(), "feature-branch");
-        assert_eq!(v["draft"].as_bool().unwrap(), true);
+        assert!(v["draft"].as_bool().unwrap());
     }
 
     #[test]

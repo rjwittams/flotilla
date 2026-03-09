@@ -1,0 +1,14 @@
+interactions:
+- channel: command
+  cmd: git
+  args:
+  - log
+  - main
+  - '--oneline'
+  - '-5'
+  cwd: '{repo}'
+  stdout: |
+    65b2848 Add feature
+    f3c8616 Initial commit
+  stderr: null
+  exit_code: 0
