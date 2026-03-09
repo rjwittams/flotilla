@@ -71,6 +71,9 @@ mod tests {
             role: "shell".into(),
             index: 0,
         };
-        assert!(pool.attach_command(&id, "bash", "/tmp".as_ref()).await.is_err());
+        assert!(pool
+            .attach_command(&id, "bash", "/tmp".as_ref())
+            .await
+            .is_err());
     }
 }
