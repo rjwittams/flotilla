@@ -13,7 +13,8 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, info};
 
 use flotilla_protocol::{
-    AssociationKey, Command, CommandResult, DaemonEvent, DeltaEntry, Issue, RepoInfo, Snapshot,
+    AssociationKey, Command, CommandResult, DaemonEvent, DeltaEntry, Issue, ProviderError,
+    RepoInfo, Snapshot,
 };
 
 use flotilla_protocol::ProviderData;
@@ -145,6 +146,8 @@ struct RepoState {
     last_broadcast_providers: ProviderData,
     /// Last broadcast provider health, used for delta computation.
     last_broadcast_health: HashMap<String, bool>,
+    /// Last broadcast errors, used for delta computation.
+    last_broadcast_errors: Vec<ProviderError>,
     /// Bounded delta log for replay on client reconnect.
     delta_log: VecDeque<DeltaEntry>,
 }
@@ -156,6 +159,7 @@ impl RepoState {
         &mut self,
         new_providers: &ProviderData,
         new_health: &HashMap<String, bool>,
+        new_errors: &[ProviderError],
     ) -> DeltaEntry {
         let mut changes = delta::diff_provider_data(&self.last_broadcast_providers, new_providers);
 
@@ -182,6 +186,11 @@ impl RepoState {
             }
         }
 
+        // Diff errors
+        if let Some(error_change) = delta::diff_errors(&self.last_broadcast_errors, new_errors) {
+            changes.push(error_change);
+        }
+
         let prev_seq = self.seq;
         let entry = DeltaEntry {
             seq: self.seq + 1,
@@ -198,6 +207,7 @@ impl RepoState {
         // Update tracking state
         self.last_broadcast_providers = new_providers.clone();
         self.last_broadcast_health = new_health.clone();
+        self.last_broadcast_errors = new_errors.to_vec();
 
         entry
     }
@@ -243,6 +253,7 @@ impl InProcessDaemon {
                     issue_fetch_mutex: Arc::new(Mutex::new(())),
                     last_broadcast_providers: ProviderData::default(),
                     last_broadcast_health: HashMap::new(),
+                    last_broadcast_errors: Vec::new(),
                     delta_log: VecDeque::new(),
                 },
             );
@@ -366,8 +377,11 @@ impl InProcessDaemon {
             proto_snapshot.issue_search_results = search_results;
 
             // Compute and log delta before updating seq
-            let delta_entry =
-                state.record_delta(&proto_snapshot.providers, &proto_snapshot.provider_health);
+            let delta_entry = state.record_delta(
+                &proto_snapshot.providers,
+                &proto_snapshot.provider_health,
+                &proto_snapshot.errors,
+            );
             debug!(
                 "repo {}: delta seq {} → {} with {} changes",
                 path.display(),
@@ -573,8 +587,11 @@ impl InProcessDaemon {
         );
 
         // Compute and log delta
-        let delta_entry =
-            state.record_delta(&proto_snapshot.providers, &proto_snapshot.provider_health);
+        let delta_entry = state.record_delta(
+            &proto_snapshot.providers,
+            &proto_snapshot.provider_health,
+            &proto_snapshot.errors,
+        );
         state.seq += 1;
 
         let event = choose_event(proto_snapshot, delta_entry);
@@ -757,6 +774,7 @@ impl DaemonHandle for InProcessDaemon {
                     issue_fetch_mutex: Arc::new(Mutex::new(())),
                     last_broadcast_providers: ProviderData::default(),
                     last_broadcast_health: HashMap::new(),
+                    last_broadcast_errors: Vec::new(),
                     delta_log: VecDeque::new(),
                 },
             );

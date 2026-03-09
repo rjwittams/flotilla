@@ -5,7 +5,7 @@ use std::hash::Hash;
 
 use indexmap::IndexMap;
 
-use flotilla_protocol::{Change, EntryOp, ProviderData, WorkItem, WorkItemIdentity};
+use flotilla_protocol::{Change, EntryOp, ProviderData, ProviderError, WorkItem, WorkItemIdentity};
 
 /// Diff two IndexMaps, producing `(key, EntryOp)` pairs for all differences.
 ///
@@ -95,6 +95,17 @@ pub fn apply_changes(pd: &mut ProviderData, changes: Vec<Change>) {
     }
 }
 
+/// Compare two error lists — if different, return `Change::ErrorsChanged` with the new errors.
+///
+/// Errors lack stable identity, so this is a full replacement rather than keyed diffing.
+pub fn diff_errors(prev: &[ProviderError], curr: &[ProviderError]) -> Option<Change> {
+    if prev == curr {
+        None
+    } else {
+        Some(Change::ErrorsChanged(curr.to_vec()))
+    }
+}
+
 /// Diff two work item lists, producing `Change::WorkItem` entries.
 ///
 /// Work items are keyed by `WorkItemIdentity`. The input slices are converted
@@ -123,8 +134,8 @@ mod tests {
 
     use flotilla_protocol::delta::{Branch, BranchStatus};
     use flotilla_protocol::{
-        ChangeRequest, ChangeRequestStatus, Checkout, CloudAgentSession, Issue, SessionStatus,
-        Workspace,
+        ChangeRequest, ChangeRequestStatus, Checkout, CloudAgentSession, Issue, ProviderError,
+        SessionStatus, Workspace,
     };
 
     use super::*;
@@ -561,5 +572,70 @@ mod tests {
         ];
         apply_changes(&mut pd, changes);
         assert!(pd.issues.is_empty());
+    }
+
+    // --- diff_errors tests ---
+
+    fn provider_error(category: &str, message: &str) -> ProviderError {
+        ProviderError {
+            category: category.into(),
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn diff_errors_both_empty_no_change() {
+        let prev: Vec<ProviderError> = vec![];
+        let curr: Vec<ProviderError> = vec![];
+        assert!(diff_errors(&prev, &curr).is_none());
+    }
+
+    #[test]
+    fn diff_errors_empty_to_errors() {
+        let prev: Vec<ProviderError> = vec![];
+        let curr = vec![provider_error("git", "not found")];
+        let change = diff_errors(&prev, &curr).expect("should produce ErrorsChanged");
+        match change {
+            Change::ErrorsChanged(errors) => {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].category, "git");
+                assert_eq!(errors[0].message, "not found");
+            }
+            other => panic!("expected ErrorsChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_errors_errors_to_empty() {
+        let prev = vec![provider_error("github", "rate limited")];
+        let curr: Vec<ProviderError> = vec![];
+        let change = diff_errors(&prev, &curr).expect("should produce ErrorsChanged");
+        match change {
+            Change::ErrorsChanged(errors) => assert!(errors.is_empty()),
+            other => panic!("expected ErrorsChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_errors_same_no_change() {
+        let errors = vec![
+            provider_error("git", "error 1"),
+            provider_error("github", "error 2"),
+        ];
+        assert!(diff_errors(&errors, &errors).is_none());
+    }
+
+    #[test]
+    fn diff_errors_different_produces_change() {
+        let prev = vec![provider_error("git", "old error")];
+        let curr = vec![provider_error("git", "new error")];
+        let change = diff_errors(&prev, &curr).expect("should produce ErrorsChanged");
+        match change {
+            Change::ErrorsChanged(errors) => {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].message, "new error");
+            }
+            other => panic!("expected ErrorsChanged, got {other:?}"),
+        }
     }
 }
