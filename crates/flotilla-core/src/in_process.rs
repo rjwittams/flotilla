@@ -989,6 +989,11 @@ impl DaemonHandle for InProcessDaemon {
             let Some(state) = repos.get(path) else {
                 continue;
             };
+            // Skip repos that haven't completed their first refresh yet —
+            // broadcasting empty placeholder state would clear the loading indicator.
+            if state.seq == 0 {
+                continue;
+            }
             let snapshot = || {
                 build_repo_snapshot(
                     path,
