@@ -32,8 +32,9 @@ fn single_repo_with_items() {
 
     let items = vec![
         make_work_item_checkout("feat-login", "/test/my-project/feat-login"),
-        make_work_item_cr("42", "Add login page"),
+        make_work_item_cr("42", "Add login page", Some("feat-login")),
         make_work_item_issue("10", "Users need authentication"),
+        support::session_item("s1"),
     ];
 
     let mut harness = TestHarness::single_repo("my-project").with_provider_data(providers, items);
@@ -98,7 +99,7 @@ fn selected_item_preview() {
 
     let items = vec![
         make_work_item_checkout("feat-dashboard", "/test/my-project/feat-dashboard"),
-        make_work_item_cr("99", "Build analytics dashboard"),
+        make_work_item_cr("99", "Build analytics dashboard", Some("feat-dashboard")),
     ];
 
     let mut harness = TestHarness::single_repo("my-project").with_provider_data(providers, items);

@@ -15,7 +15,7 @@ use flotilla_tui::ui;
 
 // Re-export shared WorkItem/RepoInfo builders — single source of truth in test_builders.
 pub use flotilla_tui::app::test_builders::{
-    bare_item, checkout_item, issue_item, pr_item, remote_branch_item, repo_info, session_item,
+    checkout_item, issue_item, pr_item, repo_info, session_item,
 };
 
 const WIDTH: u16 = 120;
@@ -226,11 +226,11 @@ pub fn make_work_item_checkout(branch: &str, path: &str) -> WorkItem {
     checkout_item(branch, path, false)
 }
 
-/// Change request work item with custom title (test_support::pr_item uses generic titles).
-pub fn make_work_item_cr(id: &str, title: &str) -> WorkItem {
+/// Change request work item with custom title and optional branch.
+pub fn make_work_item_cr(id: &str, title: &str, branch: Option<&str>) -> WorkItem {
     let mut item = pr_item(id);
     item.description = title.to_string();
-    item.branch = None;
+    item.branch = branch.map(|b| b.to_string());
     item
 }
 

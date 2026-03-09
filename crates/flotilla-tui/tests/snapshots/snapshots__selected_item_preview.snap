@@ -1,6 +1,5 @@
 ---
 source: crates/flotilla-tui/tests/snapshots.rs
-assertion_line: 107
 expression: output
 ---
  ⚓  flotilla  | my-project | [+]
@@ -9,7 +8,7 @@ expression: output
 │      ── Worktrees ──                                                 ││Branch: feat-dashboard                        │
 │▸  ○  checkout feat-… feat-dashboard  ✓                               ││Path: /test/my-project/feat-dashboard         │
 │      ── Pull Request                                                 ││                                              │
-│   ⊙  Build analytic… —                       #99                     ││                                              │
+│   ⊙  Build analytic… feat-dashboard          #99                     ││                                              │
 │                                                                      ││                                              │
 │                                                                      ││                                              │
 │                                                                      ││                                              │
