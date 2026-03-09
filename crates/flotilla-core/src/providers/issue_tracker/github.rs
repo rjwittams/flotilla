@@ -104,20 +104,23 @@ impl super::IssueTracker for GitHubIssueTracker {
     ) -> Result<Vec<Issue>, String> {
         use futures::stream::{self, StreamExt};
 
-        let futs: Vec<_> = ids.iter().map(|id| {
-            let endpoint = format!("repos/{}/issues/{}", self.repo_slug, id);
-            let api = Arc::clone(&self.api);
-            let repo_root = repo_root.to_path_buf();
-            let provider_name = self.provider_name.clone();
-            let id = id.clone();
-            async move {
-                let body = api.get(&endpoint, &repo_root).await?;
-                let v: serde_json::Value =
-                    serde_json::from_str(&body).map_err(|e| e.to_string())?;
-                parse_issue(&provider_name, &v)
-                    .ok_or_else(|| format!("failed to parse issue {}", id))
-            }
-        }).collect();
+        let futs: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let endpoint = format!("repos/{}/issues/{}", self.repo_slug, id);
+                let api = Arc::clone(&self.api);
+                let repo_root = repo_root.to_path_buf();
+                let provider_name = self.provider_name.clone();
+                let id = id.clone();
+                async move {
+                    let body = api.get(&endpoint, &repo_root).await?;
+                    let v: serde_json::Value =
+                        serde_json::from_str(&body).map_err(|e| e.to_string())?;
+                    parse_issue(&provider_name, &v)
+                        .ok_or_else(|| format!("failed to parse issue {}", id))
+                }
+            })
+            .collect();
 
         let results: Vec<_> = stream::iter(futs).buffer_unordered(10).collect().await;
         let mut issues = Vec::new();

@@ -200,12 +200,15 @@ mod tests {
         });
 
         let changeset = IssueChangeset {
-            updated: vec![Issue {
-                id: "2".to_string(),
-                title: "Updated Issue 2".to_string(),
-                labels: vec!["changed".to_string()],
-                association_keys: vec![],
-            }, issue("4")],
+            updated: vec![
+                Issue {
+                    id: "2".to_string(),
+                    title: "Updated Issue 2".to_string(),
+                    labels: vec!["changed".to_string()],
+                    association_keys: vec![],
+                },
+                issue("4"),
+            ],
             closed_ids: vec!["3".to_string()],
             has_more: false,
         };
