@@ -666,11 +666,9 @@ impl InProcessDaemon {
                             }
                             self.broadcast_snapshot(&path).await;
                         } else {
-                            // Fetch failed — keep existing cache, just update timestamp
-                            let mut repos = self.repos.write().await;
-                            if let Some(state) = repos.get_mut(&path) {
-                                state.issue_cache.mark_refreshed(refresh_ts.clone());
-                            }
+                            // Fetch failed — keep existing cache and do NOT advance
+                            // the timestamp, so the next incremental call retries
+                            // from the same `since` window.
                         }
                     } else {
                         let has_changes =

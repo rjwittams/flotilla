@@ -196,14 +196,15 @@ impl super::IssueTracker for GitHubIssueTracker {
             }
         }
 
-        // Use the filtered issue count (not raw pagination which includes PRs)
-        // to decide whether there are more changes. If we got a full page of
-        // actual issues, there are likely more pages of changes.
+        // Escalate when there are more pages AND at least one real issue
+        // on this page — remaining pages likely contain more issues too.
+        // When issue_count == 0 (all PRs), don't escalate: there are no
+        // issue changes to miss.
         let issue_count = updated.len() + closed_ids.len();
         Ok(IssueChangeset {
             updated,
             closed_ids,
-            has_more: response.has_next_page && issue_count >= per_page,
+            has_more: response.has_next_page && issue_count > 0,
         })
     }
 
@@ -355,6 +356,34 @@ mod tests {
         assert!(
             !changeset.has_more,
             "should not escalate when all items are PRs"
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_since_escalates_on_mixed_pr_issue_page() {
+        // Page has both PRs and issues with has_next_page — should escalate
+        // because remaining pages may contain more issues.
+        let body = r#"[
+            {"number": 1, "title": "Issue", "state": "open", "labels": []},
+            {"number": 2, "title": "PR", "state": "open", "labels": [], "pull_request": {"url": "..."}}
+        ]"#;
+        let tracker = mock_tracker(vec![Ok(GhApiResponse {
+            status: 200,
+            etag: None,
+            body: body.to_string(),
+            has_next_page: true,
+            total_count: None,
+        })]);
+
+        let changeset = tracker
+            .list_issues_changed_since(Path::new("/tmp/repo"), "2026-03-09T00:00:00Z", 2)
+            .await
+            .unwrap();
+
+        assert_eq!(changeset.updated.len(), 1);
+        assert!(
+            changeset.has_more,
+            "should escalate when page has issues and more pages exist"
         );
     }
 }
