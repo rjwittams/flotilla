@@ -134,13 +134,18 @@ fn render_status_bar(
 
     // Show in-flight command progress for the active repo
     let active_repo = &model.repo_order[model.active_repo];
-    let in_flight_desc: Option<&str> = in_flight
+    let active_cmds: Vec<&str> = in_flight
         .values()
-        .find(|cmd| &cmd.repo == active_repo)
-        .map(|cmd| cmd.description.as_str());
+        .filter(|cmd| &cmd.repo == active_repo)
+        .map(|cmd| cmd.description.as_str())
+        .collect();
 
-    if let Some(desc) = in_flight_desc {
-        let msg = format!(" {desc}");
+    if !active_cmds.is_empty() {
+        let msg = if active_cmds.len() == 1 {
+            format!(" {}", active_cmds[0])
+        } else {
+            format!(" {} ({} commands)", active_cmds[0], active_cmds.len())
+        };
         let status = Paragraph::new(msg).style(Style::default().fg(Color::Yellow));
         frame.render_widget(status, area);
         return;

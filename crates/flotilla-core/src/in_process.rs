@@ -505,24 +505,23 @@ impl DaemonHandle for InProcessDaemon {
     }
 
     async fn execute(&self, repo: &Path, command: Command) -> Result<u64, String> {
-        let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
-
-        // Issue commands: execute inline (already backgrounded by TUI), return ID
+        // Issue commands: execute inline (already backgrounded by TUI).
+        // No command ID or lifecycle events — these are internal cache operations.
         match &command {
             Command::SetIssueViewport { visible_count, .. } => {
                 self.ensure_issues_cached(repo, *visible_count * 2).await;
                 self.broadcast_snapshot(repo).await;
-                return Ok(id);
+                return Ok(0);
             }
             Command::FetchMoreIssues { desired_count, .. } => {
                 self.ensure_issues_cached(repo, *desired_count).await;
                 self.broadcast_snapshot(repo).await;
-                return Ok(id);
+                return Ok(0);
             }
             Command::SearchIssues { query, .. } => {
                 self.search_issues(repo, query).await;
                 self.broadcast_snapshot(repo).await;
-                return Ok(id);
+                return Ok(0);
             }
             Command::ClearIssueSearch { .. } => {
                 let mut repos = self.repos.write().await;
@@ -531,10 +530,12 @@ impl DaemonHandle for InProcessDaemon {
                 }
                 drop(repos);
                 self.broadcast_snapshot(repo).await;
-                return Ok(id);
+                return Ok(0);
             }
             _ => {}
         }
+
+        let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
 
         // Gather what the spawned task needs — validate repo before broadcasting
         let runner = Arc::clone(&self.runner);
