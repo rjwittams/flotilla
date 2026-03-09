@@ -40,12 +40,15 @@ impl ShpoolTerminalPool {
                 continue;
             };
 
-            // Parse "checkout/role/index"
-            let parts: Vec<&str> = rest.splitn(3, '/').collect();
-            if parts.len() != 3 {
+            // Parse "checkout/role/index" from the right — checkout may contain
+            // slashes (e.g. "feature/foo"), but role and index never do.
+            let Some((before_index, index_str)) = rest.rsplit_once('/') else {
                 continue;
-            }
-            let index: u32 = parts[2].parse().unwrap_or(0);
+            };
+            let Some((checkout, role)) = before_index.rsplit_once('/') else {
+                continue;
+            };
+            let index: u32 = index_str.parse().unwrap_or(0);
 
             let status_str = session["status"]
                 .as_str()
@@ -59,11 +62,11 @@ impl ShpoolTerminalPool {
 
             terminals.push(ManagedTerminal {
                 id: ManagedTerminalId {
-                    checkout: parts[0].into(),
-                    role: parts[1].into(),
+                    checkout: checkout.into(),
+                    role: role.into(),
                     index,
                 },
-                role: parts[1].into(),
+                role: role.into(),
                 command: String::new(), // shpool doesn't report the original command
                 working_directory: PathBuf::new(), // populated separately if needed
                 status,
@@ -200,6 +203,35 @@ mod tests {
         assert_eq!(terminals[1].id.checkout, "my-feature");
         assert_eq!(terminals[1].id.role, "agent");
         assert_eq!(terminals[1].status, TerminalStatus::Disconnected);
+    }
+
+    #[test]
+    fn parse_list_json_with_slashy_branch_names() {
+        let json = r#"{
+            "sessions": [
+                {
+                    "name": "flotilla/feature/foo/shell/0",
+                    "started_at_unix_ms": 1709900000000,
+                    "status": "Attached"
+                },
+                {
+                    "name": "flotilla/feat/deep/nested/agent/1",
+                    "started_at_unix_ms": 1709900001000,
+                    "status": "Disconnected"
+                }
+            ]
+        }"#;
+
+        let terminals = ShpoolTerminalPool::parse_list_json(json).unwrap();
+        assert_eq!(terminals.len(), 2);
+
+        assert_eq!(terminals[0].id.checkout, "feature/foo");
+        assert_eq!(terminals[0].id.role, "shell");
+        assert_eq!(terminals[0].id.index, 0);
+
+        assert_eq!(terminals[1].id.checkout, "feat/deep/nested");
+        assert_eq!(terminals[1].id.role, "agent");
+        assert_eq!(terminals[1].id.index, 1);
     }
 
     #[test]
