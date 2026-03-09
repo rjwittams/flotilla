@@ -103,10 +103,7 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
 
                             // Check event log filter area (click cycles level)
                             let ef = app.ui.layout.event_log_filter_area;
-                            if x >= ef.x
-                                && x < ef.x + ef.width
-                                && y >= ef.y
-                                && y < ef.y + ef.height
+                            if x >= ef.x && x < ef.x + ef.width && y >= ef.y && y < ef.y + ef.height
                             {
                                 app.ui.event_log.filter = app.ui.event_log.filter.cycle();
                                 app.ui.event_log.count = 0;
@@ -148,13 +145,10 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
                                     }
                                     Some(TabId::Add) => {
                                         let mut input = tui_input::Input::default();
-                                        if let Some(parent) =
-                                            app.model.active_repo_root().parent()
+                                        if let Some(parent) = app.model.active_repo_root().parent()
                                         {
-                                            let parent_str =
-                                                format!("{}/", parent.display());
-                                            input =
-                                                tui_input::Input::from(parent_str.as_str());
+                                            let parent_str = format!("{}/", parent.display());
+                                            input = tui_input::Input::from(parent_str.as_str());
                                         }
                                         app.ui.mode = UiMode::FilePicker {
                                             input,
