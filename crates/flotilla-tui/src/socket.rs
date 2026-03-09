@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -152,6 +153,68 @@ impl SocketDaemon {
     ) -> Result<RawResponse, String> {
         send_request(&self.writer, &self.pending, &self.next_id, method, params).await
     }
+}
+
+/// Connect to an existing daemon or spawn a new one and retry.
+///
+/// - `socket_path`: Unix socket to connect to.
+/// - `config_dir`: used for the daemon log file and ensuring the directory exists.
+/// - `config_dir_override`: if `Some`, passes `--config-dir` to the spawned daemon.
+/// - `socket_override`: if `Some`, passes `--socket` to the spawned daemon.
+pub async fn connect_or_spawn(
+    socket_path: &Path,
+    config_dir: &Path,
+    config_dir_override: Option<&Path>,
+    socket_override: Option<&Path>,
+) -> Result<Arc<SocketDaemon>, String> {
+    // Try to connect to existing daemon
+    if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
+        return Ok(daemon);
+    }
+
+    // Clean up stale socket
+    let _ = std::fs::remove_file(socket_path);
+
+    // Spawn daemon process
+    let exe = std::env::current_exe().map_err(|e| format!("can't find self: {e}"))?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("daemon");
+    if let Some(dir) = config_dir_override {
+        cmd.arg("--config-dir").arg(dir);
+    }
+    if let Some(socket) = socket_override {
+        cmd.arg("--socket").arg(socket);
+    }
+    // Detach: own session so Ctrl-C doesn't kill daemon with TUI
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    // Redirect stdio, log stderr to file for debugging
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    let log_file = config_dir.join("daemon.log");
+    let _ = std::fs::create_dir_all(config_dir);
+    let stderr = std::fs::File::create(&log_file)
+        .map(std::process::Stdio::from)
+        .unwrap_or_else(|_| std::process::Stdio::null());
+    cmd.stderr(stderr);
+    cmd.spawn()
+        .map_err(|e| format!("failed to spawn daemon: {e}"))?;
+
+    // Retry connection with backoff
+    let delays = [50, 100, 200, 400, 800];
+    for delay_ms in delays {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
+            return Ok(daemon);
+        }
+    }
+
+    Err("timed out waiting for daemon to start".into())
 }
 
 /// Send a request on the wire and wait for the response.

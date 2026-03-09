@@ -127,10 +127,15 @@ async fn run_tui(cli: Cli) -> Result<()> {
             d as Arc<dyn DaemonHandle>
         } else {
             let socket_path = cli.socket_path();
-            connect_or_spawn(&socket_path, &cli)
-                .await
-                .map_err(|e| color_eyre::eyre::eyre!(e))
-                .expect("failed to connect to daemon")
+            flotilla_tui::socket::connect_or_spawn(
+                &socket_path,
+                &cli.config_dir(),
+                cli.config_dir.as_deref(),
+                cli.socket.as_deref(),
+            )
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!(e))
+            .expect("failed to connect to daemon")
         };
         info!("daemon ready in {:.0?}", startup.elapsed());
         daemon
@@ -310,60 +315,6 @@ async fn run_tui(cli: Cli) -> Result<()> {
     execute!(stdout(), DisableMouseCapture)?;
     ratatui::restore();
     Ok(())
-}
-
-async fn connect_or_spawn(
-    socket_path: &std::path::Path,
-    cli: &Cli,
-) -> Result<Arc<SocketDaemon>, String> {
-    // Try to connect to existing daemon
-    if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
-        return Ok(daemon);
-    }
-
-    // Clean up stale socket
-    let _ = std::fs::remove_file(socket_path);
-
-    // Spawn daemon process
-    let exe = std::env::current_exe().map_err(|e| format!("can't find self: {e}"))?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("daemon");
-    if let Some(ref config_dir) = cli.config_dir {
-        cmd.arg("--config-dir").arg(config_dir);
-    }
-    if let Some(ref socket) = cli.socket {
-        cmd.arg("--socket").arg(socket);
-    }
-    // Detach: own session so Ctrl-C doesn't kill daemon with TUI
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    // Redirect stdio, log stderr to file for debugging
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    let log_file = cli.config_dir().join("daemon.log");
-    let _ = std::fs::create_dir_all(cli.config_dir());
-    let stderr = std::fs::File::create(&log_file)
-        .map(std::process::Stdio::from)
-        .unwrap_or_else(|_| std::process::Stdio::null());
-    cmd.stderr(stderr);
-    cmd.spawn()
-        .map_err(|e| format!("failed to spawn daemon: {e}"))?;
-
-    // Retry connection with backoff
-    let delays = [50, 100, 200, 400, 800];
-    for delay_ms in delays {
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
-            return Ok(daemon);
-        }
-    }
-
-    Err("timed out waiting for daemon to start".into())
 }
 
 async fn run_daemon(cli: &Cli, timeout_secs: u64) -> Result<()> {
