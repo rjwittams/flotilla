@@ -122,12 +122,19 @@ impl TuiModel {
     }
 }
 
+/// A command that has been dispatched to the daemon and is awaiting completion.
+pub struct InFlightCommand {
+    pub repo: PathBuf,
+    pub description: String,
+}
+
 pub struct App {
     pub daemon: Arc<dyn DaemonHandle>,
     pub config: Arc<ConfigStore>,
     pub model: TuiModel,
     pub ui: UiState,
     pub proto_commands: CommandQueue,
+    pub in_flight: HashMap<u64, InFlightCommand>,
     pub should_quit: bool,
 }
 
@@ -145,6 +152,7 @@ impl App {
             model,
             ui,
             proto_commands: Default::default(),
+            in_flight: HashMap::new(),
             should_quit: false,
         }
     }
