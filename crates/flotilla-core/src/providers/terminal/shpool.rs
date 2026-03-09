@@ -125,10 +125,24 @@ impl TerminalPool for ShpoolTerminalPool {
         }
         // shpool attach creates the session if it doesn't exist (using --cmd/--dir),
         // or reattaches if it does (ignoring --cmd/--dir).
+        // --cmd does a direct exec with no shell environment, so we wrap commands
+        // in an interactive login shell to get the full user environment (PATH,
+        // node, direnv, aliases, etc). Empty commands omit --cmd, letting shpool
+        // use the user's default shell.
+        let cmd_part = if command.is_empty() {
+            String::new()
+        } else {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+            // shell-words parses: /bin/zsh -lic 'claude'
+            // → ["/bin/zsh", "-lic", "claude"]
+            // Interactive login shell resolves aliases and has full PATH.
+            let escaped_cmd = command.replace('\'', "'\\''");
+            format!(" --cmd {}", sq(&format!("{shell} -lic '{escaped_cmd}'")))
+        };
         Ok(format!(
-            "shpool --socket {} attach --cmd {} --dir {} {}",
+            "shpool --socket {} attach{} --dir {} {}",
             sq(&socket_path_str),
-            sq(command),
+            cmd_part,
             sq(&cwd_str),
             sq(&session_name),
         ))
@@ -231,10 +245,30 @@ mod tests {
         assert!(cmd.contains("shpool"));
         assert!(cmd.contains("attach"));
         assert!(cmd.contains("--cmd"));
+        assert!(cmd.contains("-lic"));
         assert!(cmd.contains("bash"));
         assert!(cmd.contains("--dir"));
         assert!(cmd.contains("/home/dev"));
         assert!(cmd.contains("flotilla/feat/shell/0"));
+    }
+
+    #[tokio::test]
+    async fn attach_command_empty_cmd_omits_cmd_flag() {
+        let runner = Arc::new(MockRunner::new(vec![]));
+        let pool = ShpoolTerminalPool::new(runner, PathBuf::from("/tmp/test.sock"));
+        let id = ManagedTerminalId {
+            checkout: "feat".into(),
+            role: "shell".into(),
+            index: 0,
+        };
+        let cmd = pool
+            .attach_command(&id, "", Path::new("/home/dev"))
+            .await
+            .unwrap();
+        assert!(cmd.contains("shpool"));
+        assert!(cmd.contains("attach"));
+        assert!(!cmd.contains("--cmd"));
+        assert!(cmd.contains("--dir"));
     }
 
     #[tokio::test]

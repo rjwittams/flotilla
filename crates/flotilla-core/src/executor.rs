@@ -374,9 +374,18 @@ async fn resolve_terminal_pool(config: &mut WorkspaceConfig, terminal_pool: &dyn
         template::default_template()
     };
     let rendered = tmpl.render(&config.template_vars);
+    info!(
+        "terminal pool ({}): resolving {} content entries",
+        terminal_pool.display_name(),
+        rendered.content.len(),
+    );
     let mut resolved = Vec::new();
     for entry in &rendered.content {
         if entry.content_type != "terminal" {
+            debug!(
+                "skipping non-terminal content: role={} type={}",
+                entry.role, entry.content_type
+            );
             continue;
         }
         let count = entry.count.unwrap_or(1);
@@ -397,11 +406,15 @@ async fn resolve_terminal_pool(config: &mut WorkspaceConfig, terminal_pool: &dyn
                 .attach_command(&id, &entry.command, &config.working_directory)
                 .await
             {
-                Ok(cmd) => resolved.push((entry.role.clone(), cmd)),
+                Ok(cmd) => {
+                    debug!("terminal {id}: cmd={:?} → {cmd:?}", entry.command);
+                    resolved.push((entry.role.clone(), cmd));
+                }
                 Err(e) => warn!("failed to get attach command for {id}: {e}"),
             }
         }
     }
+    info!("terminal pool: resolved {} commands", resolved.len());
     if !resolved.is_empty() {
         config.resolved_commands = Some(resolved);
     }

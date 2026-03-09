@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use super::{resolve_claude_path, CommandRunner};
@@ -236,8 +236,7 @@ pub async fn detect_providers(
 
     // 7. Terminal pool: prefer shpool if available, fall back to passthrough
     if runner.exists("shpool", &["version"]).await {
-        let shpool_socket = crate::config::flotilla_config_dir()
-            .join("shpool/shpool.socket");
+        let shpool_socket = crate::config::flotilla_config_dir().join("shpool/shpool.socket");
         registry.terminal_pool = Some((
             "shpool".into(),
             Arc::new(crate::providers::terminal::shpool::ShpoolTerminalPool::new(

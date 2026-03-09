@@ -78,6 +78,9 @@ pub fn provider_names_from_registry(registry: &ProviderRegistry) -> HashMap<Stri
     if let Some((_, wm)) = &registry.workspace_manager {
         names.insert("workspace_manager".into(), wm.display_name().into());
     }
+    if let Some((_, tp)) = &registry.terminal_pool {
+        names.insert("terminal_pool".into(), tp.display_name().into());
+    }
     names
 }
 

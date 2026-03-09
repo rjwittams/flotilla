@@ -285,6 +285,12 @@ fn compute_provider_health(
                 .any(|e| e.category == "PRs" || e.category == "merged"),
         );
     }
+    if registry.terminal_pool.is_some() {
+        health.insert(
+            "terminal_pool",
+            !errors.iter().any(|e| e.category == "terminals"),
+        );
+    }
     health
 }
 
