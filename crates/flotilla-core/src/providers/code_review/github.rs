@@ -223,6 +223,51 @@ impl super::CodeReview for GitHubCodeReview {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::providers::code_review::CodeReview;
+    use crate::providers::replay::{Masks, ReplaySession};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn replay_list_change_requests() {
+        let session = ReplaySession::from_file(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/providers/code_review/fixtures/github_prs.yaml"
+            ),
+            Masks::new(),
+        );
+        let api = Arc::new(session.gh_api());
+        let runner = Arc::new(session.command_runner());
+        let provider = GitHubCodeReview::new("github".into(), "owner/repo".into(), api, runner);
+
+        let prs = provider
+            .list_change_requests(Path::new("/repo"), 100)
+            .await
+            .unwrap();
+
+        assert_eq!(prs.len(), 2);
+        // First PR
+        assert_eq!(prs[0].0, "1");
+        assert_eq!(prs[0].1.title, "Add login feature");
+        assert_eq!(prs[0].1.branch, "feature/login");
+        assert_eq!(prs[0].1.status, ChangeRequestStatus::Open);
+        // Should have linked issue from "Fixes #10"
+        assert!(prs[0]
+            .1
+            .association_keys
+            .contains(&AssociationKey::IssueRef("github".into(), "10".into())));
+        // Second PR is draft
+        assert_eq!(prs[1].0, "2");
+        assert_eq!(prs[1].1.title, "WIP: Refactor auth");
+        assert_eq!(prs[1].1.branch, "refactor/auth");
+        assert_eq!(prs[1].1.status, ChangeRequestStatus::Draft);
+        // Draft PR has no body, so no association keys
+        assert!(prs[1].1.association_keys.is_empty());
+
+        session.assert_complete();
+    }
+
     #[test]
     fn parse_rest_api_pr_fields() {
         let json = r#"{
@@ -236,7 +281,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(v["number"].as_i64().unwrap(), 42);
         assert_eq!(v["head"]["ref"].as_str().unwrap(), "feature-branch");
-        assert_eq!(v["draft"].as_bool().unwrap(), true);
+        assert!(v["draft"].as_bool().unwrap());
     }
 
     #[test]

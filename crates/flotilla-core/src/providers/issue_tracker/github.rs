@@ -262,6 +262,40 @@ mod tests {
         GitHubIssueTracker::new("github".into(), "owner/repo".into(), api, runner)
     }
 
+    use crate::providers::replay::{Masks, ReplaySession};
+
+    #[tokio::test]
+    async fn replay_list_issues() {
+        let session = ReplaySession::from_file(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/providers/issue_tracker/fixtures/github_issues.yaml"
+            ),
+            Masks::new(),
+        );
+        let api = Arc::new(session.gh_api());
+        let runner = Arc::new(session.command_runner());
+        let tracker = GitHubIssueTracker::new("github".into(), "owner/repo".into(), api, runner);
+
+        let issues = tracker.list_issues(Path::new("/repo"), 30).await.unwrap();
+
+        // Should filter out #6 (has pull_request key)
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].0, "5");
+        assert_eq!(issues[0].1.title, "Bug: crash on startup");
+        assert_eq!(issues[0].1.labels, vec!["bug"]);
+        assert_eq!(issues[1].0, "7");
+        assert_eq!(issues[1].1.title, "Performance issue");
+        assert!(issues[1].1.labels.is_empty());
+        // Verify association keys
+        assert!(issues[0]
+            .1
+            .association_keys
+            .contains(&AssociationKey::IssueRef("github".into(), "5".into())));
+
+        session.assert_complete();
+    }
+
     #[test]
     fn parse_rest_api_issues_filters_pull_requests() {
         let json = r#"[

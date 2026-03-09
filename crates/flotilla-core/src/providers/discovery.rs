@@ -260,7 +260,7 @@ mod tests {
     }
 
     impl DiscoveryMockRunner {
-        fn new() -> DiscoveryMockRunnerBuilder {
+        fn builder() -> DiscoveryMockRunnerBuilder {
             DiscoveryMockRunnerBuilder {
                 responses: HashMap::new(),
                 tool_exists: HashMap::new(),
@@ -440,7 +440,7 @@ mod tests {
     #[tokio::test]
     async fn first_remote_uses_first_success_and_trims_url() {
         let repo_root = Path::new("/tmp/repo-root");
-        let runner = DiscoveryMockRunner::new()
+        let runner = DiscoveryMockRunner::builder()
             .on_run("git", &["remote"], Ok(" upstream \norigin\n".to_string()))
             .on_run(
                 "git",
@@ -458,7 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_remote_skips_failed_remote_and_uses_next() {
-        let runner = DiscoveryMockRunner::new()
+        let runner = DiscoveryMockRunner::builder()
             .on_run(
                 "git",
                 &["remote"],
@@ -482,17 +482,17 @@ mod tests {
     #[tokio::test]
     async fn first_remote_returns_none_when_listing_fails_or_empty() {
         let cases = [
-            DiscoveryMockRunner::new()
+            DiscoveryMockRunner::builder()
                 .on_run(
                     "git",
                     &["remote"],
                     Err("fatal: not a git repository".to_string()),
                 )
                 .build(),
-            DiscoveryMockRunner::new()
+            DiscoveryMockRunner::builder()
                 .on_run("git", &["remote"], Ok(String::new()))
                 .build(),
-            DiscoveryMockRunner::new()
+            DiscoveryMockRunner::builder()
                 .on_run("git", &["remote"], Ok("\n\n".to_string()))
                 .build(),
         ];
@@ -502,7 +502,7 @@ mod tests {
     }
 
     fn discovery_runner() -> DiscoveryMockRunnerBuilder {
-        DiscoveryMockRunner::new()
+        DiscoveryMockRunner::builder()
     }
 
     #[tokio::test]
