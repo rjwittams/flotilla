@@ -15,7 +15,8 @@ use flotilla_core::config::ConfigStore;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::data::{self, GroupEntry, SectionLabels};
 use flotilla_protocol::{
-    Command, DaemonEvent, ProviderData, RepoInfo, RepoLabels, Snapshot, SnapshotDelta, WorkItem,
+    Command, DaemonEvent, ProviderData, ProviderError, RepoInfo, RepoLabels, Snapshot,
+    SnapshotDelta, WorkItem,
 };
 use std::collections::VecDeque;
 
@@ -122,6 +123,27 @@ impl TuiModel {
     }
 }
 
+/// Log provider errors and format them into a status message.
+///
+/// Suppresses "issues disabled" messages since the daemon handles those.
+/// Returns `None` when there are no displayable errors.
+fn format_error_status(errors: &[ProviderError], repo_path: &Path) -> Option<String> {
+    let name = TuiModel::repo_name(repo_path);
+    let mut all_errors: Vec<String> = Vec::new();
+    for e in errors {
+        if e.category == "issues" && e.message.contains("has disabled issues") {
+            continue;
+        }
+        tracing::error!("{name}: {}: {}", e.category, e.message);
+        all_errors.push(format!("{name}: {}: {}", e.category, e.message));
+    }
+    if all_errors.is_empty() {
+        None
+    } else {
+        Some(all_errors.join("; "))
+    }
+}
+
 pub struct App {
     pub daemon: Arc<dyn DaemonHandle>,
     pub config: Arc<ConfigStore>,
@@ -217,21 +239,8 @@ impl App {
             rui.update_table_view(table_view);
         }
 
-        // Log errors, suppressing "issues disabled" since the daemon handles that
-        if !snap.errors.is_empty() {
-            let name = TuiModel::repo_name(&path);
-            let mut all_errors: Vec<String> = Vec::new();
-            for e in &snap.errors {
-                if e.category == "issues" && e.message.contains("has disabled issues") {
-                    continue;
-                }
-                tracing::error!("{name}: {}: {}", e.category, e.message);
-                all_errors.push(format!("{name}: {}: {}", e.category, e.message));
-            }
-            if !all_errors.is_empty() {
-                self.model.status_message = Some(all_errors.join("; "));
-            }
-        }
+        // Log and display errors (clears status when errors resolve)
+        self.model.status_message = format_error_status(&snap.errors, &path);
 
         // Request initial issue fetch once per repo (on first snapshot received)
         let rm = self.model.repos.get_mut(&path).unwrap();
@@ -280,20 +289,7 @@ impl App {
                     rm.provider_health.remove(provider);
                 }
                 flotilla_protocol::Change::ErrorsChanged(errors) => {
-                    if !errors.is_empty() {
-                        let name = TuiModel::repo_name(&path);
-                        let mut all_errors: Vec<String> = Vec::new();
-                        for e in errors {
-                            if e.category == "issues" && e.message.contains("has disabled issues") {
-                                continue;
-                            }
-                            tracing::error!("{name}: {}: {}", e.category, e.message);
-                            all_errors.push(format!("{name}: {}: {}", e.category, e.message));
-                        }
-                        if !all_errors.is_empty() {
-                            self.model.status_message = Some(all_errors.join("; "));
-                        }
-                    }
+                    self.model.status_message = format_error_status(errors, &path);
                 }
                 _ => {}
             }
