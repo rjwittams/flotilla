@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use super::github_api::{GhApi, GhApiResponse};
 use super::{CommandOutput, CommandRunner};
 
 /// A single recorded interaction with an external system.
@@ -193,6 +194,11 @@ impl ReplaySession {
         ReplayRunner::new(self.clone())
     }
 
+    /// Create a `ReplayGhApi` that replays gh_api interactions from this session.
+    pub fn gh_api(&self) -> ReplayGhApi {
+        ReplayGhApi::new(self.clone())
+    }
+
     /// Check that all interactions were consumed.
     pub fn assert_complete(&self) {
         let inner = self.inner.lock().unwrap();
@@ -282,6 +288,88 @@ impl CommandRunner for ReplayRunner {
 
     async fn exists(&self, _cmd: &str, _args: &[&str]) -> bool {
         true
+    }
+}
+
+/// A `GhApi` implementation that replays canned responses from a `ReplaySession`.
+pub struct ReplayGhApi {
+    session: ReplaySession,
+}
+
+impl ReplayGhApi {
+    pub fn new(session: ReplaySession) -> Self {
+        Self { session }
+    }
+}
+
+#[async_trait]
+impl GhApi for ReplayGhApi {
+    async fn get(&self, endpoint: &str, _repo_root: &Path) -> Result<String, String> {
+        let interaction = self.session.next("gh_api");
+        let Interaction::GhApi {
+            endpoint: expected_endpoint,
+            status,
+            body,
+            ..
+        } = interaction
+        else {
+            panic!("ReplayGhApi: expected gh_api interaction");
+        };
+
+        assert_eq!(
+            endpoint, expected_endpoint,
+            "ReplayGhApi: endpoint mismatch"
+        );
+
+        if (200..300).contains(&status) {
+            Ok(body)
+        } else {
+            Err(format!("HTTP {status}: {body}"))
+        }
+    }
+
+    async fn get_with_headers(
+        &self,
+        endpoint: &str,
+        _repo_root: &Path,
+    ) -> Result<GhApiResponse, String> {
+        let interaction = self.session.next("gh_api");
+        let Interaction::GhApi {
+            endpoint: expected_endpoint,
+            status,
+            body,
+            headers,
+            ..
+        } = interaction
+        else {
+            panic!("ReplayGhApi: expected gh_api interaction");
+        };
+
+        assert_eq!(
+            endpoint, expected_endpoint,
+            "ReplayGhApi: endpoint mismatch"
+        );
+
+        let etag = headers.get("etag").cloned();
+        let has_next_page = headers
+            .get("has_next_page")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let total_count = headers
+            .get("total_count")
+            .and_then(|v| v.parse::<u32>().ok());
+
+        if (200..300).contains(&status) || status == 304 {
+            Ok(GhApiResponse {
+                status,
+                etag,
+                body,
+                has_next_page,
+                total_count,
+            })
+        } else {
+            Err(format!("HTTP {status}: {body}"))
+        }
     }
 }
 
@@ -465,6 +553,120 @@ interactions:
             }
             _ => panic!("expected command"),
         }
+        session.assert_complete();
+    }
+
+    #[tokio::test]
+    async fn replay_gh_api_get() {
+        let yaml = r#"
+interactions:
+  - channel: gh_api
+    method: GET
+    endpoint: "/repos/owner/repo/pulls?state=all&per_page=100"
+    status: 200
+    body: '[{"number": 42, "title": "Fix bug"}]'
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+
+        let session = ReplaySession::from_file(&path, Masks::new());
+        let api = session.gh_api();
+
+        let result = api
+            .get(
+                "/repos/owner/repo/pulls?state=all&per_page=100",
+                Path::new("/repo"),
+            )
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Fix bug"));
+        session.assert_complete();
+    }
+
+    #[tokio::test]
+    async fn replay_gh_api_get_non_2xx_returns_err() {
+        let yaml = r#"
+interactions:
+  - channel: gh_api
+    method: GET
+    endpoint: "/repos/owner/repo/pulls"
+    status: 404
+    body: '{"message": "Not Found"}'
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+
+        let session = ReplaySession::from_file(&path, Masks::new());
+        let api = session.gh_api();
+
+        let result = api.get("/repos/owner/repo/pulls", Path::new("/repo")).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("404"));
+        session.assert_complete();
+    }
+
+    #[tokio::test]
+    async fn replay_gh_api_get_with_headers() {
+        let yaml = r#"
+interactions:
+  - channel: gh_api
+    method: GET
+    endpoint: "/repos/owner/repo/issues?per_page=100"
+    status: 200
+    body: '[{"number": 1}]'
+    headers:
+      etag: 'W/"abc123"'
+      has_next_page: "true"
+      total_count: "42"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+
+        let session = ReplaySession::from_file(&path, Masks::new());
+        let api = session.gh_api();
+
+        let result = api
+            .get_with_headers("/repos/owner/repo/issues?per_page=100", Path::new("/repo"))
+            .await;
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.etag, Some("W/\"abc123\"".to_string()));
+        assert!(resp.body.contains("number"));
+        assert!(resp.has_next_page);
+        assert_eq!(resp.total_count, Some(42));
+        session.assert_complete();
+    }
+
+    #[tokio::test]
+    async fn replay_gh_api_get_with_headers_no_pagination() {
+        let yaml = r#"
+interactions:
+  - channel: gh_api
+    method: GET
+    endpoint: "/repos/owner/repo/issues"
+    status: 200
+    body: '[]'
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+
+        let session = ReplaySession::from_file(&path, Masks::new());
+        let api = session.gh_api();
+
+        let result = api
+            .get_with_headers("/repos/owner/repo/issues", Path::new("/repo"))
+            .await;
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.etag, None);
+        assert!(!resp.has_next_page);
+        assert_eq!(resp.total_count, None);
         session.assert_complete();
     }
 }
