@@ -10,6 +10,10 @@ use flotilla_daemon::server::DaemonServer;
 use flotilla_protocol::DaemonEvent;
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "skip-no-sandbox-tests",
+    ignore = "excluded by `skip-no-sandbox-tests`; run without that feature to include"
+)]
 async fn socket_roundtrip() {
     let tmp = tempfile::TempDir::new().unwrap();
     let socket_path = tmp.path().join("test.sock");
