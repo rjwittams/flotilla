@@ -114,6 +114,10 @@ pub async fn resolve_claude_path(runner: &dyn CommandRunner) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+pub mod replay;
+
+#[cfg(test)]
 pub mod testing {
     use super::*;
     use async_trait::async_trait;
