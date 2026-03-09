@@ -1,6 +1,6 @@
 ---
 source: crates/flotilla-tui/tests/snapshots.rs
-assertion_line: 41
+assertion_line: 40
 expression: output
 ---
  ⚓  flotilla  | my-project | [+]
@@ -11,7 +11,7 @@ expression: output
 │      ── Pull Request                                                 ││                                              │
 │   ⊙  Add login page  —                       #42                     ││                                              │
 │      ── Issues ──                                                    ││                                              │
-│   ◇  Users need aut… —                                               ││                                              │
+│   ◇  Users need aut… —                                 #10           ││                                              │
 │                                                                      ││                                              │
 │                                                                      ││                                              │
 │                                                                      ││                                              │

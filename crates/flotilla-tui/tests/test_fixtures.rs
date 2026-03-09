@@ -273,7 +273,7 @@ pub fn make_work_item_issue(id: &str, title: &str) -> WorkItem {
         checkout: None,
         change_request_key: None,
         session_key: None,
-        issue_keys: vec![],
+        issue_keys: vec![id.to_string()],
         workspace_refs: vec![],
         is_main_checkout: false,
         debug_group: vec![],
