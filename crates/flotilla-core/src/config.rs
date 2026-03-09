@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 /// Global flotilla config from ~/.config/flotilla/config.toml
@@ -260,6 +261,62 @@ impl ConfigStore {
         }
         global.vcs.git.checkouts.clone()
     }
+}
+
+/// Collect repo roots: persisted (in saved tab order) first, then CLI args, then auto-detect from cwd.
+/// Persists any new repos and saves tab order.
+pub fn resolve_repo_roots(cli_roots: &[PathBuf], config: &ConfigStore) -> Vec<PathBuf> {
+    use crate::providers::vcs::git::GitVcs;
+    use crate::providers::vcs::Vcs;
+    use crate::providers::ProcessCommandRunner;
+
+    let mut repo_roots: Vec<PathBuf> = Vec::new();
+
+    // 1. Persisted repos in saved tab order
+    let persisted = config.load_repos();
+    let tab_order = config.load_tab_order();
+    if let Some(order) = tab_order {
+        for path in &order {
+            if persisted.contains(path) && !repo_roots.contains(path) {
+                repo_roots.push(path.clone());
+            }
+        }
+        // Any persisted repos not in the order file go at the end
+        for path in &persisted {
+            if !repo_roots.contains(path) {
+                repo_roots.push(path.clone());
+            }
+        }
+    } else {
+        repo_roots.extend(persisted);
+    }
+
+    // 2. CLI args (appended after persisted)
+    for root in cli_roots {
+        let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        if !repo_roots.contains(&canonical) {
+            repo_roots.push(canonical);
+        }
+    }
+
+    // 3. Auto-detect from cwd — resolve to main repo root (not worktree)
+    let cwd = std::env::current_dir().ok();
+    if let Some(ref cwd) = cwd {
+        let git = GitVcs::new(Arc::new(ProcessCommandRunner));
+        if let Some(repo_root) = git.resolve_repo_root(cwd) {
+            if !repo_roots.contains(&repo_root) {
+                repo_roots.push(repo_root);
+            }
+        }
+    }
+
+    // Persist any new repos and save tab order
+    for path in &repo_roots {
+        config.save_repo(path);
+    }
+    config.save_tab_order(&repo_roots);
+
+    repo_roots
 }
 
 #[cfg(test)]
