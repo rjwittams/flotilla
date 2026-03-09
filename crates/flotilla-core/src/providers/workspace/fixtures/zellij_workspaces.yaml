@@ -1,0 +1,83 @@
+interactions:
+- channel: command
+  cmd: zellij
+  args:
+  - action
+  - new-tab
+  - '--name'
+  - feat-123
+  - '--cwd'
+  - /tmp
+  cwd: '.'
+  stdout: ''
+  stderr: null
+  exit_code: 0
+- channel: command
+  cmd: zellij
+  args:
+  - action
+  - write-chars
+  - |
+    {main_command}
+  cwd: '.'
+  stdout: ''
+  stderr: null
+  exit_code: 0
+- channel: command
+  cmd: zellij
+  args:
+  - action
+  - new-tab
+  - '--name'
+  - fix-456
+  - '--cwd'
+  - /tmp
+  cwd: '.'
+  stdout: ''
+  stderr: null
+  exit_code: 0
+- channel: command
+  cmd: zellij
+  args:
+  - action
+  - write-chars
+  - |
+    {main_command}
+  cwd: '.'
+  stdout: ''
+  stderr: null
+  exit_code: 0
+- channel: command
+  cmd: zellij
+  args:
+  - action
+  - query-tab-names
+  cwd: '.'
+  stdout: |
+    Tab #1
+    feat-123
+    fix-456
+  stderr: null
+  exit_code: 0
+- channel: command
+  cmd: zellij
+  args:
+  - action
+  - go-to-tab-name
+  - feat-123
+  cwd: '.'
+  stdout: ''
+  stderr: null
+  exit_code: 0
+- channel: command
+  cmd: zellij
+  args:
+  - action
+  - query-tab-names
+  cwd: '.'
+  stdout: |
+    Tab #1
+    feat-123
+    fix-456
+  stderr: null
+  exit_code: 0

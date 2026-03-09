@@ -1,0 +1,6 @@
+interactions:
+- channel: gh_api
+  method: GET
+  endpoint: repos/rjwittams/flotilla/pulls?state=open&per_page=100
+  status: 200
+  body: '[]'

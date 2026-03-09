@@ -1,0 +1,13 @@
+interactions:
+- channel: command
+  cmd: git
+  args:
+  - status
+  - '--porcelain'
+  cwd: '{repo}'
+  stdout: |
+    A  staged.txt
+     M tracked.txt
+    ?? untracked.txt
+  stderr: null
+  exit_code: 0

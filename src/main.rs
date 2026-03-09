@@ -100,21 +100,19 @@ async fn run_tui(cli: Cli) -> Result<()> {
         );
         roots
     } else {
-        if !cli.repo_root.is_empty() {
-            eprintln!(
-                "Warning: --repo-root is ignored in socket mode (repos are managed by the daemon)"
-            );
-        }
         vec![]
     };
 
+    let cli_repo_roots = cli.repo_root.clone();
+
     // Spawn daemon init on a separate task so it runs concurrently with the splash
     // (show_splash uses blocking crossterm::event::poll calls).
+    let daemon_log_path = cli.config_dir().join("daemon.log");
     let config_clone = Arc::clone(&config);
     let daemon_task = tokio::spawn(async move {
-        let daemon: Arc<dyn DaemonHandle> = if embedded {
+        let daemon: Result<Arc<dyn DaemonHandle>, String> = if embedded {
             let d = InProcessDaemon::new(repo_roots, config_clone).await;
-            d as Arc<dyn DaemonHandle>
+            Ok(d as Arc<dyn DaemonHandle>)
         } else {
             let socket_path = cli.socket_path();
             flotilla_tui::socket::connect_or_spawn(
@@ -124,15 +122,40 @@ async fn run_tui(cli: Cli) -> Result<()> {
                 cli.socket.as_deref(),
             )
             .await
-            .map_err(|e| color_eyre::eyre::eyre!(e))
-            .expect("failed to connect to daemon")
+            .map(|d| d as Arc<dyn DaemonHandle>)
         };
-        info!("daemon ready in {:.0?}", startup.elapsed());
         daemon
     });
 
     flotilla_tui::splash::show_splash(&mut terminal).await?;
-    let daemon = daemon_task.await.expect("daemon init panicked");
+    let daemon = match daemon_task.await {
+        Ok(Ok(daemon)) => {
+            info!("daemon ready in {:.0?}", startup.elapsed());
+            daemon
+        }
+        Ok(Err(e)) => {
+            ratatui::restore();
+            eprintln!("Error: {e}");
+            eprintln!("  Check daemon log at {}", daemon_log_path.display());
+            std::process::exit(1);
+        }
+        Err(e) => {
+            ratatui::restore();
+            eprintln!("Error: daemon initialization panicked: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Forward --repo-root paths to the daemon (socket mode only;
+    // in-process mode already received them via InProcessDaemon::new).
+    if !embedded {
+        for root in &cli_repo_roots {
+            let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            if let Err(e) = daemon.add_repo(&canonical).await {
+                info!("failed to add repo {}: {e}", canonical.display());
+            }
+        }
+    }
 
     let repos_info = daemon.list_repos().await.unwrap_or_default();
     let app = app::App::new(daemon.clone(), repos_info, Arc::clone(&config));

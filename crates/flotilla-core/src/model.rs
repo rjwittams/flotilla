@@ -456,7 +456,7 @@ mod tests {
         let names = provider_names_from_registry(&reg);
         assert_eq!(names.len(), 1);
         assert_eq!(names.get("code_review").unwrap(), "StubCR");
-        assert!(names.get("vcs").is_none());
+        assert!(!names.contains_key("vcs"));
     }
 
     // -------------------------------------------------------

@@ -1,0 +1,9 @@
+interactions:
+- channel: command
+  cmd: git
+  args:
+  - remote
+  cwd: '{repo}'
+  stdout: ''
+  stderr: null
+  exit_code: 0

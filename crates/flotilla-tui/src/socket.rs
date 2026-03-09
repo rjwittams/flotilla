@@ -155,27 +155,58 @@ impl SocketDaemon {
     }
 }
 
-/// Connect to an existing daemon or spawn a new one and retry.
+/// Acquire the daemon spawn lock (flock-based, like tmux).
 ///
-/// - `socket_path`: Unix socket to connect to.
-/// - `config_dir`: used for the daemon log file and ensuring the directory exists.
-/// - `config_dir_override`: if `Some`, passes `--config-dir` to the spawned daemon.
-/// - `socket_override`: if `Some`, passes `--socket` to the spawned daemon.
-pub async fn connect_or_spawn(
-    socket_path: &Path,
+/// Returns:
+/// - `Ok(Some(file))` — lock acquired, caller should spawn the daemon
+/// - `Ok(None)` — another process is spawning; we blocked until they released
+/// - `Err(_)` — lock file couldn't be opened
+fn acquire_spawn_lock(lock_path: &std::path::Path) -> Result<Option<std::fs::File>, String> {
+    use std::os::unix::io::AsRawFd;
+
+    // Ensure parent directory exists (e.g. first run with custom --config-dir).
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|e| format!("lock open: {e}"))?;
+
+    // Non-blocking try: are we the first?
+    let fd = file.as_raw_fd();
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        // We got the lock — we're the spawner.
+        return Ok(Some(file));
+    }
+
+    // Another process holds the lock — block until they release it.
+    // The OS releases the lock automatically if the holder dies.
+    // Loop on EINTR like tmux does (client_get_lock).
+    loop {
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if ret == 0 {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!("flock: {err}"));
+        }
+    }
+    // Lock released — the other process's daemon should be running now.
+    // Drop the lock immediately; we won't spawn.
+    drop(file);
+    Ok(None)
+}
+
+fn spawn_daemon(
     config_dir: &Path,
     config_dir_override: Option<&Path>,
     socket_override: Option<&Path>,
-) -> Result<Arc<SocketDaemon>, String> {
-    // Try to connect to existing daemon
-    if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
-        return Ok(daemon);
-    }
-
-    // Clean up stale socket
-    let _ = std::fs::remove_file(socket_path);
-
-    // Spawn daemon process
+) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("can't find self: {e}"))?;
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("daemon");
@@ -204,17 +235,80 @@ pub async fn connect_or_spawn(
     cmd.stderr(stderr);
     cmd.spawn()
         .map_err(|e| format!("failed to spawn daemon: {e}"))?;
+    Ok(())
+}
 
-    // Retry connection with backoff
-    let delays = [50, 100, 200, 400, 800];
-    for delay_ms in delays {
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
-            return Ok(daemon);
+pub async fn connect_or_spawn(
+    socket_path: &Path,
+    config_dir: &Path,
+    config_dir_override: Option<&Path>,
+    socket_override: Option<&Path>,
+) -> Result<Arc<SocketDaemon>, String> {
+    // Try to connect to existing daemon
+    if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
+        return Ok(daemon);
+    }
+
+    // Acquire spawn lock (tmux-style flock). The loser blocks until the
+    // winner's daemon is ready, then retries connect.
+    // Append ".lock" to the full filename to avoid aliasing when the socket
+    // path already ends in ".lock" (with_extension would replace it).
+    let lock_path = PathBuf::from(format!("{}.lock", socket_path.display()));
+    let lock_path_clone = lock_path.clone();
+    let lock_result = tokio::task::spawn_blocking(move || acquire_spawn_lock(&lock_path_clone))
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))?;
+    let lock_file = match lock_result {
+        Ok(Some(file)) => Some(file),
+        Ok(None) => {
+            // Another process spawned the daemon — retry connect.
+            // (tmux's "goto retry" after flock releases.)
+            if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
+                return Ok(daemon);
+            }
+            // Their daemon didn't come up — fall through to spawn our own.
+            None
+        }
+        Err(e) => {
+            return Err(format!("spawn lock failed: {e}"));
+        }
+    };
+
+    {
+        // Clean up stale socket
+        let _ = std::fs::remove_file(socket_path);
+
+        // Spawn daemon process
+        let spawn_result = spawn_daemon(config_dir, config_dir_override, socket_override);
+        if let Err(e) = spawn_result {
+            if lock_file.is_some() {
+                drop(lock_file);
+                let _ = std::fs::remove_file(&lock_path);
+            }
+            return Err(e);
         }
     }
 
-    Err("timed out waiting for daemon to start".into())
+    // Poll for connection with a 10s deadline.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
+            // Release lock and clean up lock file (only if we hold it)
+            if lock_file.is_some() {
+                drop(lock_file);
+                let _ = std::fs::remove_file(&lock_path);
+            }
+            return Ok(daemon);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            if lock_file.is_some() {
+                drop(lock_file);
+                let _ = std::fs::remove_file(&lock_path);
+            }
+            return Err("timed out waiting for daemon to start (10s)".into());
+        }
+    }
 }
 
 /// Send a request on the wire and wait for the response.
@@ -350,15 +444,7 @@ fn handle_event(
                     let next_id = Arc::clone(next_id);
 
                     tokio::spawn(async move {
-                        recover_from_gap(
-                            &repo,
-                            &local_seqs,
-                            &event_tx,
-                            &writer,
-                            &pending,
-                            &next_id,
-                        )
-                        .await;
+                        recover_from_gap(&local_seqs, &event_tx, &writer, &pending, &next_id).await;
                         recovering.lock().unwrap().remove(&repo);
                     });
                 }
@@ -380,15 +466,18 @@ fn handle_event(
 /// Recover from a seq gap by calling `replay_since` with the stale seq,
 /// updating local seq tracking, and forwarding replay events to the TUI.
 async fn recover_from_gap(
-    repo: &Path,
     local_seqs: &SeqMap,
     event_tx: &broadcast::Sender<DaemonEvent>,
     writer: &Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>,
     pending: &Mutex<HashMap<u64, oneshot::Sender<RawResponse>>>,
     next_id: &AtomicU64,
 ) {
-    let stale_seq = local_seqs.read().unwrap().get(repo).copied().unwrap_or(0);
-    let last_seen = HashMap::from([(repo.to_path_buf(), stale_seq)]);
+    let last_seen = {
+        let seqs = local_seqs.read().unwrap();
+        seqs.iter()
+            .map(|(path, &seq)| (path.clone(), seq))
+            .collect::<HashMap<_, _>>()
+    };
 
     let resp = send_request(
         writer,
@@ -402,43 +491,39 @@ async fn recover_from_gap(
     match resp {
         Ok(raw) => match raw.parse::<Vec<DaemonEvent>>() {
             Ok(events) => {
-                debug!(
-                    "gap recovery: got {} replay events for {}",
-                    events.len(),
-                    repo.display()
-                );
-                for event in events {
-                    // Update local seq from replay events
-                    match &event {
-                        DaemonEvent::SnapshotFull(snap) if snap.repo == repo => {
-                            local_seqs
-                                .write()
-                                .unwrap()
-                                .insert(repo.to_path_buf(), snap.seq);
+                debug!("gap recovery: got {} replay events", events.len());
+                // Update seqs monotonically — a live event may have advanced
+                // a repo's seq while this replay was in flight.
+                {
+                    let mut seqs = local_seqs.write().unwrap();
+                    for event in &events {
+                        match event {
+                            DaemonEvent::SnapshotFull(snap) => {
+                                let current = seqs.get(&snap.repo).copied().unwrap_or(0);
+                                if snap.seq >= current {
+                                    seqs.insert(snap.repo.clone(), snap.seq);
+                                }
+                            }
+                            DaemonEvent::SnapshotDelta(delta) => {
+                                let current = seqs.get(&delta.repo).copied().unwrap_or(0);
+                                if delta.seq >= current {
+                                    seqs.insert(delta.repo.clone(), delta.seq);
+                                }
+                            }
+                            _ => {}
                         }
-                        DaemonEvent::SnapshotDelta(delta) if delta.repo == repo => {
-                            local_seqs
-                                .write()
-                                .unwrap()
-                                .insert(repo.to_path_buf(), delta.seq);
-                        }
-                        _ => {}
                     }
+                }
+                for event in events {
                     let _ = event_tx.send(event);
                 }
             }
             Err(e) => {
-                error!(
-                    "gap recovery: failed to parse replay events for {}: {e}",
-                    repo.display()
-                );
+                error!("gap recovery: failed to parse replay events: {e}");
             }
         },
         Err(e) => {
-            error!(
-                "gap recovery: failed replay_since for {}: {e}",
-                repo.display()
-            );
+            error!("gap recovery: replay_since request failed: {e}");
         }
     }
 }
