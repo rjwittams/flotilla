@@ -489,6 +489,153 @@ mod tests {
         )
     }
 
+    fn setup_zellij_ws_session() {
+        // Set ZELLIJ_SESSION_NAME BEFORE creating the runner so it inherits the env
+        unsafe {
+            std::env::set_var("ZELLIJ_SESSION_NAME", "flotilla-test-zj-ws");
+        }
+
+        // Create a tmux session to host zellij
+        let status = std::process::Command::new("tmux")
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                "zellij-host-ws",
+                "-x",
+                "80",
+                "-y",
+                "24",
+            ])
+            .status()
+            .expect("failed to create tmux host session");
+        assert!(status.success(), "tmux new-session for zellij host failed");
+
+        // Start zellij inside the tmux session
+        std::process::Command::new("tmux")
+            .args([
+                "send-keys",
+                "-t",
+                "zellij-host-ws",
+                "zellij --session flotilla-test-zj-ws",
+                "Enter",
+            ])
+            .status()
+            .expect("failed to send zellij start command");
+
+        // Wait for zellij to start up
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+
+    fn teardown_zellij_ws_session() {
+        // Quit zellij gracefully
+        let _ = std::process::Command::new("zellij")
+            .args(["action", "quit"])
+            .env("ZELLIJ_SESSION_NAME", "flotilla-test-zj-ws")
+            .status();
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Kill the tmux host session
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", "zellij-host-ws"])
+            .status();
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Force-delete the zellij session
+        let _ = std::process::Command::new("zellij")
+            .args(["delete-session", "flotilla-test-zj-ws", "--force"])
+            .status();
+
+        // Remove ZELLIJ_SESSION_NAME env var
+        unsafe {
+            std::env::remove_var("ZELLIJ_SESSION_NAME");
+        }
+
+        // Clean up state files created by create_workspace
+        if let Some(config_dir) = dirs::config_dir() {
+            let state_dir = config_dir
+                .join("flotilla")
+                .join("zellij")
+                .join("flotilla-test-zj-ws");
+            let _ = std::fs::remove_dir_all(&state_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn record_replay_create_and_switch_workspaces() {
+        let recording = replay::is_recording();
+
+        if recording {
+            setup_zellij_ws_session();
+        }
+
+        let session =
+            replay::test_session(&fixture("zellij_workspaces.yaml"), replay::Masks::new());
+        let runner = replay::test_runner(&session);
+
+        let mgr = ZellijWorkspaceManager::new(runner.clone());
+
+        // Create workspace "feat-123"
+        let config1 = WorkspaceConfig {
+            name: "feat-123".to_string(),
+            working_directory: PathBuf::from("/tmp"),
+            template_yaml: None,
+            template_vars: HashMap::new(),
+        };
+        let (name1, ws1) = mgr.create_workspace(&config1).await.unwrap();
+        assert_eq!(name1, "feat-123");
+        assert_eq!(ws1.name, "feat-123");
+
+        // Create workspace "fix-456"
+        let config2 = WorkspaceConfig {
+            name: "fix-456".to_string(),
+            working_directory: PathBuf::from("/tmp"),
+            template_yaml: None,
+            template_vars: HashMap::new(),
+        };
+        let (name2, ws2) = mgr.create_workspace(&config2).await.unwrap();
+        assert_eq!(name2, "fix-456");
+        assert_eq!(ws2.name, "fix-456");
+
+        // Verify with external command: query tab names through the runner
+        let list_output = runner
+            .run("zellij", &["action", "query-tab-names"], Path::new("."))
+            .await
+            .unwrap();
+        assert!(
+            list_output.contains("feat-123"),
+            "expected 'feat-123' in tab list: {list_output}"
+        );
+        assert!(
+            list_output.contains("fix-456"),
+            "expected 'fix-456' in tab list: {list_output}"
+        );
+
+        // Switch to "feat-123"
+        mgr.select_workspace("feat-123").await.unwrap();
+
+        // List workspaces via the manager — assert names only (not directories,
+        // since state enrichment differs between recording and replay modes)
+        let workspaces = mgr.list_workspaces().await.unwrap();
+        let names: Vec<&str> = workspaces.iter().map(|w| w.1.name.as_str()).collect();
+        assert!(
+            names.contains(&"feat-123"),
+            "expected 'feat-123' in {names:?}"
+        );
+        assert!(
+            names.contains(&"fix-456"),
+            "expected 'fix-456' in {names:?}"
+        );
+
+        if recording {
+            teardown_zellij_ws_session();
+        }
+
+        session.finish();
+    }
+
     fn setup_zellij_session() {
         // Set ZELLIJ_SESSION_NAME so zellij action commands target our session
         unsafe {

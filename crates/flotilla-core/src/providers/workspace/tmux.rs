@@ -517,6 +517,133 @@ mod tests {
             .status();
     }
 
+    fn setup_tmux_ws_session() {
+        let status = std::process::Command::new("tmux")
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                "flotilla-test-tmux",
+                "-x",
+                "80",
+                "-y",
+                "24",
+            ])
+            .status()
+            .expect("failed to create tmux session");
+        assert!(status.success(), "tmux new-session failed");
+    }
+
+    fn teardown_tmux_ws_session() {
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", "flotilla-test-tmux"])
+            .status();
+
+        // Clean up state files created by create_workspace
+        if let Some(config_dir) = dirs::config_dir() {
+            let state_dir = config_dir
+                .join("flotilla")
+                .join("tmux")
+                .join("flotilla-test-tmux");
+            let _ = std::fs::remove_dir_all(&state_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn record_replay_create_and_switch_workspaces() {
+        let recording = replay::is_recording();
+
+        if recording {
+            setup_tmux_ws_session();
+        }
+
+        let session = replay::test_session(&fixture("tmux_workspaces.yaml"), replay::Masks::new());
+        let runner = replay::test_runner(&session);
+
+        let mgr = TmuxWorkspaceManager::new(runner.clone());
+
+        // Create workspace "feat-123"
+        let config1 = WorkspaceConfig {
+            name: "feat-123".to_string(),
+            working_directory: PathBuf::from("/tmp"),
+            template_yaml: None,
+            template_vars: HashMap::new(),
+        };
+        let (name1, ws1) = mgr.create_workspace(&config1).await.unwrap();
+        assert_eq!(name1, "feat-123");
+        assert_eq!(ws1.name, "feat-123");
+
+        // Create workspace "fix-456"
+        let config2 = WorkspaceConfig {
+            name: "fix-456".to_string(),
+            working_directory: PathBuf::from("/tmp"),
+            template_yaml: None,
+            template_vars: HashMap::new(),
+        };
+        let (name2, ws2) = mgr.create_workspace(&config2).await.unwrap();
+        assert_eq!(name2, "fix-456");
+        assert_eq!(ws2.name, "fix-456");
+
+        // Verify with external command: list windows through the runner
+        let list_output = runner
+            .run(
+                "tmux",
+                &["list-windows", "-F", "#{window_name}"],
+                Path::new("."),
+            )
+            .await
+            .unwrap();
+        assert!(
+            list_output.contains("feat-123"),
+            "expected 'feat-123' in list output: {list_output}"
+        );
+        assert!(
+            list_output.contains("fix-456"),
+            "expected 'fix-456' in list output: {list_output}"
+        );
+
+        // Switch to "feat-123"
+        mgr.select_workspace("feat-123").await.unwrap();
+
+        // Verify current window through the runner
+        let current = runner
+            .run(
+                "tmux",
+                &["display-message", "-p", "#{window_name}"],
+                Path::new("."),
+            )
+            .await
+            .unwrap();
+        assert!(
+            current.contains("feat-123"),
+            "expected current window 'feat-123', got: {current}"
+        );
+
+        // List workspaces via the manager
+        let workspaces = mgr.list_workspaces().await.unwrap();
+        let names: Vec<&str> = workspaces.iter().map(|w| w.1.name.as_str()).collect();
+        assert!(
+            names.contains(&"feat-123"),
+            "expected 'feat-123' in {names:?}"
+        );
+        assert!(
+            names.contains(&"fix-456"),
+            "expected 'fix-456' in {names:?}"
+        );
+        // At least 3: default zsh window + feat-123 + fix-456
+        assert!(
+            workspaces.len() >= 3,
+            "expected at least 3 workspaces, got {}",
+            workspaces.len()
+        );
+
+        if recording {
+            teardown_tmux_ws_session();
+        }
+
+        session.finish();
+    }
+
     #[tokio::test]
     async fn record_replay_list_workspaces() {
         let recording = replay::is_recording();
