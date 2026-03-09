@@ -172,9 +172,11 @@ async fn run_tui(cli: Cli) -> Result<()> {
         }
 
         // ── Coalesce ──
+        // Scroll: accumulate net delta. Ticks: discard.
+        // Drags are NOT coalesced — each position triggers an adjacent-tab swap,
+        // and the sequence must be preserved (including ordering relative to MouseUp).
         let mut scroll_delta: i32 = 0;
         let mut last_scroll_pos: Option<(u16, u16)> = None;
-        let mut last_drag: Option<crossterm::event::MouseEvent> = None;
         let mut other_events: Vec<event::Event> = Vec::new();
 
         for evt in batch {
@@ -187,9 +189,6 @@ async fn run_tui(cli: Cli) -> Result<()> {
                     crossterm::event::MouseEventKind::ScrollUp => {
                         scroll_delta -= 1;
                         last_scroll_pos = Some((m.column, m.row));
-                    }
-                    crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                        last_drag = Some(*m);
                     }
                     _ => other_events.push(evt),
                 },
@@ -287,6 +286,36 @@ async fn run_tui(cli: Cli) -> Result<()> {
                                 app.handle_mouse(m);
                             }
                         }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            if let Some(dragging_idx) = app.ui.drag.dragging_tab {
+                                if !app.ui.drag.active {
+                                    let dx = (m.column as i16 - app.ui.drag.start_x as i16)
+                                        .unsigned_abs();
+                                    if dx >= 2 {
+                                        app.ui.drag.active = true;
+                                    }
+                                }
+                                if app.ui.drag.active {
+                                    for (id, r) in &app.ui.layout.tab_areas {
+                                        if let app::TabId::Repo(i) = *id {
+                                            if m.column >= r.x
+                                                && m.column < r.x + r.width
+                                                && m.row >= r.y
+                                                && m.row < r.y + r.height
+                                                && i != dragging_idx
+                                            {
+                                                app.model.repo_order.swap(dragging_idx, i);
+                                                app.model.active_repo = i;
+                                                app.ui.drag.dragging_tab = Some(i);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                app.handle_mouse(m);
+                            }
+                        }
                         MouseEventKind::Up(MouseButton::Left) => {
                             if app.ui.drag.dragging_tab.take().is_some() {
                                 if app.ui.drag.active {
@@ -301,37 +330,6 @@ async fn run_tui(cli: Cli) -> Result<()> {
                     }
                 }
                 event::Event::Tick => {} // already filtered out
-            }
-        }
-
-        // ── Apply coalesced drag (latest position only) ──
-        if let Some(drag_m) = last_drag {
-            if let Some(dragging_idx) = app.ui.drag.dragging_tab {
-                if !app.ui.drag.active {
-                    let dx = (drag_m.column as i16 - app.ui.drag.start_x as i16).unsigned_abs();
-                    if dx >= 2 {
-                        app.ui.drag.active = true;
-                    }
-                }
-                if app.ui.drag.active {
-                    for (id, r) in &app.ui.layout.tab_areas {
-                        if let app::TabId::Repo(i) = *id {
-                            if drag_m.column >= r.x
-                                && drag_m.column < r.x + r.width
-                                && drag_m.row >= r.y
-                                && drag_m.row < r.y + r.height
-                                && i != dragging_idx
-                            {
-                                app.model.repo_order.swap(dragging_idx, i);
-                                app.model.active_repo = i;
-                                app.ui.drag.dragging_tab = Some(i);
-                                break;
-                            }
-                        }
-                    }
-                }
-            } else {
-                app.handle_mouse(drag_m);
             }
         }
 
