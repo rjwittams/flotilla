@@ -504,21 +504,26 @@ mod tests {
     }
 
     #[test]
-    fn managed_terminal_correlates_via_checkout_path() {
+    fn managed_terminal_correlates_via_branch() {
         let path = PathBuf::from("/code/feat-x");
         let items = vec![
             item(
                 "git",
                 ItemKind::Checkout,
                 "feat-x",
-                vec![CorrelationKey::CheckoutPath(path.clone())],
-                ProviderItemKey::Checkout(path.clone()),
+                vec![
+                    CorrelationKey::Branch("feat-x".into()),
+                    CorrelationKey::CheckoutPath(path.clone()),
+                ],
+                ProviderItemKey::Checkout(path),
             ),
             item(
                 "terminal",
                 ItemKind::ManagedTerminal,
                 "shell/0",
-                vec![CorrelationKey::CheckoutPath(path)],
+                // Terminal correlates via branch name (from ManagedTerminalId.checkout),
+                // NOT via CheckoutPath — shpool doesn't report working directory.
+                vec![CorrelationKey::Branch("feat-x".into())],
                 ProviderItemKey::ManagedTerminal("feat-x/shell/0".into()),
             ),
         ];

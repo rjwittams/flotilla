@@ -370,7 +370,9 @@ pub fn correlate(providers: &ProviderData) -> (Vec<CorrelationResult>, Vec<Corre
     }
 
     for (key, terminal) in &providers.managed_terminals {
-        let mut keys = Vec::new();
+        let mut keys = vec![crate::providers::types::CorrelationKey::Branch(
+            terminal.id.checkout.clone(),
+        )];
         if !terminal.working_directory.as_os_str().is_empty() {
             keys.push(crate::providers::types::CorrelationKey::CheckoutPath(
                 terminal.working_directory.clone(),

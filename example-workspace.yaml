@@ -9,21 +9,21 @@
 #   {issue_number}  — GitHub issue number (if applicable)
 #   {session_id}    — web session UUID   (if applicable)
 
-panes:
-  - name: main
-    surfaces:
-      - command: "{main_command}"
+# What terminal sessions to create
+content:
+  - role: main
+    command: "{main_command}"
+  - role: ai
+    command: codex
+  - role: shell
+    command: ""
 
-  - name: ai
+# How to arrange them in the workspace
+layout:
+  - slot: main
+    focus: true
+  - slot: ai
     split: right
-    surfaces:
-      - name: codex
-        command: codex
-      - name: gemini
-        command: gemini
-
-  - name: shell
+  - slot: shell
     split: down
     parent: ai
-    surfaces:
-      - command: ""
