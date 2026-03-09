@@ -102,9 +102,11 @@ known cleanup target, not a pattern to copy.
   replace embedded mode.
 - **No automatic reconnection.** If the daemon dies, the TUI exits with an
   error and the user restarts. This is a deliberate simplicity choice.
-- **Clients receive work items, not raw provider data.** The daemon performs
-  correlation so clients stay thin. This was a deliberate choice over pushing
-  raw provider data to clients and correlating per-frontend.
+- **Snapshots carry both work items and raw provider data.** The daemon
+  correlates and includes pre-built work items, but snapshots also carry the
+  full `ProviderData`. The TUI stores `rm.providers`, applies deltas to it,
+  and re-correlates client-side. This is a known architectural mismatch — the
+  daemon owns correlation, but the client duplicates it. See `#154`.
 - **The architecture reached its current shape via a Strangler Fig migration**:
   (1) define the daemon boundary in-process, (2) add a socket server,
   (3) add delta snapshots, (4) multi-host (future). Intermediate structure from
@@ -112,8 +114,12 @@ known cleanup target, not a pattern to copy.
 
 ## Current Pressure
 
-The TUI still re-applies deltas, re-correlates provider data, and rebuilds
-table state client-side. That keeps the client simple, but it is also where
-current performance pressure is accumulating. If repo scale or additional
-frontends make that too expensive, the next step is to move more materialized
-state ownership to the daemon.
+The TUI stores raw `ProviderData`, applies deltas to it, and re-correlates
+from scratch on every update. The daemon already correlates and includes work
+items in the snapshot, so the client-side re-correlation is redundant. This
+duplication is the main cleanup target — the TUI should consume daemon-provided
+work items directly rather than re-deriving them. See `#154`.
+
+If repo scale or additional frontends make the current approach too expensive,
+the next step is to move more materialized state ownership to the daemon and
+have clients consume it passively.

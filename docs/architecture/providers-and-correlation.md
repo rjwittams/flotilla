@@ -127,15 +127,17 @@ overlaps rather than gaps.
 
 ### Viewport-based initial fetch
 
-The first issue fetch is triggered when the user navigates to the issues tab.
-The daemon fetches 2× the visible row count to provide a scroll buffer.
-Subsequent pagination is demand-driven via `FetchMoreIssues`.
+The TUI sends `SetIssueViewport` on the first snapshot received for each repo,
+regardless of which tab is active. The daemon doubles the visible count and
+fetches that many issues eagerly. Subsequent pagination is demand-driven via
+`FetchMoreIssues`.
 
 ### Pinned issues
 
-Issues linked to open change requests are pinned in the cache. Pinned issues
-survive both incremental eviction and full cache resets, so correlated rows keep
-their issue context even when the general list is paginated.
+Issues linked to open change requests or checkouts (via git config association
+keys) are pinned in the cache. Pinned issues survive both incremental eviction
+and full cache resets, so correlated rows keep their issue context even when the
+general list is paginated.
 
 ### Rate limiting
 
