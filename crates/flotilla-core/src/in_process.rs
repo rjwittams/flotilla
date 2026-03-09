@@ -27,6 +27,10 @@ use crate::model::{provider_names_from_registry, repo_name, RepoModel};
 use crate::providers::CommandRunner;
 use crate::refresh::RefreshSnapshot;
 
+fn now_iso8601() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 /// Extract issue IDs referenced by association keys on change requests and checkouts.
 fn collect_linked_issue_ids(providers: &ProviderData) -> Vec<String> {
     let mut ids = HashSet::new();
@@ -266,6 +270,7 @@ impl InProcessDaemon {
         // main snapshot broadcast path.
         drop(repos);
         self.fetch_missing_linked_issues().await;
+        self.refresh_issues_incremental().await;
     }
 
     /// Fetch issue pages until the cache has at least `desired_count` entries
@@ -318,6 +323,9 @@ impl InProcessDaemon {
                     let mut repos = self.repos.write().await;
                     if let Some(state) = repos.get_mut(repo) {
                         state.issue_cache.merge_page(page);
+                        if state.issue_cache.last_refreshed_at.is_none() {
+                            state.issue_cache.mark_refreshed(now_iso8601());
+                        }
                     }
                 }
                 Err(e) => {
@@ -426,6 +434,82 @@ impl InProcessDaemon {
                 Err(e) => {
                     tracing::warn!(
                         "failed to fetch linked issues for {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Incremental issue refresh: fetch issues changed since last refresh,
+    /// apply changeset to cache, and broadcast if anything changed.
+    async fn refresh_issues_incremental(&self) {
+        let tasks: Vec<_> = {
+            let repos = self.repos.read().await;
+            repos
+                .iter()
+                .filter_map(|(path, state)| {
+                    let since = state.issue_cache.last_refreshed_at.as_ref()?;
+                    if state.model.registry.issue_trackers.is_empty() {
+                        return None;
+                    }
+                    Some((
+                        path.clone(),
+                        since.clone(),
+                        Arc::clone(&state.model.registry),
+                        Arc::clone(&state.issue_fetch_mutex),
+                        state.issue_cache.len(),
+                    ))
+                })
+                .collect()
+        };
+
+        for (path, since, registry, fetch_mutex, prev_count) in tasks {
+            let _guard = fetch_mutex.lock().await;
+            let tracker = match registry.issue_trackers.values().next() {
+                Some(t) => t,
+                None => continue,
+            };
+
+            match tracker.list_issues_changed_since(&path, &since, 50).await {
+                Ok(changeset) => {
+                    let escalate = changeset.has_more;
+                    let has_changes =
+                        !changeset.updated.is_empty() || !changeset.closed_ids.is_empty();
+
+                    {
+                        let mut repos = self.repos.write().await;
+                        if let Some(state) = repos.get_mut(&path) {
+                            state.issue_cache.apply_changeset(changeset);
+                            state.issue_cache.mark_refreshed(now_iso8601());
+                        }
+                    }
+
+                    if escalate {
+                        // Too many changes — fall back to full re-fetch
+                        drop(_guard);
+                        {
+                            let mut repos = self.repos.write().await;
+                            if let Some(state) = repos.get_mut(&path) {
+                                state.issue_cache.reset();
+                            }
+                        }
+                        self.ensure_issues_cached(&path, prev_count).await;
+                        {
+                            let mut repos = self.repos.write().await;
+                            if let Some(state) = repos.get_mut(&path) {
+                                state.issue_cache.mark_refreshed(now_iso8601());
+                            }
+                        }
+                        self.broadcast_snapshot(&path).await;
+                    } else if has_changes {
+                        self.broadcast_snapshot(&path).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "incremental issue refresh failed for {}: {}",
                         path.display(),
                         e
                     );
@@ -563,11 +647,28 @@ impl DaemonHandle for InProcessDaemon {
     }
 
     async fn refresh(&self, repo: &Path) -> Result<(), String> {
-        let repos = self.repos.read().await;
-        let state = repos
-            .get(repo)
-            .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
-        state.model.refresh_handle.trigger_refresh();
+        let prev_count = {
+            let mut repos = self.repos.write().await;
+            let state = repos
+                .get_mut(repo)
+                .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
+            let count = state.issue_cache.len();
+            state.issue_cache.reset();
+            state.model.refresh_handle.trigger_refresh();
+            count
+        };
+
+        if prev_count > 0 {
+            self.ensure_issues_cached(repo, prev_count).await;
+            {
+                let mut repos = self.repos.write().await;
+                if let Some(state) = repos.get_mut(repo) {
+                    state.issue_cache.mark_refreshed(now_iso8601());
+                }
+            }
+            self.broadcast_snapshot(repo).await;
+        }
+
         Ok(())
     }
 
