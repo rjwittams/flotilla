@@ -87,6 +87,10 @@ pub struct IssuePage {
 pub struct IssueChangeset {
     pub updated: Vec<(String, Issue)>,
     pub closed_ids: Vec<String>,
+    /// Whether the provider had more changes than it returned. When true,
+    /// the caller should discard this changeset and perform a full re-fetch
+    /// instead of applying it incrementally. This differs from
+    /// `IssuePage::has_more`, which signals additional pages to paginate.
     pub has_more: bool,
 }
 
