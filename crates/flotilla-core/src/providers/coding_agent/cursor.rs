@@ -42,7 +42,7 @@ impl CursorCodingAgent {
 
             let resp = client
                 .get(url)
-                .bearer_auth(&api_key)
+                .basic_auth(&api_key, None::<&str>)
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
@@ -108,8 +108,8 @@ struct CursorTarget {
 impl CursorAgent {
     fn session_status(&self) -> SessionStatus {
         match self.status.as_str() {
-            "RUNNING" => SessionStatus::Running,
-            "ARCHIVED" => SessionStatus::Archived,
+            "CREATING" | "RUNNING" => SessionStatus::Running,
+            "FINISHED" | "STOPPED" | "FAILED" | "EXPIRED" => SessionStatus::Idle,
             _ => SessionStatus::Idle,
         }
     }
@@ -262,10 +262,10 @@ mod tests {
 
     #[test]
     fn cursor_agent_maps_status_and_branch() {
-        let agent = CursorAgent {
+        let make = |status: &str| CursorAgent {
             id: "bc-1".to_string(),
             name: "Session".to_string(),
-            status: "RUNNING".to_string(),
+            status: status.to_string(),
             created_at: "2026-01-01T00:00:00.000Z".to_string(),
             source: CursorSource {
                 repository: "github.com/owner/repo".to_string(),
@@ -274,7 +274,15 @@ mod tests {
                 branch_name: "feature/one".to_string(),
             },
         };
-        assert_eq!(agent.session_status(), SessionStatus::Running);
+
+        assert_eq!(make("CREATING").session_status(), SessionStatus::Running);
+        assert_eq!(make("RUNNING").session_status(), SessionStatus::Running);
+        assert_eq!(make("FINISHED").session_status(), SessionStatus::Idle);
+        assert_eq!(make("STOPPED").session_status(), SessionStatus::Idle);
+        assert_eq!(make("FAILED").session_status(), SessionStatus::Idle);
+        assert_eq!(make("EXPIRED").session_status(), SessionStatus::Idle);
+
+        let agent = make("RUNNING");
         assert_eq!(agent.branch(), Some("feature/one"));
         assert_eq!(agent.repo_slug(), Some("owner/repo".to_string()));
     }
