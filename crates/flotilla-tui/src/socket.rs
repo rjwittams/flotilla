@@ -287,14 +287,7 @@ fn handle_event(
                     let next_id = Arc::clone(next_id);
 
                     tokio::spawn(async move {
-                        recover_from_gap(
-                            &local_seqs,
-                            &event_tx,
-                            &writer,
-                            &pending,
-                            &next_id,
-                        )
-                        .await;
+                        recover_from_gap(&local_seqs, &event_tx, &writer, &pending, &next_id).await;
                         recovering.lock().unwrap().remove(&repo);
                     });
                 }
@@ -342,15 +335,23 @@ async fn recover_from_gap(
         Ok(raw) => match raw.parse::<Vec<DaemonEvent>>() {
             Ok(events) => {
                 debug!("gap recovery: got {} replay events", events.len());
+                // Update seqs monotonically — a live event may have advanced
+                // a repo's seq while this replay was in flight.
                 {
                     let mut seqs = local_seqs.write().unwrap();
                     for event in &events {
                         match event {
                             DaemonEvent::SnapshotFull(snap) => {
-                                seqs.insert(snap.repo.clone(), snap.seq);
+                                let current = seqs.get(&snap.repo).copied().unwrap_or(0);
+                                if snap.seq >= current {
+                                    seqs.insert(snap.repo.clone(), snap.seq);
+                                }
                             }
                             DaemonEvent::SnapshotDelta(delta) => {
-                                seqs.insert(delta.repo.clone(), delta.seq);
+                                let current = seqs.get(&delta.repo).copied().unwrap_or(0);
+                                if delta.seq >= current {
+                                    seqs.insert(delta.repo.clone(), delta.seq);
+                                }
                             }
                             _ => {}
                         }
