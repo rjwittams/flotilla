@@ -1,6 +1,48 @@
-# Workspace Manager: Multi-Checkout Gap
+# Workspace Managers
 
-## Current State
+Workspace creation and selection are abstracted behind the
+`WorkspaceManager` trait, but the underlying tools do not all model workspaces
+the way Flotilla would ideally like them to. This document records both the
+current contract and the major mismatches in the adapters.
+
+## Current Contract
+
+The current workspace-manager boundary is intentionally thin:
+
+- list existing workspaces
+- create a workspace from a rendered template/config
+- select an existing workspace
+
+Template parsing and variable substitution live in core. Provider-specific pane
+creation, tab selection, and command dispatch live in the workspace-manager
+implementations.
+
+## Templates
+
+Core supports a small YAML workspace template model:
+
+- panes with names
+- parent/split relationships
+- surfaces with commands
+- variable substitution such as `{main_command}`
+
+This gives Flotilla one portable representation for workspace creation even when
+the underlying tools use different native formats. Native provider-specific
+formats can still be layered on later.
+
+## Current Adapters
+
+Implemented adapters:
+
+- `cmux`
+- `tmux`
+- `zellij`
+
+Detection is based primarily on the current shell environment
+(`CMUX_SOCKET_PATH`, `ZELLIJ`, `TMUX`) so Flotilla prefers the terminal
+environment it is actually running inside.
+
+## Multi-Checkout Gap
 
 A workspace manager (cmux, tmux, zellij) reports its workspaces with a list of directories. Each directory becomes a `CorrelationKey::CheckoutPath`, which the correlation engine uses to merge items into groups.
 
@@ -16,9 +58,16 @@ A workspace manager that understands its purpose would:
 2. **Provide event streams or sync RPCs** -- report workspace state changes in real time rather than requiring polling with fixed sleeps.
 3. **Report readiness** -- signal when panes/surfaces are ready to receive input, eliminating the need for fixed-delay sleeps during creation.
 
-## Current Adapters
+## Current Limitations
 
 None of cmux, tmux, or zellij directly model the concept of a "primary working directory" for a workspace. We infer it from the directory list. This is a fundamental mismatch between the workspace manager abstraction and the tools available today.
+
+`tmux` and `zellij` also currently rely on fixed sleeps while building pane
+layouts. That is a practical adapter workaround, not the desired contract.
+
+Detached daemon mode creates another pressure point for `cmux`: access control
+is tied to process ancestry, so a daemon that outlives the original TUI process
+may lose authority to drive the workspace manager.
 
 ## Design Pressure
 
@@ -27,3 +76,5 @@ When building new workspace manager integrations or improving existing ones:
 - Prefer providers that can distinguish primary vs auxiliary directories.
 - Push for event-based or callback-based readiness signals over fixed sleeps.
 - Document gaps between the ideal contract and what the provider actually supports, so we have ammunition to request improvements upstream or in our own adapters.
+- Treat native template support as additive polish, not a reason to remove the
+  portable logical workspace model.
