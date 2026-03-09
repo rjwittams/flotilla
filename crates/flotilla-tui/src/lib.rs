@@ -1,4 +1,5 @@
 pub mod app;
+pub mod cli;
 pub mod event;
 pub mod event_log;
 pub mod run;

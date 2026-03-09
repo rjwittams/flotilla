@@ -3,7 +3,6 @@ use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::in_process::InProcessDaemon;
 use flotilla_tui::app;
 use flotilla_tui::event_log;
-use flotilla_tui::socket::SocketDaemon;
 
 use clap::Parser;
 use color_eyre::Result;
@@ -148,64 +147,13 @@ async fn run_daemon(cli: &Cli, timeout_secs: u64) -> Result<()> {
 }
 
 async fn run_status(cli: &Cli) -> Result<()> {
-    let socket_path = cli.socket_path();
-    let daemon = SocketDaemon::connect(&socket_path)
+    flotilla_tui::cli::run_status(&cli.socket_path())
         .await
-        .map_err(|e| color_eyre::eyre::eyre!("cannot connect to daemon: {e}"))?;
-
-    let repos = daemon
-        .list_repos()
-        .await
-        .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
-
-    if repos.is_empty() {
-        println!("No repos tracked.");
-        return Ok(());
-    }
-
-    for repo in &repos {
-        let name = &repo.name;
-        let path = repo.path.display();
-        let health: Vec<String> = repo
-            .provider_health
-            .iter()
-            .map(|(k, v)| format!("{k}: {}", if *v { "ok" } else { "error" }))
-            .collect();
-        let loading = if repo.loading { " (loading)" } else { "" };
-        println!("{name}{loading}  {path}");
-        if !health.is_empty() {
-            println!("  providers: {}", health.join(", "));
-        }
-    }
-
-    Ok(())
+        .map_err(|e| color_eyre::eyre::eyre!(e))
 }
 
 async fn run_watch(cli: &Cli) -> Result<()> {
-    let socket_path = cli.socket_path();
-    let daemon = SocketDaemon::connect(&socket_path)
+    flotilla_tui::cli::run_watch(&cli.socket_path())
         .await
-        .map_err(|e| color_eyre::eyre::eyre!("cannot connect to daemon: {e}"))?;
-
-    let mut rx = daemon.subscribe();
-    println!("watching events (Ctrl-C to stop)...");
-
-    loop {
-        match rx.recv().await {
-            Ok(event) => {
-                let json =
-                    serde_json::to_string_pretty(&event).unwrap_or_else(|_| format!("{event:?}"));
-                println!("{json}");
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                eprintln!("warning: skipped {n} events");
-            }
-            Err(_) => {
-                eprintln!("daemon disconnected");
-                break;
-            }
-        }
-    }
-
-    Ok(())
+        .map_err(|e| color_eyre::eyre::eyre!(e))
 }
