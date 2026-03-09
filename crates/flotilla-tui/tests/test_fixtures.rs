@@ -73,7 +73,6 @@ impl TestHarness {
     }
 
     /// Set a provider status for a repo.
-    #[allow(dead_code)]
     pub fn with_provider_status(
         mut self,
         repo: &str,

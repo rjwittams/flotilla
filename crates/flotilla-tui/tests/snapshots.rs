@@ -1,7 +1,7 @@
 mod test_fixtures;
 
 use flotilla_protocol::{ProviderData, SessionStatus};
-use flotilla_tui::app::UiMode;
+use flotilla_tui::app::{Intent, ProviderStatus, UiMode};
 use test_fixtures::*;
 
 #[test]
@@ -59,6 +59,50 @@ fn status_bar_with_error() {
 #[test]
 fn help_screen() {
     let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::Help);
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn action_menu() {
+    let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::ActionMenu {
+        items: vec![
+            Intent::CreateWorkspace,
+            Intent::OpenChangeRequest,
+            Intent::RemoveCheckout,
+        ],
+        index: 0,
+    });
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn config_screen() {
+    let mut harness = TestHarness::single_repo("my-project")
+        .with_mode(UiMode::Config)
+        .with_provider_status("my-project", "code_review", "GitHub", ProviderStatus::Ok)
+        .with_provider_status("my-project", "issues", "GitHub", ProviderStatus::Error);
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn selected_item_preview() {
+    let mut providers = ProviderData::default();
+    let (path, checkout) =
+        make_checkout("feat-dashboard", "/test/my-project/feat-dashboard", false);
+    providers.checkouts.insert(path, checkout);
+    let (id, cr) = make_change_request("99", "Build analytics dashboard", "feat-dashboard");
+    providers.change_requests.insert(id, cr);
+
+    let items = vec![
+        make_work_item_checkout("feat-dashboard", "/test/my-project/feat-dashboard"),
+        make_work_item_cr("99", "Build analytics dashboard"),
+    ];
+
+    let mut harness =
+        TestHarness::single_repo("my-project").with_provider_data(providers, items);
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
 }
