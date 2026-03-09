@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, oneshot, Mutex};
 use tracing::{debug, error, warn};
 
 use flotilla_core::daemon::DaemonHandle;
@@ -14,16 +14,20 @@ use flotilla_protocol::{
     Command, CommandResult, DaemonEvent, Message, RawResponse, RepoInfo, Snapshot,
 };
 
+/// Std RwLock for local seq tracking — the critical sections are single HashMap
+/// operations (no async work while holding the lock), and using a sync lock
+/// avoids the race where a spawned seq update hasn't run before the next delta
+/// arrives.
+type SeqMap = std::sync::RwLock<HashMap<PathBuf, u64>>;
+
 pub struct SocketDaemon {
     writer: Arc<Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RawResponse>>>>,
     event_tx: broadcast::Sender<DaemonEvent>,
     next_id: Arc<AtomicU64>,
     /// Local snapshot seq per repo, for gap detection.
-    /// Maintained by the background reader; not used for get_state.
-    /// Field is read via Arc::clone in connect() for the reader task.
-    #[allow(dead_code)]
-    local_seqs: Arc<RwLock<HashMap<PathBuf, u64>>>,
+    /// Updated by replay_since (seeding) and the background reader (live events).
+    local_seqs: Arc<SeqMap>,
 }
 
 impl SocketDaemon {
@@ -42,7 +46,7 @@ impl SocketDaemon {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RawResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let next_id = Arc::new(AtomicU64::new(1));
-        let local_seqs: Arc<RwLock<HashMap<PathBuf, u64>>> = Arc::new(RwLock::new(HashMap::new()));
+        let local_seqs: Arc<SeqMap> = Arc::new(std::sync::RwLock::new(HashMap::new()));
 
         let writer = Arc::new(Mutex::new(BufWriter::new(write_half)));
 
@@ -204,7 +208,7 @@ async fn send_request(
 /// remain free to route the recovery response).
 fn handle_event(
     event: DaemonEvent,
-    local_seqs: &Arc<RwLock<HashMap<PathBuf, u64>>>,
+    local_seqs: &Arc<SeqMap>,
     event_tx: &broadcast::Sender<DaemonEvent>,
     writer: &Arc<Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>>,
     pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<RawResponse>>>>,
@@ -217,13 +221,12 @@ fn handle_event(
                 snap.repo.display(),
                 snap.seq
             );
-            let local_seqs = Arc::clone(local_seqs);
-            let repo = snap.repo.clone();
-            let seq = snap.seq;
-            // Spawn seq update to avoid blocking the reader on the write lock
-            tokio::spawn(async move {
-                local_seqs.write().await.insert(repo, seq);
-            });
+            // Sync lock: update seq before dispatching event so a
+            // quickly-following delta sees the correct local seq.
+            local_seqs
+                .write()
+                .unwrap()
+                .insert(snap.repo.clone(), snap.seq);
             let _ = event_tx.send(event);
         }
         DaemonEvent::SnapshotDelta(delta) => {
@@ -236,71 +239,64 @@ fn handle_event(
             let pending = Arc::clone(pending);
             let next_id = Arc::clone(next_id);
 
-            // Spawn delta processing to avoid blocking the reader.
-            // The spawned task checks seq, applies or triggers recovery.
-            tokio::spawn(async move {
-                let mut seqs = local_seqs_clone.write().await;
-                let local_seq = seqs.get(&repo).copied();
+            // Check seq under sync lock, then spawn only if recovery needed.
+            let local_seq = local_seqs_clone.read().unwrap().get(&repo).copied();
 
-                match local_seq {
-                    Some(ls) if prev_seq == ls => {
-                        // Happy path: apply delta
-                        seqs.insert(repo.clone(), seq);
-                        drop(seqs);
-                        debug!(
-                            "applied delta for {} (seq {} → {})",
-                            repo.display(),
-                            prev_seq,
-                            seq
-                        );
-                        let _ = event_tx.send(event);
-                    }
-                    Some(ls) => {
-                        // Seq gap
-                        warn!(
-                            "seq gap for {} (local={}, delta prev_seq={}), requesting full snapshot",
-                            repo.display(),
-                            ls,
-                            prev_seq
-                        );
-                        drop(seqs);
-                        recover_from_gap(
-                            &repo,
-                            &local_seqs_clone,
-                            &event_tx,
-                            &writer,
-                            &pending,
-                            &next_id,
-                        )
-                        .await;
-                    }
-                    None => {
-                        // No local state for this repo
-                        warn!(
-                            "received delta for unknown repo {}, requesting full snapshot",
-                            repo.display()
-                        );
-                        drop(seqs);
-                        recover_from_gap(
-                            &repo,
-                            &local_seqs_clone,
-                            &event_tx,
-                            &writer,
-                            &pending,
-                            &next_id,
-                        )
-                        .await;
-                    }
+            match local_seq {
+                Some(ls) if prev_seq == ls => {
+                    // Happy path: apply delta (sync lock, no spawn needed)
+                    local_seqs_clone.write().unwrap().insert(repo.clone(), seq);
+                    debug!(
+                        "applied delta for {} (seq {} → {})",
+                        repo.display(),
+                        prev_seq,
+                        seq
+                    );
+                    let _ = event_tx.send(event);
                 }
-            });
+                Some(ls) => {
+                    // Seq gap — spawn recovery (async work)
+                    warn!(
+                        "seq gap for {} (local={}, delta prev_seq={}), requesting replay",
+                        repo.display(),
+                        ls,
+                        prev_seq
+                    );
+                    tokio::spawn(async move {
+                        recover_from_gap(
+                            &repo,
+                            &local_seqs_clone,
+                            &event_tx,
+                            &writer,
+                            &pending,
+                            &next_id,
+                        )
+                        .await;
+                    });
+                }
+                None => {
+                    // No local state for this repo — spawn recovery
+                    warn!(
+                        "received delta for unknown repo {}, requesting replay",
+                        repo.display()
+                    );
+                    tokio::spawn(async move {
+                        recover_from_gap(
+                            &repo,
+                            &local_seqs_clone,
+                            &event_tx,
+                            &writer,
+                            &pending,
+                            &next_id,
+                        )
+                        .await;
+                    });
+                }
+            }
         }
         DaemonEvent::RepoRemoved { path } => {
-            // Evict local seq tracking for removed repos
-            let local_seqs = Arc::clone(local_seqs);
-            let path = path.clone();
-            tokio::spawn(async move {
-                local_seqs.write().await.remove(&path);
-            });
+            // Sync lock: evict before dispatching
+            local_seqs.write().unwrap().remove(path);
             let _ = event_tx.send(event);
         }
         DaemonEvent::RepoAdded(_) | DaemonEvent::CommandResult { .. } => {
@@ -313,13 +309,13 @@ fn handle_event(
 /// updating local seq tracking, and forwarding replay events to the TUI.
 async fn recover_from_gap(
     repo: &Path,
-    local_seqs: &RwLock<HashMap<PathBuf, u64>>,
+    local_seqs: &SeqMap,
     event_tx: &broadcast::Sender<DaemonEvent>,
     writer: &Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>,
     pending: &Mutex<HashMap<u64, oneshot::Sender<RawResponse>>>,
     next_id: &AtomicU64,
 ) {
-    let stale_seq = local_seqs.read().await.get(repo).copied().unwrap_or(0);
+    let stale_seq = local_seqs.read().unwrap().get(repo).copied().unwrap_or(0);
     let last_seen = HashMap::from([(repo.to_path_buf(), stale_seq)]);
 
     let resp = send_request(
@@ -345,13 +341,13 @@ async fn recover_from_gap(
                         DaemonEvent::SnapshotFull(snap) if snap.repo == repo => {
                             local_seqs
                                 .write()
-                                .await
+                                .unwrap()
                                 .insert(repo.to_path_buf(), snap.seq);
                         }
                         DaemonEvent::SnapshotDelta(delta) if delta.repo == repo => {
                             local_seqs
                                 .write()
-                                .await
+                                .unwrap()
                                 .insert(repo.to_path_buf(), delta.seq);
                         }
                         _ => {}
@@ -436,6 +432,25 @@ impl DaemonHandle for SocketDaemon {
                 serde_json::json!({ "last_seen": last_seen }),
             )
             .await?;
-        resp.parse::<Vec<DaemonEvent>>()
+        let events: Vec<DaemonEvent> = resp.parse()?;
+
+        // Seed local_seqs from replay events so the background reader
+        // doesn't trigger spurious gap recovery for the first live delta.
+        {
+            let mut seqs = self.local_seqs.write().unwrap();
+            for event in &events {
+                match event {
+                    DaemonEvent::SnapshotFull(snap) => {
+                        seqs.insert(snap.repo.clone(), snap.seq);
+                    }
+                    DaemonEvent::SnapshotDelta(delta) => {
+                        seqs.insert(delta.repo.clone(), delta.seq);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(events)
     }
 }

@@ -334,7 +334,10 @@ async fn dispatch_request(
                 .get("last_seen")
                 .cloned()
                 .and_then(|v| serde_json::from_value(v).ok())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    warn!("replay_since: failed to parse last_seen, returning full snapshots");
+                    std::collections::HashMap::new()
+                });
             match daemon.replay_since(&last_seen).await {
                 Ok(events) => Message::ok_response(id, &events),
                 Err(e) => Message::error_response(id, e),

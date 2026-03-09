@@ -808,9 +808,10 @@ impl DaemonHandle for InProcessDaemon {
                         .position(|entry| entry.prev_seq == client_seq);
 
                     if let Some(start_idx) = replay_start {
+                        // Capture issue metadata once — it doesn't change per-entry
+                        let issue_snapshot = snapshot();
                         // Replay delta entries
                         for entry in state.delta_log.iter().skip(start_idx) {
-                            let issue_snapshot = snapshot();
                             events.push(DaemonEvent::SnapshotDelta(Box::new(
                                 flotilla_protocol::SnapshotDelta {
                                     seq: entry.seq,
