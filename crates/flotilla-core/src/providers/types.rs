@@ -5,7 +5,8 @@ use std::path::PathBuf;
 // These are the canonical definitions; core uses them via this re-export.
 pub use flotilla_protocol::{
     AheadBehind, AssociationKey, ChangeRequest, ChangeRequestStatus, Checkout, CloudAgentSession,
-    CommitInfo, CorrelationKey, Issue, IssuePage, SessionStatus, WorkingTreeStatus, Workspace,
+    CommitInfo, CorrelationKey, Issue, IssueChangeset, IssuePage, SessionStatus, WorkingTreeStatus,
+    Workspace,
 };
 
 /// Criteria passed to coding agents so they can filter results to a specific repo.

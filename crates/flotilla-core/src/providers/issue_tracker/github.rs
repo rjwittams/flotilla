@@ -152,6 +152,48 @@ impl super::IssueTracker for GitHubIssueTracker {
             .collect())
     }
 
+    async fn list_issues_changed_since(
+        &self,
+        repo_root: &Path,
+        since: &str,
+        per_page: usize,
+    ) -> Result<IssueChangeset, String> {
+        let per_page = clamp_per_page(per_page);
+        let endpoint = format!(
+            "repos/{}/issues?state=all&since={}&sort=updated&direction=desc&per_page={}",
+            self.repo_slug, since, per_page
+        );
+        let response = self.api.get_with_headers(&endpoint, repo_root).await?;
+        let items: Vec<serde_json::Value> =
+            serde_json::from_str(&response.body).map_err(|e| e.to_string())?;
+
+        let mut updated = Vec::new();
+        let mut closed_ids = Vec::new();
+
+        for v in &items {
+            if v.as_object()
+                .map(|o| o.contains_key("pull_request"))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let state = v["state"].as_str().unwrap_or("open");
+            if state == "open" {
+                if let Some(issue) = parse_issue(&self.provider_name, v) {
+                    updated.push(issue);
+                }
+            } else if let Some(number) = v["number"].as_i64() {
+                closed_ids.push(number.to_string());
+            }
+        }
+
+        Ok(IssueChangeset {
+            updated,
+            closed_ids,
+            has_more: response.has_next_page,
+        })
+    }
+
     async fn open_in_browser(&self, repo_root: &Path, id: &str) -> Result<(), String> {
         self.runner
             .run("gh", &["issue", "view", id, "--web"], repo_root)
@@ -162,6 +204,50 @@ impl super::IssueTracker for GitHubIssueTracker {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::providers::github_api::GhApiResponse;
+    use crate::providers::issue_tracker::IssueTracker;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    struct MockGhApi {
+        responses: Mutex<VecDeque<Result<GhApiResponse, String>>>,
+    }
+
+    impl MockGhApi {
+        fn new(responses: Vec<Result<GhApiResponse, String>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl GhApi for MockGhApi {
+        async fn get(&self, endpoint: &str, repo_root: &Path) -> Result<String, String> {
+            self.get_with_headers(endpoint, repo_root)
+                .await
+                .map(|r| r.body)
+        }
+        async fn get_with_headers(
+            &self,
+            _endpoint: &str,
+            _repo_root: &Path,
+        ) -> Result<GhApiResponse, String> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("MockGhApi: no more responses")
+        }
+    }
+
+    fn mock_tracker(responses: Vec<Result<GhApiResponse, String>>) -> GitHubIssueTracker {
+        let api = Arc::new(MockGhApi::new(responses));
+        let runner = Arc::new(crate::providers::testing::MockRunner::new(vec![]));
+        GitHubIssueTracker::new("github".into(), "owner/repo".into(), api, runner)
+    }
+
     #[test]
     fn parse_rest_api_issues_filters_pull_requests() {
         let json = r#"[
@@ -177,5 +263,56 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0]["number"], 1);
         assert_eq!(filtered[1]["number"], 3);
+    }
+
+    #[tokio::test]
+    async fn changed_since_partitions_open_and_closed() {
+        let body = r#"[
+            {"number": 1, "title": "Open issue", "state": "open", "labels": []},
+            {"number": 2, "title": "Closed issue", "state": "closed", "labels": []},
+            {"number": 3, "title": "Another open", "state": "open", "labels": []}
+        ]"#;
+        let tracker = mock_tracker(vec![Ok(GhApiResponse {
+            status: 200,
+            etag: None,
+            body: body.to_string(),
+            has_next_page: false,
+            total_count: None,
+        })]);
+
+        let changeset = tracker
+            .list_issues_changed_since(Path::new("/tmp/repo"), "2026-03-09T00:00:00Z", 50)
+            .await
+            .unwrap();
+
+        assert_eq!(changeset.updated.len(), 2);
+        assert_eq!(changeset.updated[0].id, "1");
+        assert_eq!(changeset.updated[1].id, "3");
+        assert_eq!(changeset.closed_ids, vec!["2"]);
+        assert!(!changeset.has_more);
+    }
+
+    #[tokio::test]
+    async fn changed_since_filters_pull_requests() {
+        let body = r#"[
+            {"number": 1, "title": "Issue", "state": "open", "labels": []},
+            {"number": 2, "title": "PR", "state": "open", "labels": [], "pull_request": {"url": "..."}}
+        ]"#;
+        let tracker = mock_tracker(vec![Ok(GhApiResponse {
+            status: 200,
+            etag: None,
+            body: body.to_string(),
+            has_next_page: false,
+            total_count: None,
+        })]);
+
+        let changeset = tracker
+            .list_issues_changed_since(Path::new("/tmp/repo"), "2026-03-09T00:00:00Z", 50)
+            .await
+            .unwrap();
+
+        assert_eq!(changeset.updated.len(), 1);
+        assert_eq!(changeset.updated[0].id, "1");
+        assert!(changeset.closed_ids.is_empty());
     }
 }

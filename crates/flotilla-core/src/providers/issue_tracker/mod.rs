@@ -1,6 +1,6 @@
 pub mod github;
 
-use crate::providers::types::{Issue, IssuePage};
+use crate::providers::types::{Issue, IssueChangeset, IssuePage};
 use async_trait::async_trait;
 use std::path::Path;
 
@@ -57,5 +57,21 @@ pub trait IssueTracker: Send + Sync {
         _limit: usize,
     ) -> Result<Vec<Issue>, String> {
         Ok(vec![])
+    }
+
+    /// Incremental sync: returns issues changed since the given ISO 8601 timestamp.
+    /// Default implementation falls back to a full page-1 fetch (no evictions).
+    async fn list_issues_changed_since(
+        &self,
+        repo_root: &Path,
+        _since: &str,
+        per_page: usize,
+    ) -> Result<IssueChangeset, String> {
+        let page = self.list_issues_page(repo_root, 1, per_page).await?;
+        Ok(IssueChangeset {
+            updated: page.issues,
+            closed_ids: vec![],
+            has_more: page.has_more,
+        })
     }
 }
