@@ -29,4 +29,7 @@ pub struct WorkspaceConfig {
     pub working_directory: PathBuf,
     pub template_vars: HashMap<String, String>,
     pub template_yaml: Option<String>,
+    /// When set, these override template commands — each entry is (role, attach_command).
+    /// Used when a TerminalPool has pre-started persistent sessions.
+    pub resolved_commands: Option<Vec<(String, String)>>,
 }

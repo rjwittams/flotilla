@@ -5,13 +5,15 @@
 
 use std::path::Path;
 
-use flotilla_protocol::{Command, CommandResult};
-use tracing::{debug, error, info};
+use flotilla_protocol::{Command, CommandResult, ManagedTerminalId};
+use tracing::{debug, error, info, warn};
 
 use crate::provider_data::ProviderData;
 use crate::providers::registry::ProviderRegistry;
+use crate::providers::terminal::TerminalPool;
 use crate::providers::types::WorkspaceConfig;
 use crate::providers::CommandRunner;
+use crate::template::{parse_template, ParsedTemplate};
 use crate::{data, providers};
 
 /// Execute a `Command` against the given repo context.
@@ -31,13 +33,16 @@ pub async fn execute(
             if let Some(co) = providers_data.checkouts.get(&checkout_path).cloned() {
                 info!("entering workspace for {}", co.branch);
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                    let config = workspace_config(
+                    let mut config = workspace_config(
                         repo_root,
                         &co.branch,
                         &checkout_path,
                         "claude",
                         config_base,
                     );
+                    if let Some((_, tp)) = &registry.terminal_pool {
+                        resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                    }
                     if let Err(e) = ws_mgr.create_workspace(&config).await {
                         return CommandResult::Error { message: e };
                     }
@@ -80,13 +85,16 @@ pub async fn execute(
                     info!("created checkout at {}", checkout_path.display());
                     // Create workspace if manager available
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let config = workspace_config(
+                        let mut config = workspace_config(
                             repo_root,
                             &branch,
                             &checkout_path,
                             "claude",
                             config_base,
                         );
+                        if let Some((_, tp)) = &registry.terminal_pool {
+                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                        }
                         if let Err(e) = ws_mgr.create_workspace(&config).await {
                             // Checkout was created but workspace failed — report as error
                             // but the checkout still exists
@@ -321,8 +329,11 @@ pub async fn execute(
             if let Some(path) = wt_path {
                 let name = branch.as_deref().unwrap_or("session");
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                    let config =
+                    let mut config =
                         workspace_config(repo_root, name, &path, &teleport_cmd, config_base);
+                    if let Some((_, tp)) = &registry.terminal_pool {
+                        resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                    }
                     if let Err(e) = ws_mgr.create_workspace(&config).await {
                         // Unlike CreateCheckout, teleport fails entirely if the workspace
                         // can't be created — the checkout may already have existed.
@@ -351,6 +362,49 @@ pub async fn execute(
     }
 }
 
+/// If a terminal pool is available and the config has a V2 template, resolve
+/// terminal sessions through the pool. Each terminal content entry is ensured
+/// running and its attach command is stored in `config.resolved_commands`.
+async fn resolve_terminal_pool(config: &mut WorkspaceConfig, terminal_pool: &dyn TerminalPool) {
+    let yaml = match config.template_yaml {
+        Some(ref y) => y.clone(),
+        None => return,
+    };
+    let v2 = match parse_template(&yaml) {
+        Ok(ParsedTemplate::V2(v2)) => v2,
+        _ => return,
+    };
+    let rendered = v2.render(&config.template_vars);
+    let mut resolved = Vec::new();
+    for entry in &rendered.content {
+        if entry.content_type != "terminal" {
+            continue;
+        }
+        let count = entry.count.unwrap_or(1);
+        for i in 0..count {
+            let id = ManagedTerminalId {
+                checkout: config.name.clone(),
+                role: entry.role.clone(),
+                index: i,
+            };
+            if let Err(e) = terminal_pool
+                .ensure_running(&id, &entry.command, &config.working_directory)
+                .await
+            {
+                warn!("failed to ensure terminal {id}: {e}");
+                continue;
+            }
+            match terminal_pool.attach_command(&id).await {
+                Ok(cmd) => resolved.push((entry.role.clone(), cmd)),
+                Err(e) => warn!("failed to get attach command for {id}: {e}"),
+            }
+        }
+    }
+    if !resolved.is_empty() {
+        config.resolved_commands = Some(resolved);
+    }
+}
+
 /// Build a WorkspaceConfig from repo/branch/dir/command.
 pub(crate) fn workspace_config(
     repo_root: &Path,
@@ -371,6 +425,7 @@ pub(crate) fn workspace_config(
         working_directory: working_dir.to_path_buf(),
         template_vars,
         template_yaml,
+        resolved_commands: None,
     }
 }
 

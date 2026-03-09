@@ -9,7 +9,6 @@ use tracing::{info, warn};
 
 use crate::providers::types::*;
 use crate::providers::CommandRunner;
-use crate::template::WorkspaceTemplate;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct TmuxState {
@@ -168,16 +167,7 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
     ) -> Result<(String, Workspace), String> {
         info!("tmux: creating workspace '{}'", config.name);
 
-        let template = if let Some(ref yaml) = config.template_yaml {
-            serde_yml::from_str::<WorkspaceTemplate>(yaml).unwrap_or_else(|e| {
-                warn!("tmux: failed to parse workspace template, using default: {e}");
-                WorkspaceTemplate::load_default()
-            })
-        } else {
-            WorkspaceTemplate::load_default()
-        };
-
-        let rendered = template.render(&config.template_vars);
+        let rendered = super::resolve_template(config);
         let working_dir = config.working_directory.display().to_string();
 
         // Create new window

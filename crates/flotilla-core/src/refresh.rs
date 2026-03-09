@@ -168,16 +168,15 @@ async fn refresh_providers(
         }
     };
 
-    let (checkouts, crs, sessions, branches, merged, workspaces, managed_terminals) =
-        tokio::join!(
-            checkouts_fut,
-            cr_fut,
-            sessions_fut,
-            branches_fut,
-            merged_fut,
-            ws_fut,
-            tp_fut
-        );
+    let (checkouts, crs, sessions, branches, merged, workspaces, managed_terminals) = tokio::join!(
+        checkouts_fut,
+        cr_fut,
+        sessions_fut,
+        branches_fut,
+        merged_fut,
+        ws_fut,
+        tp_fut
+    );
 
     pd.checkouts = checkouts
         .unwrap_or_else(|e| {

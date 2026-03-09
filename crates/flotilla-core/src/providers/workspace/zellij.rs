@@ -5,11 +5,10 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::providers::types::*;
 use crate::providers::CommandRunner;
-use crate::template::WorkspaceTemplate;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ZellijState {
@@ -198,17 +197,7 @@ impl super::WorkspaceManager for ZellijWorkspaceManager {
     ) -> Result<(String, Workspace), String> {
         info!("zellij: creating workspace '{}'", config.name);
 
-        // Parse template from YAML if provided, otherwise use default
-        let template = if let Some(ref yaml) = config.template_yaml {
-            serde_yml::from_str::<WorkspaceTemplate>(yaml).unwrap_or_else(|e| {
-                warn!("zellij: failed to parse workspace template, using default: {e}");
-                WorkspaceTemplate::load_default()
-            })
-        } else {
-            WorkspaceTemplate::load_default()
-        };
-
-        let rendered = template.render(&config.template_vars);
+        let rendered = super::resolve_template(config);
         let working_dir = config.working_directory.display().to_string();
 
         // Create new tab
