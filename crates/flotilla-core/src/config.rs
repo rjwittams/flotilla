@@ -95,7 +95,7 @@ pub fn path_to_slug(path: &Path) -> String {
     let slug: String = raw
         .chars()
         .filter_map(|c| {
-            if c.is_ascii_alphanumeric() {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
                 prev_hyphen = false;
                 Some(c)
             } else if !prev_hyphen {
@@ -285,10 +285,10 @@ mod tests {
             ("/Users/alice/dev/myrepo", "users-alice-dev-myrepo"),
             ("relative/path", "relative-path"),
             ("/Users/Bob Smith/my repo", "users-bob-smith-my-repo"),
-            ("/opt/my-project_v2.0", "opt-my-project-v2-0"),
-            ("/tmp/my__project", "tmp-my-project"),
+            ("/opt/my-project_v2.0", "opt-my-project_v2.0"),
+            ("/tmp/my__project", "tmp-my__project"),
             ("/", ""),
-            (".", ""),
+            (".", "."),
         ];
         for (input, expected) in cases {
             assert_eq!(
