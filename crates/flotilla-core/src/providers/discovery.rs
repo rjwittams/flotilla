@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{resolve_claude_path, CommandRunner};
@@ -232,6 +232,21 @@ pub async fn detect_providers(
             ));
             info!("{repo_name}: Workspace mgr → cmux (binary found, not running inside cmux)");
         }
+    }
+
+    // 7. Terminal pool: prefer shpool if available
+    if runner.exists("shpool", &["version"]).await {
+        let shpool_socket = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("~/.config"))
+            .join("flotilla/shpool/shpool.socket");
+        registry.terminal_pool = Some((
+            "shpool".into(),
+            Arc::new(crate::providers::terminal::shpool::ShpoolTerminalPool::new(
+                Arc::clone(&runner),
+                shpool_socket,
+            )),
+        ));
+        info!("{repo_name}: Terminal pool → shpool");
     }
 
     (registry, repo_slug)
