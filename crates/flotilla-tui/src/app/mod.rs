@@ -263,7 +263,7 @@ impl App {
         rm.issue_search_active = delta.issue_search_results.is_some();
         rm.issue_fetch_pending = false;
 
-        // Apply provider health changes from the delta
+        // Apply provider health and error changes from the delta
         for change in &delta.changes {
             match change {
                 flotilla_protocol::Change::ProviderHealth {
@@ -278,6 +278,22 @@ impl App {
                     op: flotilla_protocol::EntryOp::Removed,
                 } => {
                     rm.provider_health.remove(provider);
+                }
+                flotilla_protocol::Change::ErrorsChanged(errors) => {
+                    if !errors.is_empty() {
+                        let name = TuiModel::repo_name(&path);
+                        let mut all_errors: Vec<String> = Vec::new();
+                        for e in errors {
+                            if e.category == "issues" && e.message.contains("has disabled issues") {
+                                continue;
+                            }
+                            tracing::error!("{name}: {}: {}", e.category, e.message);
+                            all_errors.push(format!("{name}: {}: {}", e.category, e.message));
+                        }
+                        if !all_errors.is_empty() {
+                            self.model.status_message = Some(all_errors.join("; "));
+                        }
+                    }
                 }
                 _ => {}
             }
