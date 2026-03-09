@@ -76,6 +76,21 @@ impl TestHarness {
         self
     }
 
+    /// Set provider names for a repo so the config screen can look up statuses.
+    pub fn with_provider_names(
+        mut self,
+        repo: &str,
+        names: Vec<(&str, &str)>,
+    ) -> Self {
+        let path = PathBuf::from(format!("/test/{repo}"));
+        let rm = self.model.repos.get_mut(&path).unwrap();
+        for (category, name) in names {
+            rm.provider_names
+                .insert(category.to_string(), name.to_string());
+        }
+        self
+    }
+
     /// Set a provider status for a repo.
     pub fn with_provider_status(
         mut self,

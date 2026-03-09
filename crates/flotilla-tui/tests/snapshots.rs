@@ -82,8 +82,17 @@ fn action_menu() {
 fn config_screen() {
     let mut harness = TestHarness::single_repo("my-project")
         .with_mode(UiMode::Config)
+        .with_provider_names(
+            "my-project",
+            vec![
+                ("code_review", "GitHub"),
+                ("issue_tracker", "GitHub"),
+                ("vcs", "Git"),
+                ("checkout_manager", "Git Worktrees"),
+            ],
+        )
         .with_provider_status("my-project", "code_review", "GitHub", ProviderStatus::Ok)
-        .with_provider_status("my-project", "issues", "GitHub", ProviderStatus::Error);
+        .with_provider_status("my-project", "issue_tracker", "GitHub", ProviderStatus::Error);
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
 }
