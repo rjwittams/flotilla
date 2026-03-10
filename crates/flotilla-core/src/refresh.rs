@@ -199,20 +199,25 @@ async fn refresh_providers(
 
     let ws_fut = async {
         if let Some((_, ws_mgr)) = &registry.workspace_manager {
-            (
-                ws_mgr.display_name().to_string(),
-                ws_mgr.list_workspaces().await,
-            )
+            let name = ws_mgr.display_name().to_string();
+            match ws_mgr.list_workspaces().await {
+                Ok(entries) => (entries, vec![]),
+                Err(e) => (vec![], vec![(name, e)]),
+            }
         } else {
-            (String::new(), Ok(vec![]))
+            (vec![], vec![])
         }
     };
 
     let tp_fut = async {
         if let Some((_, tp)) = &registry.terminal_pool {
-            (tp.display_name().to_string(), tp.list_terminals().await)
+            let name = tp.display_name().to_string();
+            match tp.list_terminals().await {
+                Ok(entries) => (entries, vec![]),
+                Err(e) => (vec![], vec![(name, e)]),
+            }
         } else {
-            (String::new(), Ok(vec![]))
+            (vec![], vec![])
         }
     };
 
@@ -222,8 +227,8 @@ async fn refresh_providers(
         (sessions, session_errors),
         (branches, branch_errors),
         (merged, merged_errors),
-        (ws_name, workspaces),
-        (tp_name, managed_terminals),
+        (workspaces, ws_errors),
+        (managed_terminals, tp_errors),
     ) = tokio::join!(
         checkouts_fut,
         cr_fut,
@@ -257,29 +262,14 @@ async fn refresh_providers(
     pd.sessions = sessions.into_iter().collect();
     collect_errors(&mut errors, "sessions", session_errors);
 
-    pd.workspaces = workspaces
-        .unwrap_or_else(|e| {
-            errors.push(RefreshError {
-                category: "workspaces",
-                provider: ws_name.clone(),
-                message: e,
-            });
-            Vec::new()
-        })
-        .into_iter()
-        .collect();
+    pd.workspaces = workspaces.into_iter().collect();
+    collect_errors(&mut errors, "workspaces", ws_errors);
+
     pd.managed_terminals = managed_terminals
-        .unwrap_or_else(|e| {
-            errors.push(RefreshError {
-                category: "terminals",
-                provider: tp_name.clone(),
-                message: e,
-            });
-            Vec::new()
-        })
         .into_iter()
         .map(|t| (t.id.to_string(), t))
         .collect();
+    collect_errors(&mut errors, "terminals", tp_errors);
     {
         use flotilla_protocol::delta::{Branch, BranchStatus};
         let remote = branches;
@@ -343,6 +333,14 @@ fn compute_provider_health(
             .iter()
             .any(|e| e.category == "branches" && e.provider == name);
         health.insert(("vcs", name), !has_error);
+    }
+
+    if let Some((_, ws)) = &registry.workspace_manager {
+        let name = ws.display_name().to_string();
+        let has_error = errors
+            .iter()
+            .any(|e| e.category == "workspaces" && e.provider == name);
+        health.insert(("workspace_manager", name), !has_error);
     }
 
     if let Some((_, tp)) = &registry.terminal_pool {

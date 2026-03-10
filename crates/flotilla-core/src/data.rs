@@ -21,7 +21,11 @@ pub struct RefreshError {
 
 impl fmt::Display for RefreshError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}: {}", self.category, self.provider, self.message)
+        if self.provider.is_empty() {
+            write!(f, "{}: {}", self.category, self.message)
+        } else {
+            write!(f, "{}/{}: {}", self.category, self.provider, self.message)
+        }
     }
 }
 
