@@ -92,7 +92,12 @@ fn config_screen() {
             ],
         )
         .with_provider_status("my-project", "code_review", "GitHub", ProviderStatus::Ok)
-        .with_provider_status("my-project", "issue_tracker", "GitHub", ProviderStatus::Error);
+        .with_provider_status(
+            "my-project",
+            "issue_tracker",
+            "GitHub",
+            ProviderStatus::Error,
+        );
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
 }
