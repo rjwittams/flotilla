@@ -360,8 +360,7 @@ impl CodexCodingAgent {
             let body = String::from_utf8_lossy(resp.body()).to_string();
             return Err(format!("task list failed (HTTP {status}): {body}"));
         }
-        serde_json::from_slice(resp.body())
-            .map_err(|e| format!("task list parse error: {e}"))
+        serde_json::from_slice(resp.body()).map_err(|e| format!("task list parse error: {e}"))
     }
 
     async fn fetch_all_tasks(
@@ -493,8 +492,7 @@ impl super::CloudAgentService for CodexCodingAgent {
             None => {
                 match self.fetch_environment_ids(repo_slug, &auth).await {
                     Ok(ids) => {
-                        let mut cache =
-                            self.env_cache.lock().expect("env_cache lock poisoned");
+                        let mut cache = self.env_cache.lock().expect("env_cache lock poisoned");
                         cache.environment_ids = ids.clone();
                         cache.loaded_at = Some(Instant::now());
                         ids
@@ -510,10 +508,7 @@ impl super::CloudAgentService for CodexCodingAgent {
                                 return Ok(vec![]);
                             }
                         };
-                        match self
-                            .fetch_environment_ids(repo_slug, &fresh_auth)
-                            .await
-                        {
+                        match self.fetch_environment_ids(repo_slug, &fresh_auth).await {
                             Ok(ids) => {
                                 let mut cache =
                                     self.env_cache.lock().expect("env_cache lock poisoned");
@@ -563,8 +558,7 @@ impl super::CloudAgentService for CodexCodingAgent {
                     match self.fetch_tasks(env_id, &fresh_auth).await {
                         Ok(tasks) => {
                             for task in &tasks {
-                                all_sessions
-                                    .push(map_task_to_session(task, &self.provider_name));
+                                all_sessions.push(map_task_to_session(task, &self.provider_name));
                             }
                         }
                         Err(e2) => {
@@ -586,9 +580,7 @@ impl super::CloudAgentService for CodexCodingAgent {
     }
 
     async fn attach_command(&self, session_id: &str) -> Result<String, String> {
-        Ok(format!(
-            "open https://chatgpt.com/codex/tasks/{session_id}"
-        ))
+        Ok(format!("open https://chatgpt.com/codex/tasks/{session_id}"))
     }
 }
 
@@ -900,8 +892,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions_fetches_envs_and_tasks() {
-        let session =
-            replay::test_session(&fixture("codex_tasks.yaml"), replay::Masks::new());
+        let session = replay::test_session(&fixture("codex_tasks.yaml"), replay::Masks::new());
         let http = replay::test_http_client(&session);
         let agent = CodexCodingAgent::new("codex".into(), http);
 
@@ -918,7 +909,10 @@ mod tests {
         let criteria = RepoCriteria {
             repo_slug: Some("rjwittams/flotilla".into()),
         };
-        let sessions = agent.list_sessions(&criteria).await.expect("should succeed");
+        let sessions = agent
+            .list_sessions(&criteria)
+            .await
+            .expect("should succeed");
 
         assert_eq!(sessions.len(), 2, "expected 2 sessions");
 
@@ -971,8 +965,7 @@ mod tests {
         std::fs::write(tmp.path().join("auth.json"), auth_json).expect("write auth.json");
         std::env::set_var("CODEX_HOME", tmp.path());
 
-        let session =
-            replay::test_session(&fixture("codex_auth_retry.yaml"), replay::Masks::new());
+        let session = replay::test_session(&fixture("codex_auth_retry.yaml"), replay::Masks::new());
         let http = replay::test_http_client(&session);
         let agent = CodexCodingAgent::new("codex".into(), http);
 
@@ -989,7 +982,10 @@ mod tests {
         let criteria = RepoCriteria {
             repo_slug: Some("owner/repo".into()),
         };
-        let sessions = agent.list_sessions(&criteria).await.expect("should succeed");
+        let sessions = agent
+            .list_sessions(&criteria)
+            .await
+            .expect("should succeed");
 
         assert_eq!(sessions.len(), 1, "expected 1 session after auth retry");
         assert_eq!(sessions[0].0, "task_1");
@@ -1012,15 +1008,17 @@ mod tests {
         let empty_dir = tempfile::tempdir().expect("tempdir");
         let empty_fixture = empty_dir.path().join("empty.yaml");
         std::fs::write(&empty_fixture, "interactions: []\n").expect("write empty fixture");
-        let session =
-            replay::test_session(empty_fixture.to_str().unwrap(), replay::Masks::new());
+        let session = replay::test_session(empty_fixture.to_str().unwrap(), replay::Masks::new());
         let http = replay::test_http_client(&session);
         let agent = CodexCodingAgent::new("codex".into(), http);
 
         let criteria = RepoCriteria {
             repo_slug: Some("owner/repo".into()),
         };
-        let sessions = agent.list_sessions(&criteria).await.expect("should succeed");
+        let sessions = agent
+            .list_sessions(&criteria)
+            .await
+            .expect("should succeed");
 
         assert!(sessions.is_empty(), "expected empty sessions when no auth");
 
