@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use super::github_api::{GhApi, GhApiResponse};
-use super::{CommandOutput, CommandRunner};
+use super::{
+    ChannelLabel, ChannelRequest, CommandOutput, CommandRunner, DefaultLabeler, IntoChannelLabel,
+};
 
 /// A single recorded interaction with an external system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,42 +50,28 @@ pub enum Interaction {
     },
 }
 
-/// Identifies the logical channel an interaction belongs to.
-/// Within a replay round, interactions on the same channel are FIFO-ordered,
-/// while different channels can be consumed in any order.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ChannelLabel {
-    Command(String),
-    GhApi(String),
-    Http(String),
-}
-
-impl ChannelLabel {
-    /// Extract host from a URL via simple string parsing.
-    /// "https://api.example.com/v1/foo" → "api.example.com"
-    pub fn http_from_url(url: &str) -> Self {
-        let host = url
-            .split("://")
-            .nth(1)
-            .unwrap_or(url)
-            .split('/')
-            .next()
-            .unwrap_or(url)
-            .split(':')
-            .next()
-            .unwrap_or(url)
-            .to_string();
-        ChannelLabel::Http(host)
-    }
-}
-
 impl Interaction {
     /// Derive the channel label from interaction data.
     pub fn channel_label(&self) -> ChannelLabel {
         match self {
-            Interaction::Command { cmd, .. } => ChannelLabel::Command(cmd.clone()),
-            Interaction::GhApi { endpoint, .. } => ChannelLabel::GhApi(endpoint.clone()),
-            Interaction::Http { url, .. } => ChannelLabel::http_from_url(url),
+            Interaction::Command { cmd, args, .. } => {
+                let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                let request = ChannelRequest::Command {
+                    cmd,
+                    args: &args_refs,
+                };
+                DefaultLabeler.into_channel_label(&request)
+            }
+            Interaction::GhApi {
+                method, endpoint, ..
+            } => {
+                let request = ChannelRequest::GhApi { method, endpoint };
+                DefaultLabeler.into_channel_label(&request)
+            }
+            Interaction::Http { method, url, .. } => {
+                let request = ChannelRequest::Http { method, url };
+                DefaultLabeler.into_channel_label(&request)
+            }
         }
     }
 }
@@ -312,7 +300,7 @@ impl Recorder {
 
         // Sort each round's interactions by channel label for deterministic output
         for round in &mut inner.rounds {
-            round.sort_by(|a, b| a.channel_label().cmp(&b.channel_label()));
+            round.sort_by_key(|a| a.channel_label());
         }
 
         let round_log = RoundLog {
@@ -444,8 +432,14 @@ impl ReplayRunner {
 
 #[async_trait]
 impl CommandRunner for ReplayRunner {
-    async fn run(&self, cmd: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
-        let interaction = self.session.next(&ChannelLabel::Command(cmd.to_string()));
+    async fn run(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: &Path,
+        label: &ChannelLabel,
+    ) -> Result<String, String> {
+        let interaction = self.session.next(label);
         let Interaction::Command {
             cmd: expected_cmd,
             args: expected_args,
@@ -482,8 +476,9 @@ impl CommandRunner for ReplayRunner {
         cmd: &str,
         args: &[&str],
         cwd: &Path,
+        label: &ChannelLabel,
     ) -> Result<CommandOutput, String> {
-        let interaction = self.session.next(&ChannelLabel::Command(cmd.to_string()));
+        let interaction = self.session.next(label);
         let Interaction::Command {
             cmd: expected_cmd,
             args: expected_args,
@@ -762,8 +757,14 @@ impl RecordingRunner {
 
 #[async_trait]
 impl CommandRunner for RecordingRunner {
-    async fn run(&self, cmd: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
-        let result = self.inner.run(cmd, args, cwd).await;
+    async fn run(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: &Path,
+        label: &ChannelLabel,
+    ) -> Result<String, String> {
+        let result = self.inner.run(cmd, args, cwd, label).await;
 
         let (stdout, stderr, exit_code) = match &result {
             Ok(out) => (Some(out.clone()), None, 0),
@@ -787,8 +788,9 @@ impl CommandRunner for RecordingRunner {
         cmd: &str,
         args: &[&str],
         cwd: &Path,
+        label: &ChannelLabel,
     ) -> Result<CommandOutput, String> {
-        let result = self.inner.run_output(cmd, args, cwd).await;
+        let result = self.inner.run_output(cmd, args, cwd, label).await;
 
         match &result {
             Ok(output) => {
@@ -910,7 +912,7 @@ impl GhApi for RecordingGhApi {
 /// Create a `GhApi` for a test session.
 /// In record mode: wraps a real `GhApiClient` with recording.
 /// In replay mode: returns a `ReplayGhApi`.
-pub fn test_gh_api(session: &Session, runner: &Arc<dyn CommandRunner>) -> Arc<dyn GhApi> {
+pub fn test_gh_api(session: &Session, _runner: &Arc<dyn CommandRunner>) -> Arc<dyn GhApi> {
     if session.is_recording() {
         // Use a raw ProcessCommandRunner — NOT the passed-in runner, which is a
         // RecordingRunner.  GhApiClient shells out via its runner, so using a
@@ -1160,7 +1162,7 @@ interactions:
         masks.add("/real/repo", "{repo}");
         let session = Session::replaying(&path, masks);
 
-        let interaction = session.next(&ChannelLabel::Command("git".into()));
+        let interaction = session.next(&ChannelLabel::Command("git status".into()));
         match interaction {
             Interaction::Command { cmd, cwd, .. } => {
                 assert_eq!(cmd, "git");
@@ -1301,10 +1303,10 @@ interactions:
             let session = Session::recording(&fixture_path, Masks::new());
             let recorder = RecordingRunner::new(session.clone(), mock);
 
-            let r1 = recorder.run("echo", &["hello"], Path::new("/tmp")).await;
+            let r1 = run!(recorder, "echo", &["hello"], Path::new("/tmp"));
             assert!(r1.is_ok());
 
-            let r2 = recorder.run("missing", &[], Path::new("/tmp")).await;
+            let r2 = run!(recorder, "missing", &[], Path::new("/tmp"));
             assert!(r2.is_err());
 
             session.finish();
@@ -1315,10 +1317,10 @@ interactions:
             let session = Session::replaying(&fixture_path, Masks::new());
             let runner = ReplayRunner::new(session.clone());
 
-            let r1 = runner.run("echo", &["hello"], Path::new("/tmp")).await;
+            let r1 = run!(runner, "echo", &["hello"], Path::new("/tmp"));
             assert_eq!(r1.unwrap(), "hello\n");
 
-            let r2 = runner.run("missing", &[], Path::new("/tmp")).await;
+            let r2 = run!(runner, "missing", &[], Path::new("/tmp"));
             assert!(r2.is_err());
 
             session.assert_complete();
@@ -1395,13 +1397,13 @@ interactions:
         assert!(matches!(http, Interaction::Http { .. }));
 
         // Now consume commands in order
-        let cmd1 = session.next(&ChannelLabel::Command("git".into()));
+        let cmd1 = session.next(&ChannelLabel::Command("git status".into()));
         match cmd1 {
             Interaction::Command { args, .. } => assert_eq!(args[0], "status"),
             _ => panic!("expected command"),
         }
 
-        let cmd2 = session.next(&ChannelLabel::Command("git".into()));
+        let cmd2 = session.next(&ChannelLabel::Command("git log".into()));
         match cmd2 {
             Interaction::Command { args, .. } => assert_eq!(args[0], "log"),
             _ => panic!("expected command"),
@@ -1420,7 +1422,24 @@ interactions:
             stderr: None,
             exit_code: 0,
         };
-        assert_eq!(cmd.channel_label(), ChannelLabel::Command("git".into()));
+        // DefaultLabeler uses subcommand: "git status"
+        assert_eq!(
+            cmd.channel_label(),
+            ChannelLabel::Command("git status".into())
+        );
+
+        let cmd_no_args = Interaction::Command {
+            cmd: "git".into(),
+            args: vec![],
+            cwd: "/repo".into(),
+            stdout: Some("ok\n".into()),
+            stderr: None,
+            exit_code: 0,
+        };
+        assert_eq!(
+            cmd_no_args.channel_label(),
+            ChannelLabel::Command("git".into())
+        );
 
         let api = Interaction::GhApi {
             method: "GET".into(),
@@ -1450,6 +1469,43 @@ interactions:
     }
 
     #[test]
+    fn default_labeler_uses_subcommand() {
+        let request = ChannelRequest::Command {
+            cmd: "git",
+            args: &["branch", "--list"],
+        };
+        assert_eq!(
+            DefaultLabeler.into_channel_label(&request),
+            ChannelLabel::Command("git branch".into())
+        );
+    }
+
+    #[test]
+    fn default_labeler_no_args_uses_cmd() {
+        let request = ChannelRequest::Command {
+            cmd: "git",
+            args: &[],
+        };
+        assert_eq!(
+            DefaultLabeler.into_channel_label(&request),
+            ChannelLabel::Command("git".into())
+        );
+    }
+
+    #[test]
+    fn task_id_overrides_label() {
+        use super::super::TaskId;
+        let request = ChannelRequest::Command {
+            cmd: "git",
+            args: &["rev-list", "--left-right", "--count", "HEAD...main"],
+        };
+        assert_eq!(
+            TaskId("trunk-ab").into_channel_label(&request),
+            ChannelLabel::Command("trunk-ab".into())
+        );
+    }
+
+    #[test]
     fn load_rounds_flat_format() {
         let yaml = r#"
 interactions:
@@ -1470,7 +1526,7 @@ interactions:
         assert_eq!(rounds[0].queues.len(), 2);
         assert!(rounds[0]
             .queues
-            .contains_key(&ChannelLabel::Command("git".into())));
+            .contains_key(&ChannelLabel::Command("git status".into())));
         assert!(rounds[0]
             .queues
             .contains_key(&ChannelLabel::GhApi("/repos/owner/repo/pulls".into())));
@@ -1499,7 +1555,7 @@ rounds:
         assert_eq!(rounds[0].queues.len(), 1);
         assert!(rounds[0]
             .queues
-            .contains_key(&ChannelLabel::Command("git".into())));
+            .contains_key(&ChannelLabel::Command("git status".into())));
         assert_eq!(rounds[1].queues.len(), 1);
         assert!(rounds[1]
             .queues
@@ -1560,7 +1616,7 @@ interactions:
         }
 
         // First git command
-        let cmd1 = replayer.next(&ChannelLabel::Command("git".into()));
+        let cmd1 = replayer.next(&ChannelLabel::Command("git status".into()));
         match cmd1 {
             Interaction::Command { stdout, .. } => {
                 assert_eq!(stdout, Some("ok\n".into()));
@@ -1568,8 +1624,8 @@ interactions:
             _ => panic!("expected command"),
         }
 
-        // Second git command (FIFO within channel)
-        let cmd2 = replayer.next(&ChannelLabel::Command("git".into()));
+        // Second git command (different subcommand channel)
+        let cmd2 = replayer.next(&ChannelLabel::Command("git log".into()));
         match cmd2 {
             Interaction::Command { stdout, .. } => {
                 assert_eq!(stdout, Some("commits\n".into()));
@@ -1634,7 +1690,7 @@ rounds:
         let replayer = Replayer::from_file(&path, Masks::new());
 
         // Consume round 1
-        let cmd = replayer.next(&ChannelLabel::Command("git".into()));
+        let cmd = replayer.next(&ChannelLabel::Command("git status".into()));
         match cmd {
             Interaction::Command { cmd, .. } => assert_eq!(cmd, "git"),
             _ => panic!("expected command"),
@@ -1751,12 +1807,12 @@ rounds:
             let session = Session::recording(&fixture_path, Masks::new());
             let runner = RecordingRunner::new(session.clone(), mock);
 
-            let r1 = runner.run("git", &["branch"], Path::new("/repo")).await;
+            let r1 = run!(runner, "git", &["branch"], Path::new("/repo"));
             assert!(r1.is_ok());
 
             session.barrier();
 
-            let r2 = runner.run("git", &["status"], Path::new("/repo")).await;
+            let r2 = run!(runner, "git", &["status"], Path::new("/repo"));
             assert!(r2.is_ok());
 
             session.finish();
@@ -1767,10 +1823,10 @@ rounds:
             let session = Session::replaying(&fixture_path, Masks::new());
             let runner = ReplayRunner::new(session.clone());
 
-            let r1 = runner.run("git", &["branch"], Path::new("/repo")).await;
+            let r1 = run!(runner, "git", &["branch"], Path::new("/repo"));
             assert_eq!(r1.expect("round 1 replay"), "branch-list\n");
 
-            let r2 = runner.run("git", &["status"], Path::new("/repo")).await;
+            let r2 = run!(runner, "git", &["status"], Path::new("/repo"));
             assert_eq!(r2.expect("round 2 replay"), "status-ok\n");
 
             session.assert_complete();

@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
 use crate::providers::types::*;
-use crate::providers::{CommandRunner, HttpClient};
+use crate::providers::{run, CommandRunner, HttpClient};
 use tracing::{debug, info, warn};
 
 pub struct ClaudeCodingAgent {
@@ -149,19 +149,18 @@ fn session_url_for(base_url: &str, session_id: &str) -> String {
 // ---------- auth helpers ----------
 
 async fn read_oauth_token_from_keychain(runner: &dyn CommandRunner) -> Result<OAuthToken, String> {
-    let output = runner
-        .run(
-            "security",
-            &[
-                "find-generic-password",
-                "-s",
-                "Claude Code-credentials",
-                "-w",
-            ],
-            Path::new("."),
-        )
-        .await
-        .map_err(|_| "No Claude Code credentials in keychain".to_string())?;
+    let output = run!(
+        runner,
+        "security",
+        &[
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ],
+        Path::new("."),
+    )
+    .map_err(|_| "No Claude Code credentials in keychain".to_string())?;
     let json = output.trim();
     let creds: OAuthCredentials = serde_json::from_str(json).map_err(|e| e.to_string())?;
     Ok(creds.claude_ai_oauth)

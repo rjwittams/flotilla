@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::providers::CommandRunner;
+use crate::providers::{run_output, CommandRunner};
 
 use async_trait::async_trait;
 
@@ -129,7 +129,7 @@ impl GhApi for GhApiClient {
 
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-        let output = self.runner.run_output("gh", &args_refs, repo_root).await?;
+        let output = run_output!(self.runner, "gh", &args_refs, repo_root)?;
 
         // Always parse stdout — gh api --include writes headers even on 304
         let parsed = parse_gh_api_response(&output.stdout);

@@ -1,6 +1,6 @@
 use crate::providers::github_api::{clamp_per_page, GhApi};
 use crate::providers::types::*;
-use crate::providers::CommandRunner;
+use crate::providers::{run, CommandRunner};
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
@@ -193,9 +193,7 @@ impl super::CodeReview for GitHubCodeReview {
     }
 
     async fn open_in_browser(&self, repo_root: &Path, id: &str) -> Result<(), String> {
-        self.runner
-            .run("gh", &["pr", "view", id, "--web"], repo_root)
-            .await?;
+        run!(self.runner, "gh", &["pr", "view", id, "--web"], repo_root)?;
         Ok(())
     }
 

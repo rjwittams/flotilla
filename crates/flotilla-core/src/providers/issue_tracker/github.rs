@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use crate::providers::github_api::{clamp_per_page, GhApi};
 use crate::providers::types::*;
-use crate::providers::CommandRunner;
+use crate::providers::{run, CommandRunner};
 
 pub struct GitHubIssueTracker {
     provider_name: String,
@@ -209,9 +209,12 @@ impl super::IssueTracker for GitHubIssueTracker {
     }
 
     async fn open_in_browser(&self, repo_root: &Path, id: &str) -> Result<(), String> {
-        self.runner
-            .run("gh", &["issue", "view", id, "--web"], repo_root)
-            .await?;
+        run!(
+            self.runner,
+            "gh",
+            &["issue", "view", id, "--web"],
+            repo_root
+        )?;
         Ok(())
     }
 }
