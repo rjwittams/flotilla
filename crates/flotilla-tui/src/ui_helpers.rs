@@ -118,7 +118,7 @@ pub fn checkout_indicator(is_main: bool, has_checkout: bool) -> &'static str {
 /// Shorten a checkout path relative to the repo root for display in the table.
 ///
 /// - Main checkout (path == repo_root) → "."
-/// - Under `.worktrees/` → just the directory name (e.g. "feat-auth")
+/// - Under `.worktrees/` → path relative to `.worktrees/` (e.g. "feat-auth" or "group/feat-auth")
 /// - Otherwise → relative path from repo root
 pub fn shorten_path(path: &Path, repo_root: &Path) -> String {
     if path == repo_root {
