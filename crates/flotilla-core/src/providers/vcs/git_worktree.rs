@@ -308,7 +308,7 @@ impl super::CheckoutManager for GitCheckoutManager {
                 format!("origin/{default_branch}")
             } else {
                 tracing::warn!(
-                    %default_branch, "fetch origin/{default_branch} failed, branching from local"
+                    %default_branch, "fetch from origin failed, branching from local"
                 );
                 default_branch.clone()
             };

@@ -210,7 +210,7 @@ async fn handle_client(
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(%n, "event subscriber lagged");
+                    warn!(skipped = n, "event subscriber lagged");
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     break;

@@ -282,7 +282,10 @@ pub async fn connect_or_spawn(
                 }
                 // Exhausted retries — acquire lock ourselves before spawning
                 // so we never spawn without mutual exclusion.
-                warn!(attempts = MAX_LOCK_RETRIES, "connect after lock wait failed, acquiring lock to spawn");
+                warn!(
+                    attempts = MAX_LOCK_RETRIES,
+                    "connect after lock wait failed, acquiring lock to spawn"
+                );
                 let lock_path_clone = lock_path.clone();
                 let final_lock =
                     tokio::task::spawn_blocking(move || acquire_spawn_lock(&lock_path_clone))
@@ -558,7 +561,10 @@ async fn recover_from_gap(
     match resp {
         Ok(raw) => match raw.parse::<Vec<DaemonEvent>>() {
             Ok(events) => {
-                debug!(event_count = events.len(), "gap recovery: got replay events");
+                debug!(
+                    event_count = events.len(),
+                    "gap recovery: got replay events"
+                );
                 // Update seqs monotonically — a live event may have advanced
                 // a repo's seq while this replay was in flight.
                 {

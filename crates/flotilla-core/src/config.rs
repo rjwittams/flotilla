@@ -227,7 +227,9 @@ impl ConfigStore {
                 .ok()
                 .and_then(|content| {
                     toml::from_str(&content)
-                        .map_err(|e| tracing::warn!(path = %path.display(), err = %e, "failed to parse"))
+                        .map_err(
+                            |e| tracing::warn!(path = %path.display(), err = %e, "failed to parse"),
+                        )
                         .ok()
                 })
                 .unwrap_or_default()

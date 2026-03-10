@@ -132,7 +132,11 @@ fn choose_event(snapshot: Snapshot, delta: DeltaEntry) -> DaemonEvent {
 
     match (delta_size, full_size) {
         (Ok(d), Ok(f)) if d < f => {
-            debug!(delta_bytes = d, full_bytes = f, "delta smaller than full, sending delta");
+            debug!(
+                delta_bytes = d,
+                full_bytes = f,
+                "delta smaller than full, sending delta"
+            );
             DaemonEvent::SnapshotDelta(Box::new(snapshot_delta))
         }
         _ => {
