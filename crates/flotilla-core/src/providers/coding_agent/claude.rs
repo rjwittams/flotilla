@@ -128,6 +128,18 @@ struct SessionsCache {
 }
 
 const SESSIONS_CACHE_TTL_SECS: u64 = 30;
+const CLAUDE_API_BASE_URL: &str = "https://api.anthropic.com";
+
+fn sessions_url_for(base_url: &str) -> String {
+    format!("{}/v1/sessions", base_url.trim_end_matches('/'))
+}
+
+fn session_url_for(base_url: &str, session_id: &str) -> String {
+    format!(
+        "{}/v1/sessions/{session_id}",
+        base_url.trim_end_matches('/')
+    )
+}
 
 // ---------- auth helpers ----------
 
@@ -180,12 +192,19 @@ impl ClaudeCodingAgent {
     /// Returns empty list on auth errors (insufficient scopes, expired token) to
     /// degrade gracefully instead of spamming errors on every refresh cycle.
     async fn fetch_sessions(runner: &dyn CommandRunner) -> Result<Vec<WebSession>, String> {
-        match Self::fetch_sessions_inner(runner).await {
+        Self::fetch_sessions_with_base(runner, CLAUDE_API_BASE_URL).await
+    }
+
+    async fn fetch_sessions_with_base(
+        runner: &dyn CommandRunner,
+        base_url: &str,
+    ) -> Result<Vec<WebSession>, String> {
+        match Self::fetch_sessions_inner_with_base(runner, base_url).await {
             Ok(sessions) => Ok(sessions),
             Err(e) if e.contains("authentication") || e.contains("missing field `data`") => {
                 debug!("session fetch failed, clearing auth cache and retrying: {e}");
                 invalidate_auth_cache();
-                match Self::fetch_sessions_inner(runner).await {
+                match Self::fetch_sessions_inner_with_base(runner, base_url).await {
                     Ok(sessions) => Ok(sessions),
                     Err(e) if e.contains("authentication") => {
                         if !AUTH_WARNED.swap(true, Ordering::Relaxed) {
@@ -201,16 +220,16 @@ impl ClaudeCodingAgent {
         }
     }
 
-    /// Fetch sessions from the API. The x-organization-uuid header was removed because
-    /// the OAuth token's scopes no longer include user:profile (needed to fetch the org
-    /// UUID from /api/oauth/profile), and the sessions API works without it.
-    async fn fetch_sessions_inner(runner: &dyn CommandRunner) -> Result<Vec<WebSession>, String> {
+    async fn fetch_sessions_inner_with_base(
+        runner: &dyn CommandRunner,
+        base_url: &str,
+    ) -> Result<Vec<WebSession>, String> {
         let token = get_oauth_token(runner).await?;
         let access_token = token.access_token;
 
         let client = reqwest::Client::new();
         let resp = client
-            .get("https://api.anthropic.com/v1/sessions")
+            .get(sessions_url_for(base_url))
             .bearer_auth(&access_token)
             .header("anthropic-beta", "ccr-byoc-2025-07-29")
             .header("anthropic-version", "2023-06-01")
@@ -239,6 +258,36 @@ impl ClaudeCodingAgent {
             .collect();
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(sessions)
+    }
+
+    async fn archive_session_with_base(
+        &self,
+        session_id: &str,
+        base_url: &str,
+    ) -> Result<(), String> {
+        info!("archiving session {session_id}");
+        let token = get_oauth_token(&*self.runner).await?;
+        let access_token = token.access_token;
+
+        let url = session_url_for(base_url, session_id);
+        let client = reqwest::Client::new();
+        let resp = client
+            .patch(&url)
+            .bearer_auth(&access_token)
+            .header("anthropic-beta", "ccr-byoc-2025-07-29")
+            .header("anthropic-version", "2023-06-01")
+            .json(&serde_json::json!({"session_status": "archived"}))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(format!("archive session failed (HTTP {status}): {body}"))
+        }
     }
 }
 
@@ -354,32 +403,510 @@ impl super::CodingAgent for ClaudeCodingAgent {
     }
 
     async fn archive_session(&self, session_id: &str) -> Result<(), String> {
-        info!("archiving session {session_id}");
-        let token = get_oauth_token(&*self.runner).await?;
-        let access_token = token.access_token;
-
-        let url = format!("https://api.anthropic.com/v1/sessions/{session_id}");
-        let client = reqwest::Client::new();
-        let resp = client
-            .patch(&url)
-            .bearer_auth(&access_token)
-            .header("anthropic-beta", "ccr-byoc-2025-07-29")
-            .header("anthropic-version", "2023-06-01")
-            .json(&serde_json::json!({"session_status": "archived"}))
-            .send()
+        self.archive_session_with_base(session_id, CLAUDE_API_BASE_URL)
             .await
-            .map_err(|e| e.to_string())?;
-
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            Err(format!("archive session failed (HTTP {status}): {body}"))
-        }
     }
 
     async fn attach_command(&self, session_id: &str) -> Result<String, String> {
         Ok(format!("claude --teleport {session_id}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::coding_agent::CodingAgent;
+    use crate::providers::CommandOutput;
+    use async_trait::async_trait;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    static TEST_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
+
+    struct QueueRunner {
+        responses: Mutex<VecDeque<Result<String, String>>>,
+        calls: AtomicUsize,
+    }
+
+    impl QueueRunner {
+        fn new(responses: Vec<Result<String, String>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl CommandRunner for QueueRunner {
+        async fn run(&self, _cmd: &str, _args: &[&str], _cwd: &Path) -> Result<String, String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("QueueRunner: no more queued responses")
+        }
+
+        async fn run_output(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: &Path,
+        ) -> Result<CommandOutput, String> {
+            match self.run(cmd, args, cwd).await {
+                Ok(stdout) => Ok(CommandOutput {
+                    stdout,
+                    stderr: String::new(),
+                    success: true,
+                }),
+                Err(stderr) => Ok(CommandOutput {
+                    stdout: String::new(),
+                    stderr,
+                    success: false,
+                }),
+            }
+        }
+
+        async fn exists(&self, _cmd: &str, _args: &[&str]) -> bool {
+            true
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestResponse {
+        status: u16,
+        body: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedRequest {
+        method: String,
+        path: String,
+        headers: HashMap<String, String>,
+        body: String,
+    }
+
+    fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> CapturedRequest {
+        let mut buf = Vec::new();
+        let mut read_buf = [0u8; 1024];
+        let header_end = loop {
+            let n = stream.read(&mut read_buf).await.expect("read request");
+            assert!(n > 0, "unexpected EOF before headers");
+            buf.extend_from_slice(&read_buf[..n]);
+            if let Some(pos) = find_bytes(&buf, b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+
+        let header_text = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let mut lines = header_text.split("\r\n").filter(|line| !line.is_empty());
+        let request_line = lines.next().expect("missing request line");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or_default().to_string();
+        let path = parts.next().unwrap_or_default().to_string();
+
+        let mut headers = HashMap::new();
+        let mut content_length = 0usize;
+        for line in lines {
+            if let Some((k, v)) = line.split_once(':') {
+                let key = k.trim().to_ascii_lowercase();
+                let value = v.trim().to_string();
+                if key == "content-length" {
+                    content_length = value.parse().unwrap_or(0);
+                }
+                headers.insert(key, value);
+            }
+        }
+
+        while buf.len() < header_end + content_length {
+            let n = stream.read(&mut read_buf).await.expect("read request body");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&read_buf[..n]);
+        }
+
+        let body = String::from_utf8_lossy(&buf[header_end..]).to_string();
+        CapturedRequest {
+            method,
+            path,
+            headers,
+            body,
+        }
+    }
+
+    fn status_text(status: u16) -> &'static str {
+        match status {
+            200 => "OK",
+            201 => "Created",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            500 => "Internal Server Error",
+            _ => "Unknown",
+        }
+    }
+
+    async fn spawn_test_server(
+        responses: Vec<TestResponse>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<CapturedRequest>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let queued = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let queued_clone = Arc::clone(&queued);
+        let captured_clone = Arc::clone(&captured);
+
+        let task = tokio::spawn(async move {
+            loop {
+                let response = {
+                    let mut guard = queued_clone.lock().unwrap();
+                    guard.pop_front()
+                };
+                let Some(response) = response else {
+                    break;
+                };
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let request = read_http_request(&mut stream).await;
+                captured_clone.lock().unwrap().push(request);
+
+                let status = response.status;
+                let body = response.body;
+                let wire = format!(
+                    "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    status,
+                    status_text(status),
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(wire.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+
+        (base_url, captured, task)
+    }
+
+    fn now_epoch_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    fn token_json(access_token: &str, expires_at: i64) -> String {
+        serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": access_token,
+                "expiresAt": expires_at
+            }
+        })
+        .to_string()
+    }
+
+    fn reset_auth_state() {
+        invalidate_auth_cache();
+        AUTH_WARNED.store(false, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn oauth_token_is_cached_until_near_expiry() {
+        let _test_lock = TEST_LOCK.lock().await;
+        reset_auth_state();
+        let runner = QueueRunner::new(vec![Ok(token_json("token-1", now_epoch_secs() + 3600))]);
+        let token1 = get_oauth_token(&runner).await.expect("first token");
+        let token2 = get_oauth_token(&runner).await.expect("cached token");
+        assert_eq!(token1.access_token, "token-1");
+        assert_eq!(token2.access_token, "token-1");
+        assert_eq!(runner.call_count(), 1, "keychain should be queried once");
+    }
+
+    #[tokio::test]
+    async fn oauth_token_refreshes_when_expiring_soon() {
+        let _test_lock = TEST_LOCK.lock().await;
+        reset_auth_state();
+        let runner = QueueRunner::new(vec![
+            Ok(token_json("old-token", now_epoch_secs() + 10)),
+            Ok(token_json("new-token", now_epoch_secs() + 3600)),
+        ]);
+        let first = get_oauth_token(&runner).await.expect("first token");
+        let second = get_oauth_token(&runner).await.expect("refreshed token");
+        assert_eq!(first.access_token, "old-token");
+        assert_eq!(second.access_token, "new-token");
+        assert_eq!(runner.call_count(), 2, "expiring token should be refreshed");
+    }
+
+    #[tokio::test]
+    async fn fetch_sessions_inner_filters_archived_sorts_and_sends_auth_header() {
+        let _test_lock = TEST_LOCK.lock().await;
+        reset_auth_state();
+        let runner = QueueRunner::new(vec![Ok(token_json("abc123", now_epoch_secs() + 3600))]);
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "id": "old",
+                    "title": "Older",
+                    "session_status": "running",
+                    "updated_at": "2026-03-01T00:00:00Z",
+                    "session_context": {"model": "opus", "outcomes": []}
+                },
+                {
+                    "id": "skip",
+                    "title": "Archived",
+                    "session_status": "archived",
+                    "updated_at": "2026-03-03T00:00:00Z",
+                    "session_context": {"model": "opus", "outcomes": []}
+                },
+                {
+                    "id": "new",
+                    "title": "Newer",
+                    "session_status": "idle",
+                    "updated_at": "2026-03-02T00:00:00Z",
+                    "session_context": {"model": "sonnet", "outcomes": []}
+                }
+            ]
+        })
+        .to_string();
+        let (base_url, captured, server_task) =
+            spawn_test_server(vec![TestResponse { status: 200, body }]).await;
+
+        let sessions = ClaudeCodingAgent::fetch_sessions_inner_with_base(&runner, &base_url)
+            .await
+            .expect("fetch sessions");
+        server_task.await.expect("server task");
+
+        assert_eq!(sessions.len(), 2, "archived sessions should be filtered");
+        assert_eq!(sessions[0].id, "new", "sessions should be sorted desc");
+        assert_eq!(sessions[1].id, "old");
+
+        let captured = captured.lock().unwrap();
+        let req = captured.first().expect("captured request");
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, "/v1/sessions");
+        assert_eq!(
+            req.headers.get("authorization").map(String::as_str),
+            Some("Bearer abc123")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_sessions_retries_after_auth_error() {
+        let _test_lock = TEST_LOCK.lock().await;
+        reset_auth_state();
+        let runner = QueueRunner::new(vec![
+            Ok(token_json("expired", now_epoch_secs() + 3600)),
+            Ok(token_json("fresh", now_epoch_secs() + 3600)),
+        ]);
+        let (base_url, _captured, server_task) = spawn_test_server(vec![
+            TestResponse {
+                status: 401,
+                body: "{}".to_string(),
+            },
+            TestResponse {
+                status: 200,
+                body: serde_json::json!({"data":[{"id":"s1","title":"Recovered","session_status":"running","updated_at":"2026-03-02T00:00:00Z","session_context":{"model":"","outcomes":[]}}]}).to_string(),
+            },
+        ])
+        .await;
+
+        let sessions = ClaudeCodingAgent::fetch_sessions_with_base(&runner, &base_url)
+            .await
+            .expect("retry should succeed");
+        server_task.await.expect("server task");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "s1");
+        assert_eq!(
+            runner.call_count(),
+            2,
+            "auth retry should re-read keychain token"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_sessions_returns_empty_after_second_auth_error() {
+        let _test_lock = TEST_LOCK.lock().await;
+        reset_auth_state();
+        let runner = QueueRunner::new(vec![
+            Ok(token_json("bad-1", now_epoch_secs() + 3600)),
+            Ok(token_json("bad-2", now_epoch_secs() + 3600)),
+        ]);
+        let (base_url, _captured, server_task) = spawn_test_server(vec![
+            TestResponse {
+                status: 403,
+                body: "{}".to_string(),
+            },
+            TestResponse {
+                status: 401,
+                body: "{}".to_string(),
+            },
+        ])
+        .await;
+
+        let sessions = ClaudeCodingAgent::fetch_sessions_with_base(&runner, &base_url)
+            .await
+            .expect("auth failures should degrade gracefully");
+        server_task.await.expect("server task");
+
+        assert!(sessions.is_empty());
+        assert_eq!(runner.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_uses_cache_and_maps_fields() {
+        let _test_lock = TEST_LOCK.lock().await;
+        reset_auth_state();
+        let runner = Arc::new(QueueRunner::new(vec![]));
+        let agent = ClaudeCodingAgent::new("claude".into(), runner);
+        {
+            let mut cache = agent.sessions_cache.lock().unwrap();
+            cache.sessions = vec![
+                WebSession {
+                    id: "one".into(),
+                    title: "One".into(),
+                    session_status: "running".into(),
+                    created_at: String::new(),
+                    updated_at: "2026-03-05T00:00:00Z".into(),
+                    session_context: SessionContext {
+                        model: "sonnet".into(),
+                        outcomes: vec![SessionOutcome {
+                            git_info: Some(SessionGitInfo {
+                                branches: vec!["refs/heads/feat-a".into()],
+                                repo: Some("owner/repo".into()),
+                            }),
+                        }],
+                    },
+                },
+                WebSession {
+                    id: "two".into(),
+                    title: "Two".into(),
+                    session_status: "something-else".into(),
+                    created_at: String::new(),
+                    updated_at: "2026-03-04T00:00:00Z".into(),
+                    session_context: SessionContext {
+                        model: String::new(),
+                        outcomes: vec![SessionOutcome { git_info: None }],
+                    },
+                },
+                WebSession {
+                    id: "skip".into(),
+                    title: "Skip".into(),
+                    session_status: "running".into(),
+                    created_at: String::new(),
+                    updated_at: "2026-03-03T00:00:00Z".into(),
+                    session_context: SessionContext {
+                        model: "opus".into(),
+                        outcomes: vec![SessionOutcome {
+                            git_info: Some(SessionGitInfo {
+                                branches: vec!["refs/heads/feat-b".into()],
+                                repo: Some("other/repo".into()),
+                            }),
+                        }],
+                    },
+                },
+            ];
+            cache.fetched_at = Some(Instant::now());
+        }
+
+        let sessions = agent
+            .list_sessions(&RepoCriteria {
+                repo_slug: Some("owner/repo".into()),
+            })
+            .await
+            .expect("list sessions");
+
+        assert_eq!(sessions.len(), 2);
+        let one = sessions
+            .iter()
+            .find(|(id, _)| id == "one")
+            .expect("one session");
+        assert_eq!(one.1.status, SessionStatus::Running);
+        assert_eq!(one.1.model.as_deref(), Some("sonnet"));
+        assert!(one
+            .1
+            .correlation_keys
+            .contains(&CorrelationKey::Branch("feat-a".into())));
+
+        let two = sessions
+            .iter()
+            .find(|(id, _)| id == "two")
+            .expect("two session");
+        assert_eq!(two.1.status, SessionStatus::Idle);
+        assert!(two.1.model.is_none());
+    }
+
+    #[tokio::test]
+    async fn archive_session_sends_patch_and_returns_error_on_failure() {
+        let _test_lock = TEST_LOCK.lock().await;
+        reset_auth_state();
+        let runner = Arc::new(QueueRunner::new(vec![
+            Ok(token_json("archive-token", now_epoch_secs() + 3600)),
+            Ok(token_json("archive-token", now_epoch_secs() + 3600)),
+        ]));
+        let agent = ClaudeCodingAgent::new("claude".into(), runner);
+        let (base_url, captured, server_task) = spawn_test_server(vec![
+            TestResponse {
+                status: 200,
+                body: "{}".to_string(),
+            },
+            TestResponse {
+                status: 500,
+                body: "boom".to_string(),
+            },
+        ])
+        .await;
+
+        agent
+            .archive_session_with_base("s-ok", &base_url)
+            .await
+            .expect("first archive should succeed");
+        let err = agent
+            .archive_session_with_base("s-fail", &base_url)
+            .await
+            .expect_err("second archive should fail");
+        server_task.await.expect("server task");
+
+        assert!(err.contains("HTTP 500"));
+        assert!(err.contains("boom"));
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].method, "PATCH");
+        assert_eq!(captured[0].path, "/v1/sessions/s-ok");
+        assert!(
+            captured[0].body.contains("\"session_status\":\"archived\""),
+            "archive payload should include archived status"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_command_formats_teleport_command() {
+        let _test_lock = TEST_LOCK.lock().await;
+        let runner = Arc::new(QueueRunner::new(vec![]));
+        let agent = ClaudeCodingAgent::new("claude".into(), runner);
+        let cmd = agent
+            .attach_command("abc123")
+            .await
+            .expect("attach command");
+        assert_eq!(cmd, "claude --teleport abc123");
     }
 }
