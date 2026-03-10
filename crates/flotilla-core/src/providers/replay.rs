@@ -786,6 +786,10 @@ impl super::HttpClient for RecordingHttpClient {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
+        let request_body = request
+            .body()
+            .and_then(|b| b.as_bytes())
+            .map(|b| String::from_utf8_lossy(b).to_string());
 
         let result = self.inner.execute(request).await;
 
@@ -800,7 +804,7 @@ impl super::HttpClient for RecordingHttpClient {
                     method,
                     url,
                     request_headers,
-                    request_body: None,
+                    request_body,
                     status: resp.status().as_u16(),
                     response_body: String::from_utf8_lossy(resp.body()).to_string(),
                     response_headers,
@@ -811,7 +815,7 @@ impl super::HttpClient for RecordingHttpClient {
                     method,
                     url,
                     request_headers,
-                    request_body: None,
+                    request_body,
                     status: 0,
                     response_body: err.clone(),
                     response_headers: HashMap::new(),

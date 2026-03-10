@@ -704,8 +704,11 @@ mod tests {
         // No TEST_LOCK needed: this test is pure string formatting,
         // it doesn't touch the global AUTH_CACHE.
         let runner = mock_runner(vec![]);
-        let http: Arc<dyn crate::providers::HttpClient> =
-            Arc::new(crate::providers::ReqwestHttpClient::new());
+        let dir = tempfile::tempdir().unwrap();
+        let empty_fixture = dir.path().join("empty.yaml");
+        std::fs::write(&empty_fixture, "interactions: []\n").unwrap();
+        let session = replay::test_session(empty_fixture.to_str().unwrap(), replay::Masks::new());
+        let http = replay::test_http_client(&session);
         let agent = make_agent(runner, http);
         let cmd = agent
             .attach_command("abc123")
