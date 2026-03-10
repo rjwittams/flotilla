@@ -15,12 +15,17 @@ use crate::providers::types::AssociationKey;
 #[derive(Debug, Clone)]
 pub struct RefreshError {
     pub category: &'static str,
+    pub provider: String,
     pub message: String,
 }
 
 impl fmt::Display for RefreshError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.category, self.message)
+        if self.provider.is_empty() {
+            write!(f, "{}: {}", self.category, self.message)
+        } else {
+            write!(f, "{}/{}: {}", self.category, self.provider, self.message)
+        }
     }
 }
 
@@ -205,7 +210,7 @@ pub struct DataStore {
     pub loading: bool,
     /// Set from the latest background refresh snapshot, for debug display.
     pub correlation_groups: Vec<CorrelatedGroup>,
-    pub provider_health: HashMap<&'static str, bool>,
+    pub provider_health: HashMap<(&'static str, String), bool>,
 }
 
 pub struct SectionLabels {
@@ -949,9 +954,10 @@ mod tests {
     fn refresh_error_display() {
         let err = RefreshError {
             category: "github",
+            provider: "GitHub".to_string(),
             message: "rate limited".to_string(),
         };
-        assert_eq!(format!("{err}"), "github: rate limited");
+        assert_eq!(format!("{err}"), "github/GitHub: rate limited");
     }
 
     #[test]
