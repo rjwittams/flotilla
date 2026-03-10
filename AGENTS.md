@@ -184,8 +184,8 @@ async fn test_list_pull_requests() {
         &fixture("github_prs.yaml"),
         Masks::new(),  // Adjust if recording with secrets
     );
-    let api = replay::test_gh_api(&session, &Arc::new(session.command_runner()));
-    let runner = Arc::new(session.command_runner());
+    let runner = replay::test_runner(&session);
+    let api = replay::test_gh_api(&session, &runner);
 
     let provider = GitHubCodeReview::new("github".into(), repo_slug, api, runner);
     let prs = provider.list_change_requests(&repo_root, 100).await.unwrap();
