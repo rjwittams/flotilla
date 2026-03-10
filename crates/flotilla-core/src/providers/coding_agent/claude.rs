@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use reqwest;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -14,14 +13,22 @@ use tracing::{debug, info, warn};
 pub struct ClaudeCodingAgent {
     provider_name: String,
     runner: Arc<dyn CommandRunner>,
+    http: Arc<dyn super::super::HttpClient>,
+    reqwest_client: reqwest::Client,
     sessions_cache: Mutex<SessionsCache>,
 }
 
 impl ClaudeCodingAgent {
-    pub fn new(provider_name: String, runner: Arc<dyn CommandRunner>) -> Self {
+    pub fn new(
+        provider_name: String,
+        runner: Arc<dyn CommandRunner>,
+        http: Arc<dyn super::super::HttpClient>,
+    ) -> Self {
         Self {
             provider_name,
             runner,
+            http,
+            reqwest_client: reqwest::Client::new(),
             sessions_cache: Mutex::new(SessionsCache {
                 sessions: Vec::new(),
                 fetched_at: None,
@@ -142,50 +149,6 @@ fn session_url_for(base_url: &str, session_id: &str) -> String {
     )
 }
 
-struct HttpResponse {
-    status: u16,
-    body: String,
-}
-
-#[async_trait]
-trait ClaudeHttp: Send + Sync {
-    async fn request(
-        &self,
-        method: &str,
-        url: &str,
-        headers: &HashMap<String, String>,
-        json_body: Option<serde_json::Value>,
-    ) -> Result<HttpResponse, String>;
-}
-
-struct ReqwestClaudeHttp;
-
-#[async_trait]
-impl ClaudeHttp for ReqwestClaudeHttp {
-    async fn request(
-        &self,
-        method: &str,
-        url: &str,
-        headers: &HashMap<String, String>,
-        json_body: Option<serde_json::Value>,
-    ) -> Result<HttpResponse, String> {
-        let method = reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|e| format!("invalid HTTP method '{method}': {e}"))?;
-        let client = reqwest::Client::new();
-        let mut req = client.request(method, url);
-        for (k, v) in headers {
-            req = req.header(k, v);
-        }
-        if let Some(body) = json_body.as_ref() {
-            req = req.json(body);
-        }
-        let resp = req.send().await.map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        Ok(HttpResponse { status, body })
-    }
-}
-
 // ---------- auth helpers ----------
 
 async fn read_oauth_token_from_keychain(runner: &dyn CommandRunner) -> Result<OAuthToken, String> {
@@ -233,45 +196,33 @@ fn invalidate_auth_cache() {
 }
 
 impl ClaudeCodingAgent {
-    fn request_headers(access_token: &str) -> HashMap<String, String> {
-        HashMap::from([
-            (
-                "authorization".to_string(),
-                format!("Bearer {access_token}"),
-            ),
-            (
-                "anthropic-beta".to_string(),
-                "ccr-byoc-2025-07-29".to_string(),
-            ),
-            ("anthropic-version".to_string(), "2023-06-01".to_string()),
-        ])
+    fn build_request(
+        client: &reqwest::Client,
+        method: &str,
+        url: &str,
+        access_token: &str,
+        json_body: Option<serde_json::Value>,
+    ) -> Result<reqwest::Request, String> {
+        let method = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|e| format!("invalid HTTP method: {e}"))?;
+        let mut builder = client
+            .request(method, url)
+            .header("authorization", format!("Bearer {access_token}"))
+            .header("anthropic-beta", "ccr-byoc-2025-07-29")
+            .header("anthropic-version", "2023-06-01");
+        if let Some(body) = json_body {
+            builder = builder.json(&body);
+        }
+        builder.build().map_err(|e| e.to_string())
     }
 
-    /// Fetch all non-archived sessions from the API, sorted by updated_at descending.
-    /// Returns empty list on auth errors (insufficient scopes, expired token) to
-    /// degrade gracefully instead of spamming errors on every refresh cycle.
-    async fn fetch_sessions(runner: &dyn CommandRunner) -> Result<Vec<WebSession>, String> {
-        Self::fetch_sessions_with_base(runner, CLAUDE_API_BASE_URL).await
-    }
-
-    async fn fetch_sessions_with_base(
-        runner: &dyn CommandRunner,
-        base_url: &str,
-    ) -> Result<Vec<WebSession>, String> {
-        Self::fetch_sessions_with_http(runner, &ReqwestClaudeHttp, base_url).await
-    }
-
-    async fn fetch_sessions_with_http(
-        runner: &dyn CommandRunner,
-        http: &dyn ClaudeHttp,
-        base_url: &str,
-    ) -> Result<Vec<WebSession>, String> {
-        match Self::fetch_sessions_inner_with_http(runner, http, base_url).await {
+    async fn fetch_sessions(&self, base_url: &str) -> Result<Vec<WebSession>, String> {
+        match self.fetch_sessions_inner(base_url).await {
             Ok(sessions) => Ok(sessions),
             Err(e) if e.contains("authentication") || e.contains("missing field `data`") => {
                 debug!("session fetch failed, clearing auth cache and retrying: {e}");
                 invalidate_auth_cache();
-                match Self::fetch_sessions_inner_with_http(runner, http, base_url).await {
+                match self.fetch_sessions_inner(base_url).await {
                     Ok(sessions) => Ok(sessions),
                     Err(e) if e.contains("authentication") => {
                         if !AUTH_WARNED.swap(true, Ordering::Relaxed) {
@@ -287,33 +238,30 @@ impl ClaudeCodingAgent {
         }
     }
 
-    async fn fetch_sessions_inner_with_http(
-        runner: &dyn CommandRunner,
-        http: &dyn ClaudeHttp,
-        base_url: &str,
-    ) -> Result<Vec<WebSession>, String> {
-        let token = get_oauth_token(runner).await?;
-        let access_token = token.access_token;
-        let headers = Self::request_headers(&access_token);
-        let resp = http
-            .request("GET", &sessions_url_for(base_url), &headers, None)
-            .await?;
+    async fn fetch_sessions_inner(&self, base_url: &str) -> Result<Vec<WebSession>, String> {
+        let token = get_oauth_token(&*self.runner).await?;
+        let request = Self::build_request(
+            &self.reqwest_client,
+            "GET",
+            &sessions_url_for(base_url),
+            &token.access_token,
+            None,
+        )?;
+        let resp = self.http.execute(request).await?;
+        let status = resp.status().as_u16();
+        let body = std::str::from_utf8(resp.body()).map_err(|e| e.to_string())?;
 
-        let status = resp.status;
         if status == 401 || status == 403 {
             return Err(format!("authentication error (HTTP {status})"));
         }
         if !(200..300).contains(&status) {
-            return Err(format!(
-                "session fetch failed (HTTP {status}): {}",
-                resp.body
-            ));
+            return Err(format!("session fetch failed (HTTP {status}): {body}"));
         }
 
-        let resp: SessionsResponse =
-            serde_json::from_str(&resp.body).map_err(|e| format!("session parse error: {e}"))?;
+        let parsed: SessionsResponse =
+            serde_json::from_str(body).map_err(|e| format!("session parse error: {e}"))?;
 
-        let mut sessions: Vec<WebSession> = resp
+        let mut sessions: Vec<WebSession> = parsed
             .data
             .into_iter()
             .filter(|s| s.session_status != "archived")
@@ -322,43 +270,27 @@ impl ClaudeCodingAgent {
         Ok(sessions)
     }
 
-    async fn archive_session_with_base(
+    async fn archive_session_inner(
         &self,
         session_id: &str,
         base_url: &str,
-    ) -> Result<(), String> {
-        self.archive_session_with_http(session_id, base_url, &ReqwestClaudeHttp)
-            .await
-    }
-
-    async fn archive_session_with_http(
-        &self,
-        session_id: &str,
-        base_url: &str,
-        http: &dyn ClaudeHttp,
     ) -> Result<(), String> {
         info!("archiving session {session_id}");
         let token = get_oauth_token(&*self.runner).await?;
-        let access_token = token.access_token;
-
-        let url = session_url_for(base_url, session_id);
-        let headers = Self::request_headers(&access_token);
-        let resp = http
-            .request(
-                "PATCH",
-                &url,
-                &headers,
-                Some(serde_json::json!({"session_status": "archived"})),
-            )
-            .await?;
-
-        if (200..300).contains(&resp.status) {
+        let request = Self::build_request(
+            &self.reqwest_client,
+            "PATCH",
+            &session_url_for(base_url, session_id),
+            &token.access_token,
+            Some(serde_json::json!({"session_status": "archived"})),
+        )?;
+        let resp = self.http.execute(request).await?;
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
             Ok(())
         } else {
-            Err(format!(
-                "archive session failed (HTTP {}): {}",
-                resp.status, resp.body
-            ))
+            let body = std::str::from_utf8(resp.body()).unwrap_or("<binary>");
+            Err(format!("archive session failed (HTTP {status}): {body}"))
         }
     }
 }
@@ -393,7 +325,7 @@ impl super::CodingAgent for ClaudeCodingAgent {
             debug!("Claude sessions: cache hit");
             sessions
         } else {
-            let fetched = Self::fetch_sessions(&*self.runner).await?;
+            let fetched = self.fetch_sessions(CLAUDE_API_BASE_URL).await?;
             debug!("Claude sessions: fetched {} from API", fetched.len());
 
             // Diff against known IDs and log additions/removals at INFO
@@ -475,7 +407,7 @@ impl super::CodingAgent for ClaudeCodingAgent {
     }
 
     async fn archive_session(&self, session_id: &str) -> Result<(), String> {
-        self.archive_session_with_base(session_id, CLAUDE_API_BASE_URL)
+        self.archive_session_inner(session_id, CLAUDE_API_BASE_URL)
             .await
     }
 
