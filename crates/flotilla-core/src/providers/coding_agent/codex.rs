@@ -599,6 +599,20 @@ impl super::CloudAgentService for CodexCodingAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::coding_agent::CloudAgentService;
+    use crate::providers::replay;
+    use std::sync::LazyLock;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    static CODEX_TEST_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
+
+    fn fixture(name: &str) -> String {
+        format!(
+            "{}/src/providers/coding_agent/fixtures/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        )
+    }
 
     // Task 1 tests
 
@@ -880,5 +894,136 @@ mod tests {
         };
         let (_, session) = map_task_to_session(&task, "codex");
         assert_eq!(session.title, "t-6");
+    }
+
+    // Task 6: Replay fixture integration test — happy path
+
+    #[tokio::test]
+    async fn list_sessions_fetches_envs_and_tasks() {
+        let session =
+            replay::test_session(&fixture("codex_tasks.yaml"), replay::Masks::new());
+        let http = replay::test_http_client(&session);
+        let agent = CodexCodingAgent::new("codex".into(), http);
+
+        // Prime auth cache with valid credentials
+        {
+            let mut cache = agent.auth_cache.lock().expect("lock");
+            cache.auth = Some(CodexAuth {
+                bearer_token: "test-token".to_string(),
+                account_id: Some("acc-123".to_string()),
+            });
+            cache.loaded_at = Some(Instant::now());
+        }
+
+        let criteria = RepoCriteria {
+            repo_slug: Some("rjwittams/flotilla".into()),
+        };
+        let sessions = agent.list_sessions(&criteria).await.expect("should succeed");
+
+        assert_eq!(sessions.len(), 2, "expected 2 sessions");
+
+        // Task 1: completed -> Idle, branch "feat-x" (non-trunk, empty PR list)
+        let (id1, s1) = &sessions[0];
+        assert_eq!(id1, "task_1");
+        assert_eq!(s1.status, SessionStatus::Idle);
+        assert!(
+            s1.correlation_keys
+                .contains(&CorrelationKey::Branch("feat-x".to_string())),
+            "task_1 should correlate with branch feat-x"
+        );
+
+        // Task 2: in_progress -> Running, PR head "codex/review-code", CR ref 208
+        let (id2, s2) = &sessions[1];
+        assert_eq!(id2, "task_2");
+        assert_eq!(s2.status, SessionStatus::Running);
+        assert!(
+            s2.correlation_keys
+                .contains(&CorrelationKey::Branch("codex/review-code".to_string())),
+            "task_2 should correlate with PR head branch"
+        );
+        assert!(
+            s2.correlation_keys
+                .contains(&CorrelationKey::ChangeRequestRef(
+                    "github".to_string(),
+                    "208".to_string()
+                )),
+            "task_2 should have ChangeRequestRef for PR 208"
+        );
+        // Should NOT have Branch("main") — PR path doesn't add source branch
+        assert!(
+            !s2.correlation_keys
+                .contains(&CorrelationKey::Branch("main".to_string())),
+            "task_2 should not correlate with trunk branch main"
+        );
+
+        session.assert_complete();
+    }
+
+    // Task 7: Auth retry replay test
+
+    #[tokio::test]
+    async fn list_sessions_retries_on_auth_error() {
+        let _lock = CODEX_TEST_LOCK.lock().await;
+
+        // Write auth.json with fresh token to a temp dir
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let auth_json = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh-token","account_id":"acc-1"}}"#;
+        std::fs::write(tmp.path().join("auth.json"), auth_json).expect("write auth.json");
+        std::env::set_var("CODEX_HOME", tmp.path());
+
+        let session =
+            replay::test_session(&fixture("codex_auth_retry.yaml"), replay::Masks::new());
+        let http = replay::test_http_client(&session);
+        let agent = CodexCodingAgent::new("codex".into(), http);
+
+        // Prime auth cache with expired token (no account_id)
+        {
+            let mut cache = agent.auth_cache.lock().expect("lock");
+            cache.auth = Some(CodexAuth {
+                bearer_token: "expired-token".to_string(),
+                account_id: None,
+            });
+            cache.loaded_at = Some(Instant::now());
+        }
+
+        let criteria = RepoCriteria {
+            repo_slug: Some("owner/repo".into()),
+        };
+        let sessions = agent.list_sessions(&criteria).await.expect("should succeed");
+
+        assert_eq!(sessions.len(), 1, "expected 1 session after auth retry");
+        assert_eq!(sessions[0].0, "task_1");
+
+        std::env::remove_var("CODEX_HOME");
+        session.assert_complete();
+    }
+
+    // Task 8: No-auth graceful degradation test
+
+    #[tokio::test]
+    async fn list_sessions_returns_empty_when_no_auth() {
+        let _lock = CODEX_TEST_LOCK.lock().await;
+
+        // Temp dir with NO auth.json
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("CODEX_HOME", tmp.path());
+
+        // Empty fixture — no HTTP calls should be made
+        let empty_dir = tempfile::tempdir().expect("tempdir");
+        let empty_fixture = empty_dir.path().join("empty.yaml");
+        std::fs::write(&empty_fixture, "interactions: []\n").expect("write empty fixture");
+        let session =
+            replay::test_session(empty_fixture.to_str().unwrap(), replay::Masks::new());
+        let http = replay::test_http_client(&session);
+        let agent = CodexCodingAgent::new("codex".into(), http);
+
+        let criteria = RepoCriteria {
+            repo_slug: Some("owner/repo".into()),
+        };
+        let sessions = agent.list_sessions(&criteria).await.expect("should succeed");
+
+        assert!(sessions.is_empty(), "expected empty sessions when no auth");
+
+        std::env::remove_var("CODEX_HOME");
     }
 }
