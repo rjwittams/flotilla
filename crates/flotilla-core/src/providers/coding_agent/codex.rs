@@ -1,7 +1,13 @@
+use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tracing::{debug, warn};
 
 use crate::providers::types::*;
+use crate::providers::HttpClient;
 
 // ---------------------------------------------------------------------------
 // Task 1: Auth file reader
@@ -65,7 +71,6 @@ fn parse_auth_file(contents: &str) -> Option<CodexAuth> {
     }
 }
 
-#[allow(dead_code)]
 fn read_auth() -> Option<CodexAuth> {
     let path = codex_home().join("auth.json");
     let contents = std::fs::read_to_string(path).ok()?;
@@ -81,7 +86,6 @@ pub fn codex_auth_file_exists() -> bool {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct EnvironmentInfo {
     pub id: String,
     #[serde(default)]
@@ -89,7 +93,6 @@ pub struct EnvironmentInfo {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct TaskListResponse {
     #[serde(default)]
     pub items: Vec<TaskItem>,
@@ -98,7 +101,6 @@ pub struct TaskListResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct TaskItem {
     pub id: String,
     #[serde(default)]
@@ -112,7 +114,6 @@ pub struct TaskItem {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct TaskStatusDisplay {
     #[serde(default)]
     pub environment_label: Option<String>,
@@ -123,14 +124,12 @@ pub struct TaskStatusDisplay {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct LatestTurnStatus {
     #[serde(default)]
     pub turn_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct TaskPullRequest {
     #[serde(default)]
     pub number: Option<u64>,
@@ -144,12 +143,10 @@ pub struct TaskPullRequest {
 // Task 3: Task-to-session mapping logic
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 fn is_trunk_branch(name: &str) -> bool {
     matches!(name, "main" | "master")
 }
 
-#[allow(dead_code)]
 fn epoch_to_rfc3339(epoch: f64) -> Option<String> {
     use chrono::{TimeZone, Utc};
     let secs = epoch as i64;
@@ -159,7 +156,6 @@ fn epoch_to_rfc3339(epoch: f64) -> Option<String> {
         .map(|dt| dt.to_rfc3339())
 }
 
-#[allow(dead_code)]
 fn map_task_to_session(task: &TaskItem, provider_name: &str) -> (String, CloudAgentSession) {
     // Determine status from latest_turn_status_display
     let status = task
@@ -232,6 +228,366 @@ fn map_task_to_session(task: &TaskItem, provider_name: &str) -> (String, CloudAg
             correlation_keys,
         },
     )
+}
+
+// ---------------------------------------------------------------------------
+// Task 4: CodexCodingAgent struct and HTTP helpers
+// ---------------------------------------------------------------------------
+
+const BASE_URL: &str = "https://chatgpt.com/backend-api";
+const AUTH_CACHE_TTL_SECS: u64 = 300; // 5 minutes
+const ENV_CACHE_TTL_SECS: u64 = 600; // 10 minutes
+
+struct AuthCache {
+    auth: Option<CodexAuth>,
+    loaded_at: Option<Instant>,
+}
+
+struct EnvCache {
+    environment_ids: Vec<String>,
+    loaded_at: Option<Instant>,
+}
+
+pub struct CodexCodingAgent {
+    provider_name: String,
+    http: Arc<dyn HttpClient>,
+    auth_cache: Mutex<AuthCache>,
+    env_cache: Mutex<EnvCache>,
+    auth_warned: AtomicBool,
+}
+
+impl CodexCodingAgent {
+    pub fn new(provider_name: String, http: Arc<dyn HttpClient>) -> Self {
+        Self {
+            provider_name,
+            http,
+            auth_cache: Mutex::new(AuthCache {
+                auth: None,
+                loaded_at: None,
+            }),
+            env_cache: Mutex::new(EnvCache {
+                environment_ids: Vec::new(),
+                loaded_at: None,
+            }),
+            auth_warned: AtomicBool::new(false),
+        }
+    }
+
+    fn get_cached_auth(&self) -> Option<CodexAuth> {
+        let cache = self.auth_cache.lock().expect("auth_cache lock poisoned");
+        if let (Some(auth), Some(loaded_at)) = (&cache.auth, cache.loaded_at) {
+            if loaded_at.elapsed().as_secs() < AUTH_CACHE_TTL_SECS {
+                return Some(auth.clone());
+            }
+        }
+        None
+    }
+
+    fn refresh_auth(&self) -> Option<CodexAuth> {
+        let auth = read_auth();
+        let mut cache = self.auth_cache.lock().expect("auth_cache lock poisoned");
+        cache.auth = auth.clone();
+        cache.loaded_at = Some(Instant::now());
+        auth
+    }
+
+    fn build_request(
+        &self,
+        method: &str,
+        url: &str,
+        auth: &CodexAuth,
+    ) -> Result<reqwest::Request, String> {
+        let method = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|e| format!("invalid HTTP method: {e}"))?;
+        let mut builder = super::REQUEST_FACTORY
+            .request(method, url)
+            .header("authorization", format!("Bearer {}", auth.bearer_token))
+            .header("user-agent", "flotilla");
+        if let Some(ref account_id) = auth.account_id {
+            builder = builder.header("chatgpt-account-id", account_id);
+        }
+        builder
+            .build()
+            .map_err(|e| format!("request build error: {e}"))
+    }
+
+    async fn fetch_environment_ids(
+        &self,
+        repo_slug: &str,
+        auth: &CodexAuth,
+    ) -> Result<Vec<String>, String> {
+        let (owner, repo) = repo_slug
+            .split_once('/')
+            .ok_or_else(|| format!("invalid repo slug: {repo_slug}"))?;
+        let url = format!("{BASE_URL}/wham/environments/by-repo/github/{owner}/{repo}");
+        let request = self.build_request("GET", &url, auth)?;
+        let resp = self.http.execute(request).await?;
+        let status = resp.status().as_u16();
+        if status == 401 || status == 403 {
+            return Err(format!("authentication error (HTTP {status})"));
+        }
+        if !resp.status().is_success() {
+            let body = String::from_utf8_lossy(resp.body()).to_string();
+            return Err(format!("environment lookup failed (HTTP {status}): {body}"));
+        }
+        let envs: Vec<EnvironmentInfo> = serde_json::from_slice(resp.body())
+            .map_err(|e| format!("environment list parse error: {e}"))?;
+        Ok(envs.into_iter().map(|e| e.id).collect())
+    }
+
+    async fn fetch_tasks_page(
+        &self,
+        base_query: &str,
+        cursor: Option<&str>,
+        auth: &CodexAuth,
+    ) -> Result<TaskListResponse, String> {
+        let mut url = format!(
+            "{BASE_URL}/wham/tasks/list?task_filter=current&limit=20&{base_query}"
+        );
+        if let Some(c) = cursor {
+            url.push_str("&cursor=");
+            url.push_str(&urlencoding::encode(c));
+        }
+        let request = self.build_request("GET", &url, auth)?;
+        let resp = self.http.execute(request).await?;
+        let status = resp.status().as_u16();
+        if status == 401 || status == 403 {
+            return Err(format!("authentication error (HTTP {status})"));
+        }
+        if !resp.status().is_success() {
+            let body = String::from_utf8_lossy(resp.body()).to_string();
+            return Err(format!("task list failed (HTTP {status}): {body}"));
+        }
+        serde_json::from_slice(resp.body())
+            .map_err(|e| format!("task list parse error: {e}"))
+    }
+
+    async fn fetch_all_tasks(
+        &self,
+        base_query: &str,
+        auth: &CodexAuth,
+    ) -> Result<Vec<TaskItem>, String> {
+        let mut all_items = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        for _ in 0..10 {
+            let page = self
+                .fetch_tasks_page(base_query, cursor.as_deref(), auth)
+                .await?;
+            all_items.extend(page.items);
+            cursor = page.cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(all_items)
+    }
+
+    async fn fetch_tasks_by_label(
+        &self,
+        repo_slug: &str,
+        auth: &CodexAuth,
+    ) -> Result<Vec<(String, CloudAgentSession)>, String> {
+        let repo_name = repo_slug
+            .rsplit_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or(repo_slug);
+
+        let tasks = match self.fetch_all_tasks("", auth).await {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                debug!(error = %e, "failed to fetch tasks by label");
+                return Ok(vec![]);
+            }
+        };
+
+        let sessions: Vec<(String, CloudAgentSession)> = tasks
+            .iter()
+            .filter(|t| {
+                t.task_status_display
+                    .as_ref()
+                    .and_then(|d| d.environment_label.as_deref())
+                    .is_some_and(|label| label.eq_ignore_ascii_case(repo_name))
+            })
+            .map(|t| map_task_to_session(t, &self.provider_name))
+            .collect();
+
+        Ok(sessions)
+    }
+
+    async fn fetch_tasks(
+        &self,
+        environment_id: &str,
+        auth: &CodexAuth,
+    ) -> Result<Vec<TaskItem>, String> {
+        let query = format!("environment_id={environment_id}");
+        self.fetch_all_tasks(&query, auth).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 5: CloudAgentService trait implementation
+// ---------------------------------------------------------------------------
+
+fn is_auth_error(e: &str) -> bool {
+    e.contains("authentication error")
+}
+
+#[async_trait]
+impl super::CloudAgentService for CodexCodingAgent {
+    fn display_name(&self) -> &str {
+        "Codex"
+    }
+
+    fn item_noun(&self) -> &str {
+        "task"
+    }
+
+    fn abbreviation(&self) -> &str {
+        "Cdx"
+    }
+
+    async fn list_sessions(
+        &self,
+        criteria: &RepoCriteria,
+    ) -> Result<Vec<(String, CloudAgentSession)>, String> {
+        let Some(ref repo_slug) = criteria.repo_slug else {
+            return Ok(vec![]);
+        };
+
+        // Obtain auth: try cache first, then refresh from disk
+        let auth = match self.get_cached_auth() {
+            Some(a) => a,
+            None => match self.refresh_auth() {
+                Some(a) => a,
+                None => {
+                    if !self.auth_warned.swap(true, Ordering::Relaxed) {
+                        warn!("Codex sessions unavailable: no auth found in ~/.codex/auth.json");
+                    }
+                    return Ok(vec![]);
+                }
+            },
+        };
+
+        // Resolve environment IDs: check cache, then fetch
+        let env_ids = {
+            let cache = self.env_cache.lock().expect("env_cache lock poisoned");
+            if let Some(loaded_at) = cache.loaded_at {
+                if loaded_at.elapsed().as_secs() < ENV_CACHE_TTL_SECS
+                    && !cache.environment_ids.is_empty()
+                {
+                    Some(cache.environment_ids.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let env_ids = match env_ids {
+            Some(ids) => ids,
+            None => {
+                match self.fetch_environment_ids(repo_slug, &auth).await {
+                    Ok(ids) => {
+                        let mut cache =
+                            self.env_cache.lock().expect("env_cache lock poisoned");
+                        cache.environment_ids = ids.clone();
+                        cache.loaded_at = Some(Instant::now());
+                        ids
+                    }
+                    Err(e) if is_auth_error(&e) => {
+                        // Retry with refreshed auth
+                        let fresh_auth = match self.refresh_auth() {
+                            Some(a) => a,
+                            None => {
+                                if !self.auth_warned.swap(true, Ordering::Relaxed) {
+                                    warn!("Codex sessions unavailable: auth refresh failed");
+                                }
+                                return Ok(vec![]);
+                            }
+                        };
+                        match self
+                            .fetch_environment_ids(repo_slug, &fresh_auth)
+                            .await
+                        {
+                            Ok(ids) => {
+                                let mut cache =
+                                    self.env_cache.lock().expect("env_cache lock poisoned");
+                                cache.environment_ids = ids.clone();
+                                cache.loaded_at = Some(Instant::now());
+                                ids
+                            }
+                            Err(e2) => {
+                                if !self.auth_warned.swap(true, Ordering::Relaxed) {
+                                    warn!(error = %e2, "Codex sessions unavailable after auth retry");
+                                }
+                                return Ok(vec![]);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "environment lookup failed, falling back to label match");
+                        return self.fetch_tasks_by_label(repo_slug, &auth).await;
+                    }
+                }
+            }
+        };
+
+        if env_ids.is_empty() {
+            return self.fetch_tasks_by_label(repo_slug, &auth).await;
+        }
+
+        let mut all_sessions = Vec::new();
+        for env_id in &env_ids {
+            match self.fetch_tasks(env_id, &auth).await {
+                Ok(tasks) => {
+                    for task in &tasks {
+                        all_sessions.push(map_task_to_session(task, &self.provider_name));
+                    }
+                }
+                Err(e) if is_auth_error(&e) => {
+                    // Retry once with fresh auth
+                    let fresh_auth = match self.refresh_auth() {
+                        Some(a) => a,
+                        None => {
+                            if !self.auth_warned.swap(true, Ordering::Relaxed) {
+                                warn!("Codex task fetch failed: auth refresh failed");
+                            }
+                            return Ok(all_sessions);
+                        }
+                    };
+                    match self.fetch_tasks(env_id, &fresh_auth).await {
+                        Ok(tasks) => {
+                            for task in &tasks {
+                                all_sessions
+                                    .push(map_task_to_session(task, &self.provider_name));
+                            }
+                        }
+                        Err(e2) => {
+                            debug!(env_id, error = %e2, "task fetch failed after auth retry");
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(env_id, error = %e, "task fetch failed");
+                }
+            }
+        }
+
+        Ok(all_sessions)
+    }
+
+    async fn archive_session(&self, _session_id: &str) -> Result<(), String> {
+        Err("archiving Codex tasks is not supported".to_string())
+    }
+
+    async fn attach_command(&self, session_id: &str) -> Result<String, String> {
+        Ok(format!(
+            "open https://chatgpt.com/codex/tasks/{session_id}"
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
