@@ -291,6 +291,7 @@ pub async fn connect_or_spawn(
                 match final_lock {
                     Ok(Some(file)) => {
                         lock_file = Some(file);
+                        break;
                     }
                     Ok(None) => {
                         // Someone else spawned while we waited — one last connect attempt.
@@ -460,7 +461,7 @@ fn handle_event(
                         buf.push(event);
                         return;
                     }
-                    guard.insert(repo.clone(), Vec::new());
+                    guard.insert(repo.clone(), vec![event]);
                     drop(guard);
 
                     if let Some(ls) = local_seq {
