@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -88,6 +88,45 @@ impl Interaction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractionLog {
     pub interactions: Vec<Interaction>,
+}
+
+/// A round of interactions grouped by channel.
+#[derive(Debug)]
+pub(crate) struct Round {
+    pub(crate) queues: HashMap<ChannelLabel, VecDeque<Interaction>>,
+}
+
+impl Round {
+    fn from_interactions(interactions: Vec<Interaction>) -> Self {
+        let mut queues: HashMap<ChannelLabel, VecDeque<Interaction>> = HashMap::new();
+        for interaction in interactions {
+            let label = interaction.channel_label();
+            queues.entry(label).or_default().push_back(interaction);
+        }
+        Round { queues }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queues.values().all(|q| q.is_empty())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoundLog {
+    rounds: Vec<InteractionLog>,
+}
+
+fn load_rounds_from_str(yaml: &str) -> Vec<Round> {
+    if let Ok(round_log) = serde_yml::from_str::<RoundLog>(yaml) {
+        return round_log
+            .rounds
+            .into_iter()
+            .map(|log| Round::from_interactions(log.interactions))
+            .collect();
+    }
+    let log: InteractionLog = serde_yml::from_str(yaml)
+        .unwrap_or_else(|e| panic!("Failed to parse fixture YAML: {e}"));
+    vec![Round::from_interactions(log.interactions)]
 }
 
 /// Placeholder substitutions for non-deterministic values.
@@ -1271,5 +1310,78 @@ interactions:
             http.channel_label(),
             ChannelLabel::Http("api.claude.ai".into())
         );
+    }
+
+    #[test]
+    fn load_rounds_flat_format() {
+        let yaml = r#"
+interactions:
+  - channel: command
+    cmd: git
+    args: ["status"]
+    cwd: "/repo"
+    stdout: "ok\n"
+    exit_code: 0
+  - channel: gh_api
+    method: GET
+    endpoint: "/repos/owner/repo/pulls"
+    status: 200
+    body: "[]"
+"#;
+        let rounds = load_rounds_from_str(yaml);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].queues.len(), 2);
+        assert!(rounds[0]
+            .queues
+            .contains_key(&ChannelLabel::Command("git".into())));
+        assert!(rounds[0]
+            .queues
+            .contains_key(&ChannelLabel::GhApi("/repos/owner/repo/pulls".into())));
+    }
+
+    #[test]
+    fn load_rounds_multi_round_format() {
+        let yaml = r#"
+rounds:
+  - interactions:
+      - channel: command
+        cmd: git
+        args: ["status"]
+        cwd: "/repo"
+        stdout: "ok\n"
+        exit_code: 0
+  - interactions:
+      - channel: gh_api
+        method: GET
+        endpoint: "/repos/owner/repo/pulls"
+        status: 200
+        body: "[]"
+"#;
+        let rounds = load_rounds_from_str(yaml);
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(rounds[0].queues.len(), 1);
+        assert!(rounds[0]
+            .queues
+            .contains_key(&ChannelLabel::Command("git".into())));
+        assert_eq!(rounds[1].queues.len(), 1);
+        assert!(rounds[1]
+            .queues
+            .contains_key(&ChannelLabel::GhApi("/repos/owner/repo/pulls".into())));
+    }
+
+    #[test]
+    fn round_is_empty() {
+        let round = Round::from_interactions(vec![]);
+        assert!(round.is_empty());
+
+        let round = Round::from_interactions(vec![Interaction::Command {
+            cmd: "git".into(),
+            args: vec![],
+            cwd: "/repo".into(),
+            stdout: None,
+            stderr: None,
+            exit_code: 0,
+        }]);
+        assert!(!round.is_empty());
     }
 }
