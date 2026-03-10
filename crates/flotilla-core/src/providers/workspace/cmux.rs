@@ -6,7 +6,6 @@ use tracing::info;
 
 use crate::providers::types::*;
 use crate::providers::CommandRunner;
-use crate::template::WorkspaceTemplate;
 
 const CMUX_BIN: &str = "/Applications/cmux.app/Contents/Resources/bin/cmux";
 
@@ -91,17 +90,8 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
         config: &WorkspaceConfig,
     ) -> Result<(String, Workspace), String> {
         info!("cmux: creating workspace '{}'", config.name);
-        // Parse template from YAML if provided, otherwise use default
-        let template = if let Some(ref yaml) = config.template_yaml {
-            serde_yml::from_str::<WorkspaceTemplate>(yaml).unwrap_or_else(|e| {
-                tracing::warn!("cmux: failed to parse workspace template, using default: {e}");
-                WorkspaceTemplate::load_default()
-            })
-        } else {
-            WorkspaceTemplate::load_default()
-        };
 
-        let rendered = template.render(&config.template_vars);
+        let rendered = super::resolve_template(config);
 
         // Create workspace — output is "OK workspace:N"
         let ws_output = self

@@ -228,6 +228,7 @@ fn render_repo_providers(model: &TuiModel, _ui: &UiState, frame: &mut Frame, are
         ("Coding agent", "coding_agent"),
         ("AI utility", "ai_utility"),
         ("Workspace mgr", "workspace_manager"),
+        ("Terminal pool", "terminal_pool"),
     ];
 
     for (category, key) in categories {
@@ -906,6 +907,7 @@ fn render_global_status(model: &TuiModel, frame: &mut Frame, area: Rect) {
     let mut coding_agent_name: Option<String> = None;
     let mut ai_utility_name: Option<String> = None;
     let mut workspace_name: Option<String> = None;
+    let mut terminal_pool_name: Option<String> = None;
 
     let mut coding_agent_status: Option<ProviderStatus> = None;
 
@@ -932,6 +934,9 @@ fn render_global_status(model: &TuiModel, frame: &mut Frame, area: Rect) {
         }
         if workspace_name.is_none() {
             workspace_name = rm.provider_names.get("workspace_manager").cloned();
+        }
+        if terminal_pool_name.is_none() {
+            terminal_pool_name = rm.provider_names.get("terminal_pool").cloned();
         }
 
         if coding_agent_status.is_none() {
@@ -960,6 +965,7 @@ fn render_global_status(model: &TuiModel, frame: &mut Frame, area: Rect) {
         ("Coding agent", &coding_agent_name),
         ("AI utility", &ai_utility_name),
         ("Workspace mgr", &workspace_name),
+        ("Terminal pool", &terminal_pool_name),
     ];
 
     for (category, name) in factories {

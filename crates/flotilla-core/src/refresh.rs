@@ -173,13 +173,22 @@ async fn refresh_providers(
         }
     };
 
-    let (checkouts, crs, sessions_bundle, branches, merged, workspaces) = tokio::join!(
+    let tp_fut = async {
+        if let Some((_, tp)) = &registry.terminal_pool {
+            tp.list_terminals().await
+        } else {
+            Ok(vec![])
+        }
+    };
+
+    let (checkouts, crs, sessions_bundle, branches, merged, workspaces, managed_terminals) = tokio::join!(
         checkouts_fut,
         cr_fut,
         sessions_fut,
         branches_fut,
         merged_fut,
-        ws_fut
+        ws_fut,
+        tp_fut
     );
 
     pd.checkouts = checkouts
@@ -211,6 +220,17 @@ async fn refresh_providers(
             Vec::new()
         })
         .into_iter()
+        .collect();
+    pd.managed_terminals = managed_terminals
+        .unwrap_or_else(|e| {
+            errors.push(RefreshError {
+                category: "terminals",
+                message: e,
+            });
+            Vec::new()
+        })
+        .into_iter()
+        .map(|t| (t.id.to_string(), t))
         .collect();
     let (sessions, session_errors) = sessions_bundle;
     if !session_errors.is_empty() {
@@ -274,6 +294,12 @@ fn compute_provider_health(
             !errors
                 .iter()
                 .any(|e| e.category == "PRs" || e.category == "merged"),
+        );
+    }
+    if registry.terminal_pool.is_some() {
+        health.insert(
+            "terminal_pool",
+            !errors.iter().any(|e| e.category == "terminals"),
         );
     }
     health

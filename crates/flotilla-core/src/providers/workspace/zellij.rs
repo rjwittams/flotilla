@@ -5,11 +5,10 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::providers::types::*;
 use crate::providers::CommandRunner;
-use crate::template::WorkspaceTemplate;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ZellijState {
@@ -217,17 +216,7 @@ impl super::WorkspaceManager for ZellijWorkspaceManager {
     ) -> Result<(String, Workspace), String> {
         info!("zellij: creating workspace '{}'", config.name);
 
-        // Parse template from YAML if provided, otherwise use default
-        let template = if let Some(ref yaml) = config.template_yaml {
-            serde_yml::from_str::<WorkspaceTemplate>(yaml).unwrap_or_else(|e| {
-                warn!("zellij: failed to parse workspace template, using default: {e}");
-                WorkspaceTemplate::load_default()
-            })
-        } else {
-            WorkspaceTemplate::load_default()
-        };
-
-        let rendered = template.render(&config.template_vars);
+        let rendered = super::resolve_template(config);
         let working_dir = config.working_directory.display().to_string();
 
         // Create new tab
@@ -595,6 +584,7 @@ mod tests {
             working_directory: PathBuf::from("/tmp"),
             template_yaml: None,
             template_vars: HashMap::new(),
+            resolved_commands: None,
         };
         let (name1, ws1) = mgr.create_workspace(&config1).await.unwrap();
         assert_eq!(name1, "feat-123");
@@ -606,6 +596,7 @@ mod tests {
             working_directory: PathBuf::from("/tmp"),
             template_yaml: None,
             template_vars: HashMap::new(),
+            resolved_commands: None,
         };
         let (name2, ws2) = mgr.create_workspace(&config2).await.unwrap();
         assert_eq!(name2, "fix-456");

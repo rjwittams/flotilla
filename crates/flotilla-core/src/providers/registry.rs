@@ -2,6 +2,7 @@ use crate::providers::ai_utility::AiUtility;
 use crate::providers::code_review::CodeReview;
 use crate::providers::coding_agent::CodingAgent;
 use crate::providers::issue_tracker::IssueTracker;
+use crate::providers::terminal::TerminalPool;
 use crate::providers::vcs::{CheckoutManager, Vcs};
 use crate::providers::workspace::WorkspaceManager;
 use indexmap::IndexMap;
@@ -15,6 +16,7 @@ pub struct ProviderRegistry {
     pub coding_agents: IndexMap<String, Arc<dyn CodingAgent>>,
     pub ai_utilities: IndexMap<String, Arc<dyn AiUtility>>,
     pub workspace_manager: Option<(String, Arc<dyn WorkspaceManager>)>,
+    pub terminal_pool: Option<(String, Arc<dyn TerminalPool>)>,
 }
 
 impl ProviderRegistry {
@@ -27,6 +29,7 @@ impl ProviderRegistry {
             coding_agents: IndexMap::new(),
             ai_utilities: IndexMap::new(),
             workspace_manager: None,
+            terminal_pool: None,
         }
     }
 }

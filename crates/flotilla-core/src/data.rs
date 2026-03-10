@@ -263,6 +263,12 @@ fn group_to_work_item(
                     workspace_refs.push(ws_ref.clone());
                 }
             }
+            (CorItemKind::ManagedTerminal, ProviderItemKey::ManagedTerminal(_key)) => {
+                // Managed terminals contribute to correlation but don't need
+                // explicit tracking on work items yet — their presence in the
+                // group is enough. The terminal pool provider shows them in
+                // ProviderData.managed_terminals.
+            }
             _ => {}
         }
     }
@@ -360,6 +366,24 @@ pub fn correlate(providers: &ProviderData) -> (Vec<CorrelationResult>, Vec<Corre
             title: ws.name.clone(),
             correlation_keys: ws.correlation_keys.clone(),
             source_key: ProviderItemKey::Workspace(ws_ref.clone()),
+        });
+    }
+
+    for (key, terminal) in &providers.managed_terminals {
+        let mut keys = vec![crate::providers::types::CorrelationKey::Branch(
+            terminal.id.checkout.clone(),
+        )];
+        if !terminal.working_directory.as_os_str().is_empty() {
+            keys.push(crate::providers::types::CorrelationKey::CheckoutPath(
+                terminal.working_directory.clone(),
+            ));
+        }
+        items.push(CorrelatedItem {
+            provider_name: "terminal".to_string(),
+            kind: CorItemKind::ManagedTerminal,
+            title: format!("{} ({})", terminal.id, terminal.role),
+            correlation_keys: keys,
+            source_key: ProviderItemKey::ManagedTerminal(key.clone()),
         });
     }
 
