@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::Color;
 
@@ -110,6 +112,25 @@ pub fn checkout_indicator(is_main: bool, has_checkout: bool) -> &'static str {
         "✓"
     } else {
         ""
+    }
+}
+
+/// Shorten a checkout path relative to the repo root for display in the table.
+///
+/// - Main checkout (path == repo_root) → "."
+/// - Under `.worktrees/` → path relative to `.worktrees/` (e.g. "feat-auth" or "group/feat-auth")
+/// - Otherwise → relative path from repo root
+pub fn shorten_path(path: &Path, repo_root: &Path) -> String {
+    if path == repo_root {
+        return ".".to_string();
+    }
+    let rel = path
+        .strip_prefix(repo_root)
+        .unwrap_or(path)
+        .to_string_lossy();
+    match rel.strip_prefix(".worktrees/") {
+        Some(name) => name.to_string(),
+        None => rel.into_owned(),
     }
 }
 
@@ -321,5 +342,39 @@ mod tests {
         assert_eq!(workspace_indicator(1), "●");
         assert_eq!(workspace_indicator(2), "2");
         assert_eq!(workspace_indicator(10), "10");
+    }
+
+    #[test]
+    fn shorten_path_main_checkout() {
+        let root = Path::new("/home/user/project");
+        assert_eq!(shorten_path(root, root), ".");
+    }
+
+    #[test]
+    fn shorten_path_worktree() {
+        let root = Path::new("/home/user/project");
+        let wt = Path::new("/home/user/project/.worktrees/feat-auth");
+        assert_eq!(shorten_path(wt, root), "feat-auth");
+    }
+
+    #[test]
+    fn shorten_path_relative() {
+        let root = Path::new("/home/user/project");
+        let sub = Path::new("/home/user/project/sub/dir");
+        assert_eq!(shorten_path(sub, root), "sub/dir");
+    }
+
+    #[test]
+    fn shorten_path_nested_worktree() {
+        let root = Path::new("/home/user/project");
+        let wt = Path::new("/home/user/project/.worktrees/group/feat-auth");
+        assert_eq!(shorten_path(wt, root), "group/feat-auth");
+    }
+
+    #[test]
+    fn shorten_path_outside_root() {
+        let root = Path::new("/home/user/project");
+        let other = Path::new("/elsewhere/wt");
+        assert_eq!(shorten_path(other, root), "/elsewhere/wt");
     }
 }
