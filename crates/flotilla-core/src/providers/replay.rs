@@ -245,6 +245,87 @@ impl Replayer {
     }
 }
 
+/// A recorder that captures interactions with round barriers and masking.
+#[derive(Clone)]
+pub struct Recorder {
+    inner: Arc<Mutex<RecorderInner>>,
+}
+
+struct RecorderInner {
+    rounds: Vec<Vec<Interaction>>,
+    current: Vec<Interaction>,
+    masks: Masks,
+    file_path: PathBuf,
+}
+
+impl Recorder {
+    /// Create a new recorder that will write to the given path.
+    pub fn new(path: impl AsRef<Path>, masks: Masks) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RecorderInner {
+                rounds: Vec::new(),
+                current: Vec::new(),
+                masks,
+                file_path: path.as_ref().to_path_buf(),
+            })),
+        }
+    }
+
+    /// Record a new interaction, applying masks before storing.
+    pub(crate) fn record(&self, interaction: Interaction) {
+        let mut inner = self.inner.lock().expect("recorder lock poisoned");
+        let masked = mask_interaction(&interaction, &inner.masks);
+        inner.current.push(masked);
+    }
+
+    /// Close the current round and start a new one.
+    pub fn barrier(&self) {
+        let mut inner = self.inner.lock().expect("recorder lock poisoned");
+        if !inner.current.is_empty() {
+            let round = std::mem::take(&mut inner.current);
+            inner.rounds.push(round);
+        }
+    }
+
+    /// Finalize and write recorded interactions to the YAML file.
+    /// Sorts interactions within each round by channel label for deterministic output.
+    pub fn save(&self) {
+        let mut inner = self.inner.lock().expect("recorder lock poisoned");
+        // Flush any remaining current interactions as a final round
+        if !inner.current.is_empty() {
+            let round = std::mem::take(&mut inner.current);
+            inner.rounds.push(round);
+        }
+
+        // Sort each round's interactions by channel label for deterministic output
+        for round in &mut inner.rounds {
+            round.sort_by(|a, b| a.channel_label().cmp(&b.channel_label()));
+        }
+
+        let round_log = RoundLog {
+            rounds: inner
+                .rounds
+                .iter()
+                .map(|interactions| InteractionLog {
+                    interactions: interactions.clone(),
+                })
+                .collect(),
+        };
+
+        let yaml =
+            serde_yml::to_string(&round_log).expect("Failed to serialize recorded interactions");
+        if let Some(parent) = inner.file_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&inner.file_path, yaml).unwrap_or_else(|e| {
+            panic!(
+                "Failed to write fixture {}: {e}",
+                inner.file_path.display()
+            )
+        });
+    }
+}
+
 /// Shared session state, holding the interaction log and current read position.
 struct SessionInner {
     log: InteractionLog,
@@ -1591,5 +1672,90 @@ rounds:
         }
 
         replayer.assert_complete();
+    }
+
+    #[test]
+    fn recorder_saves_single_round() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("recorded.yaml");
+
+        let recorder = Recorder::new(&path, Masks::new());
+        recorder.record(Interaction::Command {
+            cmd: "git".into(),
+            args: vec!["status".into()],
+            cwd: "/repo".into(),
+            stdout: Some("ok\n".into()),
+            stderr: None,
+            exit_code: 0,
+        });
+        recorder.save();
+
+        let content = std::fs::read_to_string(&path).expect("read fixture");
+        let round_log: RoundLog =
+            serde_yml::from_str(&content).expect("parse fixture");
+        assert_eq!(round_log.rounds.len(), 1);
+        assert_eq!(round_log.rounds[0].interactions.len(), 1);
+    }
+
+    #[test]
+    fn recorder_saves_multi_round_with_barriers() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("recorded.yaml");
+
+        let recorder = Recorder::new(&path, Masks::new());
+        recorder.record(Interaction::Command {
+            cmd: "git".into(),
+            args: vec!["status".into()],
+            cwd: "/repo".into(),
+            stdout: Some("ok\n".into()),
+            stderr: None,
+            exit_code: 0,
+        });
+        recorder.barrier();
+        recorder.record(Interaction::GhApi {
+            method: "GET".into(),
+            endpoint: "/repos/owner/repo/pulls".into(),
+            status: 200,
+            body: "[]".into(),
+            headers: HashMap::new(),
+        });
+        recorder.save();
+
+        let content = std::fs::read_to_string(&path).expect("read fixture");
+        let round_log: RoundLog =
+            serde_yml::from_str(&content).expect("parse fixture");
+        assert_eq!(round_log.rounds.len(), 2);
+        assert_eq!(round_log.rounds[0].interactions.len(), 1);
+        assert_eq!(round_log.rounds[1].interactions.len(), 1);
+    }
+
+    #[test]
+    fn recorder_applies_masks() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("recorded.yaml");
+
+        let mut masks = Masks::new();
+        masks.add("/Users/bob/dev/repo", "{repo}");
+
+        let recorder = Recorder::new(&path, masks);
+        recorder.record(Interaction::Command {
+            cmd: "git".into(),
+            args: vec!["status".into()],
+            cwd: "/Users/bob/dev/repo".into(),
+            stdout: Some("ok\n".into()),
+            stderr: None,
+            exit_code: 0,
+        });
+        recorder.save();
+
+        let content = std::fs::read_to_string(&path).expect("read fixture");
+        assert!(
+            content.contains("{repo}"),
+            "expected masked value in output"
+        );
+        assert!(
+            !content.contains("/Users/bob/dev/repo"),
+            "expected concrete value to be masked"
+        );
     }
 }
