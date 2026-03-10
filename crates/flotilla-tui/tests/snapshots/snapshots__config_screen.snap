@@ -12,10 +12,10 @@ expression: output
 │Coding agent    Claude                                                ││                                              │
 │AI utility      —                                                     ││                                              │
 │Workspace mgr   —                                                     ││                                              │
+│Terminal pool   —                                                     ││                                              │
 │                                                                      ││                                              │
 │── Coding Agent Status ──                                             ││                                              │
 │Claude          ✓ authenticated                                       ││                                              │
-│                                                                      ││                                              │
 │                                                                      ││                                              │
 │                                                                      ││                                              │
 │                                                                      ││                                              │
