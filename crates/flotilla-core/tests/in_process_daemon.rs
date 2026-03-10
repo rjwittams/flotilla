@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use flotilla_core::config::ConfigStore;
@@ -6,17 +7,26 @@ use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::in_process::InProcessDaemon;
 use flotilla_protocol::{Command, DaemonEvent};
 
-#[tokio::test]
-async fn daemon_broadcasts_snapshots() {
+async fn daemon_for_cwd() -> (PathBuf, Arc<InProcessDaemon>) {
     let repo = std::env::current_dir().unwrap();
     let config = Arc::new(ConfigStore::new());
     let daemon = InProcessDaemon::new(vec![repo.clone()], config).await;
+    (repo, daemon)
+}
+
+async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>) -> DaemonEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+        .await
+        .expect("timeout waiting for event")
+        .expect("recv error")
+}
+
+#[tokio::test]
+async fn daemon_broadcasts_snapshots() {
+    let (repo, daemon) = daemon_for_cwd().await;
     let mut rx = daemon.subscribe();
 
-    let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
-        .await
-        .expect("timeout waiting for snapshot")
-        .expect("recv error");
+    let event = recv_event(&mut rx).await;
 
     match event {
         DaemonEvent::SnapshotFull(snap) => {
@@ -33,9 +43,7 @@ async fn daemon_broadcasts_snapshots() {
 
 #[tokio::test]
 async fn execute_broadcasts_lifecycle_events() {
-    let repo = std::env::current_dir().unwrap();
-    let config = Arc::new(ConfigStore::new());
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config).await;
+    let (repo, daemon) = daemon_for_cwd().await;
     let mut rx = daemon.subscribe();
 
     // Execute a command that goes through the spawned task path.
@@ -111,16 +119,11 @@ async fn execute_broadcasts_lifecycle_events() {
 
 #[tokio::test]
 async fn replay_since_returns_full_snapshot_for_unknown_seq() {
-    let repo = std::env::current_dir().unwrap();
-    let config = Arc::new(ConfigStore::new());
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config).await;
+    let (repo, daemon) = daemon_for_cwd().await;
 
     // Wait for at least one broadcast so the daemon has state
     let mut rx = daemon.subscribe();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
-        .await
-        .expect("timeout")
-        .expect("recv");
+    let _ = recv_event(&mut rx).await;
 
     // Request replay with a seq that won't be in the delta log
     let last_seen = HashMap::from([(repo.clone(), 999999)]);
@@ -137,16 +140,11 @@ async fn replay_since_returns_full_snapshot_for_unknown_seq() {
 
 #[tokio::test]
 async fn replay_since_returns_full_snapshot_for_new_repo() {
-    let repo = std::env::current_dir().unwrap();
-    let config = Arc::new(ConfigStore::new());
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config).await;
+    let (repo, daemon) = daemon_for_cwd().await;
 
     // Wait for at least one broadcast
     let mut rx = daemon.subscribe();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
-        .await
-        .expect("timeout")
-        .expect("recv");
+    let _ = recv_event(&mut rx).await;
 
     // Request replay with empty last_seen (new client)
     let events = daemon
@@ -165,16 +163,11 @@ async fn replay_since_returns_full_snapshot_for_new_repo() {
 
 #[tokio::test]
 async fn replay_since_returns_empty_when_up_to_date() {
-    let repo = std::env::current_dir().unwrap();
-    let config = Arc::new(ConfigStore::new());
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config).await;
+    let (repo, daemon) = daemon_for_cwd().await;
 
     // Wait for the first snapshot to get the current seq
     let mut rx = daemon.subscribe();
-    let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
-        .await
-        .expect("timeout")
-        .expect("recv");
+    let event = recv_event(&mut rx).await;
 
     let current_seq = match event {
         DaemonEvent::SnapshotFull(snap) => snap.seq,
@@ -250,16 +243,11 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
 
 #[tokio::test]
 async fn inline_issue_command_returns_zero_and_skips_lifecycle_events() {
-    let repo = std::env::current_dir().unwrap();
-    let config = Arc::new(ConfigStore::new());
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config).await;
+    let (repo, daemon) = daemon_for_cwd().await;
     let mut rx = daemon.subscribe();
 
     // Wait for initial snapshot event before issuing command.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
-        .await
-        .expect("timeout")
-        .expect("recv");
+    let _ = recv_event(&mut rx).await;
 
     let command_id = daemon
         .execute(&repo, Command::ClearIssueSearch { repo: repo.clone() })

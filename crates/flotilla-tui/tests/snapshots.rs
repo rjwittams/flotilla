@@ -1,10 +1,19 @@
 mod support;
 
 use flotilla_protocol::{ProviderData, SessionStatus};
-use flotilla_tui::app::{DirEntry, InFlightCommand, Intent, ProviderStatus, UiMode};
+use flotilla_tui::app::{InFlightCommand, Intent, ProviderStatus, UiMode};
 use std::path::PathBuf;
 use support::*;
 use tui_input::Input;
+
+fn picker_entry(name: &str, is_git_repo: bool, is_added: bool) -> flotilla_tui::app::DirEntry {
+    flotilla_tui::app::DirEntry {
+        name: name.to_string(),
+        is_dir: true,
+        is_git_repo,
+        is_added,
+    }
+}
 
 #[test]
 fn empty_state() {
@@ -221,19 +230,9 @@ fn file_picker_popup() {
     let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::FilePicker {
         input: Input::from("/test"),
         dir_entries: vec![
-            DirEntry {
-                name: "repo-a".into(),
-                is_dir: true,
-                is_git_repo: true,
-                is_added: false,
-            },
-            DirEntry {
-                name: "repo-b".into(),
-                is_dir: true,
-                is_git_repo: true,
-                is_added: true,
-            },
-            DirEntry {
+            picker_entry("repo-a", true, false),
+            picker_entry("repo-b", true, true),
+            flotilla_tui::app::DirEntry {
                 name: "notes.txt".into(),
                 is_dir: false,
                 is_git_repo: false,

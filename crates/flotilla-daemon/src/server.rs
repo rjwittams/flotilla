@@ -401,6 +401,13 @@ mod tests {
         }
     }
 
+    async fn empty_daemon() -> (tempfile::TempDir, Arc<InProcessDaemon>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
+        let daemon = InProcessDaemon::new(vec![], config).await;
+        (tmp, daemon)
+    }
+
     #[tokio::test]
     async fn write_message_writes_json_line() {
         let (a, b) = tokio::net::UnixStream::pair().expect("pair");
@@ -439,9 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_request_handles_unknown_and_missing_params() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-        let daemon = InProcessDaemon::new(vec![], config).await;
+        let (_tmp, daemon) = empty_daemon().await;
 
         let unknown = dispatch_request(&daemon, 1, "not_a_method", serde_json::json!({})).await;
         match unknown {
@@ -486,11 +491,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_add_list_remove_repo_round_trip() {
-        let tmp = tempfile::tempdir().unwrap();
+        let (tmp, daemon) = empty_daemon().await;
         let repo_path = tmp.path().join("repo-a");
         std::fs::create_dir_all(&repo_path).unwrap();
-        let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-        let daemon = InProcessDaemon::new(vec![], config).await;
 
         let add = dispatch_request(
             &daemon,
@@ -530,9 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_replay_since_with_bad_payload_degrades_to_empty_last_seen() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-        let daemon = InProcessDaemon::new(vec![], config).await;
+        let (_tmp, daemon) = empty_daemon().await;
 
         let replay = dispatch_request(
             &daemon,

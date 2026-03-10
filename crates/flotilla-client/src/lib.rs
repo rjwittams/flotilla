@@ -685,6 +685,17 @@ mod tests {
     use flotilla_protocol::{Snapshot, SnapshotDelta};
     use tokio::net::UnixStream;
 
+    type SharedWriter = Arc<Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>>;
+    type SharedPending = Arc<Mutex<HashMap<u64, oneshot::Sender<RawResponse>>>>;
+    type RequestLines = tokio::io::Lines<BufReader<UnixStream>>;
+
+    struct RequestHarness {
+        writer: SharedWriter,
+        pending: SharedPending,
+        next_id: Arc<AtomicU64>,
+        lines: RequestLines,
+    }
+
     fn make_snapshot(repo: &Path, seq: u64) -> Snapshot {
         Snapshot {
             seq,
@@ -712,18 +723,46 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn send_request_writes_message_and_returns_pending_response() {
+    fn request_harness() -> RequestHarness {
         let (client, server) = UnixStream::pair().expect("pair");
         let (_read_half, write_half) = client.into_split();
-        let writer = Arc::new(Mutex::new(BufWriter::new(write_half)));
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let next_id = Arc::new(AtomicU64::new(1));
-        let mut lines = BufReader::new(server).lines();
+        RequestHarness {
+            writer: Arc::new(Mutex::new(BufWriter::new(write_half))),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(1)),
+            lines: BufReader::new(server).lines(),
+        }
+    }
 
-        let request_writer = Arc::clone(&writer);
-        let request_pending = Arc::clone(&pending);
-        let request_next_id = Arc::clone(&next_id);
+    fn event_harness() -> (SharedWriter, SharedPending, Arc<AtomicU64>) {
+        let (client, _server) = UnixStream::pair().expect("pair");
+        let (_read_half, write_half) = client.into_split();
+        (
+            Arc::new(Mutex::new(BufWriter::new(write_half))),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(1)),
+        )
+    }
+
+    async fn read_request(lines: &mut RequestLines) -> (u64, String, serde_json::Value) {
+        let line = lines
+            .next_line()
+            .await
+            .expect("read request line")
+            .expect("line missing");
+        match serde_json::from_str::<Message>(&line).expect("parse request") {
+            Message::Request { id, method, params } => (id, method, params),
+            other => panic!("expected request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_request_writes_message_and_returns_pending_response() {
+        let mut harness = request_harness();
+
+        let request_writer = Arc::clone(&harness.writer);
+        let request_pending = Arc::clone(&harness.pending);
+        let request_next_id = Arc::clone(&harness.next_id);
         let request_task = tokio::spawn(async move {
             send_request(
                 &request_writer,
@@ -735,22 +774,12 @@ mod tests {
             .await
         });
 
-        let line = lines
-            .next_line()
-            .await
-            .expect("read request line")
-            .expect("line missing");
-        let msg: Message = serde_json::from_str(&line).expect("parse request");
-        let id = match msg {
-            Message::Request { id, method, params } => {
-                assert_eq!(method, "list_repos");
-                assert_eq!(params["x"], 1);
-                id
-            }
-            other => panic!("expected request, got {other:?}"),
-        };
+        let (id, method, params) = read_request(&mut harness.lines).await;
+        assert_eq!(method, "list_repos");
+        assert_eq!(params["x"], 1);
 
-        let tx = pending
+        let tx = harness
+            .pending
             .lock()
             .await
             .remove(&id)
@@ -769,16 +798,11 @@ mod tests {
 
     #[tokio::test]
     async fn send_request_returns_cancelled_when_sender_is_dropped() {
-        let (client, server) = UnixStream::pair().expect("pair");
-        let (_read_half, write_half) = client.into_split();
-        let writer = Arc::new(Mutex::new(BufWriter::new(write_half)));
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let next_id = Arc::new(AtomicU64::new(1));
-        let mut lines = BufReader::new(server).lines();
+        let mut harness = request_harness();
 
-        let request_writer = Arc::clone(&writer);
-        let request_pending = Arc::clone(&pending);
-        let request_next_id = Arc::clone(&next_id);
+        let request_writer = Arc::clone(&harness.writer);
+        let request_pending = Arc::clone(&harness.pending);
+        let request_next_id = Arc::clone(&harness.next_id);
         let task = tokio::spawn(async move {
             send_request(
                 &request_writer,
@@ -790,21 +814,10 @@ mod tests {
             .await
         });
 
-        let line = lines
-            .next_line()
-            .await
-            .expect("read request line")
-            .expect("line missing");
-        let msg: Message = serde_json::from_str(&line).expect("parse request");
-        let id = match msg {
-            Message::Request { id, method, .. } => {
-                assert_eq!(method, "never_replied");
-                id
-            }
-            other => panic!("expected request, got {other:?}"),
-        };
+        let (id, method, _) = read_request(&mut harness.lines).await;
+        assert_eq!(method, "never_replied");
 
-        let dropped = pending.lock().await.remove(&id);
+        let dropped = harness.pending.lock().await.remove(&id);
         drop(dropped);
         let err = task
             .await
@@ -820,11 +833,7 @@ mod tests {
         let recovering: Arc<std::sync::Mutex<HashMap<PathBuf, Vec<DaemonEvent>>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
         let (event_tx, mut event_rx) = broadcast::channel(16);
-        let (client, _server) = UnixStream::pair().expect("pair");
-        let (_read_half, write_half) = client.into_split();
-        let writer = Arc::new(Mutex::new(BufWriter::new(write_half)));
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let next_id = Arc::new(AtomicU64::new(1));
+        let (writer, pending, next_id) = event_harness();
 
         handle_event(
             DaemonEvent::SnapshotFull(Box::new(make_snapshot(&repo, 10))),
@@ -861,11 +870,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(HashMap::new()));
         recovering.lock().unwrap().insert(repo.clone(), vec![]);
         let (event_tx, mut event_rx) = broadcast::channel(16);
-        let (client, _server) = UnixStream::pair().expect("pair");
-        let (_read_half, write_half) = client.into_split();
-        let writer = Arc::new(Mutex::new(BufWriter::new(write_half)));
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let next_id = Arc::new(AtomicU64::new(1));
+        let (writer, pending, next_id) = event_harness();
 
         handle_event(
             DaemonEvent::SnapshotDelta(Box::new(make_delta(&repo, 99, 100))),
@@ -897,18 +902,13 @@ mod tests {
         local_seqs.write().unwrap().insert(repo.clone(), 3);
         let (event_tx, mut event_rx) = broadcast::channel(16);
 
-        let (client, server) = UnixStream::pair().expect("pair");
-        let (_read_half, write_half) = client.into_split();
-        let writer = Arc::new(Mutex::new(BufWriter::new(write_half)));
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let next_id = Arc::new(AtomicU64::new(1));
-        let mut lines = BufReader::new(server).lines();
+        let mut harness = request_harness();
 
         let recover_local_seqs = Arc::clone(&local_seqs);
         let recover_event_tx = event_tx.clone();
-        let recover_writer = Arc::clone(&writer);
-        let recover_pending = Arc::clone(&pending);
-        let recover_next_id = Arc::clone(&next_id);
+        let recover_writer = Arc::clone(&harness.writer);
+        let recover_pending = Arc::clone(&harness.pending);
+        let recover_next_id = Arc::clone(&harness.next_id);
         let recover_task = tokio::spawn(async move {
             recover_from_gap(
                 &recover_local_seqs,
@@ -920,24 +920,14 @@ mod tests {
             .await;
         });
 
-        let line = lines
-            .next_line()
-            .await
-            .expect("read replay request")
-            .expect("line");
-        let msg: Message = serde_json::from_str(&line).expect("parse replay request");
-        let id = match msg {
-            Message::Request { id, method, .. } => {
-                assert_eq!(method, "replay_since");
-                id
-            }
-            other => panic!("expected request, got {other:?}"),
-        };
+        let (id, method, _) = read_request(&mut harness.lines).await;
+        assert_eq!(method, "replay_since");
 
         let replay_events = vec![DaemonEvent::SnapshotDelta(Box::new(make_delta(
             &repo, 3, 4,
         )))];
-        let tx = pending
+        let tx = harness
+            .pending
             .lock()
             .await
             .remove(&id)

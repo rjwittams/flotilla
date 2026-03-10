@@ -416,69 +416,13 @@ impl super::CodingAgent for ClaudeCodingAgent {
 mod tests {
     use super::*;
     use crate::providers::coding_agent::CodingAgent;
-    use crate::providers::CommandOutput;
-    use async_trait::async_trait;
     use std::collections::{HashMap, VecDeque};
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex as AsyncMutex;
 
     static TEST_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
-
-    struct QueueRunner {
-        responses: Mutex<VecDeque<Result<String, String>>>,
-        calls: AtomicUsize,
-    }
-
-    impl QueueRunner {
-        fn new(responses: Vec<Result<String, String>>) -> Self {
-            Self {
-                responses: Mutex::new(responses.into()),
-                calls: AtomicUsize::new(0),
-            }
-        }
-
-        fn call_count(&self) -> usize {
-            self.calls.load(Ordering::Relaxed)
-        }
-    }
-
-    #[async_trait]
-    impl CommandRunner for QueueRunner {
-        async fn run(&self, _cmd: &str, _args: &[&str], _cwd: &Path) -> Result<String, String> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            self.responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("QueueRunner: no more queued responses")
-        }
-
-        async fn run_output(
-            &self,
-            cmd: &str,
-            args: &[&str],
-            cwd: &Path,
-        ) -> Result<CommandOutput, String> {
-            match self.run(cmd, args, cwd).await {
-                Ok(stdout) => Ok(CommandOutput {
-                    stdout,
-                    stderr: String::new(),
-                    success: true,
-                }),
-                Err(stderr) => Ok(CommandOutput {
-                    stdout: String::new(),
-                    stderr,
-                    success: false,
-                }),
-            }
-        }
-
-        async fn exists(&self, _cmd: &str, _args: &[&str]) -> bool {
-            true
-        }
-    }
 
     #[derive(Debug, Clone)]
     struct TestResponse {
@@ -628,23 +572,32 @@ mod tests {
         AUTH_WARNED.store(false, Ordering::Relaxed);
     }
 
+    fn mock_runner(
+        responses: Vec<Result<String, String>>,
+    ) -> crate::providers::testing::MockRunner {
+        crate::providers::testing::MockRunner::new(responses)
+    }
+
+    fn mock_runner_arc(responses: Vec<Result<String, String>>) -> Arc<dyn CommandRunner> {
+        Arc::new(mock_runner(responses))
+    }
+
     #[tokio::test]
     async fn oauth_token_is_cached_until_near_expiry() {
         let _test_lock = TEST_LOCK.lock().await;
         reset_auth_state();
-        let runner = QueueRunner::new(vec![Ok(token_json("token-1", now_epoch_secs() + 3600))]);
+        let runner = mock_runner(vec![Ok(token_json("token-1", now_epoch_secs() + 3600))]);
         let token1 = get_oauth_token(&runner).await.expect("first token");
         let token2 = get_oauth_token(&runner).await.expect("cached token");
         assert_eq!(token1.access_token, "token-1");
         assert_eq!(token2.access_token, "token-1");
-        assert_eq!(runner.call_count(), 1, "keychain should be queried once");
     }
 
     #[tokio::test]
     async fn oauth_token_refreshes_when_expiring_soon() {
         let _test_lock = TEST_LOCK.lock().await;
         reset_auth_state();
-        let runner = QueueRunner::new(vec![
+        let runner = mock_runner(vec![
             Ok(token_json("old-token", now_epoch_secs() + 10)),
             Ok(token_json("new-token", now_epoch_secs() + 3600)),
         ]);
@@ -652,14 +605,13 @@ mod tests {
         let second = get_oauth_token(&runner).await.expect("refreshed token");
         assert_eq!(first.access_token, "old-token");
         assert_eq!(second.access_token, "new-token");
-        assert_eq!(runner.call_count(), 2, "expiring token should be refreshed");
     }
 
     #[tokio::test]
     async fn fetch_sessions_inner_filters_archived_sorts_and_sends_auth_header() {
         let _test_lock = TEST_LOCK.lock().await;
         reset_auth_state();
-        let runner = QueueRunner::new(vec![Ok(token_json("abc123", now_epoch_secs() + 3600))]);
+        let runner = mock_runner(vec![Ok(token_json("abc123", now_epoch_secs() + 3600))]);
         let body = serde_json::json!({
             "data": [
                 {
@@ -712,11 +664,11 @@ mod tests {
     async fn fetch_sessions_retries_after_auth_error() {
         let _test_lock = TEST_LOCK.lock().await;
         reset_auth_state();
-        let runner = QueueRunner::new(vec![
+        let runner = mock_runner(vec![
             Ok(token_json("expired", now_epoch_secs() + 3600)),
             Ok(token_json("fresh", now_epoch_secs() + 3600)),
         ]);
-        let (base_url, _captured, server_task) = spawn_test_server(vec![
+        let (base_url, captured, server_task) = spawn_test_server(vec![
             TestResponse {
                 status: 401,
                 body: "{}".to_string(),
@@ -735,10 +687,15 @@ mod tests {
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "s1");
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
         assert_eq!(
-            runner.call_count(),
-            2,
-            "auth retry should re-read keychain token"
+            captured[0].headers.get("authorization").map(String::as_str),
+            Some("Bearer expired")
+        );
+        assert_eq!(
+            captured[1].headers.get("authorization").map(String::as_str),
+            Some("Bearer fresh")
         );
     }
 
@@ -746,11 +703,11 @@ mod tests {
     async fn fetch_sessions_returns_empty_after_second_auth_error() {
         let _test_lock = TEST_LOCK.lock().await;
         reset_auth_state();
-        let runner = QueueRunner::new(vec![
+        let runner = mock_runner(vec![
             Ok(token_json("bad-1", now_epoch_secs() + 3600)),
             Ok(token_json("bad-2", now_epoch_secs() + 3600)),
         ]);
-        let (base_url, _captured, server_task) = spawn_test_server(vec![
+        let (base_url, captured, server_task) = spawn_test_server(vec![
             TestResponse {
                 status: 403,
                 body: "{}".to_string(),
@@ -768,14 +725,23 @@ mod tests {
         server_task.await.expect("server task");
 
         assert!(sessions.is_empty());
-        assert_eq!(runner.call_count(), 2);
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(
+            captured[0].headers.get("authorization").map(String::as_str),
+            Some("Bearer bad-1")
+        );
+        assert_eq!(
+            captured[1].headers.get("authorization").map(String::as_str),
+            Some("Bearer bad-2")
+        );
     }
 
     #[tokio::test]
     async fn list_sessions_uses_cache_and_maps_fields() {
         let _test_lock = TEST_LOCK.lock().await;
         reset_auth_state();
-        let runner = Arc::new(QueueRunner::new(vec![]));
+        let runner = mock_runner_arc(vec![]);
         let agent = ClaudeCodingAgent::new("claude".into(), runner);
         {
             let mut cache = agent.sessions_cache.lock().unwrap();
@@ -858,10 +824,10 @@ mod tests {
     async fn archive_session_sends_patch_and_returns_error_on_failure() {
         let _test_lock = TEST_LOCK.lock().await;
         reset_auth_state();
-        let runner = Arc::new(QueueRunner::new(vec![
+        let runner = mock_runner_arc(vec![
             Ok(token_json("archive-token", now_epoch_secs() + 3600)),
             Ok(token_json("archive-token", now_epoch_secs() + 3600)),
-        ]));
+        ]);
         let agent = ClaudeCodingAgent::new("claude".into(), runner);
         let (base_url, captured, server_task) = spawn_test_server(vec![
             TestResponse {
@@ -901,7 +867,7 @@ mod tests {
     #[tokio::test]
     async fn attach_command_formats_teleport_command() {
         let _test_lock = TEST_LOCK.lock().await;
-        let runner = Arc::new(QueueRunner::new(vec![]));
+        let runner = mock_runner_arc(vec![]);
         let agent = ClaudeCodingAgent::new("claude".into(), runner);
         let cmd = agent
             .attach_command("abc123")
