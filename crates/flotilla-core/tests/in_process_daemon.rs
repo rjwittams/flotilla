@@ -188,3 +188,130 @@ async fn replay_since_returns_empty_when_up_to_date() {
 
     assert!(events.is_empty(), "should be empty when up to date");
 }
+
+#[tokio::test]
+async fn add_and_remove_repo_updates_state_and_emits_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("new-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![], config).await;
+    let mut rx = daemon.subscribe();
+
+    daemon
+        .add_repo(&repo)
+        .await
+        .expect("add_repo should succeed");
+
+    let added = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::RepoAdded(info)) => break *info,
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for RepoAdded");
+    assert_eq!(added.path, repo);
+
+    let repos = daemon.list_repos().await.expect("list_repos after add");
+    assert_eq!(repos.len(), 1);
+    assert_eq!(repos[0].path, repo);
+
+    daemon
+        .remove_repo(&repo)
+        .await
+        .expect("remove_repo should succeed");
+    let removed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::RepoRemoved { path }) => break path,
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for RepoRemoved");
+    assert_eq!(removed, repo);
+
+    let repos = daemon.list_repos().await.expect("list_repos after remove");
+    assert!(repos.is_empty());
+
+    let err = daemon
+        .remove_repo(&repo)
+        .await
+        .expect_err("removing missing repo should fail");
+    assert!(err.contains("repo not tracked"));
+}
+
+#[tokio::test]
+async fn inline_issue_command_returns_zero_and_skips_lifecycle_events() {
+    let repo = std::env::current_dir().unwrap();
+    let config = Arc::new(ConfigStore::new());
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config).await;
+    let mut rx = daemon.subscribe();
+
+    // Wait for initial snapshot event before issuing command.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+        .await
+        .expect("timeout")
+        .expect("recv");
+
+    let command_id = daemon
+        .execute(&repo, Command::ClearIssueSearch { repo: repo.clone() })
+        .await
+        .expect("inline command should succeed");
+    assert_eq!(command_id, 0, "inline issue commands should return id=0");
+
+    // Inline commands should not emit CommandStarted/Finished lifecycle events.
+    let no_lifecycle = tokio::time::timeout(std::time::Duration::from_millis(300), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::CommandStarted { .. })
+                | Ok(DaemonEvent::CommandFinished { .. }) => {
+                    return false;
+                }
+                Ok(_) => {}
+                Err(_) => return true,
+            }
+        }
+    })
+    .await;
+    assert!(
+        no_lifecycle.is_err() || no_lifecycle.unwrap(),
+        "inline command unexpectedly emitted lifecycle event"
+    );
+}
+
+#[tokio::test]
+async fn execute_on_untracked_repo_returns_error_without_started_event() {
+    let config = Arc::new(ConfigStore::new());
+    let daemon = InProcessDaemon::new(vec![], config).await;
+    let mut rx = daemon.subscribe();
+    let repo = std::path::PathBuf::from("/tmp/does-not-exist-for-daemon-test");
+
+    let err = daemon
+        .execute(&repo, Command::Refresh)
+        .await
+        .expect_err("untracked repo should fail");
+    assert!(err.contains("repo not tracked"));
+
+    let started = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::CommandStarted { .. }) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    })
+    .await;
+    assert!(
+        started.is_err() || !started.unwrap(),
+        "should not emit CommandStarted for invalid repo"
+    );
+}
