@@ -1,8 +1,10 @@
 mod support;
 
 use flotilla_protocol::{ProviderData, SessionStatus};
-use flotilla_tui::app::{Intent, ProviderStatus, UiMode};
+use flotilla_tui::app::{DirEntry, InFlightCommand, Intent, ProviderStatus, UiMode};
+use std::path::PathBuf;
 use support::*;
+use tui_input::Input;
 
 #[test]
 fn empty_state() {
@@ -161,6 +163,138 @@ fn preview_session() {
 
     let items = vec![item];
     let mut harness = TestHarness::single_repo("my-project").with_provider_data(providers, items);
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn status_bar_with_multiple_in_flight_commands() {
+    let mut harness = TestHarness::single_repo("my-project");
+    harness.in_flight.insert(
+        1,
+        InFlightCommand {
+            repo: PathBuf::from("/test/my-project"),
+            description: "Refreshing repository...".into(),
+        },
+    );
+    harness.in_flight.insert(
+        2,
+        InFlightCommand {
+            repo: PathBuf::from("/test/my-project"),
+            description: "Refreshing repository...".into(),
+        },
+    );
+    harness.in_flight.insert(
+        3,
+        InFlightCommand {
+            repo: PathBuf::from("/test/other-project"),
+            description: "Should not render".into(),
+        },
+    );
+
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn branch_input_generating_popup() {
+    let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::BranchInput {
+        input: Input::from("feature/new-branch"),
+        generating: true,
+        pending_issue_ids: vec![],
+    });
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn issue_search_mode_status_bar() {
+    let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::IssueSearch {
+        input: Input::from("auth timeout"),
+    });
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn file_picker_popup() {
+    let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::FilePicker {
+        input: Input::from("/test"),
+        dir_entries: vec![
+            DirEntry {
+                name: "repo-a".into(),
+                is_dir: true,
+                is_git_repo: true,
+                is_added: false,
+            },
+            DirEntry {
+                name: "repo-b".into(),
+                is_dir: true,
+                is_git_repo: true,
+                is_added: true,
+            },
+            DirEntry {
+                name: "notes.txt".into(),
+                is_dir: false,
+                is_git_repo: false,
+                is_added: false,
+            },
+        ],
+        selected: 1,
+    });
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn delete_confirm_safe_to_delete() {
+    let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::DeleteConfirm {
+        info: Some(flotilla_protocol::CheckoutStatus {
+            branch: "feat-cleanup".into(),
+            change_request_status: Some("MERGED".into()),
+            merge_commit_sha: Some("abc1234".into()),
+            unpushed_commits: vec![],
+            has_uncommitted: false,
+            base_detection_warning: None,
+        }),
+        loading: false,
+    });
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn providers_overlay() {
+    let mut harness = TestHarness::single_repo("my-project")
+        .with_provider_names(
+            "my-project",
+            vec![
+                ("vcs", "Git"),
+                ("checkout_manager", "Git Worktrees"),
+                ("code_review", "GitHub"),
+                ("coding_agent", "Claude"),
+            ],
+        )
+        .with_provider_status("my-project", "coding_agent", "Claude", ProviderStatus::Ok)
+        .with_provider_status("my-project", "code_review", "GitHub", ProviderStatus::Error);
+    let repo = harness.model.repo_order[0].clone();
+    harness.ui.repo_ui.get_mut(&repo).unwrap().show_providers = true;
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn debug_panel_with_correlation_details() {
+    let mut item = support::checkout_item("feat-xyz", "/test/my-project/feat-xyz", false);
+    item.description = "Feature branch checkout".into();
+    item.debug_group = vec![
+        "Group #12".into(),
+        "branch: feat-xyz".into(),
+        "checkout: /test/my-project/feat-xyz".into(),
+    ];
+    let mut harness = TestHarness::single_repo("my-project")
+        .with_provider_data(ProviderData::default(), vec![item]);
+    harness.ui.show_debug = true;
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
 }
