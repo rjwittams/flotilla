@@ -635,6 +635,52 @@ impl CodexCodingAgent {
         Ok(envs.into_iter().map(|e| e.id).collect())
     }
 
+    /// Fetch a single page from the tasks list endpoint, returning items and cursor.
+    async fn fetch_tasks_page(
+        &self,
+        base_query: &str,
+        cursor: Option<&str>,
+        auth: &CodexAuth,
+    ) -> Result<TaskListResponse, String> {
+        let mut url = format!("{BASE_URL}/wham/tasks/list?task_filter=current&limit=20&{base_query}");
+        if let Some(c) = cursor {
+            url.push_str("&cursor=");
+            url.push_str(&urlencoding::encode(c));
+        }
+        let request = self.build_request("GET", &url, auth)?;
+        let resp = self.http.execute(request).await?;
+        let status = resp.status().as_u16();
+        if status == 401 || status == 403 {
+            return Err(format!("authentication error (HTTP {status})"));
+        }
+        if !resp.status().is_success() {
+            let body = String::from_utf8_lossy(resp.body()).to_string();
+            return Err(format!("task list failed (HTTP {status}): {body}"));
+        }
+        serde_json::from_slice(resp.body())
+            .map_err(|e| format!("task list parse error: {e}"))
+    }
+
+    /// Paginate through all tasks matching a base query string.
+    async fn fetch_all_tasks(
+        &self,
+        base_query: &str,
+        auth: &CodexAuth,
+    ) -> Result<Vec<TaskItem>, String> {
+        let mut all_items = Vec::new();
+        let mut cursor: Option<String> = None;
+        // Cap pages to avoid runaway loops (same as Cursor provider).
+        for _ in 0..10 {
+            let page = self.fetch_tasks_page(base_query, cursor.as_deref(), auth).await?;
+            all_items.extend(page.items);
+            cursor = page.cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(all_items)
+    }
+
     /// Fallback: list all tasks (no env filter) and filter by environment_label
     /// matching the repo name portion of the slug (case-insensitive).
     async fn fetch_tasks_by_label(
@@ -647,16 +693,14 @@ impl CodexCodingAgent {
             .last()
             .unwrap_or(repo_slug)
             .to_lowercase();
-        let url = format!("{BASE_URL}/wham/tasks/list?task_filter=current&limit=20");
-        let request = self.build_request("GET", &url, auth)?;
-        let resp = self.http.execute(request).await?;
-        if !resp.status().is_success() {
-            return Ok(vec![]);
-        }
-        let resp: TaskListResponse = serde_json::from_slice(resp.body())
-            .map_err(|e| format!("task list parse error: {e}"))?;
-        Ok(resp
-            .items
+        let items = match self.fetch_all_tasks("", auth).await {
+            Ok(items) => items,
+            Err(e) => {
+                debug!(err = %e, "Codex label-fallback task fetch failed");
+                return Ok(vec![]);
+            }
+        };
+        Ok(items
             .iter()
             .filter(|t| {
                 t.task_status_display
@@ -673,22 +717,7 @@ impl CodexCodingAgent {
         environment_id: &str,
         auth: &CodexAuth,
     ) -> Result<Vec<TaskItem>, String> {
-        let url = format!(
-            "{BASE_URL}/wham/tasks/list?task_filter=current&environment_id={environment_id}&limit=20"
-        );
-        let request = self.build_request("GET", &url, auth)?;
-        let resp = self.http.execute(request).await?;
-        let status = resp.status().as_u16();
-        if status == 401 || status == 403 {
-            return Err(format!("authentication error (HTTP {status})"));
-        }
-        if !resp.status().is_success() {
-            let body = String::from_utf8_lossy(resp.body()).to_string();
-            return Err(format!("task list failed (HTTP {status}): {body}"));
-        }
-        let resp: TaskListResponse = serde_json::from_slice(resp.body())
-            .map_err(|e| format!("task list parse error: {e}"))?;
-        Ok(resp.items)
+        self.fetch_all_tasks(&format!("environment_id={environment_id}"), auth).await
     }
 }
 ```
@@ -768,14 +797,30 @@ impl super::CloudAgentService for CodexCodingAgent {
                     Ok(ids) => ids,
                     Err(e) if e.contains("authentication") => {
                         // Retry with fresh auth
-                        let fresh = self.refresh_auth().ok_or_else(|| {
-                            "Codex auth refresh failed".to_string()
-                        })?;
-                        self.fetch_environment_ids(slug, &fresh).await?
+                        match self.refresh_auth() {
+                            Some(fresh) => {
+                                match self.fetch_environment_ids(slug, &fresh).await {
+                                    Ok(ids) => ids,
+                                    Err(e) => {
+                                        if !self.auth_warned.swap(true, Ordering::Relaxed) {
+                                            warn!(err = %e, "Codex auth retry failed");
+                                        }
+                                        return Ok(vec![]);
+                                    }
+                                }
+                            }
+                            None => {
+                                if !self.auth_warned.swap(true, Ordering::Relaxed) {
+                                    warn!("Codex auth refresh failed: no valid auth");
+                                }
+                                return Ok(vec![]);
+                            }
+                        }
                     }
                     Err(e) => {
-                        debug!(err = %e, "Codex environment lookup failed");
-                        return Ok(vec![]);
+                        // Non-auth failure (5xx, shape drift, etc.) — use label fallback
+                        debug!(err = %e, "Codex environment lookup failed, trying label fallback");
+                        return self.fetch_tasks_by_label(slug, &auth).await;
                     }
                 };
                 let mut cache = self.env_cache.lock().unwrap();
@@ -1130,11 +1175,13 @@ Add import at the top of `discovery.rs`:
 use crate::providers::coding_agent::codex::CodexCodingAgent;
 ```
 
-Add registration after the Cursor block (after the closing `}` of the `if std::env::var("CURSOR_API_KEY")...` block, before the Claude section):
+Add registration after the Cursor block (after the closing `}` of the `if std::env::var("CURSOR_API_KEY")...` block, before the Claude section).
+
+Gate on `~/.codex/auth.json` existence rather than the `codex` binary. The provider uses the ChatGPT backend API directly and reads file-based auth — nothing at runtime requires the CLI. This avoids false negatives for users who have Codex auth but installed the CLI elsewhere or use the web-only flow.
 
 ```rust
-    // 4b. Cloud agent: Codex
-    if runner.exists("codex", &["--version"]).await {
+    // 4b. Cloud agent: Codex (gated on auth file, not binary — provider uses API directly)
+    if codex::codex_auth_file_exists() {
         registry.cloud_agents.insert(
             "codex".to_string(),
             Arc::new(CodexCodingAgent::new(
@@ -1146,37 +1193,69 @@ Add registration after the Cursor block (after the closing `}` of the `if std::e
     }
 ```
 
+This requires making `codex_auth_file_exists()` a public function in `codex.rs`:
+
+```rust
+/// Check whether the Codex auth file exists (used by discovery).
+pub fn codex_auth_file_exists() -> bool {
+    codex_home().join("auth.json").exists()
+}
+```
+
 - [ ] **Step 2: Add discovery test**
 
-Add a test in the `tests` module of `discovery.rs`, following the pattern of `detect_providers_claude_registration_depends_on_binary`. Use the existing `discovery_runner()` helper:
+Add a test in the `tests` module of `discovery.rs`. Since the gate is file-based (not binary-based), the test creates/removes a temp auth file and points `CODEX_HOME` to it:
 
 ```rust
 #[tokio::test]
-async fn detect_providers_codex_registration_depends_on_binary() {
-    for (has_codex, should_register) in [(true, true), (false, false)] {
-        let (dir, repo) = make_repo_with_git_dir();
-        let config = temp_config(&dir);
+async fn detect_providers_codex_registration_depends_on_auth_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex_dir = dir.path().join(".codex-test");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+
+    // With auth.json present → registered
+    std::fs::write(
+        codex_dir.join("auth.json"),
+        r#"{"auth_mode":"chatgpt","tokens":{"access_token":"t","account_id":"a"}}"#,
+    ).unwrap();
+    std::env::set_var("CODEX_HOME", &codex_dir);
+    {
+        let (dir2, repo) = make_repo_with_git_dir();
+        let config = temp_config(&dir2);
         let runner: Arc<dyn CommandRunner> = Arc::new(
             discovery_runner()
                 .on_run("git", &["remote"], Err("no remotes".to_string()))
                 .tool_exists("wt", false)
                 .tool_exists("gh", false)
                 .tool_exists("claude", false)
-                .tool_exists("codex", has_codex)
                 .build(),
         );
-
         let (registry, _) = detect_providers(&repo, &config, runner).await;
-        assert_eq!(
-            registry.cloud_agents.contains_key("codex"),
-            should_register,
-            "codex={has_codex} should_register={should_register}"
-        );
+        assert!(registry.cloud_agents.contains_key("codex"));
     }
+
+    // Without auth.json → not registered
+    std::fs::remove_file(codex_dir.join("auth.json")).unwrap();
+    {
+        let (dir2, repo) = make_repo_with_git_dir();
+        let config = temp_config(&dir2);
+        let runner: Arc<dyn CommandRunner> = Arc::new(
+            discovery_runner()
+                .on_run("git", &["remote"], Err("no remotes".to_string()))
+                .tool_exists("wt", false)
+                .tool_exists("gh", false)
+                .tool_exists("claude", false)
+                .build(),
+        );
+        let (registry, _) = detect_providers(&repo, &config, runner).await;
+        assert!(!registry.cloud_agents.contains_key("codex"));
+    }
+
+    std::env::remove_var("CODEX_HOME");
 }
 ```
 
-Note: existing discovery tests don't need updating. `DiscoveryMockRunner.exists()` returns `false` for unregistered tools (`unwrap_or(false)`), so existing tests work without explicit `.tool_exists("codex", false)`.
+Note: existing discovery tests don't need updating — Codex registration is gated on a file, not a tool_exists check.
 
 - [ ] **Step 4: Run all discovery tests**
 

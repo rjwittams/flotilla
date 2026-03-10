@@ -77,7 +77,7 @@ Cache:
 
 ## Discovery
 
-In `detect_providers()`, check for `codex` binary via `CommandRunner::exists("codex", &["--version"])`. If found, register `CodexCodingAgent`.
+In `detect_providers()`, check for `~/.codex/auth.json` existence via `codex::codex_auth_file_exists()`. If present, register `CodexCodingAgent`. Gate on the auth file rather than the `codex` binary because the provider uses the ChatGPT backend API directly — nothing at runtime requires the CLI. This avoids false negatives for users who have Codex auth but don't have the CLI on PATH.
 
 Constructor: `CodexCodingAgent::new(provider_name: String, http: Arc<dyn HttpClient>)`. No `CommandRunner` dependency — auth is file-based, not keychain-based.
 
