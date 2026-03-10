@@ -12,6 +12,7 @@ pub enum ItemKind {
     ChangeRequest,
     CloudSession,
     Workspace,
+    ManagedTerminal,
 }
 
 /// A key that uniquely identifies a provider item by its natural identity.
@@ -21,6 +22,7 @@ pub enum ProviderItemKey {
     ChangeRequest(String),
     Session(String),
     Workspace(String),
+    ManagedTerminal(String),
 }
 
 /// A single item submitted for correlation.
@@ -499,5 +501,37 @@ mod tests {
         let groups = correlate(items);
         assert_eq!(groups.len(), 1, "multiple sessions can share a group");
         assert_eq!(groups[0].items.len(), 3);
+    }
+
+    #[test]
+    fn managed_terminal_correlates_via_branch() {
+        let path = PathBuf::from("/code/feat-x");
+        let items = vec![
+            item(
+                "git",
+                ItemKind::Checkout,
+                "feat-x",
+                vec![
+                    CorrelationKey::Branch("feat-x".into()),
+                    CorrelationKey::CheckoutPath(path.clone()),
+                ],
+                ProviderItemKey::Checkout(path),
+            ),
+            item(
+                "terminal",
+                ItemKind::ManagedTerminal,
+                "shell/0",
+                // Terminal correlates via branch name (from ManagedTerminalId.checkout),
+                // NOT via CheckoutPath — shpool doesn't report working directory.
+                vec![CorrelationKey::Branch("feat-x".into())],
+                ProviderItemKey::ManagedTerminal("feat-x/shell/0".into()),
+            ),
+        ];
+
+        let groups = correlate(items);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].items.len(), 2);
+        assert!(groups[0].has(&ItemKind::Checkout));
+        assert!(groups[0].has(&ItemKind::ManagedTerminal));
     }
 }
