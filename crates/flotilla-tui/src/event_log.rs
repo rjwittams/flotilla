@@ -260,13 +260,14 @@ pub fn init() {
 
     // Hardcoded directives are appended after RUST_LOG and take precedence,
     // so these noisy crates stay at INFO even if RUST_LOG sets them to DEBUG.
-    let filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::DEBUG.into())
-        .from_env_lossy()
-        .add_directive("h2=info".parse().expect("valid directive"))
-        .add_directive("hyper=info".parse().expect("valid directive"))
-        .add_directive("reqwest=info".parse().expect("valid directive"))
-        .add_directive("rustls=info".parse().expect("valid directive"));
+    let filter = ["h2=info", "hyper=info", "reqwest=info", "rustls=info"]
+        .into_iter()
+        .fold(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::DEBUG.into())
+                .from_env_lossy(),
+            |f, d| f.add_directive(d.parse().expect("valid directive")),
+        );
 
     tracing_subscriber::registry()
         .with(filter)

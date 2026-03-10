@@ -9,13 +9,14 @@ use flotilla_core::config::ConfigStore;
 pub async fn run(socket_path: &Path, timeout_secs: u64) -> Result<(), String> {
     // Hardcoded directives are appended after RUST_LOG and take precedence,
     // so these noisy crates stay at INFO even if RUST_LOG sets them to DEBUG.
-    let filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(tracing_subscriber::filter::LevelFilter::DEBUG.into())
-        .from_env_lossy()
-        .add_directive("h2=info".parse().expect("valid directive"))
-        .add_directive("hyper=info".parse().expect("valid directive"))
-        .add_directive("reqwest=info".parse().expect("valid directive"))
-        .add_directive("rustls=info".parse().expect("valid directive"));
+    let filter = ["h2=info", "hyper=info", "reqwest=info", "rustls=info"]
+        .into_iter()
+        .fold(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing_subscriber::filter::LevelFilter::DEBUG.into())
+                .from_env_lossy(),
+            |f, d| f.add_directive(d.parse().expect("valid directive")),
+        );
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(filter)
