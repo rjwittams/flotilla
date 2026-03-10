@@ -227,6 +227,11 @@ impl ReplaySession {
         ReplayHttp::new(self.clone())
     }
 
+    /// Create a `ReplayHttpClient` that replays HTTP interactions from this session.
+    pub fn http_client(&self) -> ReplayHttpClient {
+        ReplayHttpClient::new(self.clone())
+    }
+
     /// Check that all interactions were consumed.
     pub fn assert_complete(&self) {
         let inner = self.inner.lock().unwrap();
@@ -439,6 +444,88 @@ impl ReplayHttp {
 impl ReplayGhApi {
     pub fn new(session: ReplaySession) -> Self {
         Self { session }
+    }
+}
+
+/// An `HttpClient` implementation that replays canned HTTP interactions
+/// from a `ReplaySession`.
+pub struct ReplayHttpClient {
+    session: ReplaySession,
+}
+
+impl ReplayHttpClient {
+    pub fn new(session: ReplaySession) -> Self {
+        Self { session }
+    }
+}
+
+#[async_trait]
+impl super::HttpClient for ReplayHttpClient {
+    async fn execute(
+        &self,
+        request: reqwest::Request,
+    ) -> Result<http::Response<bytes::Bytes>, String> {
+        let interaction = self.session.next("http");
+        let Interaction::Http {
+            method: expected_method,
+            url: expected_url,
+            request_headers: expected_headers,
+            request_body: expected_body,
+            status,
+            response_body,
+            response_headers,
+        } = interaction
+        else {
+            panic!("ReplayHttpClient: expected http interaction");
+        };
+
+        // Validate request matches fixture
+        assert_eq!(
+            request.method().as_str(),
+            expected_method,
+            "ReplayHttpClient: method mismatch for URL '{}'",
+            request.url()
+        );
+        assert_eq!(
+            request.url().as_str(),
+            expected_url,
+            "ReplayHttpClient: URL mismatch"
+        );
+
+        // Validate headers the fixture cares about (subset matching)
+        for (key, expected_value) in &expected_headers {
+            let actual = request
+                .headers()
+                .get(key)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                actual, expected_value,
+                "ReplayHttpClient: header '{key}' mismatch for '{expected_method} {expected_url}'"
+            );
+        }
+
+        // Validate body if fixture specifies one
+        if let Some(ref expected) = expected_body {
+            let actual_body = request
+                .body()
+                .and_then(|b| b.as_bytes())
+                .map(|b| String::from_utf8_lossy(b).to_string())
+                .unwrap_or_default();
+            assert_eq!(
+                actual_body, *expected,
+                "ReplayHttpClient: body mismatch for '{expected_method} {expected_url}'"
+            );
+        }
+
+        // Build response from fixture data
+        let mut builder = http::Response::builder().status(status);
+        for (key, value) in &response_headers {
+            builder = builder.header(key.as_str(), value.as_str());
+        }
+        builder
+            .body(bytes::Bytes::from(response_body))
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -741,6 +828,14 @@ pub fn test_gh_api(session: &ReplaySession, runner: &Arc<dyn CommandRunner>) -> 
     } else {
         Arc::new(session.gh_api())
     }
+}
+
+/// Create an `HttpClient` for a test session.
+/// In replay mode: returns a `ReplayHttpClient`.
+/// (Recording mode for HTTP not yet supported — use RECORD=1 with curl
+/// or browser DevTools to capture fixture YAML manually.)
+pub fn test_http_client(session: &ReplaySession) -> Arc<dyn super::HttpClient> {
+    Arc::new(session.http_client())
 }
 
 fn mask_interaction(interaction: &Interaction, masks: &Masks) -> Interaction {
@@ -1098,6 +1193,41 @@ interactions:
         assert_eq!(response.status, 200);
         assert_eq!(response.body, r#"{"data":[]}"#);
         assert!(response.headers.is_empty());
+        session.assert_complete();
+    }
+
+    #[tokio::test]
+    async fn replay_http_client_round_trip() {
+        use crate::providers::HttpClient;
+
+        let yaml = r#"
+interactions:
+  - channel: http
+    method: GET
+    url: "https://example.test/v1/sessions"
+    request_headers:
+      authorization: "Bearer token-1"
+      anthropic-version: "2023-06-01"
+    status: 200
+    response_body: '{"data":[]}'
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("http.yaml");
+        std::fs::write(&path, yaml).unwrap();
+
+        let session = ReplaySession::from_file(&path, Masks::new());
+        let client = session.http_client();
+
+        let request = reqwest::Client::new()
+            .get("https://example.test/v1/sessions")
+            .header("authorization", "Bearer token-1")
+            .header("anthropic-version", "2023-06-01")
+            .build()
+            .unwrap();
+
+        let response = client.execute(request).await.expect("replay should work");
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.body().as_ref(), br#"{"data":[]}"#);
         session.assert_complete();
     }
 }
