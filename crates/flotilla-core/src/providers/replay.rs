@@ -1348,6 +1348,56 @@ interactions:
     }
 
     #[test]
+    fn multi_channel_round_allows_any_consumption_order() {
+        // Fixture has command and http in same round
+        let yaml = r#"
+interactions:
+  - channel: command
+    cmd: git
+    args: ["status"]
+    cwd: "/repo"
+    stdout: "ok\n"
+    exit_code: 0
+  - channel: http
+    method: GET
+    url: "https://api.test/v1/sessions"
+    status: 200
+    response_body: '{"data":[]}'
+  - channel: command
+    cmd: git
+    args: ["log"]
+    cwd: "/repo"
+    stdout: "abc\n"
+    exit_code: 0
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+
+        let session = Session::replaying(&path, Masks::new());
+
+        // Consume http FIRST (before any commands) — this is the key test.
+        // With the old linear cursor this would have panicked.
+        let http = session.next(&ChannelLabel::Http("api.test".into()));
+        assert!(matches!(http, Interaction::Http { .. }));
+
+        // Now consume commands in order
+        let cmd1 = session.next(&ChannelLabel::Command("git".into()));
+        match cmd1 {
+            Interaction::Command { args, .. } => assert_eq!(args[0], "status"),
+            _ => panic!("expected command"),
+        }
+
+        let cmd2 = session.next(&ChannelLabel::Command("git".into()));
+        match cmd2 {
+            Interaction::Command { args, .. } => assert_eq!(args[0], "log"),
+            _ => panic!("expected command"),
+        }
+
+        session.finish();
+    }
+
+    #[test]
     fn channel_label_from_interaction() {
         let cmd = Interaction::Command {
             cmd: "git".into(),
