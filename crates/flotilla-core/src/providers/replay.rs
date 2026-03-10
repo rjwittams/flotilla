@@ -48,6 +48,42 @@ pub enum Interaction {
     },
 }
 
+/// Identifies the logical channel an interaction belongs to.
+/// Within a replay round, interactions on the same channel are FIFO-ordered,
+/// while different channels can be consumed in any order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ChannelLabel {
+    Command(String),
+    GhApi(String),
+    Http(String),
+}
+
+impl Interaction {
+    /// Derive the channel label from interaction data.
+    pub fn channel_label(&self) -> ChannelLabel {
+        match self {
+            Interaction::Command { cmd, .. } => ChannelLabel::Command(cmd.clone()),
+            Interaction::GhApi { endpoint, .. } => ChannelLabel::GhApi(endpoint.clone()),
+            Interaction::Http { url, .. } => {
+                // Extract host from URL via simple string parsing
+                // "https://api.example.com/v1/foo" → "api.example.com"
+                let host = url
+                    .split("://")
+                    .nth(1)
+                    .unwrap_or(url)
+                    .split('/')
+                    .next()
+                    .unwrap_or(url)
+                    .split(':')
+                    .next()
+                    .unwrap_or(url)
+                    .to_string();
+                ChannelLabel::Http(host)
+            }
+        }
+    }
+}
+
 /// Top-level YAML document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractionLog {
@@ -1196,5 +1232,44 @@ interactions:
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(response.body().as_ref(), br#"{"data":[]}"#);
         session.assert_complete();
+    }
+
+    #[test]
+    fn channel_label_from_interaction() {
+        let cmd = Interaction::Command {
+            cmd: "git".into(),
+            args: vec!["status".into()],
+            cwd: "/repo".into(),
+            stdout: Some("ok\n".into()),
+            stderr: None,
+            exit_code: 0,
+        };
+        assert_eq!(cmd.channel_label(), ChannelLabel::Command("git".into()));
+
+        let api = Interaction::GhApi {
+            method: "GET".into(),
+            endpoint: "repos/owner/repo/pulls".into(),
+            status: 200,
+            body: "[]".into(),
+            headers: HashMap::new(),
+        };
+        assert_eq!(
+            api.channel_label(),
+            ChannelLabel::GhApi("repos/owner/repo/pulls".into())
+        );
+
+        let http = Interaction::Http {
+            method: "GET".into(),
+            url: "https://api.claude.ai/v1/sessions".into(),
+            request_headers: HashMap::new(),
+            request_body: None,
+            status: 200,
+            response_body: "{}".into(),
+            response_headers: HashMap::new(),
+        };
+        assert_eq!(
+            http.channel_label(),
+            ChannelLabel::Http("api.claude.ai".into())
+        );
     }
 }
