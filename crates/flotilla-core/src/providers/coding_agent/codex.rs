@@ -341,9 +341,11 @@ impl CodexCodingAgent {
         cursor: Option<&str>,
         auth: &CodexAuth,
     ) -> Result<TaskListResponse, String> {
-        let mut url = format!(
-            "{BASE_URL}/wham/tasks/list?task_filter=current&limit=20&{base_query}"
-        );
+        let mut url = format!("{BASE_URL}/wham/tasks/list?task_filter=current&limit=20");
+        if !base_query.is_empty() {
+            url.push('&');
+            url.push_str(base_query);
+        }
         if let Some(c) = cursor {
             url.push_str("&cursor=");
             url.push_str(&urlencoding::encode(c));
