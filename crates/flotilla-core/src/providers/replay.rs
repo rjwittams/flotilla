@@ -167,6 +167,84 @@ impl Masks {
     }
 }
 
+/// A replayer that serves canned interactions from round-based per-channel FIFO queues.
+#[derive(Clone)]
+pub struct Replayer {
+    inner: Arc<Mutex<ReplayerInner>>,
+}
+
+struct ReplayerInner {
+    rounds: VecDeque<Round>,
+    masks: Masks,
+}
+
+impl Replayer {
+    /// Load a replayer from a YAML fixture file.
+    pub fn from_file(path: impl AsRef<Path>, masks: Masks) -> Self {
+        let content = std::fs::read_to_string(path.as_ref())
+            .unwrap_or_else(|e| panic!("Failed to read fixture {}: {e}", path.as_ref().display()));
+        let rounds = load_rounds_from_str(&content);
+        Self {
+            inner: Arc::new(Mutex::new(ReplayerInner {
+                rounds: rounds.into(),
+                masks,
+            })),
+        }
+    }
+
+    /// Consume the next interaction matching the given channel label from the current round.
+    /// Returns the interaction with masks unmasked (placeholders -> concrete values).
+    /// Panics if no matching interaction is found in the current round.
+    pub(crate) fn next(&self, label: &ChannelLabel) -> Interaction {
+        let mut inner = self.inner.lock().expect("replayer lock poisoned");
+        let round = inner
+            .rounds
+            .front_mut()
+            .expect("Replayer: no more rounds — all interactions consumed");
+        if !round.queues.contains_key(label) {
+            panic!(
+                "Replayer: no queue for channel {:?} in current round (available: {:?})",
+                label,
+                round.queues.keys().collect::<Vec<_>>()
+            );
+        }
+        let queue = round
+            .queues
+            .get_mut(label)
+            .expect("Replayer: channel verified present");
+        let interaction = queue.pop_front().unwrap_or_else(|| {
+            panic!(
+                "Replayer: channel {:?} queue is empty in current round",
+                label
+            )
+        });
+        // Remove queue if drained
+        if queue.is_empty() {
+            round.queues.remove(label);
+        }
+        // Auto-advance if round is fully drained
+        if round.is_empty() {
+            inner.rounds.pop_front();
+        }
+        unmask_interaction(&interaction, &inner.masks)
+    }
+
+    /// Check that all rounds and their queues have been fully consumed.
+    pub fn assert_complete(&self) {
+        let inner = self.inner.lock().expect("replayer lock poisoned");
+        for (i, round) in inner.rounds.iter().enumerate() {
+            for (label, queue) in &round.queues {
+                assert!(
+                    queue.is_empty(),
+                    "Replayer: round {i} has {} unconsumed interactions on channel {:?}",
+                    queue.len(),
+                    label
+                );
+            }
+        }
+    }
+}
+
 /// Shared session state, holding the interaction log and current read position.
 struct SessionInner {
     log: InteractionLog,
@@ -1383,5 +1461,135 @@ rounds:
             exit_code: 0,
         }]);
         assert!(!round.is_empty());
+    }
+
+    #[test]
+    fn replayer_serves_by_channel_label() {
+        let yaml = r#"
+interactions:
+  - channel: command
+    cmd: git
+    args: ["status"]
+    cwd: "/repo"
+    stdout: "ok\n"
+    exit_code: 0
+  - channel: gh_api
+    method: GET
+    endpoint: "/repos/owner/repo/pulls"
+    status: 200
+    body: "[]"
+  - channel: command
+    cmd: git
+    args: ["log"]
+    cwd: "/repo"
+    stdout: "commits\n"
+    exit_code: 0
+"#;
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, yaml).expect("write fixture");
+
+        let replayer = Replayer::from_file(&path, Masks::new());
+
+        // Can consume in any channel order within the same round
+        let api = replayer.next(&ChannelLabel::GhApi("/repos/owner/repo/pulls".into()));
+        match api {
+            Interaction::GhApi { endpoint, .. } => {
+                assert_eq!(endpoint, "/repos/owner/repo/pulls");
+            }
+            _ => panic!("expected gh_api"),
+        }
+
+        // First git command
+        let cmd1 = replayer.next(&ChannelLabel::Command("git".into()));
+        match cmd1 {
+            Interaction::Command { stdout, .. } => {
+                assert_eq!(stdout, Some("ok\n".into()));
+            }
+            _ => panic!("expected command"),
+        }
+
+        // Second git command (FIFO within channel)
+        let cmd2 = replayer.next(&ChannelLabel::Command("git".into()));
+        match cmd2 {
+            Interaction::Command { stdout, .. } => {
+                assert_eq!(stdout, Some("commits\n".into()));
+            }
+            _ => panic!("expected command"),
+        }
+
+        replayer.assert_complete();
+    }
+
+    #[test]
+    #[should_panic(expected = "no queue for channel")]
+    fn replayer_enforces_round_boundaries() {
+        let yaml = r#"
+rounds:
+  - interactions:
+      - channel: command
+        cmd: git
+        args: ["status"]
+        cwd: "/repo"
+        stdout: "ok\n"
+        exit_code: 0
+  - interactions:
+      - channel: gh_api
+        method: GET
+        endpoint: "/repos/owner/repo/pulls"
+        status: 200
+        body: "[]"
+"#;
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, yaml).expect("write fixture");
+
+        let replayer = Replayer::from_file(&path, Masks::new());
+
+        // Round 1 only has a command — requesting gh_api should panic
+        replayer.next(&ChannelLabel::GhApi("/repos/owner/repo/pulls".into()));
+    }
+
+    #[test]
+    fn replayer_auto_advances_rounds() {
+        let yaml = r#"
+rounds:
+  - interactions:
+      - channel: command
+        cmd: git
+        args: ["status"]
+        cwd: "/repo"
+        stdout: "ok\n"
+        exit_code: 0
+  - interactions:
+      - channel: gh_api
+        method: GET
+        endpoint: "/repos/owner/repo/pulls"
+        status: 200
+        body: "[]"
+"#;
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, yaml).expect("write fixture");
+
+        let replayer = Replayer::from_file(&path, Masks::new());
+
+        // Consume round 1
+        let cmd = replayer.next(&ChannelLabel::Command("git".into()));
+        match cmd {
+            Interaction::Command { cmd, .. } => assert_eq!(cmd, "git"),
+            _ => panic!("expected command"),
+        }
+
+        // Round auto-advances — now we can get gh_api from round 2
+        let api = replayer.next(&ChannelLabel::GhApi("/repos/owner/repo/pulls".into()));
+        match api {
+            Interaction::GhApi { endpoint, .. } => {
+                assert_eq!(endpoint, "/repos/owner/repo/pulls");
+            }
+            _ => panic!("expected gh_api"),
+        }
+
+        replayer.assert_complete();
     }
 }
