@@ -121,7 +121,12 @@ struct RoundLog {
 }
 
 fn load_rounds_from_str(yaml: &str) -> Vec<Round> {
-    if let Ok(round_log) = serde_yml::from_str::<RoundLog>(yaml) {
+    // Detect which format by checking for the `rounds:` key.
+    // If present, parse as RoundLog and propagate errors directly
+    // (don't fall through to flat format, which gives misleading errors).
+    if yaml.trim_start().starts_with("rounds:") {
+        let round_log: RoundLog = serde_yml::from_str(yaml)
+            .unwrap_or_else(|e| panic!("Failed to parse multi-round fixture YAML: {e}"));
         return round_log
             .rounds
             .into_iter()
@@ -234,17 +239,21 @@ impl Replayer {
     }
 
     /// Check that all rounds and their queues have been fully consumed.
+    /// Because `next()` removes empty queues and auto-pops empty rounds,
+    /// any remaining round necessarily has non-empty queues.
     pub fn assert_complete(&self) {
         let inner = self.inner.lock().expect("replayer lock poisoned");
-        for (i, round) in inner.rounds.iter().enumerate() {
-            for (label, queue) in &round.queues {
-                assert!(
-                    queue.is_empty(),
-                    "Replayer: round {i} has {} unconsumed interactions on channel {:?}",
-                    queue.len(),
-                    label
-                );
-            }
+        if let Some(round) = inner.rounds.front() {
+            let remaining: Vec<_> = round
+                .queues
+                .iter()
+                .map(|(label, q)| format!("{label:?} ({} remaining)", q.len()))
+                .collect();
+            panic!(
+                "Replayer: {} round(s) with unconsumed interactions: {}",
+                inner.rounds.len(),
+                remaining.join(", ")
+            );
         }
     }
 }
