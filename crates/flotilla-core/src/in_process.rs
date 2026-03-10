@@ -650,8 +650,11 @@ impl InProcessDaemon {
                     let has_more = changeset.has_more;
 
                     if n_updated > 0 || n_closed > 0 || has_more {
-                        let updated_ids: Vec<&str> =
-                            changeset.updated.iter().map(|(id, _)| id.as_str()).collect();
+                        let updated_ids: Vec<&str> = changeset
+                            .updated
+                            .iter()
+                            .map(|(id, _)| id.as_str())
+                            .collect();
                         info!(
                             "issue incremental: repo={} updated={:?} closed={:?} has_more={}",
                             path.display(),
