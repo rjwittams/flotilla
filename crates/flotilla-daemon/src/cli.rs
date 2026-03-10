@@ -9,7 +9,11 @@ use flotilla_core::config::ConfigStore;
 pub async fn run(socket_path: &Path, timeout_secs: u64) -> Result<(), String> {
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::DEBUG.into())
-        .from_env_lossy();
+        .from_env_lossy()
+        .add_directive("h2=info".parse().unwrap())
+        .add_directive("hyper=info".parse().unwrap())
+        .add_directive("reqwest=info".parse().unwrap())
+        .add_directive("rustls=info".parse().unwrap());
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(filter)

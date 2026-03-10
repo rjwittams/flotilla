@@ -260,7 +260,11 @@ pub fn init() {
 
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::DEBUG.into())
-        .from_env_lossy();
+        .from_env_lossy()
+        .add_directive("h2=info".parse().unwrap())
+        .add_directive("hyper=info".parse().unwrap())
+        .add_directive("reqwest=info".parse().unwrap())
+        .add_directive("rustls=info".parse().unwrap());
 
     tracing_subscriber::registry()
         .with(filter)

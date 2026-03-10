@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{broadcast, Mutex, RwLock};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use flotilla_protocol::{
     AssociationKey, Command, DaemonEvent, DeltaEntry, Issue, ProviderError, RepoInfo, Snapshot,
@@ -635,12 +635,40 @@ impl InProcessDaemon {
             // that land on GitHub during the request.
             let refresh_ts = now_iso8601();
 
+            debug!(
+                "issue incremental: repo={} since={} refresh_ts={} cache_len={}",
+                path.display(),
+                since,
+                refresh_ts,
+                prev_count,
+            );
+
             match tracker.list_issues_changed_since(&path, &since, 50).await {
                 Ok(changeset) => {
-                    if changeset.has_more {
+                    let n_updated = changeset.updated.len();
+                    let n_closed = changeset.closed_ids.len();
+                    let has_more = changeset.has_more;
+
+                    if n_updated > 0 || n_closed > 0 || has_more {
+                        let updated_ids: Vec<&str> =
+                            changeset.updated.iter().map(|(id, _)| id.as_str()).collect();
+                        info!(
+                            "issue incremental: repo={} updated={:?} closed={:?} has_more={}",
+                            path.display(),
+                            updated_ids,
+                            changeset.closed_ids,
+                            has_more,
+                        );
+                    }
+
+                    if has_more {
                         // Too many changes — skip incremental, do a full re-fetch.
                         // Don't reset until we have data to replace it with,
                         // so transient API failures don't wipe the UI.
+                        info!(
+                            "issue incremental: escalating to full re-fetch for {}",
+                            path.display(),
+                        );
                         drop(_guard);
                         let first_page = {
                             let reg = {
@@ -681,10 +709,13 @@ impl InProcessDaemon {
                             // Fetch failed — keep existing cache and do NOT advance
                             // the timestamp, so the next incremental call retries
                             // from the same `since` window.
+                            warn!(
+                                "issue incremental: escalation fetch failed for {}, keeping cache",
+                                path.display(),
+                            );
                         }
                     } else {
-                        let has_changes =
-                            !changeset.updated.is_empty() || !changeset.closed_ids.is_empty();
+                        let has_changes = n_updated > 0 || n_closed > 0;
                         {
                             let mut repos = self.repos.write().await;
                             if let Some(state) = repos.get_mut(&path) {
@@ -698,7 +729,7 @@ impl InProcessDaemon {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    warn!(
                         "incremental issue refresh failed for {}: {}",
                         path.display(),
                         e
