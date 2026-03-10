@@ -501,8 +501,7 @@ mod tests {
         reset_auth_state();
 
         let runner = mock_runner(vec![Ok(token_json("abc123", now_epoch_secs() + 3600))]);
-        let session =
-            replay::ReplaySession::from_file(fixture("claude_sessions.yaml"), replay::Masks::new());
+        let session = replay::test_session(&fixture("claude_sessions.yaml"), replay::Masks::new());
         let http = replay::test_http_client(&session);
         let agent = make_agent(runner, http);
 
@@ -526,10 +525,8 @@ mod tests {
             Ok(token_json("expired", now_epoch_secs() + 3600)),
             Ok(token_json("fresh", now_epoch_secs() + 3600)),
         ]);
-        let session = replay::ReplaySession::from_file(
-            fixture("claude_auth_retry.yaml"),
-            replay::Masks::new(),
-        );
+        let session =
+            replay::test_session(&fixture("claude_auth_retry.yaml"), replay::Masks::new());
         let http = replay::test_http_client(&session);
         let agent = make_agent(runner, http);
 
@@ -552,10 +549,8 @@ mod tests {
             Ok(token_json("bad-1", now_epoch_secs() + 3600)),
             Ok(token_json("bad-2", now_epoch_secs() + 3600)),
         ]);
-        let session = replay::ReplaySession::from_file(
-            fixture("claude_auth_failure.yaml"),
-            replay::Masks::new(),
-        );
+        let session =
+            replay::test_session(&fixture("claude_auth_failure.yaml"), replay::Masks::new());
         let http = replay::test_http_client(&session);
         let agent = make_agent(runner, http);
 
@@ -579,7 +574,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let empty_fixture = dir.path().join("empty.yaml");
         std::fs::write(&empty_fixture, "interactions: []\n").unwrap();
-        let session = replay::ReplaySession::from_file(&empty_fixture, replay::Masks::new());
+        let session = replay::test_session(empty_fixture.to_str().unwrap(), replay::Masks::new());
         let http = replay::test_http_client(&session);
         let agent = make_agent(runner, http);
         {
@@ -668,10 +663,8 @@ mod tests {
             "archive-token",
             now_epoch_secs() + 3600,
         ))]);
-        let session = replay::ReplaySession::from_file(
-            fixture("claude_archive_ok.yaml"),
-            replay::Masks::new(),
-        );
+        let session =
+            replay::test_session(&fixture("claude_archive_ok.yaml"), replay::Masks::new());
         let http = replay::test_http_client(&session);
         let agent = make_agent(runner, http);
 
@@ -691,10 +684,8 @@ mod tests {
             "archive-token",
             now_epoch_secs() + 3600,
         ))]);
-        let session = replay::ReplaySession::from_file(
-            fixture("claude_archive_fail.yaml"),
-            replay::Masks::new(),
-        );
+        let session =
+            replay::test_session(&fixture("claude_archive_fail.yaml"), replay::Masks::new());
         let http = replay::test_http_client(&session);
         let agent = make_agent(runner, http);
 

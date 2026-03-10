@@ -761,12 +761,78 @@ pub fn test_gh_api(session: &ReplaySession, runner: &Arc<dyn CommandRunner>) -> 
     }
 }
 
+/// An `HttpClient` that delegates to a real `HttpClient` and records all interactions.
+pub struct RecordingHttpClient {
+    session: ReplaySession,
+    inner: Arc<dyn super::HttpClient>,
+}
+
+impl RecordingHttpClient {
+    pub fn new(session: ReplaySession, inner: Arc<dyn super::HttpClient>) -> Self {
+        Self { session, inner }
+    }
+}
+
+#[async_trait]
+impl super::HttpClient for RecordingHttpClient {
+    async fn execute(
+        &self,
+        request: reqwest::Request,
+    ) -> Result<http::Response<bytes::Bytes>, String> {
+        let method = request.method().to_string();
+        let url = request.url().to_string();
+        let request_headers: HashMap<String, String> = request
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+
+        let result = self.inner.execute(request).await;
+
+        match &result {
+            Ok(resp) => {
+                let response_headers: HashMap<String, String> = resp
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                    .collect();
+                self.session.record(Interaction::Http {
+                    method,
+                    url,
+                    request_headers,
+                    request_body: None,
+                    status: resp.status().as_u16(),
+                    response_body: String::from_utf8_lossy(resp.body()).to_string(),
+                    response_headers,
+                });
+            }
+            Err(err) => {
+                self.session.record(Interaction::Http {
+                    method,
+                    url,
+                    request_headers,
+                    request_body: None,
+                    status: 0,
+                    response_body: err.clone(),
+                    response_headers: HashMap::new(),
+                });
+            }
+        }
+
+        result
+    }
+}
+
 /// Create an `HttpClient` for a test session.
+/// In record mode: wraps a real `ReqwestHttpClient` with recording.
 /// In replay mode: returns a `ReplayHttpClient`.
-/// (Recording mode for HTTP not yet supported — use RECORD=1 with curl
-/// or browser DevTools to capture fixture YAML manually.)
 pub fn test_http_client(session: &ReplaySession) -> Arc<dyn super::HttpClient> {
-    Arc::new(session.http_client())
+    if session.is_recording() {
+        let real_client = Arc::new(super::ReqwestHttpClient::new());
+        Arc::new(RecordingHttpClient::new(session.clone(), real_client))
+    } else {
+        Arc::new(session.http_client())
+    }
 }
 
 fn mask_interaction(interaction: &Interaction, masks: &Masks) -> Interaction {

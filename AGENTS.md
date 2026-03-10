@@ -136,18 +136,7 @@ This runs your test against real systems (git, GitHub, Claude API, HTTP endpoint
 **What is recorded:**
 - **CommandRunner**: All shell commands (git, wt, etc.) and their output
 - **GhApi**: All GitHub API calls (endpoints, request/response bodies)
-- **HttpClient**: Manual only (see below)
-
-**HTTP recording limitation:** `HttpClient` recording is not yet automated. Instead:
-1. Capture HTTP interactions with `curl -v` or browser DevTools
-2. Format them manually as YAML interactions
-3. Add them to your fixture file
-
-Example curl capture and format:
-```bash
-curl -v -H "authorization: Bearer token" https://api.anthropic.com/v1/sessions 2>&1 | tee capture.txt
-# Then manually create the HTTP interaction YAML
-```
+- **HttpClient**: All HTTP requests (method, URL, headers, request/response bodies)
 
 ### Masks
 
