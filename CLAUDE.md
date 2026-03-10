@@ -16,6 +16,13 @@ Before pushing, always run `cargo fmt`, `cargo clippy --all-targets --locked -- 
 
 In the Codex sandbox, prefer `mkdir -p .codex-tmp && TMPDIR="$PWD/.codex-tmp" cargo test --workspace --locked --features flotilla-daemon/skip-no-sandbox-tests` so native dependencies can create temp files and socket-bind tests stay skipped.
 
+## Claude Code Web (changedirection/flotilla fork)
+
+This fork exists for Claude Code Web sessions. Two things to be aware of:
+
+- **Upstream repo for gh commands**: Issues and PRs live on the upstream `rjwittams/flotilla`. Always pass `-R rjwittams/flotilla` to `gh issue` and `gh pr` commands (e.g. `gh issue list -R rjwittams/flotilla`, `gh pr create -R rjwittams/flotilla`). PRs should target `rjwittams/flotilla:main` as the base.
+- **No local servers**: The sandbox blocks binding ports, so MCP servers and visualization tools that start local HTTP servers won't work.
+
 ## Architecture
 
 Provider-based plugin system with data correlation:
