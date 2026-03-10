@@ -2,6 +2,10 @@
 
 TUI dashboard for managing development workspaces across git worktrees, code review (GitHub PRs), issue trackers, cloud agent sessions (Claude), and terminal multiplexers (cmux).
 
+## Development Phase
+
+We are in a **no backwards compatibility** phase. Protocol types, snapshot formats, config file formats, and wire formats can all change freely without migration logic or deprecation paths.
+
 ## Quick Reference
 
 ```bash
