@@ -10,11 +10,16 @@ use crate::providers::types::*;
 use crate::providers::{CommandRunner, HttpClient};
 use tracing::{debug, info, warn};
 
+/// Shared reqwest client used only as a request factory (building
+/// `reqwest::Request` objects). Actual execution goes through the
+/// injected `HttpClient` trait, which has its own client. This avoids
+/// creating a redundant connection pool per `ClaudeCodingAgent` instance.
+static REQUEST_FACTORY: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+
 pub struct ClaudeCodingAgent {
     provider_name: String,
     runner: Arc<dyn CommandRunner>,
     http: Arc<dyn HttpClient>,
-    reqwest_client: reqwest::Client,
     sessions_cache: Mutex<SessionsCache>,
 }
 
@@ -28,7 +33,6 @@ impl ClaudeCodingAgent {
             provider_name,
             runner,
             http,
-            reqwest_client: reqwest::Client::new(),
             sessions_cache: Mutex::new(SessionsCache {
                 sessions: Vec::new(),
                 fetched_at: None,
@@ -197,7 +201,6 @@ fn invalidate_auth_cache() {
 
 impl ClaudeCodingAgent {
     fn build_request(
-        client: &reqwest::Client,
         method: &str,
         url: &str,
         access_token: &str,
@@ -205,7 +208,7 @@ impl ClaudeCodingAgent {
     ) -> Result<reqwest::Request, String> {
         let method = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|e| format!("invalid HTTP method: {e}"))?;
-        let mut builder = client
+        let mut builder = REQUEST_FACTORY
             .request(method, url)
             .header("authorization", format!("Bearer {access_token}"))
             .header("anthropic-beta", "ccr-byoc-2025-07-29")
@@ -241,7 +244,6 @@ impl ClaudeCodingAgent {
     async fn fetch_sessions_inner(&self, base_url: &str) -> Result<Vec<WebSession>, String> {
         let token = get_oauth_token(&*self.runner).await?;
         let request = Self::build_request(
-            &self.reqwest_client,
             "GET",
             &sessions_url_for(base_url),
             &token.access_token,
@@ -251,6 +253,9 @@ impl ClaudeCodingAgent {
         let status = resp.status().as_u16();
         let body = std::str::from_utf8(resp.body()).map_err(|e| e.to_string())?;
 
+        // Both 401 and 403 are treated as auth errors so the caller's retry
+        // logic (which matches on "authentication") can invalidate the cached
+        // token and try again with fresh credentials.
         if status == 401 || status == 403 {
             return Err(format!("authentication error (HTTP {status})"));
         }
@@ -274,7 +279,6 @@ impl ClaudeCodingAgent {
         info!("archiving session {session_id}");
         let token = get_oauth_token(&*self.runner).await?;
         let request = Self::build_request(
-            &self.reqwest_client,
             "PATCH",
             &session_url_for(base_url, session_id),
             &token.access_token,
@@ -566,12 +570,17 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions_uses_cache_and_maps_fields() {
+        // This test pre-populates the cache, so no HTTP calls are made.
+        // Use an empty replay session to make that explicit.
         let _test_lock = TEST_LOCK.lock().await;
         reset_auth_state();
 
         let runner = mock_runner(vec![]);
-        let http: Arc<dyn crate::providers::HttpClient> =
-            Arc::new(crate::providers::ReqwestHttpClient::new());
+        let dir = tempfile::tempdir().unwrap();
+        let empty_fixture = dir.path().join("empty.yaml");
+        std::fs::write(&empty_fixture, "interactions: []\n").unwrap();
+        let session = replay::ReplaySession::from_file(&empty_fixture, replay::Masks::new());
+        let http = replay::test_http_client(&session);
         let agent = make_agent(runner, http);
         {
             let mut cache = agent.sessions_cache.lock().unwrap();
@@ -701,7 +710,8 @@ mod tests {
 
     #[tokio::test]
     async fn attach_command_formats_teleport_command() {
-        let _test_lock = TEST_LOCK.lock().await;
+        // No TEST_LOCK needed: this test is pure string formatting,
+        // it doesn't touch the global AUTH_CACHE.
         let runner = mock_runner(vec![]);
         let http: Arc<dyn crate::providers::HttpClient> =
             Arc::new(crate::providers::ReqwestHttpClient::new());

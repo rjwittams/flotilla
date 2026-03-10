@@ -683,6 +683,7 @@ impl DaemonHandle for SocketDaemon {
 mod tests {
     use super::*;
     use flotilla_protocol::{Snapshot, SnapshotDelta};
+    use tokio::net::unix::OwnedReadHalf;
     use tokio::net::UnixStream;
 
     type SharedWriter = Arc<Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>>;
@@ -734,13 +735,18 @@ mod tests {
         }
     }
 
-    fn event_harness() -> (SharedWriter, SharedPending, Arc<AtomicU64>) {
-        let (client, _server) = UnixStream::pair().expect("pair");
+    /// Returns a writer/pending/next_id triple for tests that call `handle_event`.
+    /// Also returns the server half of the socket pair so it isn't dropped — dropping
+    /// it would close the pipe and cause writes on the client half to fail.
+    fn event_harness() -> (SharedWriter, SharedPending, Arc<AtomicU64>, OwnedReadHalf) {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let (server_read, _server_write) = server.into_split();
         let (_read_half, write_half) = client.into_split();
         (
             Arc::new(Mutex::new(BufWriter::new(write_half))),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(AtomicU64::new(1)),
+            server_read,
         )
     }
 
@@ -833,7 +839,7 @@ mod tests {
         let recovering: Arc<std::sync::Mutex<HashMap<PathBuf, Vec<DaemonEvent>>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
         let (event_tx, mut event_rx) = broadcast::channel(16);
-        let (writer, pending, next_id) = event_harness();
+        let (writer, pending, next_id, _server) = event_harness();
 
         handle_event(
             DaemonEvent::SnapshotFull(Box::new(make_snapshot(&repo, 10))),
@@ -870,7 +876,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(HashMap::new()));
         recovering.lock().unwrap().insert(repo.clone(), vec![]);
         let (event_tx, mut event_rx) = broadcast::channel(16);
-        let (writer, pending, next_id) = event_harness();
+        let (writer, pending, next_id, _server) = event_harness();
 
         handle_event(
             DaemonEvent::SnapshotDelta(Box::new(make_delta(&repo, 99, 100))),
@@ -960,8 +966,18 @@ mod tests {
             .expect("acquire first lock")
             .expect("first call should become spawner");
 
+        // Use a barrier so we know the waiter thread has started before
+        // checking is_finished(). Without this, a short sleep could pass
+        // vacuously on a loaded machine (thread not yet scheduled).
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let barrier_clone = Arc::clone(&barrier);
         let lock_path_clone = lock_path.clone();
-        let waiter = std::thread::spawn(move || acquire_spawn_lock(&lock_path_clone).unwrap());
+        let waiter = std::thread::spawn(move || {
+            barrier_clone.wait();
+            acquire_spawn_lock(&lock_path_clone).unwrap()
+        });
+        barrier.wait();
+        // Waiter has started; give it time to enter flock() (a single syscall).
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(
             !waiter.is_finished(),
