@@ -950,9 +950,10 @@ mod tests {
     fn refresh_error_display() {
         let err = RefreshError {
             category: "github",
+            provider: "GitHub".to_string(),
             message: "rate limited".to_string(),
         };
-        assert_eq!(format!("{err}"), "github: rate limited");
+        assert_eq!(format!("{err}"), "github/GitHub: rate limited");
     }
 
     #[test]

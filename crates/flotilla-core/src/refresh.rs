@@ -114,17 +114,17 @@ async fn refresh_providers(
 
     let checkouts_fut = async {
         if let Some(cm) = registry.checkout_managers.values().next() {
-            cm.list_checkouts(repo_root).await
+            (cm.display_name().to_string(), cm.list_checkouts(repo_root).await)
         } else {
-            Ok(vec![])
+            (String::new(), Ok(vec![]))
         }
     };
 
     let cr_fut = async {
         if let Some(cr) = registry.code_review.values().next() {
-            cr.list_change_requests(repo_root, 20).await
+            (cr.display_name().to_string(), cr.list_change_requests(repo_root, 20).await)
         } else {
-            Ok(vec![])
+            (String::new(), Ok(vec![]))
         }
     };
 
@@ -132,18 +132,18 @@ async fn refresh_providers(
         if registry.cloud_agents.is_empty() {
             return (vec![], vec![]);
         }
-        let results = futures::future::join_all(registry.cloud_agents.iter().map(|(name, ca)| {
-            let provider = name.clone();
-            async move { (provider, ca.list_sessions(criteria).await) }
+        let results = futures::future::join_all(registry.cloud_agents.values().map(|ca| {
+            let display_name = ca.display_name().to_string();
+            async move { (display_name, ca.list_sessions(criteria).await) }
         }))
         .await;
 
         let mut sessions = Vec::new();
         let mut session_errors = Vec::new();
-        for (provider, result) in results {
+        for (display_name, result) in results {
             match result {
                 Ok(mut entries) => sessions.append(&mut entries),
-                Err(e) => session_errors.push(format!("{provider}: {e}")),
+                Err(e) => session_errors.push((display_name, e)),
             }
         }
         (sessions, session_errors)
@@ -151,37 +151,45 @@ async fn refresh_providers(
 
     let branches_fut = async {
         if let Some(vcs) = registry.vcs.values().next() {
-            vcs.list_remote_branches(repo_root).await
+            (vcs.display_name().to_string(), vcs.list_remote_branches(repo_root).await)
         } else {
-            Ok(vec![])
+            (String::new(), Ok(vec![]))
         }
     };
 
     let merged_fut = async {
         if let Some(cr) = registry.code_review.values().next() {
-            cr.list_merged_branch_names(repo_root, 50).await
+            (cr.display_name().to_string(), cr.list_merged_branch_names(repo_root, 50).await)
         } else {
-            Ok(vec![])
+            (String::new(), Ok(vec![]))
         }
     };
 
     let ws_fut = async {
         if let Some((_, ws_mgr)) = &registry.workspace_manager {
-            ws_mgr.list_workspaces().await
+            (ws_mgr.display_name().to_string(), ws_mgr.list_workspaces().await)
         } else {
-            Ok(vec![])
+            (String::new(), Ok(vec![]))
         }
     };
 
     let tp_fut = async {
         if let Some((_, tp)) = &registry.terminal_pool {
-            tp.list_terminals().await
+            (tp.display_name().to_string(), tp.list_terminals().await)
         } else {
-            Ok(vec![])
+            (String::new(), Ok(vec![]))
         }
     };
 
-    let (checkouts, crs, sessions_bundle, branches, merged, workspaces, managed_terminals) = tokio::join!(
+    let (
+        (cm_name, checkouts),
+        (cr_name, crs),
+        sessions_bundle,
+        (vcs_name, branches),
+        (merged_name, merged),
+        (ws_name, workspaces),
+        (tp_name, managed_terminals),
+    ) = tokio::join!(
         checkouts_fut,
         cr_fut,
         sessions_fut,
@@ -195,7 +203,7 @@ async fn refresh_providers(
         .unwrap_or_else(|e| {
             errors.push(RefreshError {
                 category: "checkouts",
-                provider: String::new(),
+                provider: cm_name.clone(),
                 message: e,
             });
             Vec::new()
@@ -206,7 +214,7 @@ async fn refresh_providers(
         .unwrap_or_else(|e| {
             errors.push(RefreshError {
                 category: "PRs",
-                provider: String::new(),
+                provider: cr_name.clone(),
                 message: e,
             });
             Vec::new()
@@ -217,7 +225,7 @@ async fn refresh_providers(
         .unwrap_or_else(|e| {
             errors.push(RefreshError {
                 category: "workspaces",
-                provider: String::new(),
+                provider: ws_name.clone(),
                 message: e,
             });
             Vec::new()
@@ -228,7 +236,7 @@ async fn refresh_providers(
         .unwrap_or_else(|e| {
             errors.push(RefreshError {
                 category: "terminals",
-                provider: String::new(),
+                provider: tp_name.clone(),
                 message: e,
             });
             Vec::new()
@@ -237,11 +245,11 @@ async fn refresh_providers(
         .map(|t| (t.id.to_string(), t))
         .collect();
     let (sessions, session_errors) = sessions_bundle;
-    if !session_errors.is_empty() {
+    for (provider, msg) in session_errors {
         errors.push(RefreshError {
             category: "sessions",
-            provider: String::new(),
-            message: session_errors.join("; "),
+            provider,
+            message: msg,
         });
     }
     pd.sessions = sessions.into_iter().collect();
@@ -250,7 +258,7 @@ async fn refresh_providers(
         let remote = branches.unwrap_or_else(|e| {
             errors.push(RefreshError {
                 category: "branches",
-                provider: String::new(),
+                provider: vcs_name.clone(),
                 message: e,
             });
             Vec::new()
@@ -258,7 +266,7 @@ async fn refresh_providers(
         let merged_names = merged.unwrap_or_else(|e| {
             errors.push(RefreshError {
                 category: "merged",
-                provider: String::new(),
+                provider: merged_name.clone(),
                 message: e,
             });
             Vec::new()

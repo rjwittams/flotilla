@@ -78,7 +78,7 @@ pub fn error_to_proto(error: &RefreshError) -> ProviderError {
 pub fn health_to_proto(
     health: &HashMap<(&'static str, String), bool>,
 ) -> HashMap<String, HashMap<String, bool>> {
-    let mut nested = HashMap::new();
+    let mut nested: HashMap<String, HashMap<String, bool>> = HashMap::new();
     for ((category, provider), &healthy) in health {
         nested
             .entry(category.to_string())
