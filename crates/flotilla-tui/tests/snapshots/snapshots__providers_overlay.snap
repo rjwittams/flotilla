@@ -1,0 +1,34 @@
+---
+source: crates/flotilla-tui/tests/snapshots.rs
+expression: output
+---
+ ⚓  flotilla  | my-project | [+]
+┌─────────────────────────────────────────────────────────────────── ✕ ┐┌ Preview ─────────────────────────────────────┐
+│VCS             Git                                                   ││                                              │
+│Checkout mgr    Git Worktrees                                         ││                                              │
+│Code review     GitHub ✗                                              ││                                              │
+│Issue tracker   —                                                     ││                                              │
+│Coding agent    Claude ✓                                              ││                                              │
+│AI utility      —                                                     ││                                              │
+│Workspace mgr   —                                                     ││                                              │
+│Terminal pool   —                                                     ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+└──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘
+ c:close providers  [/]:switch tab  ?:help  q:quit

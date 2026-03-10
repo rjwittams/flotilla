@@ -378,3 +378,184 @@ fn extract_path_param(params: &serde_json::Value, field: &str) -> Result<PathBuf
         .map(PathBuf::from)
         .ok_or_else(|| format!("missing '{field}' parameter"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flotilla_protocol::{DaemonEvent, RepoInfo};
+
+    fn assert_ok_empty_response(msg: Message, expected_id: u64) {
+        match msg {
+            Message::Response {
+                id,
+                ok,
+                data,
+                error,
+            } => {
+                assert_eq!(id, expected_id);
+                assert!(ok);
+                assert!(data.is_none());
+                assert!(error.is_none());
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+    }
+
+    async fn empty_daemon() -> (tempfile::TempDir, Arc<InProcessDaemon>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
+        let daemon = InProcessDaemon::new(vec![], config).await;
+        (tmp, daemon)
+    }
+
+    #[tokio::test]
+    async fn write_message_writes_json_line() {
+        let (a, b) = tokio::net::UnixStream::pair().expect("pair");
+        let (_read_half, write_half) = a.into_split();
+        let writer = tokio::sync::Mutex::new(BufWriter::new(write_half));
+
+        let msg = Message::empty_ok_response(9);
+        write_message(&writer, &msg).await.expect("write_message");
+
+        let mut lines = BufReader::new(b).lines();
+        let line = lines.next_line().await.expect("read line").expect("line");
+        let parsed: Message = serde_json::from_str(&line).expect("parse line as message");
+        match parsed {
+            Message::Response { id, ok, .. } => {
+                assert_eq!(id, 9);
+                assert!(ok);
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_path_param_requires_string_field() {
+        let params = serde_json::json!({});
+        let err = extract_path_param(&params, "repo").expect_err("missing field should error");
+        assert!(err.contains("missing 'repo' parameter"));
+
+        let params = serde_json::json!({ "repo": 42 });
+        let err = extract_path_param(&params, "repo").expect_err("non-string field should error");
+        assert!(err.contains("missing 'repo' parameter"));
+
+        let params = serde_json::json!({ "repo": "/tmp/project" });
+        let path = extract_path_param(&params, "repo").expect("valid path string");
+        assert_eq!(path, PathBuf::from("/tmp/project"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_request_handles_unknown_and_missing_params() {
+        let (_tmp, daemon) = empty_daemon().await;
+
+        let unknown = dispatch_request(&daemon, 1, "not_a_method", serde_json::json!({})).await;
+        match unknown {
+            Message::Response {
+                id,
+                ok,
+                data,
+                error,
+            } => {
+                assert_eq!(id, 1);
+                assert!(!ok);
+                assert!(data.is_none());
+                assert!(
+                    error.unwrap_or_default().contains("unknown method"),
+                    "unexpected error payload"
+                );
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+
+        let missing_repo = dispatch_request(&daemon, 2, "get_state", serde_json::json!({})).await;
+        match missing_repo {
+            Message::Response {
+                id,
+                ok,
+                data,
+                error,
+            } => {
+                assert_eq!(id, 2);
+                assert!(!ok);
+                assert!(data.is_none());
+                assert!(
+                    error
+                        .unwrap_or_default()
+                        .contains("missing 'repo' parameter"),
+                    "unexpected error payload"
+                );
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_add_list_remove_repo_round_trip() {
+        let (tmp, daemon) = empty_daemon().await;
+        let repo_path = tmp.path().join("repo-a");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let add = dispatch_request(
+            &daemon,
+            10,
+            "add_repo",
+            serde_json::json!({ "path": repo_path }),
+        )
+        .await;
+        assert_ok_empty_response(add, 10);
+
+        let list = dispatch_request(&daemon, 11, "list_repos", serde_json::json!({})).await;
+        let listed: Vec<RepoInfo> = match list {
+            Message::Response {
+                id,
+                ok,
+                data,
+                error,
+            } => {
+                assert_eq!(id, 11);
+                assert!(ok, "list_repos should be ok: {error:?}");
+                serde_json::from_value(data.expect("list data")).expect("parse repo list")
+            }
+            other => panic!("expected response, got {other:?}"),
+        };
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, repo_path);
+
+        let remove = dispatch_request(
+            &daemon,
+            12,
+            "remove_repo",
+            serde_json::json!({ "path": listed[0].path }),
+        )
+        .await;
+        assert_ok_empty_response(remove, 12);
+    }
+
+    #[tokio::test]
+    async fn dispatch_replay_since_with_bad_payload_degrades_to_empty_last_seen() {
+        let (_tmp, daemon) = empty_daemon().await;
+
+        let replay = dispatch_request(
+            &daemon,
+            30,
+            "replay_since",
+            serde_json::json!({ "last_seen": "invalid-shape" }),
+        )
+        .await;
+        match replay {
+            Message::Response {
+                id,
+                ok,
+                data,
+                error,
+            } => {
+                assert_eq!(id, 30);
+                assert!(ok, "replay_since should still succeed: {error:?}");
+                let events: Vec<DaemonEvent> =
+                    serde_json::from_value(data.expect("replay events data")).expect("events");
+                assert!(events.is_empty());
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+    }
+}

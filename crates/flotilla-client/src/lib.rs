@@ -678,3 +678,318 @@ impl DaemonHandle for SocketDaemon {
         Ok(events)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flotilla_protocol::{Snapshot, SnapshotDelta};
+    use tokio::net::unix::OwnedReadHalf;
+    use tokio::net::UnixStream;
+
+    type SharedWriter = Arc<Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>>;
+    type SharedPending = Arc<Mutex<HashMap<u64, oneshot::Sender<RawResponse>>>>;
+    type RequestLines = tokio::io::Lines<BufReader<UnixStream>>;
+
+    struct RequestHarness {
+        writer: SharedWriter,
+        pending: SharedPending,
+        next_id: Arc<AtomicU64>,
+        lines: RequestLines,
+    }
+
+    fn make_snapshot(repo: &Path, seq: u64) -> Snapshot {
+        Snapshot {
+            seq,
+            repo: repo.to_path_buf(),
+            work_items: vec![],
+            providers: flotilla_protocol::ProviderData::default(),
+            provider_health: HashMap::new(),
+            errors: vec![],
+            issue_total: None,
+            issue_has_more: false,
+            issue_search_results: None,
+        }
+    }
+
+    fn make_delta(repo: &Path, prev_seq: u64, seq: u64) -> SnapshotDelta {
+        SnapshotDelta {
+            seq,
+            prev_seq,
+            repo: repo.to_path_buf(),
+            changes: vec![],
+            work_items: vec![],
+            issue_total: None,
+            issue_has_more: false,
+            issue_search_results: None,
+        }
+    }
+
+    fn request_harness() -> RequestHarness {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let (_read_half, write_half) = client.into_split();
+        RequestHarness {
+            writer: Arc::new(Mutex::new(BufWriter::new(write_half))),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(1)),
+            lines: BufReader::new(server).lines(),
+        }
+    }
+
+    /// Returns a writer/pending/next_id triple for tests that call `handle_event`.
+    /// Also returns the server half of the socket pair so it isn't dropped — dropping
+    /// it would close the pipe and cause writes on the client half to fail.
+    fn event_harness() -> (SharedWriter, SharedPending, Arc<AtomicU64>, OwnedReadHalf) {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let (server_read, _server_write) = server.into_split();
+        let (_read_half, write_half) = client.into_split();
+        (
+            Arc::new(Mutex::new(BufWriter::new(write_half))),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(1)),
+            server_read,
+        )
+    }
+
+    async fn read_request(lines: &mut RequestLines) -> (u64, String, serde_json::Value) {
+        let line = lines
+            .next_line()
+            .await
+            .expect("read request line")
+            .expect("line missing");
+        match serde_json::from_str::<Message>(&line).expect("parse request") {
+            Message::Request { id, method, params } => (id, method, params),
+            other => panic!("expected request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_request_writes_message_and_returns_pending_response() {
+        let mut harness = request_harness();
+
+        let request_writer = Arc::clone(&harness.writer);
+        let request_pending = Arc::clone(&harness.pending);
+        let request_next_id = Arc::clone(&harness.next_id);
+        let request_task = tokio::spawn(async move {
+            send_request(
+                &request_writer,
+                &request_pending,
+                &request_next_id,
+                "list_repos",
+                serde_json::json!({"x": 1}),
+            )
+            .await
+        });
+
+        let (id, method, params) = read_request(&mut harness.lines).await;
+        assert_eq!(method, "list_repos");
+        assert_eq!(params["x"], 1);
+
+        let tx = harness
+            .pending
+            .lock()
+            .await
+            .remove(&id)
+            .expect("pending sender should exist");
+        tx.send(RawResponse {
+            ok: true,
+            data: Some(serde_json::json!({"ok": true})),
+            error: None,
+        })
+        .expect("send response");
+
+        let raw = request_task.await.expect("join").expect("send_request");
+        assert!(raw.ok);
+        assert_eq!(raw.data.unwrap()["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn send_request_returns_cancelled_when_sender_is_dropped() {
+        let mut harness = request_harness();
+
+        let request_writer = Arc::clone(&harness.writer);
+        let request_pending = Arc::clone(&harness.pending);
+        let request_next_id = Arc::clone(&harness.next_id);
+        let task = tokio::spawn(async move {
+            send_request(
+                &request_writer,
+                &request_pending,
+                &request_next_id,
+                "never_replied",
+                serde_json::json!({}),
+            )
+            .await
+        });
+
+        let (id, method, _) = read_request(&mut harness.lines).await;
+        assert_eq!(method, "never_replied");
+
+        let dropped = harness.pending.lock().await.remove(&id);
+        drop(dropped);
+        let err = task
+            .await
+            .expect("join")
+            .expect_err("dropping sender should cancel request");
+        assert!(err.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn handle_event_updates_local_seqs_for_full_and_matching_delta() {
+        let repo = PathBuf::from("/tmp/repo");
+        let local_seqs: Arc<SeqMap> = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let recovering: Arc<std::sync::Mutex<HashMap<PathBuf, Vec<DaemonEvent>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+        let (writer, pending, next_id, _server) = event_harness();
+
+        handle_event(
+            DaemonEvent::SnapshotFull(Box::new(make_snapshot(&repo, 10))),
+            &local_seqs,
+            &recovering,
+            &event_tx,
+            &writer,
+            &pending,
+            &next_id,
+        );
+        handle_event(
+            DaemonEvent::SnapshotDelta(Box::new(make_delta(&repo, 10, 11))),
+            &local_seqs,
+            &recovering,
+            &event_tx,
+            &writer,
+            &pending,
+            &next_id,
+        );
+
+        let first = event_rx.recv().await.expect("event");
+        assert!(matches!(first, DaemonEvent::SnapshotFull(_)));
+        let second = event_rx.recv().await.expect("event");
+        assert!(matches!(second, DaemonEvent::SnapshotDelta(_)));
+        assert_eq!(local_seqs.read().unwrap().get(&repo), Some(&11));
+    }
+
+    #[tokio::test]
+    async fn handle_event_buffers_delta_when_recovery_already_running() {
+        let repo = PathBuf::from("/tmp/repo");
+        let local_seqs: Arc<SeqMap> = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        local_seqs.write().unwrap().insert(repo.clone(), 1);
+        let recovering: Arc<std::sync::Mutex<HashMap<PathBuf, Vec<DaemonEvent>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        recovering.lock().unwrap().insert(repo.clone(), vec![]);
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+        let (writer, pending, next_id, _server) = event_harness();
+
+        handle_event(
+            DaemonEvent::SnapshotDelta(Box::new(make_delta(&repo, 99, 100))),
+            &local_seqs,
+            &recovering,
+            &event_tx,
+            &writer,
+            &pending,
+            &next_id,
+        );
+
+        let buffered = recovering
+            .lock()
+            .unwrap()
+            .get(&repo)
+            .cloned()
+            .expect("buffer exists");
+        assert_eq!(buffered.len(), 1);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "buffered delta should not dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_from_gap_requests_replay_and_applies_seqs() {
+        let repo = PathBuf::from("/tmp/repo");
+        let local_seqs: Arc<SeqMap> = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        local_seqs.write().unwrap().insert(repo.clone(), 3);
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+
+        let mut harness = request_harness();
+
+        let recover_local_seqs = Arc::clone(&local_seqs);
+        let recover_event_tx = event_tx.clone();
+        let recover_writer = Arc::clone(&harness.writer);
+        let recover_pending = Arc::clone(&harness.pending);
+        let recover_next_id = Arc::clone(&harness.next_id);
+        let recover_task = tokio::spawn(async move {
+            recover_from_gap(
+                &recover_local_seqs,
+                &recover_event_tx,
+                &recover_writer,
+                &recover_pending,
+                &recover_next_id,
+            )
+            .await;
+        });
+
+        let (id, method, _) = read_request(&mut harness.lines).await;
+        assert_eq!(method, "replay_since");
+
+        let replay_events = vec![DaemonEvent::SnapshotDelta(Box::new(make_delta(
+            &repo, 3, 4,
+        )))];
+        let tx = harness
+            .pending
+            .lock()
+            .await
+            .remove(&id)
+            .expect("pending sender for replay");
+        tx.send(RawResponse {
+            ok: true,
+            data: Some(serde_json::to_value(replay_events).expect("serialize replay events")),
+            error: None,
+        })
+        .expect("send replay response");
+        recover_task.await.expect("join recover");
+
+        let event = event_rx.recv().await.expect("forwarded replay event");
+        assert!(matches!(event, DaemonEvent::SnapshotDelta(_)));
+        assert_eq!(local_seqs.read().unwrap().get(&repo), Some(&4));
+    }
+
+    #[test]
+    fn acquire_spawn_lock_waiter_blocks_then_returns_none() {
+        let unique = format!(
+            "flotilla-client-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        );
+        let lock_path = std::env::temp_dir().join(unique).join("daemon.sock.lock");
+        let holder = acquire_spawn_lock(&lock_path)
+            .expect("acquire first lock")
+            .expect("first call should become spawner");
+
+        // Use a barrier so we know the waiter thread has started before
+        // checking is_finished(). Without this, a short sleep could pass
+        // vacuously on a loaded machine (thread not yet scheduled).
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let barrier_clone = Arc::clone(&barrier);
+        let lock_path_clone = lock_path.clone();
+        let waiter = std::thread::spawn(move || {
+            barrier_clone.wait();
+            acquire_spawn_lock(&lock_path_clone).unwrap()
+        });
+        barrier.wait();
+        // Waiter has started; give it time to enter flock() (a single syscall).
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !waiter.is_finished(),
+            "waiter should block while lock is held"
+        );
+
+        drop(holder);
+        let waiter_result = waiter.join().expect("join waiter");
+        assert!(
+            waiter_result.is_none(),
+            "waiter should return None after spawner releases lock"
+        );
+        let _ = std::fs::remove_file(&lock_path);
+    }
+}

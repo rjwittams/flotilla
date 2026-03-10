@@ -199,6 +199,7 @@ pub async fn detect_providers(
             Arc::new(ClaudeCodingAgent::new(
                 "claude".to_string(),
                 Arc::clone(&runner),
+                Arc::new(crate::providers::ReqwestHttpClient::new()),
             )),
         );
         registry.ai_utilities.insert(
