@@ -560,7 +560,10 @@ branch refs/heads/feature
             .unwrap_or_else(|| PathBuf::from("/test/repo"));
 
         let mut masks = replay::Masks::new();
-        masks.add(repo_path.to_str().unwrap(), "{repo}");
+        masks.add(
+            repo_path.to_str().expect("repo path is valid UTF-8"),
+            "{repo}",
+        );
         let session = replay::test_session(&fixture("git_create_remote_branch.yaml"), masks);
         let runner = replay::test_runner(&session);
 
