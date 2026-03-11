@@ -569,19 +569,25 @@ pub fn group_work_items(
         }
     }
 
-    // Sessions -- sorted by updated_at descending
+    // Sessions -- grouped by provider, then sorted by updated_at descending
     session_items.sort_by(|a, b| {
-        let a_time = a
+        let a_ses = a
             .session_key
             .as_deref()
-            .and_then(|k| providers.sessions.get(k))
-            .and_then(|s| s.updated_at.as_deref());
-        let b_time = b
+            .and_then(|k| providers.sessions.get(k));
+        let b_ses = b
             .session_key
             .as_deref()
-            .and_then(|k| providers.sessions.get(k))
-            .and_then(|s| s.updated_at.as_deref());
-        b_time.cmp(&a_time)
+            .and_then(|k| providers.sessions.get(k));
+        let a_provider = a_ses.map(|s| s.provider_name.as_str()).unwrap_or("");
+        let b_provider = b_ses.map(|s| s.provider_name.as_str()).unwrap_or("");
+        a_provider
+            .cmp(b_provider)
+            .then_with(|| {
+                let a_time = a_ses.and_then(|s| s.updated_at.as_deref());
+                let b_time = b_ses.and_then(|s| s.updated_at.as_deref());
+                b_time.cmp(&a_time)
+            })
     });
     if !session_items.is_empty() {
         entries.push(GroupEntry::Header(SectionHeader(labels.sessions.clone())));
@@ -1981,6 +1987,66 @@ mod tests {
 
         let session_descs = session_descriptions(&result.table_entries);
         assert_eq!(session_descs, vec!["New", "Mid", "Old"]);
+    }
+
+    #[test]
+    fn group_work_items_sessions_grouped_by_provider_then_time() {
+        let mut providers = new_providers();
+        providers.sessions.insert(
+            "s-claude-old".to_string(),
+            CloudAgentSession {
+                title: "Claude Old".to_string(),
+                status: SessionStatus::Idle,
+                model: None,
+                updated_at: Some("2026-01-01T00:00:00Z".to_string()),
+                correlation_keys: vec![],
+                provider_name: "claude".to_string(),
+                provider_display_name: "Claude".to_string(),
+                item_noun: "Agent".to_string(),
+            },
+        );
+        providers.sessions.insert(
+            "s-codex-new".to_string(),
+            CloudAgentSession {
+                title: "Codex New".to_string(),
+                status: SessionStatus::Running,
+                model: None,
+                updated_at: Some("2026-03-01T00:00:00Z".to_string()),
+                correlation_keys: vec![],
+                provider_name: "codex".to_string(),
+                provider_display_name: "Codex".to_string(),
+                item_noun: "Task".to_string(),
+            },
+        );
+        providers.sessions.insert(
+            "s-claude-new".to_string(),
+            CloudAgentSession {
+                title: "Claude New".to_string(),
+                status: SessionStatus::Running,
+                model: None,
+                updated_at: Some("2026-02-01T00:00:00Z".to_string()),
+                correlation_keys: vec![],
+                provider_name: "claude".to_string(),
+                provider_display_name: "Claude".to_string(),
+                item_noun: "Agent".to_string(),
+            },
+        );
+
+        let labels = default_labels();
+        let items = vec![
+            to_proto(&session_item("s-claude-old", "Claude Old")),
+            to_proto(&session_item("s-codex-new", "Codex New")),
+            to_proto(&session_item("s-claude-new", "Claude New")),
+        ];
+        let result = group_work_items(&items, &providers, &labels);
+
+        let session_descs = session_descriptions(&result.table_entries);
+        // claude sessions grouped first (alphabetically), newest first within group
+        // then codex sessions
+        assert_eq!(
+            session_descs,
+            vec!["Claude New", "Claude Old", "Codex New"]
+        );
     }
 
     // -----------------------------------------------------------------------
