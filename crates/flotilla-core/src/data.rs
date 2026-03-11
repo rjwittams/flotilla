@@ -581,13 +581,11 @@ pub fn group_work_items(
             .and_then(|k| providers.sessions.get(k));
         let a_provider = a_ses.map(|s| s.provider_name.as_str()).unwrap_or("");
         let b_provider = b_ses.map(|s| s.provider_name.as_str()).unwrap_or("");
-        a_provider
-            .cmp(b_provider)
-            .then_with(|| {
-                let a_time = a_ses.and_then(|s| s.updated_at.as_deref());
-                let b_time = b_ses.and_then(|s| s.updated_at.as_deref());
-                b_time.cmp(&a_time)
-            })
+        a_provider.cmp(b_provider).then_with(|| {
+            let a_time = a_ses.and_then(|s| s.updated_at.as_deref());
+            let b_time = b_ses.and_then(|s| s.updated_at.as_deref());
+            b_time.cmp(&a_time)
+        })
     });
     if !session_items.is_empty() {
         entries.push(GroupEntry::Header(SectionHeader(labels.sessions.clone())));
@@ -2043,10 +2041,7 @@ mod tests {
         let session_descs = session_descriptions(&result.table_entries);
         // claude sessions grouped first (alphabetically), newest first within group
         // then codex sessions
-        assert_eq!(
-            session_descs,
-            vec!["Claude New", "Claude Old", "Codex New"]
-        );
+        assert_eq!(session_descs, vec!["Claude New", "Claude Old", "Codex New"]);
     }
 
     // -----------------------------------------------------------------------
