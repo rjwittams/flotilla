@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use super::{resolve_claude_path, CommandRunner};
+use super::{resolve_claude_path, run, CommandRunner};
 use crate::config::ConfigStore;
 use crate::providers::ai_utility::claude::ClaudeAiUtility;
 use crate::providers::code_review::github::GitHubCodeReview;
@@ -21,16 +21,13 @@ use tracing::{info, warn};
 
 /// Extract the first git remote URL for this repo.
 pub async fn first_remote_url(repo_root: &Path, runner: &dyn CommandRunner) -> Option<String> {
-    let remotes_output = runner.run("git", &["remote"], repo_root).await.ok()?;
+    let remotes_output = run!(runner, "git", &["remote"], repo_root).ok()?;
     for remote in remotes_output.lines() {
         let remote = remote.trim();
         if remote.is_empty() {
             continue;
         }
-        if let Ok(url) = runner
-            .run("git", &["remote", "get-url", remote], repo_root)
-            .await
-        {
+        if let Ok(url) = run!(runner, "git", &["remote", "get-url", remote], repo_root) {
             return Some(url.trim().to_string());
         }
     }
@@ -358,7 +355,13 @@ mod tests {
 
     #[async_trait]
     impl CommandRunner for DiscoveryMockRunner {
-        async fn run(&self, cmd: &str, args: &[&str], cwd: &Path) -> Result<String, String> {
+        async fn run(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: &Path,
+            _label: &super::super::ChannelLabel,
+        ) -> Result<String, String> {
             self.seen_cwds.lock().unwrap().push(cwd.to_path_buf());
             let key = (cmd.to_string(), args.join(" "));
             let mut map = self.responses.lock().unwrap();
@@ -378,8 +381,9 @@ mod tests {
             cmd: &str,
             args: &[&str],
             cwd: &Path,
+            label: &super::super::ChannelLabel,
         ) -> Result<super::super::CommandOutput, String> {
-            match self.run(cmd, args, cwd).await {
+            match self.run(cmd, args, cwd, label).await {
                 Ok(stdout) => Ok(super::super::CommandOutput {
                     stdout,
                     stderr: String::new(),

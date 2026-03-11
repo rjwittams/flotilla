@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::providers::types::*;
-use crate::providers::HttpClient;
+use crate::providers::{http_execute, HttpClient};
 
 pub struct CursorCodingAgent {
     provider_name: String,
@@ -48,7 +48,7 @@ impl CursorCodingAgent {
                 .basic_auth(&api_key, None::<&str>)
                 .build()
                 .map_err(|e| format!("request build error: {e}"))?;
-            let resp = self.http.execute(request).await?;
+            let resp = http_execute!(self.http, request)?;
             let status = resp.status().as_u16();
             if status == 401 || status == 403 {
                 return Err(format!("authentication error (HTTP {status})"));

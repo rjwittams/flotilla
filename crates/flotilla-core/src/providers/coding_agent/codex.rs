@@ -7,7 +7,7 @@ use std::time::Instant;
 use tracing::{debug, warn};
 
 use crate::providers::types::*;
-use crate::providers::HttpClient;
+use crate::providers::{http_execute, HttpClient};
 
 // --- Auth ---
 
@@ -319,7 +319,7 @@ impl CodexCodingAgent {
             .ok_or_else(|| format!("invalid repo slug: {repo_slug}"))?;
         let url = format!("{BASE_URL}/wham/environments/by-repo/github/{owner}/{repo}");
         let request = self.build_request("GET", &url, auth)?;
-        let resp = self.http.execute(request).await?;
+        let resp = http_execute!(self.http, request)?;
         let status = resp.status().as_u16();
         if status == 401 || status == 403 {
             return Err(format!("authentication error (HTTP {status})"));
@@ -349,7 +349,7 @@ impl CodexCodingAgent {
             url.push_str(&urlencoding::encode(c));
         }
         let request = self.build_request("GET", &url, auth)?;
-        let resp = self.http.execute(request).await?;
+        let resp = http_execute!(self.http, request)?;
         let status = resp.status().as_u16();
         if status == 401 || status == 403 {
             return Err(format!("authentication error (HTTP {status})"));
