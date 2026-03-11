@@ -23,6 +23,14 @@ use flotilla_protocol::{ProviderData, WorkItem};
 const HIGHLIGHT_SYMBOL: &str = "▸ ";
 const HIGHLIGHT_SYMBOL_WIDTH: u16 = 2;
 
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+    }
+}
+
 pub fn render(
     model: &TuiModel,
     ui: &mut UiState,
@@ -617,8 +625,14 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
 
         if let Some(ref pr_key) = item.change_request_key {
             if let Some(cr) = providers.change_requests.get(pr_key.as_str()) {
+                let provider_prefix = if cr.provider_name.is_empty() {
+                    String::new()
+                } else {
+                    format!("{} ", capitalize(&cr.provider_name))
+                };
                 lines.push(format!(
-                    "{} #{}: {}",
+                    "{}{} #{}: {}",
+                    provider_prefix,
                     model.active_labels().code_review.abbr,
                     pr_key,
                     cr.title
@@ -629,7 +643,13 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
 
         if let Some(ref ses_key) = item.session_key {
             if let Some(ses) = providers.sessions.get(ses_key.as_str()) {
-                lines.push(format!("Session: {}", ses.title));
+                let provider_prefix = if ses.provider_name.is_empty() {
+                    "Agent".to_string()
+                } else {
+                    format!("{} Agent", capitalize(&ses.provider_name))
+                };
+                lines.push(format!("{}: {}", provider_prefix, ses.title));
+                lines.push(format!("Id: {}", ses_key));
                 lines.push(format!("Status: {:?}", ses.status));
                 if let Some(ref model_name) = ses.model {
                     lines.push(format!("Model: {}", model_name));
@@ -655,9 +675,14 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
         for issue_key in &item.issue_keys {
             if let Some(issue) = providers.issues.get(issue_key.as_str()) {
                 let labels = issue.labels.join(", ");
+                let provider_prefix = if issue.provider_name.is_empty() {
+                    String::new()
+                } else {
+                    format!("{} ", capitalize(&issue.provider_name))
+                };
                 lines.push(format!(
-                    "Issue #{}: {} [{}]",
-                    issue_key, issue.title, labels
+                    "{}Issue #{}: {} [{}]",
+                    provider_prefix, issue_key, issue.title, labels
                 ));
             }
         }
