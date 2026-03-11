@@ -4,9 +4,9 @@ expression: output
 ---
  ⚓  flotilla  | my-project | [+]
 ┌─────────────────────────────────────────────────────────────────── ⚙ ┐┌ Preview ─────────────────────────────────────┐
-│      Path     Description     Branch   WT  WS  PR   SS   Issues Git  ││Description: Debug API endpoints              │
+│      Source     Path  Descriptio Branc WT  WS  PR   SS   Issues Git  ││Description: Debug API endpoints              │
 │      ── Sessions ──                                                  ││Branch: feat/session-branch                   │
-│▸  ▶           Debug API endpo feat/ses              ▶                ││Session: Debug API endpoints                  │
+│▸  ▶                   Debug API  feat/              ▶                ││Session: Debug API endpoints                  │
 │                                                                      ││Status: Running                               │
 │                                                                      ││                                              │
 │                                                                      ││                                              │

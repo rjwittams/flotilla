@@ -4,7 +4,7 @@ expression: output
 ---
  ⚓  flotilla  | my-project | [+]
 ┌─────────────────────────────────────────────────────────────────── ⚙ ┐┌ Preview ─────────────────────────────────────┐
-│      Path     Descript┌ Help ↓ ──────────────────────────────────────────────────────────────┐                       │
+│      Source     Path  ┌ Help ↓ ──────────────────────────────────────────────────────────────┐                       │
 │                       │Item Icons                                                            │                       │
 │                       │●  Checkout with workspace    ○  Checkout (no workspace)              │                       │
 │                       │▶  Running session            ◆  Idle session                         │                       │

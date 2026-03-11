@@ -312,6 +312,7 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
     let labels = model.active_labels();
     let header = Row::new(vec![
         Cell::from(""),
+        Cell::from("Source"),
         Cell::from("Path"),
         Cell::from("Description"),
         Cell::from("Branch"),
@@ -326,16 +327,17 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
     .height(1);
 
     let widths = [
-        Constraint::Length(3), // icon
-        Constraint::Fill(1),   // Path
-        Constraint::Fill(2),   // Description
-        Constraint::Fill(1),   // Branch
-        Constraint::Length(3), // WT
-        Constraint::Length(3), // WS
-        Constraint::Length(4), // PR
-        Constraint::Length(4), // SS
-        Constraint::Length(6), // Issues
-        Constraint::Length(5), // Git
+        Constraint::Length(3),  // icon
+        Constraint::Length(10), // Source
+        Constraint::Fill(1),    // Path
+        Constraint::Fill(2),    // Description
+        Constraint::Fill(1),    // Branch
+        Constraint::Length(3),  // WT
+        Constraint::Length(3),  // WS
+        Constraint::Length(4),  // PR
+        Constraint::Length(4),  // SS
+        Constraint::Length(6),  // Issues
+        Constraint::Length(5),  // Git
     ];
 
     let inner_width = area.width.saturating_sub(2 + HIGHLIGHT_SYMBOL_WIDTH);
@@ -345,6 +347,7 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
     // Build rows from active repo (immutable borrows)
     let rm = model.active();
     let rui = active_rui(model, ui);
+    let mut prev_source: Option<String> = None;
     let rows: Vec<Row> = rui
         .table_view
         .table_entries
@@ -357,10 +360,19 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
             };
 
             match entry {
-                GroupEntry::Header(header) => build_header_row(header),
+                GroupEntry::Header(header) => {
+                    prev_source = None;
+                    build_header_row(header)
+                }
                 GroupEntry::Item(item) => {
-                    let mut row =
-                        build_item_row(item, &rm.providers, &col_widths, model.active_repo_root());
+                    let mut row = build_item_row(
+                        item,
+                        &rm.providers,
+                        &col_widths,
+                        model.active_repo_root(),
+                        prev_source.as_deref(),
+                    );
+                    prev_source = item.source.clone();
                     if is_multi_selected {
                         row = row.style(Style::default().bg(Color::Indexed(236)));
                     }
@@ -431,6 +443,7 @@ fn build_header_row(_header: &SectionHeader) -> Row<'static> {
         Cell::from(""),
         Cell::from(""),
         Cell::from(""),
+        Cell::from(""),
     ])
     .height(1)
 }
@@ -440,6 +453,7 @@ fn build_item_row<'a>(
     providers: &ProviderData,
     col_widths: &[u16],
     repo_root: &Path,
+    prev_source: Option<&str>,
 ) -> Row<'a> {
     let session_status = item
         .session_key
@@ -449,9 +463,15 @@ fn build_item_row<'a>(
     let (icon, icon_color) =
         ui_helpers::work_item_icon(&item.kind, !item.workspace_refs.is_empty(), session_status);
 
-    let path_width = col_widths.get(1).copied().unwrap_or(14) as usize;
-    let desc_width = col_widths.get(2).copied().unwrap_or(15) as usize;
-    let branch_width = col_widths.get(3).copied().unwrap_or(25) as usize;
+    let source_display = match item.source.as_deref() {
+        Some(s) if prev_source == Some(s) => String::new(),
+        Some(s) => s.to_string(),
+        None => String::new(),
+    };
+
+    let path_width = col_widths.get(2).copied().unwrap_or(14) as usize;
+    let desc_width = col_widths.get(3).copied().unwrap_or(15) as usize;
+    let branch_width = col_widths.get(4).copied().unwrap_or(25) as usize;
 
     let path_display = item
         .checkout_key()
@@ -511,6 +531,10 @@ fn build_item_row<'a>(
         Cell::from(Span::styled(
             format!(" {icon}"),
             Style::default().fg(icon_color),
+        )),
+        Cell::from(Span::styled(
+            source_display,
+            Style::default().fg(Color::Indexed(245)),
         )),
         Cell::from(Span::styled(
             path_display,
