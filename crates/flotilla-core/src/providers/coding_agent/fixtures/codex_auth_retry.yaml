@@ -18,13 +18,6 @@ interactions:
   method: GET
   url: "https://chatgpt.com/backend-api/wham/tasks/list?task_filter=current&limit=20&environment_id=env-1"
   request_headers:
-    authorization: "Bearer expired-token"
-  status: 401
-  response_body: '{"error":"unauthorized"}'
-- channel: http
-  method: GET
-  url: "https://chatgpt.com/backend-api/wham/tasks/list?task_filter=current&limit=20&environment_id=env-1"
-  request_headers:
     authorization: "Bearer fresh-token"
     chatgpt-account-id: "acc-1"
   status: 200

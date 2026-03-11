@@ -827,6 +827,10 @@ mod tests {
 
     #[tokio::test]
     async fn detect_providers_codex_registration_depends_on_auth_file() {
+        let _lock = crate::providers::coding_agent::codex::CODEX_TEST_LOCK
+            .lock()
+            .await;
+
         // With auth.json present → registered
         let codex_dir = tempfile::tempdir().unwrap();
         std::fs::write(

@@ -9,9 +9,7 @@ use tracing::{debug, warn};
 use crate::providers::types::*;
 use crate::providers::HttpClient;
 
-// ---------------------------------------------------------------------------
-// Task 1: Auth file reader
-// ---------------------------------------------------------------------------
+// --- Auth ---
 
 #[derive(Debug, Deserialize)]
 struct CodexAuthFile {
@@ -81,9 +79,7 @@ pub fn codex_auth_file_exists() -> bool {
     codex_home().join("auth.json").exists()
 }
 
-// ---------------------------------------------------------------------------
-// Task 2: API response deserialization types
-// ---------------------------------------------------------------------------
+// --- API response types ---
 
 #[derive(Debug, Deserialize)]
 pub struct EnvironmentInfo {
@@ -147,9 +143,7 @@ pub struct PullRequestDetail {
     pub url: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Task 3: Task-to-session mapping logic
-// ---------------------------------------------------------------------------
+// --- Task-to-session mapping ---
 
 fn is_trunk_branch(name: &str) -> bool {
     matches!(name, "main" | "master")
@@ -236,9 +230,7 @@ fn map_task_to_session(task: &TaskItem, provider_name: &str) -> (String, CloudAg
     )
 }
 
-// ---------------------------------------------------------------------------
-// Task 4: CodexCodingAgent struct and HTTP helpers
-// ---------------------------------------------------------------------------
+// --- CodexCodingAgent struct and HTTP helpers ---
 
 const BASE_URL: &str = "https://chatgpt.com/backend-api";
 const AUTH_CACHE_TTL_SECS: u64 = 300; // 5 minutes
@@ -428,14 +420,12 @@ impl CodexCodingAgent {
         environment_id: &str,
         auth: &CodexAuth,
     ) -> Result<Vec<TaskItem>, String> {
-        let query = format!("environment_id={environment_id}");
+        let query = format!("environment_id={}", urlencoding::encode(environment_id));
         self.fetch_all_tasks(&query, auth).await
     }
 }
 
-// ---------------------------------------------------------------------------
-// Task 5: CloudAgentService trait implementation
-// ---------------------------------------------------------------------------
+// --- CloudAgentService trait implementation ---
 
 fn is_auth_error(e: &str) -> bool {
     e.contains("authentication error")
@@ -463,8 +453,9 @@ impl super::CloudAgentService for CodexCodingAgent {
             return Ok(vec![]);
         };
 
-        // Obtain auth: try cache first, then refresh from disk
-        let auth = match self.get_cached_auth() {
+        // Obtain auth: try cache first, then refresh from disk.
+        // Mutable so we can update it after an env-lookup auth retry.
+        let mut auth = match self.get_cached_auth() {
             Some(a) => a,
             None => match self.refresh_auth() {
                 Some(a) => a,
@@ -481,9 +472,7 @@ impl super::CloudAgentService for CodexCodingAgent {
         let env_ids = {
             let cache = self.env_cache.lock().expect("env_cache lock poisoned");
             if let Some(loaded_at) = cache.loaded_at {
-                if loaded_at.elapsed().as_secs() < ENV_CACHE_TTL_SECS
-                    && !cache.environment_ids.is_empty()
-                {
+                if loaded_at.elapsed().as_secs() < ENV_CACHE_TTL_SECS {
                     Some(cache.environment_ids.clone())
                 } else {
                     None
@@ -520,6 +509,7 @@ impl super::CloudAgentService for CodexCodingAgent {
                                     self.env_cache.lock().expect("env_cache lock poisoned");
                                 cache.environment_ids = ids.clone();
                                 cache.loaded_at = Some(Instant::now());
+                                auth = fresh_auth;
                                 ids
                             }
                             Err(e2) => {
@@ -590,19 +580,18 @@ impl super::CloudAgentService for CodexCodingAgent {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// --- Tests ---
+
+/// Lock shared across test modules that manipulate the `CODEX_HOME` env var.
+#[cfg(test)]
+pub(crate) static CODEX_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::providers::coding_agent::CloudAgentService;
     use crate::providers::replay;
-    use std::sync::LazyLock;
-    use tokio::sync::Mutex as AsyncMutex;
-
-    static CODEX_TEST_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 
     fn fixture(name: &str) -> String {
         format!(
@@ -612,7 +601,7 @@ mod tests {
         )
     }
 
-    // Task 1 tests
+    // Auth parsing tests
 
     #[test]
     fn parse_auth_chatgpt_mode() {
@@ -668,7 +657,7 @@ mod tests {
         assert!(parse_auth_file(json).is_none());
     }
 
-    // Task 2 tests
+    // Deserialization tests
 
     #[test]
     fn deserialize_task_list_response() {
@@ -746,7 +735,7 @@ mod tests {
         assert!(envs[1].label.is_none());
     }
 
-    // Task 3 tests
+    // Task-to-session mapping tests
 
     #[test]
     fn map_task_pending_status() {
@@ -900,7 +889,7 @@ mod tests {
         assert_eq!(session.title, "t-6");
     }
 
-    // Task 6: Replay fixture integration test — happy path
+    // Replay fixture integration tests
 
     #[tokio::test]
     async fn list_sessions_fetches_envs_and_tasks() {
@@ -965,7 +954,7 @@ mod tests {
         session.assert_complete();
     }
 
-    // Task 7: Auth retry replay test
+    // Auth retry replay test
 
     #[tokio::test]
     async fn list_sessions_retries_on_auth_error() {
@@ -1006,7 +995,7 @@ mod tests {
         session.assert_complete();
     }
 
-    // Task 8: No-auth graceful degradation test
+    // No-auth graceful degradation test
 
     #[tokio::test]
     async fn list_sessions_returns_empty_when_no_auth() {
