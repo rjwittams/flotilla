@@ -4,10 +4,7 @@ expression: output
 ---
  ⚓  flotilla  | my-project | [+]
 ┌─────────────────────────────────────────────────────────────────── ⚙ ┐┌ Preview ─────────────────────────────────────┐
-│      Path     Description     Branch   WT  WS  PR   SS   Issues Git  ││                                              │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
-│                       ┌ Help ────────────────────────────────────────────────────────────────┐                       │
+│      Path     Descript┌ Help ────────────────────────────────────────────────────────────────┐                       │
 │                       │Navigation                                                            │                       │
 │                       │j/k or ↑/↓      Navigate list                                         │                       │
 │                       │Click            Select item                                          │                       │
@@ -27,8 +24,11 @@ expression: output
 │                       │Space            Toggle selection on current item                     │                       │
 │                       │Enter            Generate branch name for all selected                │                       │
 │                       │Esc              Clear selection                                      │                       │
+│                       │                                                                      │                       │
+│                       │Repos                                                                 │                       │
+│                       │[ / ]            Switch repo tab                                      │                       │
+│                       │{ / }            Move repo tab left/right                             │                       │
+│                       │Drag tab         Reorder tabs                                         │                       │
 │                       └──────────────────────────────────────────────────────────────────────┘                       │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
 └──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘
  ?:close help  esc:close help

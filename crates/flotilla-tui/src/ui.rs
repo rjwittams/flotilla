@@ -827,7 +827,7 @@ fn render_help(model: &TuiModel, ui: &UiState, frame: &mut Frame) {
         return;
     }
 
-    let area = ui_helpers::popup_area(frame.area(), 60, 70);
+    let area = ui_helpers::popup_area(frame.area(), 60, 85);
     frame.render_widget(Clear, area);
 
     let labels = model.active_labels();
@@ -874,6 +874,18 @@ fn render_help(model: &TuiModel, ui: &UiState, frame: &mut Frame) {
         Line::from("  D                Toggle correlation debug panel"),
         Line::from("  ?                Toggle this help"),
         Line::from("  q / Esc          Quit"),
+        Line::from(""),
+        Line::from(Span::styled("Item Icons", Style::default().bold())),
+        Line::from("  ●  Checkout with workspace    ○  Checkout (no workspace)"),
+        Line::from("  ▶  Running session            ◆  Idle session"),
+        Line::from("  ⊙  Pull request               ◇  Issue"),
+        Line::from("  ⊶  Remote branch"),
+        Line::from(""),
+        Line::from(Span::styled("Column Indicators", Style::default().bold())),
+        Line::from("  WT: ◆ main  ✓ checked out"),
+        Line::from("  WS: ● has workspace  2/3/… multiple"),
+        Line::from("  PR: ✓ merged  ✗ closed"),
+        Line::from("  Git: ? untracked  M modified  ↑ ahead  ↓ behind"),
     ];
 
     let paragraph = Paragraph::new(help_text)
