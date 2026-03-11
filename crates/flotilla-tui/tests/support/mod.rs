@@ -222,6 +222,8 @@ pub fn make_change_request(id: &str, title: &str, branch: &str) -> (String, Chan
         body: None,
         correlation_keys: vec![CorrelationKey::Branch(branch.to_string())],
         association_keys: vec![],
+        provider_name: String::new(),
+        provider_display_name: String::new(),
     };
     (id.to_string(), cr)
 }
@@ -231,6 +233,8 @@ pub fn make_issue(id: &str, title: &str) -> (String, Issue) {
         title: title.to_string(),
         labels: vec![],
         association_keys: vec![],
+        provider_name: String::new(),
+        provider_display_name: String::new(),
     };
     (id.to_string(), issue)
 }
@@ -242,6 +246,9 @@ pub fn make_session(id: &str, title: &str, status: SessionStatus) -> (String, Cl
         model: None,
         updated_at: None,
         correlation_keys: vec![],
+        provider_name: String::new(),
+        provider_display_name: String::new(),
+        item_noun: String::new(),
     };
     (id.to_string(), session)
 }

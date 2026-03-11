@@ -215,15 +215,18 @@ impl ClaudeCodingAgent {
         match self.fetch_sessions_inner(base_url).await {
             Ok(sessions) => Ok(sessions),
             Err(e) if e.contains("authentication") || e.contains("missing field `data`") => {
-                debug!(err = %e, "session fetch failed, clearing auth cache and retrying");
+                debug!(provider = "claude", err = %e, "session fetch failed, clearing auth cache and retrying");
                 invalidate_auth_cache();
                 match self.fetch_sessions_inner(base_url).await {
                     Ok(sessions) => Ok(sessions),
                     Err(e) if e.contains("authentication") => {
                         if !self.auth_warned.swap(true, Ordering::Relaxed) {
-                            warn!("Claude sessions unavailable: insufficient OAuth scopes");
+                            warn!(
+                                provider = "claude",
+                                "Claude sessions unavailable: insufficient OAuth scopes"
+                            );
                         }
-                        debug!(err = %e, "Claude auth error detail");
+                        debug!(provider = "claude", err = %e, "Claude auth error detail");
                         Ok(vec![])
                     }
                     Err(e) => Err(e),
@@ -264,7 +267,7 @@ impl ClaudeCodingAgent {
     }
 
     async fn archive_session_inner(&self, session_id: &str, base_url: &str) -> Result<(), String> {
-        info!(%session_id, "archiving session");
+        info!(provider = "claude", %session_id, "archiving session");
         let token = get_oauth_token(&*self.runner).await?;
         let url = session_url_for(base_url, session_id);
         let request = Self::build_request(
@@ -311,11 +314,15 @@ impl super::CloudAgentService for ClaudeCodingAgent {
         };
 
         let sessions = if let Some(sessions) = cached {
-            debug!("Claude sessions: cache hit");
+            debug!(provider = "claude", "Claude sessions: cache hit");
             sessions
         } else {
             let fetched = self.fetch_sessions(CLAUDE_API_BASE_URL).await?;
-            debug!(count = fetched.len(), "Claude sessions: fetched from API");
+            debug!(
+                provider = "claude",
+                count = fetched.len(),
+                "Claude sessions: fetched from API"
+            );
 
             // Diff against known IDs and log additions/removals at INFO
             let mut cache = self.sessions_cache.lock().unwrap();
@@ -324,12 +331,12 @@ impl super::CloudAgentService for ClaudeCodingAgent {
             if !cache.known_ids.is_empty() {
                 for s in &fetched {
                     if !cache.known_ids.contains(&s.id) {
-                        info!(title = %s.title, id = %s.id, "session appeared");
+                        info!(provider = "claude", title = %s.title, id = %s.id, "session appeared");
                     }
                 }
                 for old_id in &cache.known_ids {
                     if !new_ids.contains(old_id) {
-                        info!(id = %old_id, "session gone");
+                        info!(provider = "claude", id = %old_id, "session gone");
                     }
                 }
             }
@@ -389,6 +396,9 @@ impl super::CloudAgentService for ClaudeCodingAgent {
                         model,
                         updated_at: Some(s.updated_at.clone()),
                         correlation_keys,
+                        provider_name: provider_name.clone(),
+                        provider_display_name: "Claude".into(),
+                        item_noun: "Agent".into(),
                     },
                 )
             })

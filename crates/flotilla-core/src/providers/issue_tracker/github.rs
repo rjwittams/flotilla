@@ -52,6 +52,8 @@ fn parse_issue(provider_name: &str, v: &serde_json::Value) -> Option<(String, Is
             title,
             labels,
             association_keys,
+            provider_name: provider_name.to_string(),
+            provider_display_name: "GitHub".into(),
         },
     ))
 }
@@ -132,7 +134,7 @@ impl super::IssueTracker for GitHubIssueTracker {
         for result in results {
             match result {
                 Ok(issue) => issues.push(issue),
-                Err(e) => tracing::warn!(err = %e, "failed to fetch issue"),
+                Err(e) => tracing::warn!(provider = "github", err = %e, "failed to fetch issue"),
             }
         }
         Ok(issues)

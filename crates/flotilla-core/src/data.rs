@@ -1,7 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+fn local_hostname() -> &'static str {
+    static HOSTNAME: OnceLock<String> = OnceLock::new();
+    HOSTNAME.get_or_init(|| gethostname::gethostname().to_string_lossy().into_owned())
+}
 
 // Re-export protocol types that are used throughout the crate and by consumers.
 pub use flotilla_protocol::{CheckoutRef, CheckoutStatus, WorkItemIdentity, WorkItemKind};
@@ -62,12 +67,19 @@ pub struct CorrelatedWorkItem {
     pub linked_issues: Vec<String>,
     pub workspace_refs: Vec<String>,
     pub correlation_group_idx: usize,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum StandaloneResult {
-    Issue { key: String, description: String },
-    RemoteBranch { branch: String },
+    Issue {
+        key: String,
+        description: String,
+        source: String,
+    },
+    RemoteBranch {
+        branch: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +182,20 @@ impl CorrelationResult {
         match self {
             CorrelationResult::Correlated(c) => Some(c.correlation_group_idx),
             _ => None,
+        }
+    }
+
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            CorrelationResult::Correlated(c) => c.source.as_deref(),
+            CorrelationResult::Standalone(StandaloneResult::Issue { source, .. }) => {
+                if source.is_empty() {
+                    None
+                } else {
+                    Some(source.as_str())
+                }
+            }
+            CorrelationResult::Standalone(StandaloneResult::RemoteBranch { .. }) => Some("git"),
         }
     }
 
@@ -317,6 +343,20 @@ fn group_to_work_item(
         .or_else(|| branch.clone())
         .unwrap_or_default();
 
+    let source = match &anchor {
+        CorrelatedAnchor::Checkout(_) => Some(local_hostname().to_string()),
+        CorrelatedAnchor::ChangeRequest(key) => providers
+            .change_requests
+            .get(key.as_str())
+            .map(|cr| cr.provider_display_name.clone())
+            .filter(|s| !s.is_empty()),
+        CorrelatedAnchor::Session(key) => providers
+            .sessions
+            .get(key.as_str())
+            .map(|s| s.provider_display_name.clone())
+            .filter(|s| !s.is_empty()),
+    };
+
     Some(CorrelationResult::Correlated(CorrelatedWorkItem {
         anchor,
         branch,
@@ -326,6 +366,7 @@ fn group_to_work_item(
         linked_issues: Vec::new(),
         workspace_refs,
         correlation_group_idx: group_idx,
+        source,
     }))
 }
 
@@ -467,6 +508,7 @@ pub fn correlate(providers: &ProviderData) -> (Vec<CorrelationResult>, Vec<Corre
             work_items.push(CorrelationResult::Standalone(StandaloneResult::Issue {
                 key: id.clone(),
                 description: issue.title.clone(),
+                source: issue.provider_display_name.clone(),
             }));
         }
     }
@@ -534,19 +576,23 @@ pub fn group_work_items(
         }
     }
 
-    // Sessions -- sorted by updated_at descending
+    // Sessions -- grouped by provider, then sorted by updated_at descending
     session_items.sort_by(|a, b| {
-        let a_time = a
+        let a_ses = a
             .session_key
             .as_deref()
-            .and_then(|k| providers.sessions.get(k))
-            .and_then(|s| s.updated_at.as_deref());
-        let b_time = b
+            .and_then(|k| providers.sessions.get(k));
+        let b_ses = b
             .session_key
             .as_deref()
-            .and_then(|k| providers.sessions.get(k))
-            .and_then(|s| s.updated_at.as_deref());
-        b_time.cmp(&a_time)
+            .and_then(|k| providers.sessions.get(k));
+        let a_provider = a_ses.map(|s| s.provider_name.as_str()).unwrap_or("");
+        let b_provider = b_ses.map(|s| s.provider_name.as_str()).unwrap_or("");
+        a_provider.cmp(b_provider).then_with(|| {
+            let a_time = a_ses.and_then(|s| s.updated_at.as_deref());
+            let b_time = b_ses.and_then(|s| s.updated_at.as_deref());
+            b_time.cmp(&a_time)
+        })
     });
     if !session_items.is_empty() {
         entries.push(GroupEntry::Header(SectionHeader(labels.sessions.clone())));
@@ -762,6 +808,7 @@ mod tests {
             linked_issues: Vec::new(),
             workspace_refs: Vec::new(),
             correlation_group_idx: 0,
+            source: None,
         }
     }
 
@@ -794,6 +841,7 @@ mod tests {
         CorrelationResult::Standalone(StandaloneResult::Issue {
             key: key.to_string(),
             description: desc.to_string(),
+            source: String::new(),
         })
     }
 
@@ -828,6 +876,8 @@ mod tests {
             body: None,
             correlation_keys: vec![CorrelationKey::Branch(branch.to_string())],
             association_keys: vec![],
+            provider_name: String::new(),
+            provider_display_name: String::new(),
         }
     }
 
@@ -846,6 +896,9 @@ mod tests {
             model: None,
             updated_at: None,
             correlation_keys: keys,
+            provider_name: String::new(),
+            provider_display_name: String::new(),
+            item_noun: String::new(),
         }
     }
 
@@ -854,6 +907,8 @@ mod tests {
             title: title.to_string(),
             labels: vec![],
             association_keys: vec![],
+            provider_name: String::new(),
+            provider_display_name: String::new(),
         }
     }
 
@@ -1900,6 +1955,9 @@ mod tests {
                 model: None,
                 updated_at: Some("2026-01-01T00:00:00Z".to_string()),
                 correlation_keys: vec![],
+                provider_name: String::new(),
+                provider_display_name: String::new(),
+                item_noun: String::new(),
             },
         );
         providers.sessions.insert(
@@ -1910,6 +1968,9 @@ mod tests {
                 model: None,
                 updated_at: Some("2026-03-01T00:00:00Z".to_string()),
                 correlation_keys: vec![],
+                provider_name: String::new(),
+                provider_display_name: String::new(),
+                item_noun: String::new(),
             },
         );
         providers.sessions.insert(
@@ -1920,6 +1981,9 @@ mod tests {
                 model: None,
                 updated_at: Some("2026-02-01T00:00:00Z".to_string()),
                 correlation_keys: vec![],
+                provider_name: String::new(),
+                provider_display_name: String::new(),
+                item_noun: String::new(),
             },
         );
 
@@ -1933,6 +1997,63 @@ mod tests {
 
         let session_descs = session_descriptions(&result.table_entries);
         assert_eq!(session_descs, vec!["New", "Mid", "Old"]);
+    }
+
+    #[test]
+    fn group_work_items_sessions_grouped_by_provider_then_time() {
+        let mut providers = new_providers();
+        providers.sessions.insert(
+            "s-claude-old".to_string(),
+            CloudAgentSession {
+                title: "Claude Old".to_string(),
+                status: SessionStatus::Idle,
+                model: None,
+                updated_at: Some("2026-01-01T00:00:00Z".to_string()),
+                correlation_keys: vec![],
+                provider_name: "claude".to_string(),
+                provider_display_name: "Claude".to_string(),
+                item_noun: "Agent".to_string(),
+            },
+        );
+        providers.sessions.insert(
+            "s-codex-new".to_string(),
+            CloudAgentSession {
+                title: "Codex New".to_string(),
+                status: SessionStatus::Running,
+                model: None,
+                updated_at: Some("2026-03-01T00:00:00Z".to_string()),
+                correlation_keys: vec![],
+                provider_name: "codex".to_string(),
+                provider_display_name: "Codex".to_string(),
+                item_noun: "Task".to_string(),
+            },
+        );
+        providers.sessions.insert(
+            "s-claude-new".to_string(),
+            CloudAgentSession {
+                title: "Claude New".to_string(),
+                status: SessionStatus::Running,
+                model: None,
+                updated_at: Some("2026-02-01T00:00:00Z".to_string()),
+                correlation_keys: vec![],
+                provider_name: "claude".to_string(),
+                provider_display_name: "Claude".to_string(),
+                item_noun: "Agent".to_string(),
+            },
+        );
+
+        let labels = default_labels();
+        let items = vec![
+            to_proto(&session_item("s-claude-old", "Claude Old")),
+            to_proto(&session_item("s-codex-new", "Codex New")),
+            to_proto(&session_item("s-claude-new", "Claude New")),
+        ];
+        let result = group_work_items(&items, &providers, &labels);
+
+        let session_descs = session_descriptions(&result.table_entries);
+        // claude sessions grouped first (alphabetically), newest first within group
+        // then codex sessions
+        assert_eq!(session_descs, vec!["Claude New", "Claude Old", "Codex New"]);
     }
 
     // -----------------------------------------------------------------------

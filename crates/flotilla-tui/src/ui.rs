@@ -340,6 +340,7 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
     let labels = model.active_labels();
     let header = Row::new(vec![
         Cell::from(""),
+        Cell::from("Source"),
         Cell::from("Path"),
         Cell::from("Description"),
         Cell::from("Branch"),
@@ -354,16 +355,17 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
     .height(1);
 
     let widths = [
-        Constraint::Length(3), // icon
-        Constraint::Fill(1),   // Path
-        Constraint::Fill(2),   // Description
-        Constraint::Fill(1),   // Branch
-        Constraint::Length(3), // WT
-        Constraint::Length(3), // WS
-        Constraint::Length(4), // PR
-        Constraint::Length(4), // SS
-        Constraint::Length(6), // Issues
-        Constraint::Length(5), // Git
+        Constraint::Length(3),  // icon
+        Constraint::Length(10), // Source
+        Constraint::Fill(1),    // Path
+        Constraint::Fill(2),    // Description
+        Constraint::Fill(1),    // Branch
+        Constraint::Length(3),  // WT
+        Constraint::Length(3),  // WS
+        Constraint::Length(4),  // PR
+        Constraint::Length(4),  // SS
+        Constraint::Length(6),  // Issues
+        Constraint::Length(5),  // Git
     ];
 
     let inner_width = area.width.saturating_sub(2 + HIGHLIGHT_SYMBOL_WIDTH);
@@ -373,6 +375,7 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
     // Build rows from active repo (immutable borrows)
     let rm = model.active();
     let rui = active_rui(model, ui);
+    let mut prev_source: Option<String> = None;
     let rows: Vec<Row> = rui
         .table_view
         .table_entries
@@ -385,10 +388,19 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
             };
 
             match entry {
-                GroupEntry::Header(header) => build_header_row(header),
+                GroupEntry::Header(header) => {
+                    prev_source = None;
+                    build_header_row(header)
+                }
                 GroupEntry::Item(item) => {
-                    let mut row =
-                        build_item_row(item, &rm.providers, &col_widths, model.active_repo_root());
+                    let mut row = build_item_row(
+                        item,
+                        &rm.providers,
+                        &col_widths,
+                        model.active_repo_root(),
+                        prev_source.as_deref(),
+                    );
+                    prev_source = item.source.clone();
                     if is_multi_selected {
                         row = row.style(Style::default().bg(Color::Indexed(236)));
                     }
@@ -459,6 +471,7 @@ fn build_header_row(_header: &SectionHeader) -> Row<'static> {
         Cell::from(""),
         Cell::from(""),
         Cell::from(""),
+        Cell::from(""),
     ])
     .height(1)
 }
@@ -468,6 +481,7 @@ fn build_item_row<'a>(
     providers: &ProviderData,
     col_widths: &[u16],
     repo_root: &Path,
+    prev_source: Option<&str>,
 ) -> Row<'a> {
     let session_status = item
         .session_key
@@ -477,14 +491,23 @@ fn build_item_row<'a>(
     let (icon, icon_color) =
         ui_helpers::work_item_icon(&item.kind, !item.workspace_refs.is_empty(), session_status);
 
-    let path_width = col_widths.get(1).copied().unwrap_or(14) as usize;
-    let desc_width = col_widths.get(2).copied().unwrap_or(15) as usize;
-    let branch_width = col_widths.get(3).copied().unwrap_or(25) as usize;
+    let source_display = match item.source.as_deref() {
+        Some(s) if prev_source == Some(s) => String::new(),
+        Some(s) => s.to_string(),
+        None => String::new(),
+    };
 
-    let path_display = item
-        .checkout_key()
-        .map(|p| ui_helpers::shorten_path(p, repo_root, path_width))
-        .unwrap_or_default();
+    let path_width = col_widths.get(2).copied().unwrap_or(14) as usize;
+    let desc_width = col_widths.get(3).copied().unwrap_or(15) as usize;
+    let branch_width = col_widths.get(4).copied().unwrap_or(25) as usize;
+
+    let path_display = if let Some(p) = item.checkout_key() {
+        ui_helpers::shorten_path(p, repo_root, path_width)
+    } else if let Some(ref ses_key) = item.session_key {
+        ses_key.clone()
+    } else {
+        String::new()
+    };
     let path_display = ui_helpers::truncate(&path_display, path_width);
 
     let description = ui_helpers::truncate(&item.description, desc_width);
@@ -539,6 +562,10 @@ fn build_item_row<'a>(
         Cell::from(Span::styled(
             format!(" {icon}"),
             Style::default().fg(icon_color),
+        )),
+        Cell::from(Span::styled(
+            source_display,
+            Style::default().fg(Color::Indexed(67)),
         )),
         Cell::from(Span::styled(
             path_display,
@@ -621,8 +648,14 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
 
         if let Some(ref pr_key) = item.change_request_key {
             if let Some(cr) = providers.change_requests.get(pr_key.as_str()) {
+                let provider_prefix = if cr.provider_display_name.is_empty() {
+                    String::new()
+                } else {
+                    format!("{} ", cr.provider_display_name)
+                };
                 lines.push(format!(
-                    "{} #{}: {}",
+                    "{}{} #{}: {}",
+                    provider_prefix,
                     model.active_labels().code_review.abbr,
                     pr_key,
                     cr.title
@@ -633,7 +666,18 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
 
         if let Some(ref ses_key) = item.session_key {
             if let Some(ses) = providers.sessions.get(ses_key.as_str()) {
-                lines.push(format!("Session: {}", ses.title));
+                let noun = if ses.item_noun.is_empty() {
+                    model.active_labels().sessions.noun_capitalized()
+                } else {
+                    ses.item_noun.clone()
+                };
+                let provider_prefix = if ses.provider_display_name.is_empty() {
+                    noun
+                } else {
+                    format!("{} {}", ses.provider_display_name, noun)
+                };
+                lines.push(format!("{}: {}", provider_prefix, ses.title));
+                lines.push(format!("Id: {}", ses_key));
                 lines.push(format!("Status: {:?}", ses.status));
                 if let Some(ref model_name) = ses.model {
                     lines.push(format!("Model: {}", model_name));
@@ -659,9 +703,14 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
         for issue_key in &item.issue_keys {
             if let Some(issue) = providers.issues.get(issue_key.as_str()) {
                 let labels = issue.labels.join(", ");
+                let provider_prefix = if issue.provider_display_name.is_empty() {
+                    String::new()
+                } else {
+                    format!("{} ", issue.provider_display_name)
+                };
                 lines.push(format!(
-                    "Issue #{}: {} [{}]",
-                    issue_key, issue.title, labels
+                    "{}Issue #{}: {} [{}]",
+                    provider_prefix, issue_key, issue.title, labels
                 ));
             }
         }

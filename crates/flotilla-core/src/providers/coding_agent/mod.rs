@@ -19,10 +19,10 @@ pub trait CloudAgentService: Send + Sync {
         "Cloud Agents"
     }
     fn item_noun(&self) -> &str {
-        "session"
+        "agent"
     }
     fn abbreviation(&self) -> &str {
-        "Ses"
+        "Agt"
     }
     async fn list_sessions(
         &self,

@@ -888,6 +888,9 @@ mod tests {
                     model: None,
                     updated_at: None,
                     correlation_keys: vec![],
+                    provider_name: String::new(),
+                    provider_display_name: String::new(),
+                    item_noun: String::new(),
                 }),
             }],
         );

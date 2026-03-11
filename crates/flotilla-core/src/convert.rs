@@ -42,6 +42,7 @@ pub fn correlation_result_to_work_item(
         workspace_refs: item.workspace_refs().to_vec(),
         is_main_checkout: item.is_main_checkout(),
         debug_group,
+        source: item.source().map(|s| s.to_string()),
     }
 }
 
@@ -127,6 +128,7 @@ mod tests {
             linked_issues: vec!["GH-10".to_string(), "LIN-20".to_string()],
             workspace_refs: vec!["cmux-1".to_string()],
             correlation_group_idx: 0,
+            source: None,
         });
 
         let proto = correlation_result_to_work_item(&item, &[]);
@@ -155,6 +157,7 @@ mod tests {
         let item = CorrelationResult::Standalone(StandaloneResult::Issue {
             key: "42".to_string(),
             description: "Fix the login bug".to_string(),
+            source: String::new(),
         });
 
         let proto = correlation_result_to_work_item(&item, &[]);
@@ -169,5 +172,63 @@ mod tests {
         assert!(proto.session_key.is_none());
         assert!(proto.workspace_refs.is_empty());
         assert!(!proto.is_main_checkout);
+    }
+
+    #[test]
+    fn convert_correlated_checkout_has_hostname_source() {
+        let hostname = gethostname::gethostname().to_string_lossy().into_owned();
+        let item = CorrelationResult::Correlated(CorrelatedWorkItem {
+            anchor: CorrelatedAnchor::Checkout(CheckoutRef {
+                key: PathBuf::from("/repos/proj/wt"),
+                is_main_checkout: false,
+            }),
+            branch: Some("feat".to_string()),
+            description: "Feature".to_string(),
+            linked_change_request: None,
+            linked_session: None,
+            linked_issues: vec![],
+            workspace_refs: vec![],
+            correlation_group_idx: 0,
+            source: Some(hostname.clone()),
+        });
+        let proto = correlation_result_to_work_item(&item, &[]);
+        assert_eq!(proto.source, Some(hostname));
+    }
+
+    #[test]
+    fn convert_correlated_session_has_provider_source() {
+        let item = CorrelationResult::Correlated(CorrelatedWorkItem {
+            anchor: CorrelatedAnchor::Session("sess-1".to_string()),
+            branch: None,
+            description: "My session".to_string(),
+            linked_change_request: None,
+            linked_session: None,
+            linked_issues: vec![],
+            workspace_refs: vec![],
+            correlation_group_idx: 0,
+            source: Some("Claude".to_string()),
+        });
+        let proto = correlation_result_to_work_item(&item, &[]);
+        assert_eq!(proto.source, Some("Claude".to_string()));
+    }
+
+    #[test]
+    fn convert_standalone_issue_has_provider_source() {
+        let item = CorrelationResult::Standalone(StandaloneResult::Issue {
+            key: "42".to_string(),
+            description: "Fix the bug".to_string(),
+            source: "GitHub".to_string(),
+        });
+        let proto = correlation_result_to_work_item(&item, &[]);
+        assert_eq!(proto.source, Some("GitHub".to_string()));
+    }
+
+    #[test]
+    fn convert_standalone_remote_branch_has_git_source() {
+        let item = CorrelationResult::Standalone(StandaloneResult::RemoteBranch {
+            branch: "origin/feat".to_string(),
+        });
+        let proto = correlation_result_to_work_item(&item, &[]);
+        assert_eq!(proto.source, Some("git".to_string()));
     }
 }

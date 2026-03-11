@@ -132,6 +132,8 @@ mod tests {
                 title: format!("Issue {}", id),
                 labels: vec![],
                 association_keys: vec![],
+                provider_name: String::new(),
+                provider_display_name: String::new(),
             },
         )
     }
@@ -213,6 +215,8 @@ mod tests {
                         title: "Updated Issue 2".to_string(),
                         labels: vec!["changed".to_string()],
                         association_keys: vec![],
+                        provider_name: String::new(),
+                        provider_display_name: String::new(),
                     },
                 ),
                 issue("4"),

@@ -1135,6 +1135,8 @@ mod tests {
             body: None,
             correlation_keys: vec![],
             association_keys: vec![AssociationKey::IssueRef("gh".into(), issue_id.into())],
+            provider_name: String::new(),
+            provider_display_name: String::new(),
         }
     }
 
@@ -1167,6 +1169,8 @@ mod tests {
                 title: "cached".into(),
                 labels: vec![],
                 association_keys: vec![],
+                provider_name: String::new(),
+                provider_display_name: String::new(),
             },
         )]);
 
@@ -1176,6 +1180,8 @@ mod tests {
                 title: "search".into(),
                 labels: vec![],
                 association_keys: vec![],
+                provider_name: String::new(),
+                provider_display_name: String::new(),
             },
         )]);
 
@@ -1273,6 +1279,8 @@ mod tests {
                 title: "cached issue".into(),
                 labels: vec![],
                 association_keys: vec![],
+                provider_name: String::new(),
+                provider_display_name: String::new(),
             },
         )]);
 

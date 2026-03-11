@@ -161,6 +161,8 @@ mod tests {
             body: None,
             correlation_keys: vec![],
             association_keys: vec![],
+            provider_name: String::new(),
+            provider_display_name: String::new(),
         }
     }
 
@@ -169,6 +171,8 @@ mod tests {
             title: title.into(),
             labels: vec![],
             association_keys: vec![],
+            provider_name: String::new(),
+            provider_display_name: String::new(),
         }
     }
 
@@ -179,6 +183,9 @@ mod tests {
             model: None,
             updated_at: None,
             correlation_keys: vec![],
+            provider_name: String::new(),
+            provider_display_name: String::new(),
+            item_noun: String::new(),
         }
     }
 
@@ -390,6 +397,7 @@ mod tests {
             workspace_refs: vec![],
             is_main_checkout: false,
             debug_group: vec![],
+            source: None,
         }
     }
 
