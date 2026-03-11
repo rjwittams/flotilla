@@ -238,6 +238,7 @@ pub trait HttpClient: Send + Sync {
     async fn execute(
         &self,
         request: reqwest::Request,
+        label: &ChannelLabel,
     ) -> Result<http::Response<bytes::Bytes>, String>;
 }
 
@@ -265,6 +266,7 @@ impl HttpClient for ReqwestHttpClient {
     async fn execute(
         &self,
         request: reqwest::Request,
+        _label: &ChannelLabel,
     ) -> Result<http::Response<bytes::Bytes>, String> {
         let resp = self
             .client

@@ -543,9 +543,9 @@ impl super::HttpClient for ReplayHttpClient {
     async fn execute(
         &self,
         request: reqwest::Request,
+        label: &ChannelLabel,
     ) -> Result<http::Response<bytes::Bytes>, String> {
-        let label = ChannelLabel::http_from_url(request.url().as_str());
-        let interaction = self.session.next(&label);
+        let interaction = self.session.next(label);
         let Interaction::Http {
             method: expected_method,
             url: expected_url,
@@ -611,10 +611,13 @@ impl super::HttpClient for ReplayHttpClient {
 
 #[async_trait]
 impl GhApi for ReplayGhApi {
-    async fn get(&self, endpoint: &str, _repo_root: &Path) -> Result<String, String> {
-        let interaction = self
-            .session
-            .next(&ChannelLabel::GhApi(endpoint.to_string()));
+    async fn get(
+        &self,
+        endpoint: &str,
+        _repo_root: &Path,
+        label: &ChannelLabel,
+    ) -> Result<String, String> {
+        let interaction = self.session.next(label);
         let Interaction::GhApi {
             endpoint: expected_endpoint,
             status,
@@ -641,10 +644,9 @@ impl GhApi for ReplayGhApi {
         &self,
         endpoint: &str,
         _repo_root: &Path,
+        label: &ChannelLabel,
     ) -> Result<GhApiResponse, String> {
-        let interaction = self
-            .session
-            .next(&ChannelLabel::GhApi(endpoint.to_string()));
+        let interaction = self.session.next(label);
         let Interaction::GhApi {
             endpoint: expected_endpoint,
             status,
@@ -840,8 +842,13 @@ impl RecordingGhApi {
 
 #[async_trait]
 impl GhApi for RecordingGhApi {
-    async fn get(&self, endpoint: &str, repo_root: &Path) -> Result<String, String> {
-        let result = self.inner.get(endpoint, repo_root).await;
+    async fn get(
+        &self,
+        endpoint: &str,
+        repo_root: &Path,
+        label: &ChannelLabel,
+    ) -> Result<String, String> {
+        let result = self.inner.get(endpoint, repo_root, label).await;
 
         match &result {
             Ok(body) => {
@@ -871,8 +878,12 @@ impl GhApi for RecordingGhApi {
         &self,
         endpoint: &str,
         repo_root: &Path,
+        label: &ChannelLabel,
     ) -> Result<GhApiResponse, String> {
-        let result = self.inner.get_with_headers(endpoint, repo_root).await;
+        let result = self
+            .inner
+            .get_with_headers(endpoint, repo_root, label)
+            .await;
 
         match &result {
             Ok(resp) => {
@@ -912,7 +923,7 @@ impl GhApi for RecordingGhApi {
 /// Create a `GhApi` for a test session.
 /// In record mode: wraps a real `GhApiClient` with recording.
 /// In replay mode: returns a `ReplayGhApi`.
-pub fn test_gh_api(session: &Session, _runner: &Arc<dyn CommandRunner>) -> Arc<dyn GhApi> {
+pub fn test_gh_api(session: &Session) -> Arc<dyn GhApi> {
     if session.is_recording() {
         // Use a raw ProcessCommandRunner — NOT the passed-in runner, which is a
         // RecordingRunner.  GhApiClient shells out via its runner, so using a
@@ -942,6 +953,7 @@ impl super::HttpClient for RecordingHttpClient {
     async fn execute(
         &self,
         request: reqwest::Request,
+        label: &ChannelLabel,
     ) -> Result<http::Response<bytes::Bytes>, String> {
         let method = request.method().to_string();
         let url = request.url().to_string();
@@ -955,7 +967,7 @@ impl super::HttpClient for RecordingHttpClient {
             .and_then(|b| b.as_bytes())
             .map(|b| String::from_utf8_lossy(b).to_string());
 
-        let result = self.inner.execute(request).await;
+        let result = self.inner.execute(request, label).await;
 
         match &result {
             Ok(resp) => {
@@ -1190,12 +1202,9 @@ interactions:
         let session = Session::replaying(&path, Masks::new());
         let api = ReplayGhApi::new(session.clone());
 
-        let result = api
-            .get(
-                "/repos/owner/repo/pulls?state=all&per_page=100",
-                Path::new("/repo"),
-            )
-            .await;
+        let endpoint = "/repos/owner/repo/pulls?state=all&per_page=100";
+        let label = ChannelLabel::GhApi(endpoint.to_string());
+        let result = api.get(endpoint, Path::new("/repo"), &label).await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("Fix bug"));
         session.assert_complete();
@@ -1218,7 +1227,9 @@ interactions:
         let session = Session::replaying(&path, Masks::new());
         let api = ReplayGhApi::new(session.clone());
 
-        let result = api.get("/repos/owner/repo/pulls", Path::new("/repo")).await;
+        let endpoint = "/repos/owner/repo/pulls";
+        let label = ChannelLabel::GhApi(endpoint.to_string());
+        let result = api.get(endpoint, Path::new("/repo"), &label).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("404"));
         session.assert_complete();
@@ -1245,8 +1256,10 @@ interactions:
         let session = Session::replaying(&path, Masks::new());
         let api = ReplayGhApi::new(session.clone());
 
+        let endpoint = "/repos/owner/repo/issues?per_page=100";
+        let label = ChannelLabel::GhApi(endpoint.to_string());
         let result = api
-            .get_with_headers("/repos/owner/repo/issues?per_page=100", Path::new("/repo"))
+            .get_with_headers(endpoint, Path::new("/repo"), &label)
             .await;
         assert!(result.is_ok());
         let resp = result.unwrap();
@@ -1275,8 +1288,10 @@ interactions:
         let session = Session::replaying(&path, Masks::new());
         let api = ReplayGhApi::new(session.clone());
 
+        let endpoint = "/repos/owner/repo/issues";
+        let label = ChannelLabel::GhApi(endpoint.to_string());
         let result = api
-            .get_with_headers("/repos/owner/repo/issues", Path::new("/repo"))
+            .get_with_headers(endpoint, Path::new("/repo"), &label)
             .await;
         assert!(result.is_ok());
         let resp = result.unwrap();
@@ -1356,7 +1371,11 @@ interactions:
             .build()
             .unwrap();
 
-        let response = client.execute(request).await.expect("replay should work");
+        let label = ChannelLabel::http_from_url("https://example.test/v1/sessions");
+        let response = client
+            .execute(request, &label)
+            .await
+            .expect("replay should work");
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(response.body().as_ref(), br#"{"data":[]}"#);
         session.assert_complete();

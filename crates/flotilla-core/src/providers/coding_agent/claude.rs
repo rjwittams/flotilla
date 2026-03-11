@@ -7,7 +7,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
 use crate::providers::types::*;
-use crate::providers::{run, CommandRunner, HttpClient};
+use crate::providers::{
+    run, ChannelRequest, CommandRunner, DefaultLabeler, HttpClient, IntoChannelLabel,
+};
 use tracing::{debug, info, warn};
 
 pub struct ClaudeCodingAgent {
@@ -235,13 +237,13 @@ impl ClaudeCodingAgent {
 
     async fn fetch_sessions_inner(&self, base_url: &str) -> Result<Vec<WebSession>, String> {
         let token = get_oauth_token(&*self.runner).await?;
-        let request = Self::build_request(
-            "GET",
-            &sessions_url_for(base_url),
-            &token.access_token,
-            None,
-        )?;
-        let resp = self.http.execute(request).await?;
+        let url = sessions_url_for(base_url);
+        let request = Self::build_request("GET", &url, &token.access_token, None)?;
+        let label = DefaultLabeler.into_channel_label(&ChannelRequest::Http {
+            method: "GET",
+            url: &url,
+        });
+        let resp = self.http.execute(request, &label).await?;
         let status = resp.status().as_u16();
         let body = std::str::from_utf8(resp.body()).map_err(|e| e.to_string())?;
 
@@ -270,13 +272,18 @@ impl ClaudeCodingAgent {
     async fn archive_session_inner(&self, session_id: &str, base_url: &str) -> Result<(), String> {
         info!(%session_id, "archiving session");
         let token = get_oauth_token(&*self.runner).await?;
+        let url = session_url_for(base_url, session_id);
         let request = Self::build_request(
             "PATCH",
-            &session_url_for(base_url, session_id),
+            &url,
             &token.access_token,
             Some(serde_json::json!({"session_status": "archived"})),
         )?;
-        let resp = self.http.execute(request).await?;
+        let label = DefaultLabeler.into_channel_label(&ChannelRequest::Http {
+            method: "PATCH",
+            url: &url,
+        });
+        let resp = self.http.execute(request, &label).await?;
         let status = resp.status().as_u16();
         if (200..300).contains(&status) {
             Ok(())

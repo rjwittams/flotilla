@@ -1,6 +1,6 @@
 use crate::providers::github_api::{clamp_per_page, GhApi};
 use crate::providers::types::*;
-use crate::providers::{run, CommandRunner};
+use crate::providers::{run, ChannelRequest, CommandRunner, DefaultLabeler, IntoChannelLabel};
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
@@ -135,7 +135,11 @@ impl super::CodeReview for GitHubCodeReview {
             "repos/{}/pulls?state=open&per_page={}",
             self.repo_slug, per_page
         );
-        let body = self.api.get(&endpoint, repo_root).await?;
+        let label = DefaultLabeler.into_channel_label(&ChannelRequest::GhApi {
+            method: "GET",
+            endpoint: &endpoint,
+        });
+        let body = self.api.get(&endpoint, repo_root, &label).await?;
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&body).map_err(|e| e.to_string())?;
 
@@ -168,7 +172,11 @@ impl super::CodeReview for GitHubCodeReview {
         id: &str,
     ) -> Result<(String, ChangeRequest), String> {
         let endpoint = format!("repos/{}/pulls/{}", self.repo_slug, id);
-        let body = self.api.get(&endpoint, repo_root).await?;
+        let label = DefaultLabeler.into_channel_label(&ChannelRequest::GhApi {
+            method: "GET",
+            endpoint: &endpoint,
+        });
+        let body = self.api.get(&endpoint, repo_root, &label).await?;
         let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
 
         let number = v["number"].as_i64().ok_or("missing number")?;
@@ -207,7 +215,11 @@ impl super::CodeReview for GitHubCodeReview {
             "repos/{}/pulls?state=closed&sort=updated&direction=desc&per_page={}",
             self.repo_slug, per_page
         );
-        let body = self.api.get(&endpoint, repo_root).await?;
+        let label = DefaultLabeler.into_channel_label(&ChannelRequest::GhApi {
+            method: "GET",
+            endpoint: &endpoint,
+        });
+        let body = self.api.get(&endpoint, repo_root, &label).await?;
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&body).map_err(|e| e.to_string())?;
 
@@ -251,7 +263,7 @@ mod tests {
         Arc<dyn crate::providers::CommandRunner>,
     ) {
         let runner = replay::test_runner(session);
-        let api = replay::test_gh_api(session, &runner);
+        let api = replay::test_gh_api(session);
         (api, runner)
     }
 
