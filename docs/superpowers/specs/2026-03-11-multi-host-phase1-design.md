@@ -108,10 +108,12 @@ The collision problem goes deeper than correlation keys. `ProviderData` uses `Pa
 ```rust
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 struct HostPath {
-    host: Option<HostName>,  // None = local
+    host: HostName,  // always set — avoids ambiguity when data replicates
     path: PathBuf,
 }
 ```
+
+The host is always populated, never `Option`. Every daemon knows its own hostname, so local items carry `host: "laptop"` and remote items carry `host: "desktop"`. This avoids the ambiguity of `None` meaning "local" — which becomes meaningless once data replicates to another host where "local" means something different.
 
 `HostPath` replaces bare `PathBuf` in all identity-bearing positions:
 
@@ -120,7 +122,7 @@ struct HostPath {
 - `CorrelationKey::CheckoutPath` values
 - `WorkItemIdentity::Checkout` values
 
-This avoids fragile string concatenation — the host and path remain separate, queryable fields. `Display` renders as `desktop:/path/to/repo` for remote or just `/path/to/repo` for local. The TUI treats `HostPath` as an opaque identifier.
+`Display` renders as `desktop:/path/to/repo`. The TUI compares `host` against its own daemon's hostname to determine locality for action filtering.
 
 Branch-based correlation (`CorrelationKey::Branch`) is intentionally *not* namespaced — a branch name on host A should correlate with the same branch name and its associated PR from host B. This is the primary mechanism for cross-host correlation.
 
@@ -314,11 +316,11 @@ This sits alongside the existing provider health display.
 
 ### Host Provenance on Work Items
 
-Each `WorkItem` (and `ProtoWorkItem`) carries an explicit `host: Option<HostName>` field. `None` means local; `Some(name)` means the item originates from a remote host. This field is set during snapshot merging and propagates through correlation and grouping.
+Each `WorkItem` (and `ProtoWorkItem`) carries an explicit `host: HostName` field — always populated, never optional. This field is set during snapshot building and propagates through correlation and grouping.
 
-The action menu and executor use `host` to filter actions:
-- **Local items** (`host: None`): all actions available as today.
-- **Remote items** (`host: Some(_)`): actions requiring local filesystem access (open terminal, delete worktree, create checkout) are hidden. Actions that work without a local clone (open PR in browser, copy branch name) remain available.
+The TUI knows its own daemon's hostname. The action menu and executor compare `item.host` against the local hostname to filter actions:
+- **Local items** (`host == my_host`): all actions available as today.
+- **Remote items** (`host != my_host`): actions requiring local filesystem access (open terminal, delete worktree, create checkout) are hidden. Actions that work without a local clone (open PR in browser, copy branch name) remain available.
 - **Remote-only repos**: For repos that exist only on remote hosts, `gh`-based browser actions are hidden since there is no local clone to provide context. Future work will either proxy commands to a remote checkout or call the GitHub API directly.
 
 ### No Other Changes
