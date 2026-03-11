@@ -115,12 +115,13 @@ struct HostPath {
 
 The host is always populated, never `Option`. Every daemon knows its own hostname, so local items carry `host: "laptop"` and remote items carry `host: "desktop"`. This avoids the ambiguity of `None` meaning "local" — which becomes meaningless once data replicates to another host where "local" means something different.
 
-`HostPath` replaces bare `PathBuf` in all identity-bearing positions:
+`HostPath` replaces bare `PathBuf` in path-based identity positions:
 
-- `ProviderData.checkouts` keys
-- `ProviderData.managed_terminals` keys
+- `ProviderData.checkouts` keys (currently `PathBuf`)
 - `CorrelationKey::CheckoutPath` values
 - `WorkItemIdentity::Checkout` values
+
+Note: `ProviderData.managed_terminals` is keyed by `String` (terminal name), not `PathBuf`. Terminal names need host-namespacing too, but via a `HostTerminalId { host: HostName, name: String }` or similar — not `HostPath`. The path-bearing field is `ManagedTerminal.working_directory`, which should also carry a `HostPath` for display purposes.
 
 `Display` renders as `desktop:/path/to/repo`. The TUI compares `host` against its own daemon's hostname to determine locality for action filtering.
 
@@ -254,6 +255,14 @@ When a peer detects a sequence gap, it sends `RequestResync` with the last known
 
 Each message carries an `origin_host` tag so the receiver knows the data source and the relay logic can avoid reflecting data back to its origin. Sequence numbers are per-(origin_host, repo_identity).
 
+### ProviderDataDelta
+
+The existing `DeltaEntry`/`SnapshotDelta` types are designed for correlated `WorkItem` snapshots, not raw `ProviderData`. A new `ProviderDataDelta` type is needed that diffs the raw provider maps (checkouts added/removed, branches changed, etc.). The structure mirrors `SnapshotDelta` but operates on `ProviderData` fields.
+
+### Daemon Hostname in Snapshots
+
+The TUI needs to know its daemon's hostname to determine which items are local (for action filtering). The `Snapshot` metadata is extended to include the daemon's `HostName`. The TUI receives this on connect and uses it for all locality comparisons.
+
 ### Authentication
 
 The daemon server distinguishes peer clients from TUI clients. In Phase 1, any client that sends a `PeerData` message is treated as a peer — no explicit handshake. A peer authentication protocol is deferred to future work.
@@ -334,7 +343,7 @@ No new tab types. No new modes. No new key bindings. The tab system, navigation,
 | `flotilla-daemon` | `PeerManager`, `PeerTransport` trait, SSH implementation, relay logic, follower mode flag, snapshot merging |
 | `flotilla-protocol` | `Message::PeerData` variant, `PeerDataMessage`, `PeerDataKind`, `HostName`, `HostPath`, `RepoIdentity` types |
 | `flotilla-core` | Config parsing for `hosts.toml`, `HostPath` in correlation keys and provider data, `host` field on work items, `RepoIdentity` extraction from remote URLs |
-| `flotilla-client` | None (reused as-is for peer connections) |
+| `flotilla-client` | New peer transport implementation alongside `SocketDaemon` for `PeerData` message handling |
 | `flotilla-tui` | Host in Source column, Hosts section in config view, action filtering by host provenance |
 | `flotilla` (root) | None |
 
