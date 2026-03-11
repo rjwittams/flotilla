@@ -1,7 +1,10 @@
 pub mod commands;
 pub mod delta;
+mod host;
 pub mod provider_data;
 pub mod snapshot;
+
+pub use host::HostName;
 
 #[cfg(test)]
 pub(crate) mod test_helpers {

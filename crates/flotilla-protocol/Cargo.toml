@@ -7,3 +7,4 @@ edition = "2021"
 serde = { workspace = true }
 serde_json = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
+gethostname = "1.1.0"

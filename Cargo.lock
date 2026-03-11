@@ -1094,6 +1094,7 @@ dependencies = [
 name = "flotilla-protocol"
 version = "0.1.0"
 dependencies = [
+ "gethostname",
  "indexmap",
  "serde",
  "serde_json",
