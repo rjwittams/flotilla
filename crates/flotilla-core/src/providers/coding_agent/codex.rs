@@ -397,7 +397,7 @@ impl CodexCodingAgent {
         let tasks = match self.fetch_all_tasks("", auth).await {
             Ok(tasks) => tasks,
             Err(e) => {
-                debug!(error = %e, "failed to fetch tasks by label");
+                debug!(provider = "codex", error = %e, "failed to fetch tasks by label");
                 return Ok(vec![]);
             }
         };
@@ -462,7 +462,10 @@ impl super::CloudAgentService for CodexCodingAgent {
                 Some(a) => a,
                 None => {
                     if !self.auth_warned.swap(true, Ordering::Relaxed) {
-                        warn!("Codex sessions unavailable: no auth found in ~/.codex/auth.json");
+                        warn!(
+                            provider = "codex",
+                            "Codex sessions unavailable: no auth found in ~/.codex/auth.json"
+                        );
                     }
                     return Ok(vec![]);
                 }
@@ -499,7 +502,10 @@ impl super::CloudAgentService for CodexCodingAgent {
                             Some(a) => a,
                             None => {
                                 if !self.auth_warned.swap(true, Ordering::Relaxed) {
-                                    warn!("Codex sessions unavailable: auth refresh failed");
+                                    warn!(
+                                        provider = "codex",
+                                        "Codex sessions unavailable: auth refresh failed"
+                                    );
                                 }
                                 return Ok(vec![]);
                             }
@@ -515,14 +521,14 @@ impl super::CloudAgentService for CodexCodingAgent {
                             }
                             Err(e2) => {
                                 if !self.auth_warned.swap(true, Ordering::Relaxed) {
-                                    warn!(error = %e2, "Codex sessions unavailable after auth retry");
+                                    warn!(provider = "codex", error = %e2, "Codex sessions unavailable after auth retry");
                                 }
                                 return Ok(vec![]);
                             }
                         }
                     }
                     Err(e) => {
-                        debug!(error = %e, "environment lookup failed, falling back to label match");
+                        debug!(provider = "codex", error = %e, "environment lookup failed, falling back to label match");
                         return self.fetch_tasks_by_label(repo_slug, &auth).await;
                     }
                 }
@@ -547,7 +553,10 @@ impl super::CloudAgentService for CodexCodingAgent {
                         Some(a) => a,
                         None => {
                             if !self.auth_warned.swap(true, Ordering::Relaxed) {
-                                warn!("Codex task fetch failed: auth refresh failed");
+                                warn!(
+                                    provider = "codex",
+                                    "Codex task fetch failed: auth refresh failed"
+                                );
                             }
                             return Ok(all_sessions);
                         }
@@ -559,12 +568,12 @@ impl super::CloudAgentService for CodexCodingAgent {
                             }
                         }
                         Err(e2) => {
-                            debug!(env_id, error = %e2, "task fetch failed after auth retry");
+                            debug!(provider = "codex", env_id, error = %e2, "task fetch failed after auth retry");
                         }
                     }
                 }
                 Err(e) => {
-                    debug!(env_id, error = %e, "task fetch failed");
+                    debug!(provider = "codex", env_id, error = %e, "task fetch failed");
                 }
             }
         }

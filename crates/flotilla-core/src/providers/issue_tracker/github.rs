@@ -133,7 +133,7 @@ impl super::IssueTracker for GitHubIssueTracker {
         for result in results {
             match result {
                 Ok(issue) => issues.push(issue),
-                Err(e) => tracing::warn!(err = %e, "failed to fetch issue"),
+                Err(e) => tracing::warn!(provider = "github", err = %e, "failed to fetch issue"),
             }
         }
         Ok(issues)
