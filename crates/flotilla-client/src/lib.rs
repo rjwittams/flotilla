@@ -377,10 +377,15 @@ async fn send_request(
         params,
     };
 
-    let line =
-        serde_json::to_string(&msg).map_err(|e| format!("failed to serialize request: {e}"))?;
+    let line = match serde_json::to_string(&msg) {
+        Ok(line) => line,
+        Err(e) => {
+            pending.lock().await.remove(&id);
+            return Err(format!("failed to serialize request: {e}"));
+        }
+    };
 
-    {
+    let write_result = async {
         let mut w = writer.lock().await;
         w.write_all(line.as_bytes())
             .await
@@ -391,12 +396,26 @@ async fn send_request(
         w.flush()
             .await
             .map_err(|e| format!("failed to flush daemon socket: {e}"))?;
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(e) = write_result {
+        pending.lock().await.remove(&id);
+        return Err(e);
     }
 
-    tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-        .await
-        .map_err(|_| "request timed out after 30s".to_string())?
-        .map_err(|_| "request cancelled (sender dropped)".to_string())
+    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        Ok(Ok(raw)) => Ok(raw),
+        Ok(Err(_)) => {
+            pending.lock().await.remove(&id);
+            Err("request cancelled (sender dropped)".to_string())
+        }
+        Err(_) => {
+            pending.lock().await.remove(&id);
+            Err("request timed out after 30s".to_string())
+        }
+    }
 }
 
 /// Handle a daemon event in the background reader: update local seq tracking,
@@ -741,6 +760,17 @@ mod tests {
         }
     }
 
+    fn broken_request_harness() -> (SharedWriter, SharedPending, Arc<AtomicU64>) {
+        let (client, server) = UnixStream::pair().expect("pair");
+        drop(server);
+        let (_read_half, write_half) = client.into_split();
+        (
+            Arc::new(Mutex::new(BufWriter::new(write_half))),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(1)),
+        )
+    }
+
     /// Returns a writer/pending/next_id triple for tests that call `handle_event`.
     /// Also returns the server half of the socket pair so it isn't dropped — dropping
     /// it would close the pipe and cause writes on the client half to fail.
@@ -829,13 +859,94 @@ mod tests {
         let (id, method, _) = read_request(&mut harness.lines).await;
         assert_eq!(method, "never_replied");
 
-        let dropped = harness.pending.lock().await.remove(&id);
-        drop(dropped);
+        harness.pending.lock().await.remove(&id);
         let err = task
             .await
             .expect("join")
             .expect_err("dropping sender should cancel request");
         assert!(err.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn send_request_cleans_pending_on_write_error() {
+        let (writer, pending, next_id) = broken_request_harness();
+
+        let err = send_request(
+            &writer,
+            &pending,
+            &next_id,
+            "broken_pipe",
+            serde_json::json!({}),
+        )
+        .await
+        .expect_err("closed peer should fail writes");
+
+        assert!(err.contains("failed to"));
+        assert!(pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_request_cleans_pending_on_cancelled_response() {
+        let mut harness = request_harness();
+
+        let request_writer = Arc::clone(&harness.writer);
+        let request_pending = Arc::clone(&harness.pending);
+        let request_next_id = Arc::clone(&harness.next_id);
+        let task = tokio::spawn(async move {
+            send_request(
+                &request_writer,
+                &request_pending,
+                &request_next_id,
+                "cancelled",
+                serde_json::json!({}),
+            )
+            .await
+        });
+
+        let (id, method, _) = read_request(&mut harness.lines).await;
+        assert_eq!(method, "cancelled");
+
+        harness.pending.lock().await.remove(&id);
+
+        let err = task
+            .await
+            .expect("join")
+            .expect_err("dropping sender should cancel request");
+        assert!(err.contains("cancelled"));
+        assert!(harness.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_request_cleans_pending_on_timeout() {
+        let mut harness = request_harness();
+
+        let request_writer = Arc::clone(&harness.writer);
+        let request_pending = Arc::clone(&harness.pending);
+        let request_next_id = Arc::clone(&harness.next_id);
+        let task = tokio::spawn(async move {
+            send_request(
+                &request_writer,
+                &request_pending,
+                &request_next_id,
+                "timeout",
+                serde_json::json!({}),
+            )
+            .await
+        });
+
+        let (id, method, _) = read_request(&mut harness.lines).await;
+        assert_eq!(id, 1);
+        assert_eq!(method, "timeout");
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+
+        let err = task
+            .await
+            .expect("join")
+            .expect_err("missing response should time out");
+        assert!(err.contains("timed out"));
+        assert!(harness.pending.lock().await.is_empty());
     }
 
     #[tokio::test]
