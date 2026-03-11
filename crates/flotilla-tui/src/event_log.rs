@@ -220,25 +220,42 @@ impl<S: tracing::Subscriber> Layer<S> for TuiLayer {
     ) {
         let level = *event.metadata().level();
 
-        let mut visitor = MessageVisitor(String::new());
+        let mut visitor = MessageVisitor {
+            message: String::new(),
+            provider: None,
+        };
         event.record(&mut visitor);
 
-        EVENT_LOG.lock().unwrap().push(level, visitor.0);
+        let display = format_log_message(&visitor.message, visitor.provider.as_deref());
+        EVENT_LOG.lock().unwrap().push(level, display);
     }
 }
 
-struct MessageVisitor(String);
+fn format_log_message(message: &str, provider: Option<&str>) -> String {
+    if let Some(provider) = provider {
+        format!("[{}] {}", provider, message)
+    } else {
+        message.to_string()
+    }
+}
+
+struct MessageVisitor {
+    message: String,
+    provider: Option<String>,
+}
 
 impl tracing::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
-            self.0 = format!("{:?}", value);
+            self.message = format!("{:?}", value);
         }
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == "message" {
-            self.0 = value.to_string();
+        match field.name() {
+            "message" => self.message = value.to_string(),
+            "provider" => self.provider = Some(value.to_string()),
+            _ => {}
         }
     }
 }
@@ -582,5 +599,19 @@ mod tests {
         // First entry should be err_1 (err_0 evicted)
         assert_eq!(log.error.entries[0].message, "err_1");
         assert_eq!(log.error.entries[99].message, "err_100");
+    }
+
+    // ── format_log_message ─────────────────────────────────────────────
+
+    #[test]
+    fn format_log_message_with_provider() {
+        let display = format_log_message("hello", Some("claude"));
+        assert_eq!(display, "[claude] hello");
+    }
+
+    #[test]
+    fn format_log_message_without_provider() {
+        let display = format_log_message("hello", None);
+        assert_eq!(display, "hello");
     }
 }
