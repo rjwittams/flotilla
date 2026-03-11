@@ -32,14 +32,16 @@ See work items across multiple development hosts from a single flotilla instance
 
 ### Topology
 
-Star with leader as hub. The local daemon is the leader; remote daemons are followers. Followers connect only to the leader. The leader relays each follower's data to all other followers so every daemon holds the full dataset.
+Star with leader as hub. The local daemon is the leader; remote daemons are followers. The leader initiates SSH connections outward to all followers, forwarding their sockets locally. Each connection carries bidirectional peer data exchange via `Message::PeerData` (see Protocol section). The leader relays each follower's data to all other followers so every daemon holds the full dataset.
 
 ```
   ┌──────────┐     ┌──────────┐
   │ Follower │     │ Follower │
   │ (desktop)│     │ (cloud)  │
   └────┬─────┘     └────┬─────┘
-       │    SSH fwd      │
+       │                 │
+       │  SSH fwd + peer protocol
+       │                 │
        └──────┬──────────┘
               │
         ┌─────┴──────┐
@@ -51,6 +53,8 @@ Star with leader as hub. The local daemon is the leader; remote daemons are foll
          │   TUI   │
          └─────────┘
 ```
+
+Connection direction: the leader connects outward to followers (SSH tunnel + client connection to follower's daemon server). Data flows bidirectionally over each connection.
 
 ### Data Flow
 
@@ -75,6 +79,11 @@ repo_slug → LogicalRepo {
 ```
 
 Each logical repo gets one tab. Repos that exist only on remote hosts still get a tab.
+
+Matching fallbacks:
+- **No usable remote**: The repo is local-only and cannot match across hosts.
+- **Multiple remotes**: Use the first remote (existing `first_remote_url()` behavior).
+- **Unrecognized URL format**: Fall back to exact URL comparison instead of slug extraction.
 
 For TUI snapshot keying (which uses `PathBuf` as repo identity): if the local host has the repo, use the local path. If the repo exists only on remote hosts, use a synthetic path like `<remote>/<host>/<remote-path>` — the TUI treats this as an opaque key, so the exact format matters only for display.
 
@@ -147,27 +156,66 @@ trait PeerTransport {
     async fn connect(&mut self) -> Result<(), String>;
     async fn disconnect(&mut self) -> Result<(), String>;
     fn is_connected(&self) -> bool;
-    fn daemon_handle(&self) -> &dyn DaemonHandle;
+
+    /// Subscribe to peer data updates (provider snapshots + deltas)
+    async fn subscribe(&mut self) -> Result<mpsc::Receiver<PeerDataMessage>, String>;
+    /// Send peer data to the remote daemon (for relay)
+    async fn send(&mut self, msg: PeerDataMessage) -> Result<(), String>;
 }
 ```
+
+This is narrower than `DaemonHandle` — scoped to peer data exchange only. The `PeerManager` uses these methods; it does not send commands or receive correlated snapshots over peer connections.
 
 The SSH implementation is the first implementor. The trait exists so future transports (direct TCP, WireGuard, etc.) can slot in without changing the `PeerManager`.
 
 ## Daemon-to-Daemon Protocol
 
-The daemon-to-daemon protocol uses the same `Message` envelope and transport as TUI-to-daemon, but carries different payload:
+### Wire Format
+
+The existing protocol is asymmetric: clients send `Message::Request`, servers push `Message::Event`. For peer communication, we add a new variant:
+
+```rust
+enum Message {
+    Request { id: u64, command: ProtoCommand },
+    Response { id: u64, result: CommandResult },
+    Event(DaemonEvent),
+    PeerData(PeerDataMessage),  // NEW
+}
+```
+
+`PeerData` messages flow in both directions over the same connection. The leader connects to each follower as a client (via the forwarded socket), and both sides can send `PeerData` messages. The follower's daemon server recognizes `PeerData` as a peer exchange rather than a TUI request.
+
+### Payload
+
+The daemon-to-daemon payload is raw `ProviderData` (pre-correlation), not correlated `WorkItem` snapshots:
 
 - **TUI-to-daemon**: correlated `WorkItem` snapshots (post-correlation)
 - **Daemon-to-daemon**: raw `ProviderData` snapshots (pre-correlation)
 
 This distinction matters because correlation must run on the merged dataset from all hosts. If daemons exchanged post-correlation data, cross-host links (checkout on host A ↔ PR on host B) would be lost.
 
-The protocol reuses:
-- Snapshot on connect for initial sync
-- Delta messages for ongoing updates
-- Sequence numbers and gap recovery
+### PeerDataMessage
 
-Each message is tagged with its origin host so the receiver can maintain `HashMap<HostName, ProviderData>` and re-correlate when any host's data changes.
+```rust
+struct PeerDataMessage {
+    origin_host: HostName,         // who generated this data
+    repo_slug: String,             // logical repo identity
+    repo_path: PathBuf,            // filesystem path on origin host
+    kind: PeerDataKind,
+}
+
+enum PeerDataKind {
+    Snapshot { data: ProviderData, seq: u64 },
+    Delta { changes: ProviderDataDelta, seq: u64, prev_seq: u64 },
+    GapRecovery { since_seq: u64 },
+}
+```
+
+Each message carries an `origin_host` tag so the receiver knows the data source and the relay logic can avoid reflecting data back to its origin. Sequence numbers are per-(origin_host, repo_slug).
+
+### Authentication
+
+The daemon server distinguishes peer clients from TUI clients. In Phase 1, any client that sends a `PeerData` message is treated as a peer — no explicit handshake. A peer authentication protocol is deferred to future work.
 
 ## Relay Logic
 
@@ -198,7 +246,9 @@ Minimal — the TUI does not know about multi-host. It receives a unified snapsh
 
 ### Source Column
 
-Already renders provider attribution. For host-scoped items (checkouts, workspaces), the Source now includes the host name — e.g. `desktop:git` or `cloud:shpool`. Service-level items (PRs, issues, cloud agents) are not host-scoped and display as before.
+Already renders provider attribution. For host-scoped items (checkouts), the Source includes the host name — e.g. `desktop:git`. Service-level items (PRs, issues, cloud agents) are not host-scoped and display as before.
+
+Workspaces are not standalone rows — they appear as `workspace_refs` attached to correlated items. A correlated row's Source reflects its anchor item (typically a checkout). The host distinction for workspaces shows up in the workspace ref details (preview pane), not the Source column.
 
 ### Config View
 
@@ -209,9 +259,14 @@ The Flotilla tab's config screen gains a "Hosts" section showing:
 
 This sits alongside the existing provider health display.
 
-### Actions on Remote Items
+### Host Provenance on Work Items
 
-Phase 1 is read-only for remote items. When a user selects a remote checkout or workspace and opens the action menu, actions that require local access (open terminal, delete worktree) are filtered out. The action menu shows only actions that remain valid (e.g. open PR in browser, copy branch name).
+Each `WorkItem` (and `ProtoWorkItem`) carries an explicit `host: Option<HostName>` field. `None` means local; `Some(name)` means the item originates from a remote host. This field is set during snapshot merging and propagates through correlation and grouping.
+
+The action menu and executor use `host` to filter actions:
+- **Local items** (`host: None`): all actions available as today.
+- **Remote items** (`host: Some(_)`): actions requiring local filesystem access (open terminal, delete worktree, create checkout) are hidden. Actions that work without a local clone (open PR in browser, copy branch name) remain available.
+- **Remote-only repos**: For repos that exist only on remote hosts, `gh`-based browser actions may not work since there is no local clone. This is a known Phase 1 limitation; future work may proxy commands to a remote checkout or call the GitHub API directly.
 
 ### No Other Changes
 
@@ -222,10 +277,10 @@ No new tab types. No new modes. No new key bindings. The tab system, navigation,
 | Crate | Changes |
 |-------|---------|
 | `flotilla-daemon` | `PeerManager`, `PeerTransport` trait, SSH implementation, relay logic, follower mode flag, snapshot merging |
-| `flotilla-protocol` | Host-tagged provider data messages, peer data envelope |
-| `flotilla-core` | Config parsing for `hosts.toml`, possible minor correlation adjustments for host tagging |
+| `flotilla-protocol` | `Message::PeerData` variant, `PeerDataMessage`, `PeerDataKind`, `HostName` type |
+| `flotilla-core` | Config parsing for `hosts.toml`, host-namespaced correlation keys, `host` field on work items |
 | `flotilla-client` | None (reused as-is for peer connections) |
-| `flotilla-tui` | Host in Source column, Hosts section in config view |
+| `flotilla-tui` | Host in Source column, Hosts section in config view, action filtering by host provenance |
 | `flotilla` (root) | None |
 
 ## Future Work
