@@ -4,6 +4,33 @@ use flotilla_protocol::Command;
 use super::{App, UiMode};
 
 impl App {
+    fn step_tab(&mut self, forward: bool) {
+        if self.model.repo_order.is_empty() {
+            return;
+        }
+        if self.ui.mode.is_config() {
+            self.ui.mode = UiMode::Normal;
+            self.model.active_repo = if forward {
+                0
+            } else {
+                self.model.repo_order.len() - 1
+            };
+            return;
+        }
+
+        if forward {
+            if self.model.active_repo + 1 < self.model.repo_order.len() {
+                self.switch_tab(self.model.active_repo + 1);
+            } else {
+                self.ui.mode = UiMode::Config;
+            }
+        } else if self.model.active_repo > 0 {
+            self.switch_tab(self.model.active_repo - 1);
+        } else {
+            self.ui.mode = UiMode::Config;
+        }
+    }
+
     pub fn switch_tab(&mut self, idx: usize) {
         if idx < self.model.repo_order.len() {
             self.ui.mode = UiMode::Normal;
@@ -18,31 +45,11 @@ impl App {
     }
 
     pub fn next_tab(&mut self) {
-        if self.model.repo_order.is_empty() {
-            return;
-        }
-        if self.ui.mode.is_config() {
-            self.ui.mode = UiMode::Normal;
-            self.model.active_repo = 0;
-        } else if self.model.active_repo < self.model.repo_order.len() - 1 {
-            self.switch_tab(self.model.active_repo + 1);
-        } else {
-            self.ui.mode = UiMode::Config;
-        }
+        self.step_tab(true);
     }
 
     pub fn prev_tab(&mut self) {
-        if self.model.repo_order.is_empty() {
-            return;
-        }
-        if self.ui.mode.is_config() {
-            self.ui.mode = UiMode::Normal;
-            self.model.active_repo = self.model.repo_order.len() - 1;
-        } else if self.model.active_repo > 0 {
-            self.switch_tab(self.model.active_repo - 1);
-        } else {
-            self.ui.mode = UiMode::Config;
-        }
+        self.step_tab(false);
     }
 
     pub fn move_tab(&mut self, delta: isize) -> bool {

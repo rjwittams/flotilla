@@ -457,6 +457,36 @@ impl App {
             pending_issue_ids,
         };
     }
+
+    pub(super) fn enter_branch_input(&mut self, generating: bool) {
+        self.ui.mode = UiMode::BranchInput {
+            input: Input::default(),
+            generating,
+            pending_issue_ids: Vec::new(),
+        };
+    }
+
+    pub(super) fn open_file_picker_from_active_repo_parent(&mut self) {
+        let mut input = Input::default();
+        if let Some(parent) = self.model.active_repo_root().parent() {
+            let parent_str = format!("{}/", parent.display());
+            input = Input::from(parent_str.as_str());
+        }
+        self.ui.mode = UiMode::FilePicker {
+            input,
+            dir_entries: Vec::new(),
+            selected: 0,
+        };
+        self.refresh_dir_listing();
+    }
+
+    pub(super) fn clear_active_issue_search(&mut self, always_dispatch: bool) {
+        if always_dispatch || self.active_ui().active_search_query.is_some() {
+            let repo = self.model.active_repo_root().clone();
+            self.proto_commands.push(Command::ClearIssueSearch { repo });
+        }
+        self.active_ui_mut().active_search_query = None;
+    }
 }
 
 #[cfg(test)]
