@@ -4,7 +4,7 @@ mod host;
 pub mod provider_data;
 pub mod snapshot;
 
-pub use host::HostName;
+pub use host::{HostName, HostPath, RepoIdentity};
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
