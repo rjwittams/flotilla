@@ -242,6 +242,22 @@ impl super::CloudAgentService for CursorCodingAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::coding_agent::CloudAgentService;
+
+    fn cursor_agent(status: &str, repository: &str, branch: &str) -> CursorAgent {
+        CursorAgent {
+            id: "bc-1".to_string(),
+            name: "Session".to_string(),
+            status: status.to_string(),
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            source: CursorSource {
+                repository: repository.to_string(),
+            },
+            target: CursorTarget {
+                branch_name: branch.to_string(),
+            },
+        }
+    }
 
     #[test]
     fn repo_slug_from_cursor_repository_cases() {
@@ -251,130 +267,61 @@ mod tests {
             ("git@github.com:owner/repo.git", Some("owner/repo")),
             ("git@github.com:owner/repo", Some("owner/repo")),
             ("owner/repo", Some("owner/repo")),
+            ("http://github.com/owner/repo", Some("owner/repo")),
+            ("https://github.com/owner/repo/", Some("owner/repo")),
+            ("  owner/repo  ", Some("owner/repo")),
             ("", None),
             ("repo-only", None),
         ];
         for (input, expected) in cases {
             assert_eq!(
                 repo_slug_from_cursor_repository(input),
-                expected.map(str::to_string)
+                expected.map(str::to_string),
+                "{input}"
             );
         }
     }
 
     #[test]
-    fn cursor_agent_maps_status_and_branch() {
-        let make = |status: &str| CursorAgent {
-            id: "bc-1".to_string(),
-            name: "Session".to_string(),
-            status: status.to_string(),
-            created_at: "2026-01-01T00:00:00.000Z".to_string(),
-            source: CursorSource {
-                repository: "github.com/owner/repo".to_string(),
-            },
-            target: CursorTarget {
-                branch_name: "feature/one".to_string(),
-            },
-        };
+    fn cursor_agent_maps_status_branch_and_repo() {
+        let status_cases = [
+            ("CREATING", SessionStatus::Running),
+            ("RUNNING", SessionStatus::Running),
+            ("FINISHED", SessionStatus::Idle),
+            ("STOPPED", SessionStatus::Idle),
+            ("FAILED", SessionStatus::Idle),
+            ("EXPIRED", SessionStatus::Idle),
+            ("UNKNOWN_STATUS", SessionStatus::Idle),
+        ];
+        for (status, expected) in status_cases {
+            assert_eq!(
+                cursor_agent(status, "", "").session_status(),
+                expected,
+                "{status}"
+            );
+        }
 
-        assert_eq!(make("CREATING").session_status(), SessionStatus::Running);
-        assert_eq!(make("RUNNING").session_status(), SessionStatus::Running);
-        assert_eq!(make("FINISHED").session_status(), SessionStatus::Idle);
-        assert_eq!(make("STOPPED").session_status(), SessionStatus::Idle);
-        assert_eq!(make("FAILED").session_status(), SessionStatus::Idle);
-        assert_eq!(make("EXPIRED").session_status(), SessionStatus::Idle);
-
-        let agent = make("RUNNING");
+        let agent = cursor_agent("RUNNING", "github.com/owner/repo", "feature/one");
         assert_eq!(agent.branch(), Some("feature/one"));
         assert_eq!(agent.repo_slug(), Some("owner/repo".to_string()));
     }
 
     #[test]
     fn cursor_agent_empty_branch_returns_none() {
-        let agent = CursorAgent {
-            id: "a-1".to_string(),
-            name: String::new(),
-            status: "RUNNING".to_string(),
-            created_at: String::new(),
-            source: CursorSource {
-                repository: String::new(),
-            },
-            target: CursorTarget {
-                branch_name: String::new(),
-            },
-        };
+        let agent = cursor_agent("RUNNING", "", "");
         assert!(agent.branch().is_none());
     }
 
     #[test]
     fn cursor_agent_repo_slug_delegates() {
-        let agent = CursorAgent {
-            id: "a-2".to_string(),
-            name: String::new(),
-            status: "FINISHED".to_string(),
-            created_at: String::new(),
-            source: CursorSource {
-                repository: "https://github.com/owner/repo.git".to_string(),
-            },
-            target: CursorTarget {
-                branch_name: String::new(),
-            },
-        };
+        let agent = cursor_agent("FINISHED", "https://github.com/owner/repo.git", "");
         assert_eq!(agent.repo_slug(), Some("owner/repo".to_string()));
     }
 
     #[test]
     fn cursor_agent_empty_repo_returns_none() {
-        let agent = CursorAgent {
-            id: "a-3".to_string(),
-            name: String::new(),
-            status: "RUNNING".to_string(),
-            created_at: String::new(),
-            source: CursorSource {
-                repository: String::new(),
-            },
-            target: CursorTarget {
-                branch_name: String::new(),
-            },
-        };
+        let agent = cursor_agent("RUNNING", "", "");
         assert!(agent.repo_slug().is_none());
-    }
-
-    #[test]
-    fn cursor_agent_unknown_status_defaults_to_idle() {
-        let agent = CursorAgent {
-            id: "a-4".to_string(),
-            name: String::new(),
-            status: "UNKNOWN_STATUS".to_string(),
-            created_at: String::new(),
-            source: CursorSource::default(),
-            target: CursorTarget::default(),
-        };
-        assert_eq!(agent.session_status(), SessionStatus::Idle);
-    }
-
-    #[test]
-    fn repo_slug_http_without_tls() {
-        assert_eq!(
-            repo_slug_from_cursor_repository("http://github.com/owner/repo"),
-            Some("owner/repo".to_string()),
-        );
-    }
-
-    #[test]
-    fn repo_slug_trailing_slashes() {
-        assert_eq!(
-            repo_slug_from_cursor_repository("https://github.com/owner/repo/"),
-            Some("owner/repo".to_string()),
-        );
-    }
-
-    #[test]
-    fn repo_slug_whitespace_trimmed() {
-        assert_eq!(
-            repo_slug_from_cursor_repository("  owner/repo  "),
-            Some("owner/repo".to_string()),
-        );
     }
 
     struct MockHttpClient;
@@ -389,11 +336,14 @@ mod tests {
         }
     }
 
+    fn cursor_service() -> CursorCodingAgent {
+        let http: Arc<dyn crate::providers::HttpClient> = Arc::new(MockHttpClient);
+        CursorCodingAgent::new("cursor".into(), http)
+    }
+
     #[tokio::test]
     async fn archive_session_returns_error() {
-        use crate::providers::coding_agent::CloudAgentService;
-        let http: Arc<dyn crate::providers::HttpClient> = Arc::new(MockHttpClient);
-        let agent = CursorCodingAgent::new("cursor".into(), http);
+        let agent = cursor_service();
         let result = agent.archive_session("any-id").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
@@ -401,18 +351,14 @@ mod tests {
 
     #[tokio::test]
     async fn attach_command_formats_resume() {
-        use crate::providers::coding_agent::CloudAgentService;
-        let http: Arc<dyn crate::providers::HttpClient> = Arc::new(MockHttpClient);
-        let agent = CursorCodingAgent::new("cursor".into(), http);
+        let agent = cursor_service();
         let cmd = agent.attach_command("sess-42").await.unwrap();
         assert_eq!(cmd, "agent --resume sess-42");
     }
 
     #[tokio::test]
     async fn display_name_returns_expected() {
-        use crate::providers::coding_agent::CloudAgentService;
-        let http: Arc<dyn crate::providers::HttpClient> = Arc::new(MockHttpClient);
-        let agent = CursorCodingAgent::new("cursor".into(), http);
+        let agent = cursor_service();
         assert_eq!(agent.display_name(), "Cursor Cloud Agents");
     }
 }

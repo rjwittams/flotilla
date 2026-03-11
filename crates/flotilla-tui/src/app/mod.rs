@@ -504,11 +504,11 @@ mod tests {
 
     #[test]
     fn from_repo_info_builds_correct_model() {
-        let info = vec![
+        let repos_info = vec![
             repo_info("/tmp/repo-a", "repo-a", RepoLabels::default()),
             repo_info("/tmp/repo-b", "repo-b", RepoLabels::default()),
         ];
-        let model = TuiModel::from_repo_info(info);
+        let model = TuiModel::from_repo_info(repos_info);
         assert_eq!(model.repos.len(), 2);
         assert_eq!(model.repo_order.len(), 2);
         assert_eq!(model.active_repo, 0);
@@ -519,11 +519,11 @@ mod tests {
 
     #[test]
     fn from_repo_info_preserves_order() {
-        let info = vec![
+        let repos_info = vec![
             repo_info("/z", "z", RepoLabels::default()),
             repo_info("/a", "a", RepoLabels::default()),
         ];
-        let model = TuiModel::from_repo_info(info);
+        let model = TuiModel::from_repo_info(repos_info);
         assert_eq!(model.repo_order[0], PathBuf::from("/z"));
         assert_eq!(model.repo_order[1], PathBuf::from("/a"));
     }
@@ -544,11 +544,7 @@ mod tests {
 
     #[test]
     fn format_error_status_single_error() {
-        let errors = vec![ProviderError {
-            category: "code_review".into(),
-            provider: "github".into(),
-            message: "rate limited".into(),
-        }];
+        let errors = vec![provider_error("code_review", "github", "rate limited")];
         let msg = format_error_status(&errors, Path::new("/tmp/my-repo")).unwrap();
         assert!(msg.contains("my-repo"));
         assert!(msg.contains("code_review"));
@@ -558,27 +554,19 @@ mod tests {
 
     #[test]
     fn format_error_status_suppresses_issues_disabled() {
-        let errors = vec![ProviderError {
-            category: "issues".into(),
-            provider: "github".into(),
-            message: "repo has disabled issues".into(),
-        }];
+        let errors = vec![provider_error(
+            "issues",
+            "github",
+            "repo has disabled issues",
+        )];
         assert!(format_error_status(&errors, Path::new("/repo")).is_none());
     }
 
     #[test]
     fn format_error_status_mixed_suppressed_and_real() {
         let errors = vec![
-            ProviderError {
-                category: "issues".into(),
-                provider: "github".into(),
-                message: "repo has disabled issues".into(),
-            },
-            ProviderError {
-                category: "vcs".into(),
-                provider: "git".into(),
-                message: "not a git repo".into(),
-            },
+            provider_error("issues", "github", "repo has disabled issues"),
+            provider_error("vcs", "git", "not a git repo"),
         ];
         let msg = format_error_status(&errors, Path::new("/repo")).unwrap();
         assert!(msg.contains("not a git repo"));
@@ -587,11 +575,7 @@ mod tests {
 
     #[test]
     fn format_error_status_empty_provider_no_suffix() {
-        let errors = vec![ProviderError {
-            category: "vcs".into(),
-            provider: String::new(),
-            message: "error".into(),
-        }];
+        let errors = vec![provider_error("vcs", "", "error")];
         let msg = format_error_status(&errors, Path::new("/r")).unwrap();
         assert!(!msg.contains("()"));
     }
@@ -599,43 +583,19 @@ mod tests {
     #[test]
     fn format_error_status_multiple_errors_joined() {
         let errors = vec![
-            ProviderError {
-                category: "vcs".into(),
-                provider: "git".into(),
-                message: "err1".into(),
-            },
-            ProviderError {
-                category: "cr".into(),
-                provider: "gh".into(),
-                message: "err2".into(),
-            },
+            provider_error("vcs", "git", "err1"),
+            provider_error("cr", "gh", "err2"),
         ];
         let msg = format_error_status(&errors, Path::new("/r")).unwrap();
         assert!(msg.contains("; "));
     }
 
-    // -- apply_snapshot --
-
-    fn make_snapshot(repo: &Path, work_items: Vec<WorkItem>) -> Snapshot {
-        Snapshot {
-            seq: 1,
-            repo: repo.to_path_buf(),
-            work_items,
-            providers: ProviderData::default(),
-            provider_health: HashMap::new(),
-            errors: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
-        }
-    }
-
     #[test]
     fn apply_snapshot_updates_provider_data() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = active_repo_path(&app);
 
-        let snap = make_snapshot(&repo, vec![]);
+        let snap = snapshot(&repo);
         app.apply_snapshot(snap);
         assert!(!app.model.repos[&repo].loading);
     }
@@ -643,9 +603,9 @@ mod tests {
     #[test]
     fn apply_snapshot_updates_issue_metadata() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = active_repo_path(&app);
 
-        let mut snap = make_snapshot(&repo, vec![]);
+        let mut snap = snapshot(&repo);
         snap.issue_has_more = true;
         snap.issue_total = Some(42);
         snap.issue_search_results = Some(vec![]);
@@ -660,9 +620,9 @@ mod tests {
     #[test]
     fn apply_snapshot_maps_provider_health_to_statuses() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = active_repo_path(&app);
 
-        let mut snap = make_snapshot(&repo, vec![]);
+        let mut snap = snapshot(&repo);
         snap.provider_health.insert(
             "vcs".into(),
             HashMap::from([("git".into(), true), ("wt".into(), false)]),
@@ -682,14 +642,10 @@ mod tests {
     #[test]
     fn apply_snapshot_sets_error_status_message() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = active_repo_path(&app);
 
-        let mut snap = make_snapshot(&repo, vec![]);
-        snap.errors = vec![ProviderError {
-            category: "cr".into(),
-            provider: "gh".into(),
-            message: "fail".into(),
-        }];
+        let mut snap = snapshot(&repo);
+        snap.errors = vec![provider_error("cr", "gh", "fail")];
         app.apply_snapshot(snap);
 
         assert!(app.model.status_message.is_some());
@@ -699,10 +655,10 @@ mod tests {
     #[test]
     fn apply_snapshot_clears_status_on_no_errors() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = active_repo_path(&app);
         app.model.status_message = Some("old error".into());
 
-        let snap = make_snapshot(&repo, vec![]);
+        let snap = snapshot(&repo);
         app.apply_snapshot(snap);
 
         assert!(app.model.status_message.is_none());
@@ -711,22 +667,22 @@ mod tests {
     #[test]
     fn apply_snapshot_unknown_repo_is_noop() {
         let mut app = stub_app();
-        let snap = make_snapshot(Path::new("/nonexistent"), vec![]);
+        let snap = snapshot(Path::new("/nonexistent"));
         app.apply_snapshot(snap);
     }
 
     #[test]
     fn apply_snapshot_requests_initial_issue_fetch() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = active_repo_path(&app);
 
-        let snap = make_snapshot(&repo, vec![]);
+        let snap = snapshot(&repo);
         app.apply_snapshot(snap);
 
         let cmd = app.proto_commands.take_next();
         assert!(matches!(cmd, Some(Command::SetIssueViewport { .. })));
         // Second snapshot should NOT queue another
-        let snap2 = make_snapshot(&repo, vec![]);
+        let snap2 = snapshot(&repo);
         app.apply_snapshot(snap2);
         assert!(app.proto_commands.take_next().is_none());
     }
@@ -737,12 +693,13 @@ mod tests {
         let inactive_repo = app.model.repo_order[1].clone();
 
         // First snapshot to establish baseline providers
-        let snap1 = make_snapshot(&inactive_repo, vec![]);
+        let snap1 = snapshot(&inactive_repo);
         app.apply_snapshot(snap1);
 
         // Second snapshot with different providers
-        let mut snap2 = make_snapshot(&inactive_repo, vec![checkout_item("feat", "/wt", false)]);
+        let mut snap2 = snapshot(&inactive_repo);
         snap2.seq = 2;
+        snap2.work_items = vec![checkout_item("feat", "/wt", false)];
         let mut different_providers = ProviderData::default();
         different_providers.checkouts.insert(
             PathBuf::from("/wt"),
@@ -768,19 +725,12 @@ mod tests {
     #[test]
     fn apply_delta_updates_issue_metadata() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = active_repo_path(&app);
 
-        let delta = SnapshotDelta {
-            seq: 2,
-            prev_seq: 1,
-            repo: repo.clone(),
-            changes: vec![],
-            work_items: vec![],
-            issue_total: Some(10),
-            issue_has_more: true,
-            issue_search_results: None,
-        };
-        app.apply_delta(delta);
+        let mut change = delta(&repo, vec![]);
+        change.issue_total = Some(10);
+        change.issue_has_more = true;
+        app.apply_delta(change);
 
         let rm = &app.model.repos[&repo];
         assert_eq!(rm.issue_total, Some(10));
@@ -791,39 +741,26 @@ mod tests {
     #[test]
     fn apply_delta_unknown_repo_is_noop() {
         let mut app = stub_app();
-        let delta = SnapshotDelta {
-            seq: 1,
-            prev_seq: 0,
-            repo: PathBuf::from("/nonexistent"),
-            changes: vec![],
-            work_items: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
-        };
-        app.apply_delta(delta);
+        let mut change = delta(Path::new("/nonexistent"), vec![]);
+        change.seq = 1;
+        change.prev_seq = 0;
+        app.apply_delta(change);
     }
 
     #[test]
     fn apply_delta_provider_health_added() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = active_repo_path(&app);
 
-        let delta = SnapshotDelta {
-            seq: 2,
-            prev_seq: 1,
-            repo: repo.clone(),
-            changes: vec![flotilla_protocol::Change::ProviderHealth {
+        let change = delta(
+            &repo,
+            vec![flotilla_protocol::Change::ProviderHealth {
                 category: "vcs".into(),
                 provider: "git".into(),
                 op: flotilla_protocol::EntryOp::Added(true),
             }],
-            work_items: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
-        };
-        app.apply_delta(delta);
+        );
+        app.apply_delta(change);
 
         assert_eq!(
             app.model.provider_statuses[&(repo.clone(), "vcs".into(), "git".into())],
@@ -835,7 +772,7 @@ mod tests {
     #[test]
     fn apply_delta_provider_health_removed() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = active_repo_path(&app);
 
         app.model
             .repos
@@ -846,21 +783,15 @@ mod tests {
             .or_default()
             .insert("git".into(), true);
 
-        let delta = SnapshotDelta {
-            seq: 2,
-            prev_seq: 1,
-            repo: repo.clone(),
-            changes: vec![flotilla_protocol::Change::ProviderHealth {
+        let change = delta(
+            &repo,
+            vec![flotilla_protocol::Change::ProviderHealth {
                 category: "vcs".into(),
                 provider: "git".into(),
                 op: flotilla_protocol::EntryOp::Removed,
             }],
-            work_items: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
-        };
-        app.apply_delta(delta);
+        );
+        app.apply_delta(change);
 
         assert!(!app.model.repos[&repo].provider_health.contains_key("vcs"));
     }
@@ -868,25 +799,15 @@ mod tests {
     #[test]
     fn apply_delta_errors_changed_updates_status() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = active_repo_path(&app);
 
-        let delta = SnapshotDelta {
-            seq: 2,
-            prev_seq: 1,
-            repo: repo.clone(),
-            changes: vec![flotilla_protocol::Change::ErrorsChanged(vec![
-                ProviderError {
-                    category: "cr".into(),
-                    provider: "gh".into(),
-                    message: "broken".into(),
-                },
+        let change = delta(
+            &repo,
+            vec![flotilla_protocol::Change::ErrorsChanged(vec![
+                provider_error("cr", "gh", "broken"),
             ])],
-            work_items: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
-        };
-        app.apply_delta(delta);
+        );
+        app.apply_delta(change);
 
         assert!(app
             .model
@@ -901,11 +822,9 @@ mod tests {
         let mut app = stub_app_with_repos(2);
         let inactive_repo = app.model.repo_order[1].clone();
 
-        let delta = SnapshotDelta {
-            seq: 2,
-            prev_seq: 1,
-            repo: inactive_repo.clone(),
-            changes: vec![flotilla_protocol::Change::Session {
+        let change = delta(
+            &inactive_repo,
+            vec![flotilla_protocol::Change::Session {
                 key: "s1".into(),
                 op: flotilla_protocol::EntryOp::Added(flotilla_protocol::CloudAgentSession {
                     title: "new session".into(),
@@ -915,12 +834,8 @@ mod tests {
                     correlation_keys: vec![],
                 }),
             }],
-            work_items: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
-        };
-        app.apply_delta(delta);
+        );
+        app.apply_delta(change);
 
         assert!(app.ui.repo_ui[&inactive_repo].has_unseen_changes);
     }
@@ -930,21 +845,15 @@ mod tests {
         let mut app = stub_app_with_repos(2);
         let inactive_repo = app.model.repo_order[1].clone();
 
-        let delta = SnapshotDelta {
-            seq: 2,
-            prev_seq: 1,
-            repo: inactive_repo.clone(),
-            changes: vec![flotilla_protocol::Change::ProviderHealth {
+        let change = delta(
+            &inactive_repo,
+            vec![flotilla_protocol::Change::ProviderHealth {
                 category: "vcs".into(),
                 provider: "git".into(),
                 op: flotilla_protocol::EntryOp::Added(true),
             }],
-            work_items: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
-        };
-        app.apply_delta(delta);
+        );
+        app.apply_delta(change);
 
         assert!(!app.ui.repo_ui[&inactive_repo].has_unseen_changes);
     }

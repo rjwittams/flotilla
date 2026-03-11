@@ -359,107 +359,50 @@ mod tests {
     // --- parse_state tests ---
 
     #[test]
-    fn parse_state_all_variants() {
-        assert_eq!(
-            GitHubCodeReview::parse_state("OPEN"),
-            ChangeRequestStatus::Open
-        );
-        assert_eq!(
-            GitHubCodeReview::parse_state("DRAFT"),
-            ChangeRequestStatus::Draft
-        );
-        assert_eq!(
-            GitHubCodeReview::parse_state("MERGED"),
-            ChangeRequestStatus::Merged
-        );
-        assert_eq!(
-            GitHubCodeReview::parse_state("CLOSED"),
-            ChangeRequestStatus::Closed
-        );
-    }
-
-    #[test]
-    fn parse_state_case_insensitive() {
-        assert_eq!(
-            GitHubCodeReview::parse_state("open"),
-            ChangeRequestStatus::Open
-        );
-        assert_eq!(
-            GitHubCodeReview::parse_state("Merged"),
-            ChangeRequestStatus::Merged
-        );
-    }
-
-    #[test]
-    fn parse_state_unknown_defaults_to_open() {
-        assert_eq!(
-            GitHubCodeReview::parse_state("unknown"),
-            ChangeRequestStatus::Open
-        );
-        assert_eq!(GitHubCodeReview::parse_state(""), ChangeRequestStatus::Open);
+    fn parse_state_cases() {
+        let cases = [
+            ("OPEN", ChangeRequestStatus::Open),
+            ("DRAFT", ChangeRequestStatus::Draft),
+            ("MERGED", ChangeRequestStatus::Merged),
+            ("CLOSED", ChangeRequestStatus::Closed),
+            ("open", ChangeRequestStatus::Open),
+            ("Merged", ChangeRequestStatus::Merged),
+            ("unknown", ChangeRequestStatus::Open),
+            ("", ChangeRequestStatus::Open),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(GitHubCodeReview::parse_state(input), expected, "{input}");
+        }
     }
 
     // --- parse_linked_issues tests ---
 
     #[test]
-    fn parse_linked_issues_fixes_keyword() {
-        assert_eq!(GitHubCodeReview::parse_linked_issues("Fixes #7"), vec!["7"]);
-    }
-
-    #[test]
-    fn parse_linked_issues_closes_keyword() {
-        assert_eq!(
-            GitHubCodeReview::parse_linked_issues("Closes #42"),
-            vec!["42"]
-        );
-    }
-
-    #[test]
-    fn parse_linked_issues_resolves_keyword() {
-        assert_eq!(
-            GitHubCodeReview::parse_linked_issues("Resolves #100"),
-            vec!["100"]
-        );
-    }
-
-    #[test]
-    fn parse_linked_issues_multiple_keywords() {
-        let result = GitHubCodeReview::parse_linked_issues("Fixes #1, Closes #2, Resolves #3");
-        assert_eq!(result, vec!["1", "2", "3"]);
-    }
-
-    #[test]
-    fn parse_linked_issues_case_insensitive() {
-        assert_eq!(GitHubCodeReview::parse_linked_issues("FIXES #5"), vec!["5"]);
-        assert_eq!(
-            GitHubCodeReview::parse_linked_issues("closes #6"),
-            vec!["6"]
-        );
-    }
-
-    #[test]
-    fn parse_linked_issues_deduplicates() {
-        let result = GitHubCodeReview::parse_linked_issues("Fixes #7\nCloses #7");
-        assert_eq!(result, vec!["7"]);
-    }
-
-    #[test]
-    fn parse_linked_issues_no_matches() {
-        assert!(GitHubCodeReview::parse_linked_issues("Just a description").is_empty());
-        assert!(GitHubCodeReview::parse_linked_issues("").is_empty());
-    }
-
-    #[test]
-    fn parse_linked_issues_missing_hash() {
-        assert!(GitHubCodeReview::parse_linked_issues("Fixes 7").is_empty());
-    }
-
-    #[test]
-    fn parse_linked_issues_embedded_in_text() {
-        let result = GitHubCodeReview::parse_linked_issues(
-            "This PR fixes #12 by updating the parser.\nAlso closes #34.",
-        );
-        assert_eq!(result, vec!["12", "34"]);
+    fn parse_linked_issues_cases() {
+        let cases = [
+            ("Fixes #7", vec!["7"]),
+            ("Closes #42", vec!["42"]),
+            ("Resolves #100", vec!["100"]),
+            ("Fixes #1, Closes #2, Resolves #3", vec!["1", "2", "3"]),
+            ("FIXES #5", vec!["5"]),
+            ("closes #6", vec!["6"]),
+            ("Fixes #7\nCloses #7", vec!["7"]),
+            ("Just a description", vec![]),
+            ("", vec![]),
+            ("Fixes 7", vec![]),
+            (
+                "This PR fixes #12 by updating the parser.\nAlso closes #34.",
+                vec!["12", "34"],
+            ),
+        ];
+        for (input, expected) in cases {
+            let expected: Vec<String> = expected.into_iter().map(str::to_string).collect();
+            assert_eq!(
+                GitHubCodeReview::parse_linked_issues(input),
+                expected,
+                "{input}"
+            );
+        }
     }
 
     // --- gh_pr_to_change_request tests ---
@@ -475,17 +418,22 @@ mod tests {
         GitHubCodeReview::new("github".into(), "owner/repo".into(), api, runner)
     }
 
-    #[test]
-    fn gh_pr_to_change_request_basic() {
-        let provider = provider_with_empty_replay();
-        let pr = GhPr {
-            number: 42,
+    fn gh_pr(number: i64) -> GhPr {
+        GhPr {
+            number,
             title: "Add feature".into(),
             head_ref_name: "feat/add-feature".into(),
             state: "OPEN".into(),
-            body: Some("Fixes #7".into()),
+            body: None,
             is_draft: false,
-        };
+        }
+    }
+
+    #[test]
+    fn gh_pr_to_change_request_basic() {
+        let provider = provider_with_empty_replay();
+        let mut pr = gh_pr(42);
+        pr.body = Some("Fixes #7".into());
         let (id, cr) = provider.gh_pr_to_change_request(&pr);
         assert_eq!(id, "42");
         assert_eq!(cr.title, "Add feature");
@@ -508,14 +456,10 @@ mod tests {
     #[test]
     fn gh_pr_to_change_request_draft_overrides_open() {
         let provider = provider_with_empty_replay();
-        let pr = GhPr {
-            number: 10,
-            title: "WIP".into(),
-            head_ref_name: "wip-branch".into(),
-            state: "OPEN".into(),
-            body: None,
-            is_draft: true,
-        };
+        let mut pr = gh_pr(10);
+        pr.title = "WIP".into();
+        pr.head_ref_name = "wip-branch".into();
+        pr.is_draft = true;
         let (_, cr) = provider.gh_pr_to_change_request(&pr);
         assert_eq!(cr.status, ChangeRequestStatus::Draft);
         assert!(cr.association_keys.is_empty());
@@ -524,14 +468,11 @@ mod tests {
     #[test]
     fn gh_pr_to_change_request_merged_not_affected_by_draft() {
         let provider = provider_with_empty_replay();
-        let pr = GhPr {
-            number: 20,
-            title: "Done".into(),
-            head_ref_name: "done-branch".into(),
-            state: "MERGED".into(),
-            body: None,
-            is_draft: true,
-        };
+        let mut pr = gh_pr(20);
+        pr.title = "Done".into();
+        pr.head_ref_name = "done-branch".into();
+        pr.state = "MERGED".into();
+        pr.is_draft = true;
         let (_, cr) = provider.gh_pr_to_change_request(&pr);
         assert_eq!(cr.status, ChangeRequestStatus::Merged);
     }
@@ -539,14 +480,10 @@ mod tests {
     #[test]
     fn gh_pr_to_change_request_issues_from_title_and_body() {
         let provider = provider_with_empty_replay();
-        let pr = GhPr {
-            number: 30,
-            title: "Fixes #1".into(),
-            head_ref_name: "fix".into(),
-            state: "OPEN".into(),
-            body: Some("Also closes #2".into()),
-            is_draft: false,
-        };
+        let mut pr = gh_pr(30);
+        pr.title = "Fixes #1".into();
+        pr.head_ref_name = "fix".into();
+        pr.body = Some("Also closes #2".into());
         let (_, cr) = provider.gh_pr_to_change_request(&pr);
         assert!(cr
             .association_keys
@@ -559,14 +496,10 @@ mod tests {
     #[test]
     fn gh_pr_to_change_request_deduplicates_issues_across_title_and_body() {
         let provider = provider_with_empty_replay();
-        let pr = GhPr {
-            number: 31,
-            title: "Fixes #5".into(),
-            head_ref_name: "fix".into(),
-            state: "OPEN".into(),
-            body: Some("Closes #5".into()),
-            is_draft: false,
-        };
+        let mut pr = gh_pr(31);
+        pr.title = "Fixes #5".into();
+        pr.head_ref_name = "fix".into();
+        pr.body = Some("Closes #5".into());
         let (_, cr) = provider.gh_pr_to_change_request(&pr);
         let issue_refs: Vec<_> = cr
             .association_keys
