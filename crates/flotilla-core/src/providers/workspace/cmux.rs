@@ -295,6 +295,7 @@ mod tests {
             CmuxWorkspaceManager::parse_ok_ref("OK workspace:42"),
             "workspace:42"
         );
+        // Defensive fallback for unexpected output without the "OK " prefix.
         assert_eq!(CmuxWorkspaceManager::parse_ok_ref("surface:7"), "surface:7");
         assert_eq!(CmuxWorkspaceManager::parse_ok_ref(""), "");
     }

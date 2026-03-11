@@ -1192,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn choose_event_uses_delta_only_when_smaller_and_non_initial() {
+    fn choose_event_uses_delta_for_non_initial_changes() {
         let repo = PathBuf::from("/tmp/repo");
         let snapshot = Snapshot {
             seq: 2,
@@ -1229,6 +1229,36 @@ mod tests {
         assert!(matches!(
             choose_event(snapshot, non_empty),
             DaemonEvent::SnapshotDelta(_)
+        ));
+    }
+
+    #[test]
+    fn choose_event_falls_back_to_full_when_delta_is_larger() {
+        let snapshot = Snapshot {
+            seq: 3,
+            repo: PathBuf::from("/tmp/repo"),
+            work_items: vec![],
+            providers: ProviderData::default(),
+            provider_health: HashMap::new(),
+            errors: vec![],
+            issue_total: None,
+            issue_has_more: false,
+            issue_search_results: None,
+        };
+
+        let delta = DeltaEntry {
+            seq: 3,
+            prev_seq: 2,
+            changes: vec![flotilla_protocol::Change::Branch {
+                key: "feature/".repeat(128),
+                op: flotilla_protocol::EntryOp::Removed,
+            }],
+            work_items: vec![],
+        };
+
+        assert!(matches!(
+            choose_event(snapshot, delta),
+            DaemonEvent::SnapshotFull(_)
         ));
     }
 
