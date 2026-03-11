@@ -772,25 +772,32 @@ fn render_delete_confirm(model: &TuiModel, ui: &UiState, frame: &mut Frame) {
         lines.push(Line::from(""));
 
         if info.has_uncommitted {
-            lines.push(Line::from(Span::styled(
-                format!("  ⚠ {} uncommitted file(s):", info.uncommitted_files.len()),
-                Style::default().fg(Color::Red).bold(),
-            )));
-            let max_display = 10;
-            for file_line in info.uncommitted_files.iter().take(max_display) {
+            if info.uncommitted_files.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    format!("    {}", file_line),
-                    Style::default().fg(Color::DarkGray),
+                    "  ⚠ Has uncommitted changes",
+                    Style::default().fg(Color::Red).bold(),
                 )));
-            }
-            if info.uncommitted_files.len() > max_display {
+            } else {
                 lines.push(Line::from(Span::styled(
-                    format!(
-                        "    ...and {} more",
-                        info.uncommitted_files.len() - max_display
-                    ),
-                    Style::default().fg(Color::DarkGray),
+                    format!("  ⚠ {} uncommitted file(s):", info.uncommitted_files.len()),
+                    Style::default().fg(Color::Red).bold(),
                 )));
+                let max_display = 10;
+                for file_line in info.uncommitted_files.iter().take(max_display) {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {}", file_line),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                if info.uncommitted_files.len() > max_display {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "    ...and {} more",
+                            info.uncommitted_files.len() - max_display
+                        ),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
             }
         }
 
