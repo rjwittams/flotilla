@@ -228,7 +228,7 @@ pub(crate) mod checkout_test_support {
             .current_dir(cwd)
             .stdin(std::process::Stdio::null())
             .output()
-            .unwrap();
+            .expect("failed to spawn git");
         assert!(
             out.status.success(),
             "git {:?} failed: {}",
@@ -240,28 +240,38 @@ pub(crate) mod checkout_test_support {
     /// Create a repo where `feature/remote-only` exists on the remote but not locally.
     /// The remote branch has a commit "remote-only work" ahead of main.
     pub fn setup_remote_only_branch() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().canonicalize().unwrap();
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let base = dir
+            .path()
+            .canonicalize()
+            .expect("failed to canonicalize tempdir");
         let remote = base.join("remote.git");
         let repo = base.join("repo");
 
-        git(&base, &["init", "--bare", remote.to_str().unwrap()]);
         git(
             &base,
-            &["clone", remote.to_str().unwrap(), repo.to_str().unwrap()],
+            &["init", "--bare", remote.to_str().expect("non-UTF-8 path")],
+        );
+        git(
+            &base,
+            &[
+                "clone",
+                remote.to_str().expect("non-UTF-8 path"),
+                repo.to_str().expect("non-UTF-8 path"),
+            ],
         );
         git(&repo, &["config", "user.email", "test@test.com"]);
         git(&repo, &["config", "user.name", "Test"]);
 
         // Initial commit on main
-        std::fs::write(repo.join("README.md"), "# Test\n").unwrap();
+        std::fs::write(repo.join("README.md"), "# Test\n").expect("failed to write README");
         git(&repo, &["add", "README.md"]);
         git(&repo, &["commit", "-m", "Initial commit"]);
         git(&repo, &["push", "origin", "main"]);
 
         // Create feature branch, commit, push, then delete local
         git(&repo, &["checkout", "-b", "feature/remote-only"]);
-        std::fs::write(repo.join("remote-work.txt"), "work\n").unwrap();
+        std::fs::write(repo.join("remote-work.txt"), "work\n").expect("failed to write test file");
         git(&repo, &["add", "remote-work.txt"]);
         git(&repo, &["commit", "-m", "remote-only work"]);
         git(&repo, &["push", "origin", "feature/remote-only"]);

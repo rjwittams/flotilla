@@ -306,7 +306,13 @@ impl super::CheckoutManager for GitCheckoutManager {
 
             if remote_exists {
                 // Fetch latest and create worktree tracking the remote branch.
-                let _ = run!(self.runner, "git", &["fetch", "origin", branch], repo_root);
+                // If fetch fails (offline, etc), the local remote-tracking ref
+                // is still usable — just potentially stale.
+                if run!(self.runner, "git", &["fetch", "origin", branch], repo_root).is_err() {
+                    tracing::warn!(
+                        %branch, "fetch from origin failed, using existing remote-tracking ref"
+                    );
+                }
                 run!(
                     self.runner,
                     "git",
