@@ -262,6 +262,7 @@ fn delete_confirm_safe_to_delete() {
             merge_commit_sha: Some("abc1234".into()),
             unpushed_commits: vec![],
             has_uncommitted: false,
+            uncommitted_files: vec![],
             base_detection_warning: None,
         }),
         loading: false,
