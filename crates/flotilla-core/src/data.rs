@@ -62,12 +62,19 @@ pub struct CorrelatedWorkItem {
     pub linked_issues: Vec<String>,
     pub workspace_refs: Vec<String>,
     pub correlation_group_idx: usize,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum StandaloneResult {
-    Issue { key: String, description: String },
-    RemoteBranch { branch: String },
+    Issue {
+        key: String,
+        description: String,
+        source: String,
+    },
+    RemoteBranch {
+        branch: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +177,16 @@ impl CorrelationResult {
         match self {
             CorrelationResult::Correlated(c) => Some(c.correlation_group_idx),
             _ => None,
+        }
+    }
+
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            CorrelationResult::Correlated(c) => c.source.as_deref(),
+            CorrelationResult::Standalone(StandaloneResult::Issue { source, .. }) => {
+                Some(source.as_str())
+            }
+            CorrelationResult::Standalone(StandaloneResult::RemoteBranch { .. }) => Some("git"),
         }
     }
 
@@ -317,6 +334,22 @@ fn group_to_work_item(
         .or_else(|| branch.clone())
         .unwrap_or_default();
 
+    let source = match &anchor {
+        CorrelatedAnchor::Checkout(_) => {
+            Some(gethostname::gethostname().to_string_lossy().into_owned())
+        }
+        CorrelatedAnchor::ChangeRequest(key) => providers
+            .change_requests
+            .get(key.as_str())
+            .map(|cr| cr.provider_name.clone())
+            .filter(|s| !s.is_empty()),
+        CorrelatedAnchor::Session(key) => providers
+            .sessions
+            .get(key.as_str())
+            .map(|s| s.provider_name.clone())
+            .filter(|s| !s.is_empty()),
+    };
+
     Some(CorrelationResult::Correlated(CorrelatedWorkItem {
         anchor,
         branch,
@@ -326,6 +359,7 @@ fn group_to_work_item(
         linked_issues: Vec::new(),
         workspace_refs,
         correlation_group_idx: group_idx,
+        source,
     }))
 }
 
@@ -467,6 +501,7 @@ pub fn correlate(providers: &ProviderData) -> (Vec<CorrelationResult>, Vec<Corre
             work_items.push(CorrelationResult::Standalone(StandaloneResult::Issue {
                 key: id.clone(),
                 description: issue.title.clone(),
+                source: issue.provider_name.clone(),
             }));
         }
     }
@@ -757,6 +792,7 @@ mod tests {
             linked_issues: Vec::new(),
             workspace_refs: Vec::new(),
             correlation_group_idx: 0,
+            source: None,
         }
     }
 
@@ -789,6 +825,7 @@ mod tests {
         CorrelationResult::Standalone(StandaloneResult::Issue {
             key: key.to_string(),
             description: desc.to_string(),
+            source: String::new(),
         })
     }
 
