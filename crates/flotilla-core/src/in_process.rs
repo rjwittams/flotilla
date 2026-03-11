@@ -80,7 +80,6 @@ fn build_repo_snapshot(
     path: &Path,
     seq: u64,
     base: &RefreshSnapshot,
-    health: &HashMap<&'static str, bool>,
     cache: &IssueCache,
     search_results: &Option<Vec<(String, Issue)>>,
 ) -> Snapshot {
@@ -94,7 +93,6 @@ fn build_repo_snapshot(
         provider_health: base.provider_health.clone(),
     };
     let mut snapshot = snapshot_to_proto(path, seq, &re_snapshot);
-    snapshot.provider_health = health.iter().map(|(k, v)| (k.to_string(), *v)).collect();
     snapshot.issue_total = cache.total_count;
     snapshot.issue_has_more = cache.has_more;
     snapshot.issue_search_results = search_results.clone();
@@ -160,7 +158,7 @@ struct RepoState {
     /// Last broadcast provider data (with injected issues), used for delta computation.
     last_broadcast_providers: ProviderData,
     /// Last broadcast provider health, used for delta computation.
-    last_broadcast_health: HashMap<String, bool>,
+    last_broadcast_health: HashMap<String, HashMap<String, bool>>,
     /// Last broadcast errors, used for delta computation.
     last_broadcast_errors: Vec<ProviderError>,
     /// Bounded delta log for replay on client reconnect.
@@ -173,32 +171,43 @@ impl RepoState {
     fn record_delta(
         &mut self,
         new_providers: &ProviderData,
-        new_health: &HashMap<String, bool>,
+        new_health: &HashMap<String, HashMap<String, bool>>,
         new_errors: &[ProviderError],
         work_items: Vec<flotilla_protocol::snapshot::WorkItem>,
     ) -> DeltaEntry {
         let mut changes = delta::diff_provider_data(&self.last_broadcast_providers, new_providers);
 
-        // Diff provider health
-        for (key, &val) in new_health {
-            match self.last_broadcast_health.get(key) {
-                Some(&prev) if prev == val => {}
-                Some(_) => changes.push(flotilla_protocol::Change::ProviderHealth {
-                    provider: key.clone(),
-                    op: flotilla_protocol::EntryOp::Updated(val),
-                }),
-                None => changes.push(flotilla_protocol::Change::ProviderHealth {
-                    provider: key.clone(),
-                    op: flotilla_protocol::EntryOp::Added(val),
-                }),
+        // Diff provider health (nested: category → provider → bool)
+        for (category, providers) in new_health {
+            let old_providers = self.last_broadcast_health.get(category);
+            for (provider, &val) in providers {
+                let old_val = old_providers.and_then(|p| p.get(provider));
+                match old_val {
+                    Some(&prev) if prev == val => {}
+                    Some(_) => changes.push(flotilla_protocol::Change::ProviderHealth {
+                        category: category.clone(),
+                        provider: provider.clone(),
+                        op: flotilla_protocol::EntryOp::Updated(val),
+                    }),
+                    None => changes.push(flotilla_protocol::Change::ProviderHealth {
+                        category: category.clone(),
+                        provider: provider.clone(),
+                        op: flotilla_protocol::EntryOp::Added(val),
+                    }),
+                }
             }
         }
-        for key in self.last_broadcast_health.keys() {
-            if !new_health.contains_key(key) {
-                changes.push(flotilla_protocol::Change::ProviderHealth {
-                    provider: key.clone(),
-                    op: flotilla_protocol::EntryOp::Removed,
-                });
+        // Check for removed entries
+        for (category, old_providers) in &self.last_broadcast_health {
+            let new_providers = new_health.get(category);
+            for provider in old_providers.keys() {
+                if new_providers.and_then(|p| p.get(provider)).is_none() {
+                    changes.push(flotilla_protocol::Change::ProviderHealth {
+                        category: category.clone(),
+                        provider: provider.clone(),
+                        op: flotilla_protocol::EntryOp::Removed,
+                    });
+                }
             }
         }
 
@@ -384,13 +393,8 @@ impl InProcessDaemon {
             state.model.data.loading = false;
 
             let mut proto_snapshot = snapshot_to_proto(&path, state.seq + 1, &re_snapshot);
-            proto_snapshot.provider_health = state
-                .model
-                .data
-                .provider_health
-                .iter()
-                .map(|(k, v)| (k.to_string(), *v))
-                .collect();
+            proto_snapshot.provider_health =
+                crate::convert::health_to_proto(&state.model.data.provider_health);
             proto_snapshot.issue_total = issue_total;
             proto_snapshot.issue_has_more = issue_has_more;
             proto_snapshot.issue_search_results = search_results;
@@ -757,7 +761,6 @@ impl InProcessDaemon {
             repo,
             state.seq + 1,
             &state.last_snapshot,
-            &state.model.data.provider_health,
             &state.issue_cache,
             &state.search_results,
         );
@@ -792,7 +795,6 @@ impl DaemonHandle for InProcessDaemon {
             repo,
             state.seq,
             &state.last_snapshot,
-            &state.model.data.provider_health,
             &state.issue_cache,
             &state.search_results,
         ))
@@ -809,13 +811,9 @@ impl DaemonHandle for InProcessDaemon {
                     name: repo_name(path),
                     labels: state.model.labels.clone(),
                     provider_names: provider_names_from_registry(&state.model.registry),
-                    provider_health: state
-                        .model
-                        .data
-                        .provider_health
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), *v))
-                        .collect(),
+                    provider_health: crate::convert::health_to_proto(
+                        &state.model.data.provider_health,
+                    ),
                     loading: state.model.data.loading,
                 });
             }
@@ -973,12 +971,7 @@ impl DaemonHandle for InProcessDaemon {
             name: repo_name(&path),
             labels: model.labels.clone(),
             provider_names: provider_names_from_registry(&model.registry),
-            provider_health: model
-                .data
-                .provider_health
-                .iter()
-                .map(|(k, v)| (k.to_string(), *v))
-                .collect(),
+            provider_health: crate::convert::health_to_proto(&model.data.provider_health),
             loading: true,
         };
 
@@ -1042,7 +1035,6 @@ impl DaemonHandle for InProcessDaemon {
                     path,
                     state.seq,
                     &state.last_snapshot,
-                    &state.model.data.provider_health,
                     &state.issue_cache,
                     &state.search_results,
                 )

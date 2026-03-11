@@ -3,6 +3,7 @@
 //! This module is the serialization boundary between the rich in-process
 //! core types and the flat, serde-friendly protocol types.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use flotilla_protocol::{CheckoutRef, ProviderError, Snapshot, WorkItem};
@@ -69,8 +70,22 @@ fn format_debug_group(group: &CorrelatedGroup) -> Vec<String> {
 pub fn error_to_proto(error: &RefreshError) -> ProviderError {
     ProviderError {
         category: error.category.to_string(),
+        provider: error.provider.clone(),
         message: error.message.clone(),
     }
+}
+
+pub fn health_to_proto(
+    health: &HashMap<(&'static str, String), bool>,
+) -> HashMap<String, HashMap<String, bool>> {
+    let mut nested: HashMap<String, HashMap<String, bool>> = HashMap::new();
+    for ((category, provider), &healthy) in health {
+        nested
+            .entry(category.to_string())
+            .or_default()
+            .insert(provider.clone(), healthy);
+    }
+    nested
 }
 
 pub fn snapshot_to_proto(repo: &Path, seq: u64, refresh: &RefreshSnapshot) -> Snapshot {
@@ -83,11 +98,7 @@ pub fn snapshot_to_proto(repo: &Path, seq: u64, refresh: &RefreshSnapshot) -> Sn
             .map(|item| correlation_result_to_work_item(item, &refresh.correlation_groups))
             .collect(),
         providers: (*refresh.providers).clone(),
-        provider_health: refresh
-            .provider_health
-            .iter()
-            .map(|(k, v)| (k.to_string(), *v))
-            .collect(),
+        provider_health: health_to_proto(&refresh.provider_health),
         errors: refresh.errors.iter().map(error_to_proto).collect(),
         issue_total: None,
         issue_has_more: false,

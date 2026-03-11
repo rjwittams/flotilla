@@ -327,9 +327,9 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
 
     let widths = [
         Constraint::Length(3), // icon
-        Constraint::Min(6),    // Path (capped at 30 after layout)
-        Constraint::Fill(1),   // Description (absorbs remaining space)
-        Constraint::Min(8),    // Branch (shrinks before fixed columns)
+        Constraint::Fill(1),   // Path
+        Constraint::Fill(2),   // Description
+        Constraint::Fill(1),   // Branch
         Constraint::Length(3), // WT
         Constraint::Length(3), // WS
         Constraint::Length(4), // PR
@@ -340,11 +340,7 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
 
     let inner_width = area.width.saturating_sub(2 + HIGHLIGHT_SYMBOL_WIDTH);
     let col_areas = Layout::horizontal(widths).split(Rect::new(0, 0, inner_width, 1));
-    let mut col_widths: Vec<u16> = col_areas.iter().map(|r| r.width).collect();
-    // Cap Path column (index 1) at 30 — ratatui doesn't support Min+Max on one column.
-    if col_widths.len() > 1 {
-        col_widths[1] = col_widths[1].min(30);
-    }
+    let col_widths: Vec<u16> = col_areas.iter().map(|r| r.width).collect();
 
     // Build rows from active repo (immutable borrows)
     let rm = model.active();
@@ -963,6 +959,17 @@ fn render_config_screen(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
     render_event_log(ui, frame, chunks[1]);
 }
 
+/// Return the worse of two provider statuses (Error > Ok > None).
+fn worse_status(a: Option<ProviderStatus>, b: Option<ProviderStatus>) -> Option<ProviderStatus> {
+    match (a, b) {
+        (Some(ProviderStatus::Error), _) | (_, Some(ProviderStatus::Error)) => {
+            Some(ProviderStatus::Error)
+        }
+        (Some(ProviderStatus::Ok), _) | (_, Some(ProviderStatus::Ok)) => Some(ProviderStatus::Ok),
+        _ => None,
+    }
+}
+
 fn render_global_status(model: &TuiModel, frame: &mut Frame, area: Rect) {
     // Collect providers across all repos: (category_key, provider_name) → status.
     let categories = [
@@ -976,7 +983,9 @@ fn render_global_status(model: &TuiModel, frame: &mut Frame, area: Rect) {
         ("Terminal pool", "terminal_pool"),
     ];
 
-    // Collect unique (category, provider_name) pairs with their best-known status.
+    // Collect unique (category, provider_name) pairs with worst-wins status.
+    // If a provider is healthy in repo A but failing in repo B, the global
+    // view should surface the failure (Error > Ok > None).
     struct ProviderEntry {
         name: String,
         status: Option<ProviderStatus>,
@@ -989,17 +998,19 @@ fn render_global_status(model: &TuiModel, frame: &mut Frame, area: Rect) {
             if let Some(pnames) = rm.provider_names.get(key) {
                 let entries = by_category.entry(key).or_default();
                 for pname in pnames {
-                    if entries.iter().any(|e| e.name == *pname) {
-                        continue;
-                    }
                     let status = model
                         .provider_statuses
                         .get(&(path.clone(), key.to_string(), pname.clone()))
                         .copied();
-                    entries.push(ProviderEntry {
-                        name: pname.clone(),
-                        status,
-                    });
+                    if let Some(existing) = entries.iter_mut().find(|e| e.name == *pname) {
+                        // Worst-wins: Error beats Ok beats None.
+                        existing.status = worse_status(existing.status, status);
+                    } else {
+                        entries.push(ProviderEntry {
+                            name: pname.clone(),
+                            status,
+                        });
+                    }
                 }
             }
         }

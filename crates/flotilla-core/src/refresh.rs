@@ -18,7 +18,7 @@ pub struct RefreshSnapshot {
     pub work_items: Vec<CorrelationResult>,
     pub correlation_groups: Vec<CorrelatedGroup>,
     pub errors: Vec<RefreshError>,
-    pub provider_health: HashMap<&'static str, bool>,
+    pub provider_health: HashMap<(&'static str, String), bool>,
 }
 
 impl Default for RefreshSnapshot {
@@ -113,75 +113,123 @@ async fn refresh_providers(
     let mut errors = Vec::new();
 
     let checkouts_fut = async {
-        if let Some(cm) = registry.checkout_managers.values().next() {
-            cm.list_checkouts(repo_root).await
-        } else {
-            Ok(vec![])
+        let results = futures::future::join_all(registry.checkout_managers.values().map(|cm| {
+            let name = cm.display_name().to_string();
+            async move { (name, cm.list_checkouts(repo_root).await) }
+        }))
+        .await;
+        let mut checkouts = Vec::new();
+        let mut errs = Vec::new();
+        for (name, result) in results {
+            match result {
+                Ok(mut entries) => checkouts.append(&mut entries),
+                Err(e) => errs.push((name, e)),
+            }
         }
+        (checkouts, errs)
     };
 
     let cr_fut = async {
-        if let Some(cr) = registry.code_review.values().next() {
-            cr.list_change_requests(repo_root, 20).await
-        } else {
-            Ok(vec![])
+        let results = futures::future::join_all(registry.code_review.values().map(|cr| {
+            let name = cr.display_name().to_string();
+            async move { (name, cr.list_change_requests(repo_root, 20).await) }
+        }))
+        .await;
+        let mut crs = Vec::new();
+        let mut errs = Vec::new();
+        for (name, result) in results {
+            match result {
+                Ok(mut entries) => crs.append(&mut entries),
+                Err(e) => errs.push((name, e)),
+            }
         }
+        (crs, errs)
     };
 
     let sessions_fut = async {
-        if registry.cloud_agents.is_empty() {
-            return (vec![], vec![]);
-        }
-        let results = futures::future::join_all(registry.cloud_agents.iter().map(|(name, ca)| {
-            let provider = name.clone();
-            async move { (provider, ca.list_sessions(criteria).await) }
+        let results = futures::future::join_all(registry.cloud_agents.values().map(|ca| {
+            let name = ca.display_name().to_string();
+            async move { (name, ca.list_sessions(criteria).await) }
         }))
         .await;
-
         let mut sessions = Vec::new();
-        let mut session_errors = Vec::new();
-        for (provider, result) in results {
+        let mut errs = Vec::new();
+        for (name, result) in results {
             match result {
                 Ok(mut entries) => sessions.append(&mut entries),
-                Err(e) => session_errors.push(format!("{provider}: {e}")),
+                Err(e) => errs.push((name, e)),
             }
         }
-        (sessions, session_errors)
+        (sessions, errs)
     };
 
     let branches_fut = async {
-        if let Some(vcs) = registry.vcs.values().next() {
-            vcs.list_remote_branches(repo_root).await
-        } else {
-            Ok(vec![])
+        let results = futures::future::join_all(registry.vcs.values().map(|vcs| {
+            let name = vcs.display_name().to_string();
+            async move { (name, vcs.list_remote_branches(repo_root).await) }
+        }))
+        .await;
+        let mut branches = Vec::new();
+        let mut errs = Vec::new();
+        for (name, result) in results {
+            match result {
+                Ok(mut entries) => branches.append(&mut entries),
+                Err(e) => errs.push((name, e)),
+            }
         }
+        (branches, errs)
     };
 
     let merged_fut = async {
-        if let Some(cr) = registry.code_review.values().next() {
-            cr.list_merged_branch_names(repo_root, 50).await
-        } else {
-            Ok(vec![])
+        let results = futures::future::join_all(registry.code_review.values().map(|cr| {
+            let name = cr.display_name().to_string();
+            async move { (name, cr.list_merged_branch_names(repo_root, 50).await) }
+        }))
+        .await;
+        let mut merged = Vec::new();
+        let mut errs = Vec::new();
+        for (name, result) in results {
+            match result {
+                Ok(mut entries) => merged.append(&mut entries),
+                Err(e) => errs.push((name, e)),
+            }
         }
+        (merged, errs)
     };
 
     let ws_fut = async {
         if let Some((_, ws_mgr)) = &registry.workspace_manager {
-            ws_mgr.list_workspaces().await
+            let name = ws_mgr.display_name().to_string();
+            match ws_mgr.list_workspaces().await {
+                Ok(entries) => (entries, vec![]),
+                Err(e) => (vec![], vec![(name, e)]),
+            }
         } else {
-            Ok(vec![])
+            (vec![], vec![])
         }
     };
 
     let tp_fut = async {
         if let Some((_, tp)) = &registry.terminal_pool {
-            tp.list_terminals().await
+            let name = tp.display_name().to_string();
+            match tp.list_terminals().await {
+                Ok(entries) => (entries, vec![]),
+                Err(e) => (vec![], vec![(name, e)]),
+            }
         } else {
-            Ok(vec![])
+            (vec![], vec![])
         }
     };
 
-    let (checkouts, crs, sessions_bundle, branches, merged, workspaces, managed_terminals) = tokio::join!(
+    let (
+        (checkouts, checkout_errors),
+        (crs, cr_errors),
+        (sessions, session_errors),
+        (branches, branch_errors),
+        (merged, merged_errors),
+        (workspaces, ws_errors),
+        (managed_terminals, tp_errors),
+    ) = tokio::join!(
         checkouts_fut,
         cr_fut,
         sessions_fut,
@@ -191,71 +239,43 @@ async fn refresh_providers(
         tp_fut
     );
 
-    pd.checkouts = checkouts
-        .unwrap_or_else(|e| {
+    fn collect_errors(
+        errors: &mut Vec<RefreshError>,
+        category: &'static str,
+        provider_errors: Vec<(String, String)>,
+    ) {
+        for (provider, message) in provider_errors {
             errors.push(RefreshError {
-                category: "checkouts",
-                message: e,
+                category,
+                provider,
+                message,
             });
-            Vec::new()
-        })
-        .into_iter()
-        .collect();
-    pd.change_requests = crs
-        .unwrap_or_else(|e| {
-            errors.push(RefreshError {
-                category: "PRs",
-                message: e,
-            });
-            Vec::new()
-        })
-        .into_iter()
-        .collect();
-    pd.workspaces = workspaces
-        .unwrap_or_else(|e| {
-            errors.push(RefreshError {
-                category: "workspaces",
-                message: e,
-            });
-            Vec::new()
-        })
-        .into_iter()
-        .collect();
+        }
+    }
+
+    pd.checkouts = checkouts.into_iter().collect();
+    collect_errors(&mut errors, "checkouts", checkout_errors);
+
+    pd.change_requests = crs.into_iter().collect();
+    collect_errors(&mut errors, "PRs", cr_errors);
+
+    pd.sessions = sessions.into_iter().collect();
+    collect_errors(&mut errors, "sessions", session_errors);
+
+    pd.workspaces = workspaces.into_iter().collect();
+    collect_errors(&mut errors, "workspaces", ws_errors);
+
     pd.managed_terminals = managed_terminals
-        .unwrap_or_else(|e| {
-            errors.push(RefreshError {
-                category: "terminals",
-                message: e,
-            });
-            Vec::new()
-        })
         .into_iter()
         .map(|t| (t.id.to_string(), t))
         .collect();
-    let (sessions, session_errors) = sessions_bundle;
-    if !session_errors.is_empty() {
-        errors.push(RefreshError {
-            category: "sessions",
-            message: session_errors.join("; "),
-        });
-    }
-    pd.sessions = sessions.into_iter().collect();
+    collect_errors(&mut errors, "terminals", tp_errors);
     {
         use flotilla_protocol::delta::{Branch, BranchStatus};
-        let remote = branches.unwrap_or_else(|e| {
-            errors.push(RefreshError {
-                category: "branches",
-                message: e,
-            });
-            Vec::new()
-        });
-        let merged_names = merged.unwrap_or_else(|e| {
-            errors.push(RefreshError {
-                category: "merged",
-                message: e,
-            });
-            Vec::new()
-        });
+        let remote = branches;
+        collect_errors(&mut errors, "branches", branch_errors);
+        let merged_names = merged;
+        collect_errors(&mut errors, "merged", merged_errors);
         for name in remote {
             pd.branches.insert(
                 name,
@@ -280,28 +300,57 @@ async fn refresh_providers(
 fn compute_provider_health(
     registry: &ProviderRegistry,
     errors: &[RefreshError],
-) -> HashMap<&'static str, bool> {
+) -> HashMap<(&'static str, String), bool> {
     let mut health = HashMap::new();
-    if registry.cloud_agents.values().next().is_some() {
-        health.insert(
-            "cloud_agent",
-            !errors.iter().any(|e| e.category == "sessions"),
-        );
+
+    for ca in registry.cloud_agents.values() {
+        let name = ca.display_name().to_string();
+        let has_error = errors
+            .iter()
+            .any(|e| e.category == "sessions" && e.provider == name);
+        health.insert(("cloud_agent", name), !has_error);
     }
-    if registry.code_review.values().next().is_some() {
-        health.insert(
-            "code_review",
-            !errors
-                .iter()
-                .any(|e| e.category == "PRs" || e.category == "merged"),
-        );
+
+    for cr in registry.code_review.values() {
+        let name = cr.display_name().to_string();
+        let has_error = errors
+            .iter()
+            .any(|e| (e.category == "PRs" || e.category == "merged") && e.provider == name);
+        health.insert(("code_review", name), !has_error);
     }
-    if registry.terminal_pool.is_some() {
-        health.insert(
-            "terminal_pool",
-            !errors.iter().any(|e| e.category == "terminals"),
-        );
+
+    for cm in registry.checkout_managers.values() {
+        let name = cm.display_name().to_string();
+        let has_error = errors
+            .iter()
+            .any(|e| e.category == "checkouts" && e.provider == name);
+        health.insert(("checkout_manager", name), !has_error);
     }
+
+    for vcs in registry.vcs.values() {
+        let name = vcs.display_name().to_string();
+        let has_error = errors
+            .iter()
+            .any(|e| e.category == "branches" && e.provider == name);
+        health.insert(("vcs", name), !has_error);
+    }
+
+    if let Some((_, ws)) = &registry.workspace_manager {
+        let name = ws.display_name().to_string();
+        let has_error = errors
+            .iter()
+            .any(|e| e.category == "workspaces" && e.provider == name);
+        health.insert(("workspace_manager", name), !has_error);
+    }
+
+    if let Some((_, tp)) = &registry.terminal_pool {
+        let name = tp.display_name().to_string();
+        let has_error = errors
+            .iter()
+            .any(|e| e.category == "terminals" && e.provider == name);
+        health.insert(("terminal_pool", name), !has_error);
+    }
+
     health
 }
 
@@ -368,6 +417,7 @@ mod tests {
     struct MockCodeReview {
         change_requests_result: Result<Vec<(String, ChangeRequest)>, String>,
         merged_result: Result<Vec<String>, String>,
+        display_name: String,
     }
 
     impl MockCodeReview {
@@ -375,6 +425,7 @@ mod tests {
             Self {
                 change_requests_result: Ok(change_requests),
                 merged_result: Ok(merged_branches),
+                display_name: "MockCR".into(),
             }
         }
 
@@ -382,6 +433,7 @@ mod tests {
             Self {
                 change_requests_result: Err(change_requests_msg.to_string()),
                 merged_result: Err(merged_msg.to_string()),
+                display_name: "MockCR".into(),
             }
         }
     }
@@ -389,7 +441,7 @@ mod tests {
     #[async_trait]
     impl CodeReview for MockCodeReview {
         fn display_name(&self) -> &str {
-            "mock-cr"
+            &self.display_name
         }
 
         async fn list_change_requests(
@@ -423,18 +475,35 @@ mod tests {
 
     struct MockCloudAgent {
         result: Result<Vec<(String, CloudAgentSession)>, String>,
+        display_name: String,
     }
 
     impl MockCloudAgent {
         fn ok(sessions: Vec<(String, CloudAgentSession)>) -> Self {
             Self {
                 result: Ok(sessions),
+                display_name: "MockCA".into(),
+            }
+        }
+
+        fn ok_named(name: &str, sessions: Vec<(String, CloudAgentSession)>) -> Self {
+            Self {
+                result: Ok(sessions),
+                display_name: name.into(),
             }
         }
 
         fn failing(msg: &str) -> Self {
             Self {
                 result: Err(msg.to_string()),
+                display_name: "MockCA".into(),
+            }
+        }
+
+        fn failing_named(name: &str, msg: &str) -> Self {
+            Self {
+                result: Err(msg.to_string()),
+                display_name: name.into(),
             }
         }
     }
@@ -442,7 +511,7 @@ mod tests {
     #[async_trait]
     impl CloudAgentService for MockCloudAgent {
         fn display_name(&self) -> &str {
-            "mock-agent"
+            &self.display_name
         }
 
         async fn list_sessions(
@@ -623,6 +692,7 @@ mod tests {
     fn refresh_error(category: &'static str) -> RefreshError {
         RefreshError {
             category,
+            provider: String::new(),
             message: format!("{category} failure"),
         }
     }
@@ -657,6 +727,14 @@ mod tests {
         assert!(health.is_empty());
     }
 
+    fn refresh_error_for(category: &'static str, provider: &str) -> RefreshError {
+        RefreshError {
+            category,
+            provider: provider.to_string(),
+            message: format!("{category} failure"),
+        }
+    }
+
     #[test]
     fn compute_provider_health_maps_error_categories() {
         let mut registry = ProviderRegistry::new();
@@ -670,12 +748,15 @@ mod tests {
 
         let cases = vec![
             (vec![], true, true),
-            (vec![refresh_error("sessions")], false, true),
-            (vec![refresh_error("PRs")], true, false),
-            (vec![refresh_error("merged")], true, false),
+            (vec![refresh_error_for("sessions", "MockCA")], false, true),
+            (vec![refresh_error_for("PRs", "MockCR")], true, false),
+            (vec![refresh_error_for("merged", "MockCR")], true, false),
             (vec![refresh_error("checkouts")], true, true),
             (
-                vec![refresh_error("sessions"), refresh_error("PRs")],
+                vec![
+                    refresh_error_for("sessions", "MockCA"),
+                    refresh_error_for("PRs", "MockCR"),
+                ],
                 false,
                 false,
             ),
@@ -683,8 +764,16 @@ mod tests {
 
         for (errors, expected_coding, expected_review) in cases {
             let health = compute_provider_health(&registry, &errors);
-            assert_eq!(health.get("cloud_agent"), Some(&expected_coding));
-            assert_eq!(health.get("code_review"), Some(&expected_review));
+            assert_eq!(
+                health.get(&("cloud_agent", "MockCA".to_string())),
+                Some(&expected_coding),
+                "cloud_agent health mismatch for errors: {errors:?}"
+            );
+            assert_eq!(
+                health.get(&("code_review", "MockCR".to_string())),
+                Some(&expected_review),
+                "code_review health mismatch for errors: {errors:?}"
+            );
         }
     }
 
@@ -859,7 +948,12 @@ mod tests {
         let mut rx = handle.snapshot_rx.clone();
         let snapshot = wait_for_snapshot(&mut rx).await;
         assert!(snapshot.errors.iter().any(|e| e.category == "sessions"));
-        assert_eq!(snapshot.provider_health.get("cloud_agent"), Some(&false));
+        assert_eq!(
+            snapshot
+                .provider_health
+                .get(&("cloud_agent", "MockCA".to_string())),
+            Some(&false)
+        );
     }
 
     #[tokio::test]
@@ -877,5 +971,72 @@ mod tests {
         handle.trigger_refresh();
         let snapshot = wait_for_snapshot(&mut rx).await;
         assert!(snapshot.errors.is_empty());
+    }
+
+    #[test]
+    fn compute_provider_health_per_provider() {
+        let mut registry = ProviderRegistry::new();
+        registry.cloud_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCloudAgent::ok_named("Claude", vec![])),
+        );
+        registry.cloud_agents.insert(
+            "cursor".to_string(),
+            Arc::new(MockCloudAgent::ok_named("Cursor", vec![])),
+        );
+
+        // Only Cursor fails
+        let errors = vec![RefreshError {
+            category: "sessions",
+            provider: "Cursor".to_string(),
+            message: "auth failed".to_string(),
+        }];
+
+        let health = compute_provider_health(&registry, &errors);
+        assert_eq!(
+            health.get(&("cloud_agent", "Claude".to_string())),
+            Some(&true)
+        );
+        assert_eq!(
+            health.get(&("cloud_agent", "Cursor".to_string())),
+            Some(&false)
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_with_mixed_provider_health_isolates_failures() {
+        let mut registry = ProviderRegistry::new();
+        registry.cloud_agents.insert(
+            "claude".to_string(),
+            Arc::new(MockCloudAgent::ok_named("Claude", vec![])),
+        );
+        registry.cloud_agents.insert(
+            "cursor".to_string(),
+            Arc::new(MockCloudAgent::failing_named("Cursor", "auth failed")),
+        );
+
+        let handle = RepoRefreshHandle::spawn(
+            repo_root(),
+            Arc::new(registry),
+            criteria(),
+            Duration::from_secs(3600),
+        );
+
+        let mut rx = handle.snapshot_rx.clone();
+        let snapshot = wait_for_snapshot(&mut rx).await;
+
+        assert!(snapshot.errors.iter().any(|e| e.provider == "Cursor"));
+        assert_eq!(
+            snapshot
+                .provider_health
+                .get(&("cloud_agent", "Claude".to_string())),
+            Some(&true)
+        );
+        assert_eq!(
+            snapshot
+                .provider_health
+                .get(&("cloud_agent", "Cursor".to_string())),
+            Some(&false)
+        );
     }
 }

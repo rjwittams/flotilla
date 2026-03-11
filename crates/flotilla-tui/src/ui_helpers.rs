@@ -138,34 +138,45 @@ pub fn shorten_path(path: &Path, repo_root: &Path, col_width: usize) -> String {
         .unwrap_or(0);
     let ideal_padding = main_display.len().saturating_sub(repo_name_len);
 
+    // Cap padding so it never exceeds half the column — leaves room for the name
+    // even after the caller truncates.  Crucially this is independent of the name
+    // length, so every worktree at the same depth gets identical indentation.
+    let padding = ideal_padding.min(col_width / 2);
+
     // Under repo root (e.g. .worktrees/feat-auth, sub/dir)
     if let Ok(rel) = path.strip_prefix(repo_root) {
         let s = rel.to_string_lossy();
         if !s.is_empty() {
             let name = s.into_owned();
-            let padding = ideal_padding.min(col_width.saturating_sub(name.len()));
             return format!("{:padding$}{name}", "");
         }
     }
 
-    // Sibling directory (same parent as repo root)
-    if let (Some(path_parent), Some(root_parent)) = (path.parent(), repo_root.parent()) {
-        if path_parent == root_parent {
+    // Sibling or descendant of sibling (shares repo name prefix in first component)
+    if let Some(root_parent) = repo_root.parent() {
+        if let Ok(rel) = path.strip_prefix(root_parent) {
+            let rel_str = rel.to_string_lossy();
             let root_name = repo_root
                 .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
+                .map(|n| n.to_string_lossy())
                 .unwrap_or_default();
-            let path_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            // Strip repo name prefix to show just the suffix (e.g. ".low-hang-12")
-            let name = path_name
-                .strip_prefix(&root_name)
-                .unwrap_or(&path_name)
-                .to_string();
-            let padding = ideal_padding.min(col_width.saturating_sub(name.len()));
-            return format!("{:padding$}{name}", "");
+            // Only handle paths whose first component starts with the repo name
+            // (e.g. "flotilla.quick-wins/..." but not "unrelated/...")
+            if rel_str.starts_with(root_name.as_ref()) {
+                // Strip repo name prefix to get the suffix
+                // e.g. "flotilla.quick-wins" -> ".quick-wins"
+                // e.g. "flotilla.quick-wins/.claude/worktrees/agent-x" -> ".quick-wins/.claude/worktrees/agent-x"
+                let suffix = rel_str.strip_prefix(root_name.as_ref()).unwrap_or(&rel_str);
+                // If nested under a sibling (contains '/'), strip the sibling dir
+                // and show only the sub-path with extra indentation.
+                // e.g. ".quick-wins/.claude/worktrees/agent-x" -> ".claude/worktrees/agent-x"
+                let (name, extra_indent) = match suffix.find('/') {
+                    Some(pos) => (&suffix[pos + 1..], padding + 2),
+                    None => (suffix, padding),
+                };
+                let p = extra_indent.min(col_width / 2);
+                return format!("{:p$}{name}", "");
+            }
         }
     }
 
@@ -419,19 +430,19 @@ mod tests {
 
     #[test]
     fn shorten_path_worktree_narrow_column() {
-        // Narrow column — padding shrinks so name still fits.
+        // Narrow column — padding is consistent (capped at col/2), caller truncates.
         let root = Path::new("/dev/project");
         let wt = Path::new("/dev/project/.worktrees/feat-auth");
-        // name = ".worktrees/feat-auth" (20 chars), col = 22, padding = 2
-        assert_eq!(shorten_path(wt, root, 22), "  .worktrees/feat-auth");
+        // ideal_padding = 5, col/2 = 11 → padding = 5 (same as wide)
+        assert_eq!(shorten_path(wt, root, 22), "     .worktrees/feat-auth");
     }
 
     #[test]
     fn shorten_path_worktree_very_narrow() {
-        // Very narrow — no padding, name alone.
+        // Very narrow — padding capped at col/2 = 5, still consistent indent.
         let root = Path::new("/dev/project");
         let wt = Path::new("/dev/project/.worktrees/feat-auth");
-        assert_eq!(shorten_path(wt, root, 10), ".worktrees/feat-auth");
+        assert_eq!(shorten_path(wt, root, 10), "     .worktrees/feat-auth");
     }
 
     #[test]
@@ -461,9 +472,10 @@ mod tests {
 
     #[test]
     fn shorten_path_sibling_different_name() {
+        // Sibling with a different name prefix is not a related worktree
         let root = Path::new("/dev/flotilla");
         let wt = Path::new("/dev/other-project");
-        assert_eq!(shorten_path(wt, root, 40), "     other-project");
+        assert_eq!(shorten_path(wt, root, 40), "/dev/other-project");
     }
 
     #[test]
@@ -473,6 +485,27 @@ mod tests {
         let root = home.join("dev/flotilla");
         let wt = home.join("dev/flotilla.low-hang-12");
         assert_eq!(shorten_path(&wt, &root, 40), "      .low-hang-12");
+    }
+
+    #[test]
+    fn shorten_path_nested_under_sibling() {
+        // Worktree created by Claude agent under a sibling worktree.
+        // Strips the sibling dir (.quick-wins) and adds extra indent.
+        // padding = len("/dev/") = 5, +2 extra = 7
+        let root = Path::new("/dev/flotilla");
+        let wt = Path::new("/dev/flotilla.quick-wins/.claude/worktrees/agent-abc");
+        assert_eq!(
+            shorten_path(wt, root, 60),
+            "       .claude/worktrees/agent-abc"
+        );
+    }
+
+    #[test]
+    fn shorten_path_unrelated_under_same_parent() {
+        // Unrelated directory under the same parent should NOT be treated as sibling
+        let root = Path::new("/dev/flotilla");
+        let other = Path::new("/dev/unrelated/sub");
+        assert_eq!(shorten_path(other, root, 40), "/dev/unrelated/sub");
     }
 
     #[test]
