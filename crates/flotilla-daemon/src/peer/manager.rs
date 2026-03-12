@@ -126,7 +126,11 @@ pub struct PeerManager {
     transport_peers: HashMap<ConfigLabel, HostName>,
     generations: HashMap<HostName, u64>,
     routes: HashMap<HostName, RouteState>,
+    /// TODO: expire abandoned reverse-path entries when routed replies time out
+    /// instead of only clearing them on reply delivery or disconnect.
     reverse_paths: HashMap<ReversePathKey, ReversePathHop>,
+    /// TODO: sweep overdue requests by deadline_at; today these are removed on
+    /// reply, targeted disconnect, or process restart.
     pending_resync_requests: HashMap<ReversePathKey, PendingResyncRequest>,
     route_epoch: u64,
     request_id_counter: u64,
@@ -141,7 +145,7 @@ pub struct PeerManager {
 
 impl PeerManager {
     const RESYNC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-    const DEFAULT_ROUTED_HOPS: u8 = 8;
+    pub(crate) const DEFAULT_ROUTED_HOPS: u8 = 8;
 
     /// Create a new PeerManager with no peers.
     pub fn new(local_host: HostName) -> Self {
@@ -410,6 +414,7 @@ impl PeerManager {
                 HandleResult::NeedsResync { from: origin, repo }
             }
             PeerDataKind::RequestResync { since_seq } => HandleResult::ResyncRequested {
+                // Legacy direct request-resync path; routed requests carry a real request_id.
                 request_id: 0,
                 from: origin,
                 repo,
