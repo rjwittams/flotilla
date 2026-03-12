@@ -29,11 +29,20 @@ impl ShpoolTerminalPool {
             .parent()
             .unwrap_or(Path::new("."))
             .join("config.toml");
-        let config_changed = Self::ensure_config(&config_path);
+        let config_stale = Self::config_needs_update(&config_path);
         Self::clean_stale_socket(&socket_path);
-        if config_changed && socket_path.exists() {
+        if config_stale && socket_path.exists() {
+            // Daemon is alive but config changed — try to stop it.
+            // Only write the new config if the stop succeeds, so that
+            // a failed stop leaves the old config on disk and the next
+            // create() call retries the restart.
             tracing::info!("shpool config changed, restarting daemon");
-            Self::stop_daemon(&socket_path).await;
+            if Self::stop_daemon(&socket_path).await {
+                Self::write_config(&config_path);
+            }
+        } else if config_stale {
+            // No daemon running, safe to write config directly.
+            Self::write_config(&config_path);
         }
         Self::start_daemon(&socket_path, &config_path).await;
         Self {
@@ -50,7 +59,7 @@ impl ShpoolTerminalPool {
             .parent()
             .unwrap_or(Path::new("."))
             .join("config.toml");
-        let _ = Self::ensure_config(&config_path);
+        Self::write_config(&config_path);
         Self {
             runner,
             socket_path,
@@ -177,8 +186,10 @@ impl ShpoolTerminalPool {
     /// waiting for it to exit. Removes the socket and pid files afterward.
     /// This is load-bearing: `start_daemon()` checks socket existence as
     /// its first guard, so the socket must be gone for a replacement to spawn.
+    /// Returns true if the daemon was stopped (or was already dead),
+    /// false if it's still alive.
     #[cfg(unix)]
-    async fn stop_daemon(socket_path: &Path) {
+    async fn stop_daemon(socket_path: &Path) -> bool {
         let pid_path = socket_path.with_file_name("daemonized-shpool.pid");
 
         // Read and parse the pid — if we can't, just clean up files
@@ -189,13 +200,13 @@ impl ShpoolTerminalPool {
                     tracing::warn!("shpool pid file unparseable, removing socket");
                     let _ = std::fs::remove_file(socket_path);
                     let _ = std::fs::remove_file(&pid_path);
-                    return;
+                    return true;
                 }
             },
             Err(_) => {
                 tracing::warn!("no shpool pid file found, removing socket");
                 let _ = std::fs::remove_file(socket_path);
-                return;
+                return true;
             }
         };
 
@@ -208,10 +219,10 @@ impl ShpoolTerminalPool {
                 tracing::debug!(%pid, "shpool daemon already dead, cleaning up");
                 let _ = std::fs::remove_file(socket_path);
                 let _ = std::fs::remove_file(&pid_path);
-            } else {
-                tracing::warn!(%pid, "cannot signal shpool daemon, keeping existing");
+                return true;
             }
-            return;
+            tracing::warn!(%pid, "cannot signal shpool daemon, keeping existing");
+            return false;
         }
 
         // Wait for process to exit (up to 2s).
@@ -225,7 +236,7 @@ impl ShpoolTerminalPool {
                 tracing::debug!(%pid, "shpool daemon exited after SIGTERM");
                 let _ = std::fs::remove_file(socket_path);
                 let _ = std::fs::remove_file(&pid_path);
-                return;
+                return true;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -234,34 +245,35 @@ impl ShpoolTerminalPool {
         // start_daemon() reuses the existing daemon rather than racing
         // a second one against it.
         tracing::warn!(%pid, "shpool daemon did not exit within 2s after SIGTERM, keeping existing");
+        false
     }
 
     #[cfg(not(unix))]
-    async fn stop_daemon(_socket_path: &Path) {
-        // shpool is Unix-only
+    async fn stop_daemon(_socket_path: &Path) -> bool {
+        true
     }
 
-    /// Write the flotilla-managed shpool config if it doesn't exist or is stale.
-    /// Returns true if the config was written (changed), false if it already matched or write failed.
-    fn ensure_config(path: &Path) -> bool {
-        let needs_write = match std::fs::read_to_string(path) {
+    /// Check whether the config file needs updating (missing or stale).
+    fn config_needs_update(path: &Path) -> bool {
+        match std::fs::read_to_string(path) {
             Ok(existing) => existing != FLOTILLA_SHPOOL_CONFIG,
             Err(_) => true,
-        };
-        if needs_write {
-            if let Some(parent) = path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    tracing::warn!(path = %parent.display(), err = %e, "failed to create shpool config dir");
-                    return false;
-                }
-            }
-            if let Err(e) = std::fs::write(path, FLOTILLA_SHPOOL_CONFIG) {
-                tracing::warn!(path = %path.display(), err = %e, "failed to write shpool config");
+        }
+    }
+
+    /// Write the flotilla-managed shpool config. Returns true on success.
+    fn write_config(path: &Path) -> bool {
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(path = %parent.display(), err = %e, "failed to create shpool config dir");
                 return false;
             }
-            return true;
         }
-        false
+        if let Err(e) = std::fs::write(path, FLOTILLA_SHPOOL_CONFIG) {
+            tracing::warn!(path = %path.display(), err = %e, "failed to write shpool config");
+            return false;
+        }
+        true
     }
 
     /// Parse the JSON output of `shpool list --json`.
@@ -438,10 +450,10 @@ mod tests {
     }
 
     #[test]
-    fn ensure_config_writes_expected_content() {
+    fn write_config_writes_expected_content() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let config_path = dir.path().join("config.toml");
-        ShpoolTerminalPool::ensure_config(&config_path);
+        assert!(ShpoolTerminalPool::write_config(&config_path));
         let content =
             std::fs::read_to_string(&config_path).expect("config should have been written");
         assert!(content.contains("prompt_prefix = \"\""));
@@ -450,19 +462,20 @@ mod tests {
     }
 
     #[test]
-    fn ensure_config_returns_true_on_first_write_false_on_second() {
+    fn config_needs_update_tracks_staleness() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let config_path = dir.path().join("config.toml");
 
-        // First call: file doesn't exist → should write and return true
-        assert!(ShpoolTerminalPool::ensure_config(&config_path));
+        // File doesn't exist → needs update
+        assert!(ShpoolTerminalPool::config_needs_update(&config_path));
 
-        // Second call: file matches → should return false
-        assert!(!ShpoolTerminalPool::ensure_config(&config_path));
+        // Write config, now it matches → no update needed
+        ShpoolTerminalPool::write_config(&config_path);
+        assert!(!ShpoolTerminalPool::config_needs_update(&config_path));
 
-        // Modify the file externally → should return true again
+        // Modify externally → needs update again
         std::fs::write(&config_path, "stale config").expect("write stale");
-        assert!(ShpoolTerminalPool::ensure_config(&config_path));
+        assert!(ShpoolTerminalPool::config_needs_update(&config_path));
     }
 
     #[test]
