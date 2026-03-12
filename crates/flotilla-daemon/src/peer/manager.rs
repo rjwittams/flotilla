@@ -208,6 +208,52 @@ impl PeerManager {
         request_id
     }
 
+    pub fn sweep_expired_resyncs(&mut self, now: Instant) -> Vec<RepoIdentity> {
+        let expired: Vec<ReversePathKey> = self
+            .pending_resync_requests
+            .iter()
+            .filter(|(_, pending)| pending.deadline_at <= now)
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        let mut affected_repos = Vec::new();
+        for key in expired {
+            self.pending_resync_requests.remove(&key);
+            let origin = key.target_host.clone();
+            let repo = key.repo_identity.clone();
+
+            let removed = if let Some(repos) = self.peer_data.get_mut(&origin) {
+                if let Some(state) = repos.get(&repo) {
+                    if state.stale {
+                        repos.remove(&repo);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if removed {
+                self.last_seen_clocks
+                    .remove(&(origin.clone(), repo.clone()));
+                if self
+                    .peer_data
+                    .get(&origin)
+                    .is_some_and(|repos| repos.is_empty())
+                {
+                    self.peer_data.remove(&origin);
+                }
+                affected_repos.push(repo);
+            }
+        }
+
+        affected_repos
+    }
+
     pub fn current_generation(&self, name: &HostName) -> Option<u64> {
         self.generations.get(name).copied()
     }
@@ -1920,5 +1966,61 @@ mod tests {
         assert!(!state.stale, "failover resync should clear stale");
         assert_eq!(state.via_peer, HostName::new("relay"));
         assert_eq!(state.via_generation, relay_generation);
+    }
+
+    #[tokio::test]
+    async fn expired_resync_request_removes_stale_snapshot() {
+        let mut mgr = PeerManager::new(HostName::new("local"));
+        let relay_sender: Arc<dyn PeerSender> = Arc::new(MockPeerSender {
+            sent: Arc::new(Mutex::new(Vec::new())),
+        });
+        let relay_generation = mgr.activate_connection(
+            HostName::new("relay"),
+            relay_sender,
+            ConnectionMeta {
+                direction: ConnectionDirection::Inbound,
+                config_label: None,
+                expected_peer: None,
+            },
+        );
+
+        let _ = mgr
+            .handle_inbound(InboundPeerEnvelope {
+                msg: PeerWireMessage::Data(snapshot_msg("target", 1)),
+                connection_generation: relay_generation,
+                connection_peer: HostName::new("relay"),
+            })
+            .await;
+
+        let state = mgr
+            .peer_data
+            .get_mut(&HostName::new("target"))
+            .and_then(|repos| repos.get_mut(&test_repo()))
+            .expect("repo state");
+        state.stale = true;
+
+        mgr.pending_resync_requests.insert(
+            ReversePathKey {
+                request_id: 7,
+                requester_host: HostName::new("local"),
+                target_host: HostName::new("target"),
+                repo_identity: test_repo(),
+            },
+            PendingResyncRequest {
+                deadline_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
+
+        let affected = mgr.sweep_expired_resyncs(Instant::now());
+
+        assert_eq!(affected, vec![test_repo()]);
+        assert!(!mgr
+            .pending_resync_requests
+            .iter()
+            .any(|(key, _)| key.request_id == 7));
+        assert!(!mgr
+            .peer_data
+            .get(&HostName::new("target"))
+            .is_some_and(|repos| repos.contains_key(&test_repo())));
     }
 }

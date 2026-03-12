@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -66,13 +66,13 @@ impl DaemonServer {
         config: Arc<ConfigStore>,
         socket_path: PathBuf,
         idle_timeout: Duration,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let daemon_config = config.load_daemon_config();
         let host_name = daemon_config
             .host_name
             .map(HostName::new)
             .unwrap_or_else(HostName::local);
-        let hosts_config = config.load_hosts();
+        let hosts_config = config.load_hosts()?;
 
         let peer_count = hosts_config.hosts.len();
         let mut peer_manager = PeerManager::new(host_name.clone());
@@ -110,7 +110,7 @@ impl DaemonServer {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (peer_data_tx, peer_data_rx) = mpsc::channel(256);
 
-        Self {
+        Ok(Self {
             daemon,
             socket_path,
             idle_timeout,
@@ -122,7 +122,7 @@ impl DaemonServer {
             peer_data_tx,
             peer_data_rx: Some(peer_data_rx),
             peer_manager: Arc::new(Mutex::new(peer_manager)),
-        }
+        })
     }
 
     /// Take the receiver for inbound peer data messages.
@@ -213,6 +213,7 @@ impl DaemonServer {
         let peer_daemon = Arc::clone(&daemon);
         tokio::spawn(async move {
             if let Some(mut rx) = peer_data_rx {
+                let mut resync_sweep = tokio::time::interval(Duration::from_secs(5));
                 // Connect all peers and collect initial receivers into a map
                 let mut initial_rx_map: HashMap<HostName, (u64, mpsc::Receiver<PeerWireMessage>)> =
                     HashMap::new();
@@ -350,7 +351,12 @@ impl DaemonServer {
                 // Persistent clock for reply messages (resync responses).
                 let mut reply_clock = flotilla_protocol::VectorClock::default();
 
-                while let Some(env) = rx.recv().await {
+                loop {
+                    tokio::select! {
+                        maybe_env = rx.recv() => {
+                            let Some(env) = maybe_env else {
+                                break;
+                            };
                     let (origin, repo_path) = match &env.msg {
                         PeerWireMessage::Data(msg) => {
                             (msg.origin_host.clone(), msg.repo_path.clone())
@@ -518,6 +524,17 @@ impl DaemonServer {
                         }
                         HandleResult::Ignored => {}
                     }
+                        }
+                        _ = resync_sweep.tick() => {
+                            let expired_repos = {
+                                let mut pm = peer_manager_task.lock().await;
+                                pm.sweep_expired_resyncs(Instant::now())
+                            };
+                            if !expired_repos.is_empty() {
+                                rebuild_peer_overlays(&peer_manager_task, &peer_daemon, expired_repos).await;
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -578,10 +595,6 @@ impl DaemonServer {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, _addr)) => {
-                            let count = client_count.fetch_add(1, Ordering::SeqCst) + 1;
-                            info!(%count, "client connected");
-                            client_notify.notify_one();
-
                             let daemon = Arc::clone(&daemon);
                             let client_count = Arc::clone(&client_count);
                             let client_notify = Arc::clone(&client_notify);
@@ -596,11 +609,10 @@ impl DaemonServer {
                                     shutdown_rx,
                                     peer_data_tx,
                                     peer_manager,
+                                    client_count,
+                                    client_notify,
                                 )
                                 .await;
-                                let count = client_count.fetch_sub(1, Ordering::SeqCst) - 1;
-                                info!(%count, "client disconnected");
-                                client_notify.notify_one();
                             });
                         }
                         Err(e) => {
@@ -825,6 +837,8 @@ async fn handle_client(
     mut shutdown_rx: watch::Receiver<bool>,
     peer_data_tx: mpsc::Sender<InboundPeerEnvelope>,
     peer_manager: Arc<Mutex<PeerManager>>,
+    client_count: Arc<AtomicUsize>,
+    client_notify: Arc<Notify>,
 ) {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
@@ -856,6 +870,10 @@ async fn handle_client(
 
     match first_msg {
         Message::Request { id, method, params } => {
+            let count = client_count.fetch_add(1, Ordering::SeqCst) + 1;
+            info!(%count, "client connected");
+            client_notify.notify_one();
+
             let event_writer = Arc::clone(&writer);
             let mut event_rx = daemon.subscribe();
             let event_task = tokio::spawn(async move {
@@ -921,6 +939,9 @@ async fn handle_client(
             }
 
             event_task.abort();
+            let count = client_count.fetch_sub(1, Ordering::SeqCst) - 1;
+            info!(%count, "client disconnected");
+            client_notify.notify_one();
         }
         Message::Hello {
             protocol_version,
@@ -1371,7 +1392,8 @@ mod tests {
             tmp.path().join("test.sock"),
             Duration::from_secs(60),
         )
-        .await;
+        .await
+        .unwrap();
 
         assert!(
             server.take_peer_data_rx().is_some(),
@@ -1403,13 +1425,26 @@ mod tests {
         let (peer_data_tx, mut peer_data_rx) = mpsc::channel(16);
         let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let client_count = Arc::new(AtomicUsize::new(0));
+        let client_notify = Arc::new(Notify::new());
 
         let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("pair");
 
         // Spawn handle_client on the server side
         let pm = Arc::clone(&peer_manager);
+        let count_ref = Arc::clone(&client_count);
+        let notify_ref = Arc::clone(&client_notify);
         let handle = tokio::spawn(async move {
-            handle_client(server_stream, daemon, shutdown_rx, peer_data_tx, pm).await;
+            handle_client(
+                server_stream,
+                daemon,
+                shutdown_rx,
+                peer_data_tx,
+                pm,
+                count_ref,
+                notify_ref,
+            )
+            .await;
         });
 
         let (read_half, write_half) = client_stream.into_split();
@@ -1474,6 +1509,7 @@ mod tests {
                 Some(1)
             );
         }
+        assert_eq!(client_count.load(Ordering::SeqCst), 0);
 
         drop(writer);
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
@@ -1509,7 +1545,8 @@ mod tests {
             tmp.path().join("test.sock"),
             Duration::from_secs(60),
         )
-        .await;
+        .await
+        .unwrap();
 
         // PeerManager should be initialized and accessible
         let pm = server.peer_manager.lock().await;
@@ -1527,11 +1564,38 @@ mod tests {
             tmp.path().join("test.sock"),
             Duration::from_secs(60),
         )
-        .await;
+        .await
+        .unwrap();
 
         // Should still have a PeerManager with no peers
         let pm = server.peer_manager.lock().await;
         assert!(pm.get_peer_data().is_empty());
+    }
+
+    #[tokio::test]
+    async fn daemon_server_new_returns_error_for_invalid_hosts_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("config");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join("hosts.toml"),
+            "[hosts.remote]\nhostname = \"10.0.0.5\"\nexpected_host_name = [\ndaemon_socket = \"/tmp/daemon.sock\"\n",
+        )
+        .unwrap();
+
+        let config = Arc::new(ConfigStore::with_base(&base));
+        let result = DaemonServer::new(
+            vec![],
+            config,
+            tmp.path().join("test.sock"),
+            Duration::from_secs(60),
+        )
+        .await;
+
+        match result {
+            Ok(_) => panic!("invalid hosts config should return startup error"),
+            Err(err) => assert!(err.contains("failed to parse")),
+        }
     }
 
     #[tokio::test]
@@ -1540,13 +1604,26 @@ mod tests {
         let (peer_data_tx, _peer_data_rx) = mpsc::channel(16);
         let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let client_count = Arc::new(AtomicUsize::new(0));
+        let client_notify = Arc::new(Notify::new());
 
         let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("pair");
 
         // Spawn handle_client on the server side
         let pm = Arc::clone(&peer_manager);
+        let count_ref = Arc::clone(&client_count);
+        let notify_ref = Arc::clone(&client_notify);
         let handle = tokio::spawn(async move {
-            handle_client(server_stream, daemon, shutdown_rx, peer_data_tx, pm).await;
+            handle_client(
+                server_stream,
+                daemon,
+                shutdown_rx,
+                peer_data_tx,
+                pm,
+                count_ref,
+                notify_ref,
+            )
+            .await;
         });
 
         let (read_half, write_half) = client_stream.into_split();

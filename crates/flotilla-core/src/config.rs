@@ -360,15 +360,15 @@ impl ConfigStore {
     }
 
     /// Load remote hosts config from `~/.config/flotilla/hosts.toml`.
-    pub fn load_hosts(&self) -> HostsConfig {
+    pub fn load_hosts(&self) -> Result<HostsConfig, String> {
         let path = self.base_path().join("hosts.toml");
         if path.exists() {
             let content = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+                .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
             toml::from_str(&content)
-                .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()))
+                .map_err(|err| format!("failed to parse {}: {err}", path.display()))
         } else {
-            HostsConfig::default()
+            Ok(HostsConfig::default())
         }
     }
 
@@ -850,7 +850,7 @@ host_name = "my-desktop"
     fn load_hosts_missing_file_returns_default() {
         let dir = tempdir().unwrap();
         let store = ConfigStore::with_base(dir.path());
-        let config = store.load_hosts();
+        let config = store.load_hosts().unwrap();
         assert!(config.hosts.is_empty());
     }
 
@@ -864,15 +864,14 @@ host_name = "my-desktop"
         )
         .unwrap();
         let store = ConfigStore::with_base(base);
-        let config = store.load_hosts();
+        let config = store.load_hosts().unwrap();
         assert_eq!(config.hosts.len(), 1);
         assert_eq!(config.hosts["desktop"].hostname, "desktop.local");
         assert_eq!(config.hosts["desktop"].expected_host_name, "desktop");
     }
 
     #[test]
-    #[should_panic(expected = "failed to parse")]
-    fn load_hosts_invalid_file_panics() {
+    fn load_hosts_invalid_file_returns_error() {
         let dir = tempdir().unwrap();
         let base = dir.path();
         std::fs::write(
@@ -881,7 +880,10 @@ host_name = "my-desktop"
         )
         .unwrap();
         let store = ConfigStore::with_base(base);
-        let _ = store.load_hosts();
+        let err = store
+            .load_hosts()
+            .expect_err("invalid hosts config should error");
+        assert!(err.contains("failed to parse"));
     }
 
     #[test]
