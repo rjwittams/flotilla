@@ -355,6 +355,13 @@ impl DaemonServer {
                         PeerWireMessage::Data(msg) => {
                             (msg.origin_host.clone(), msg.repo_path.clone())
                         }
+                        PeerWireMessage::Routed(
+                            flotilla_protocol::RoutedPeerMessage::ResyncSnapshot {
+                                responder_host,
+                                repo_path,
+                                ..
+                            },
+                        ) => (responder_host.clone(), repo_path.clone()),
                         PeerWireMessage::Routed(_) => (env.connection_peer.clone(), PathBuf::new()),
                     };
 
@@ -435,7 +442,8 @@ impl DaemonServer {
                         }
                         HandleResult::ResyncRequested {
                             request_id,
-                            from,
+                            requester_host,
+                            reply_via,
                             repo,
                             since_seq: _, // Phase 1: always send full snapshot
                         } => {
@@ -450,16 +458,16 @@ impl DaemonServer {
                                     reply_clock.tick(&local_host);
                                     let response_clock = reply_clock.clone();
                                     let response_repo = repo.clone();
-                                    let response_repo_path = repo_path.clone();
+                                    let response_repo_path = local_path.clone();
                                     let response_host = local_host.clone();
                                     let response_data = local_providers.clone();
                                     if let Err(e) = pm
                                         .send_to(
-                                            &from,
+                                            &reply_via,
                                             PeerWireMessage::Routed(
                                                 flotilla_protocol::RoutedPeerMessage::ResyncSnapshot {
                                                     request_id,
-                                                    requester_host: from.clone(),
+                                                    requester_host: requester_host.clone(),
                                                     responder_host: response_host,
                                                     remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
                                                     repo_identity: response_repo,
@@ -473,7 +481,7 @@ impl DaemonServer {
                                         .await
                                     {
                                         warn!(
-                                            peer = %from,
+                                            peer = %reply_via,
                                             err = %e,
                                             "failed to send resync response"
                                         );

@@ -33,7 +33,8 @@ pub enum HandleResult {
     /// The sender is requesting a resync — caller should send a snapshot back.
     ResyncRequested {
         request_id: u64,
-        from: HostName,
+        requester_host: HostName,
+        reply_via: HostName,
         repo: RepoIdentity,
         since_seq: u64,
     },
@@ -416,7 +417,8 @@ impl PeerManager {
             PeerDataKind::RequestResync { since_seq } => HandleResult::ResyncRequested {
                 // Legacy direct request-resync path; routed requests carry a real request_id.
                 request_id: 0,
-                from: origin,
+                requester_host: origin.clone(),
+                reply_via: origin,
                 repo,
                 since_seq,
             },
@@ -469,7 +471,8 @@ impl PeerManager {
                 if target_host == self.local_host {
                     return HandleResult::ResyncRequested {
                         request_id,
-                        from: requester_host,
+                        requester_host,
+                        reply_via: connection_peer,
                         repo: repo_identity,
                         since_seq,
                     };
@@ -1106,7 +1109,8 @@ mod tests {
             result,
             HandleResult::ResyncRequested {
                 request_id: 0,
-                from: HostName::new("remote"),
+                requester_host: HostName::new("remote"),
+                reply_via: HostName::new("remote"),
                 repo: test_repo(),
                 since_seq: 3,
             }
@@ -1595,7 +1599,8 @@ mod tests {
             result,
             HandleResult::ResyncRequested {
                 request_id: 41,
-                from: HostName::new("requester"),
+                requester_host: HostName::new("requester"),
+                reply_via: HostName::new("relay"),
                 repo: test_repo(),
                 since_seq: 7,
             }
