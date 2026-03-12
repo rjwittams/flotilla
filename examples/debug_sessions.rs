@@ -27,7 +27,7 @@ async fn main() {
     println!("\n=== Step 1: Build ProviderRegistry ===");
     let config = ConfigStore::new();
     let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
-    let (registry, repo_slug) = detect_providers(&repo_root, &config, runner).await;
+    let (registry, repo_slug) = detect_providers(&repo_root, &config, runner, false).await;
     println!("  checkout_managers: {}", registry.checkout_managers.len());
     println!("  code_review: {}", registry.code_review.len());
     println!("  issue_trackers: {}", registry.issue_trackers.len());

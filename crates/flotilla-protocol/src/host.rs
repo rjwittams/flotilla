@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use tracing::warn;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -18,14 +19,20 @@ impl HostName {
 
     /// Create a HostName from the local machine's hostname.
     /// Uses `gethostname` crate (already a dependency in flotilla-core).
+    /// The result is cached so `gethostname()` is only called once.
     pub fn local() -> Self {
-        let name = gethostname::gethostname()
-            .into_string()
-            .unwrap_or_else(|os| {
-                warn!(hostname = ?os, "hostname is not valid UTF-8, falling back to \"localhost\"");
-                "localhost".to_string()
-            });
-        Self(name)
+        static HOSTNAME: OnceLock<HostName> = OnceLock::new();
+        HOSTNAME
+            .get_or_init(|| {
+                let name = gethostname::gethostname()
+                    .into_string()
+                    .unwrap_or_else(|os| {
+                        warn!(hostname = ?os, "hostname is not valid UTF-8, falling back to \"localhost\"");
+                        "localhost".to_string()
+                    });
+                Self(name)
+            })
+            .clone()
     }
 }
 

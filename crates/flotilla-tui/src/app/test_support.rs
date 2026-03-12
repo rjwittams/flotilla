@@ -19,14 +19,14 @@ use super::{App, DirEntry, TuiRepoModel, UiMode};
 // Re-export shared builders so unit tests can use `test_support::checkout_item` etc.
 pub(crate) use super::test_builders::*;
 
-struct StubDaemon {
+pub(crate) struct StubDaemon {
     tx: broadcast::Sender<DaemonEvent>,
 }
 
 static STUB_APP_CONFIG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 impl StubDaemon {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (tx, _) = broadcast::channel(1);
         Self { tx }
     }
