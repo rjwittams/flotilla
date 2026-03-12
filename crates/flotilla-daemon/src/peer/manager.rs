@@ -796,6 +796,10 @@ impl PeerManager {
         &self.peers
     }
 
+    pub fn configured_peer_names(&self) -> Vec<HostName> {
+        self.peers.keys().cloned().collect()
+    }
+
     pub fn outbound_peer_names(&self) -> Vec<HostName> {
         self.peers
             .keys()

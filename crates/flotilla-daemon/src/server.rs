@@ -107,6 +107,12 @@ impl DaemonServer {
             host_name.clone(),
         )
         .await;
+        for peer_host in peer_manager.configured_peer_names() {
+            daemon.send_event(DaemonEvent::PeerStatusChanged {
+                host: peer_host,
+                status: PeerConnectionState::Disconnected,
+            });
+        }
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (peer_data_tx, peer_data_rx) = mpsc::channel(256);
 
@@ -994,6 +1000,10 @@ async fn handle_client(
                     },
                 )
             };
+            daemon.send_event(DaemonEvent::PeerStatusChanged {
+                host: host_name.clone(),
+                status: PeerConnectionState::Connected,
+            });
 
             loop {
                 tokio::select! {
@@ -1040,6 +1050,10 @@ async fn handle_client(
             }
 
             disconnect_peer_and_rebuild(&peer_manager, &daemon, &host_name, generation).await;
+            daemon.send_event(DaemonEvent::PeerStatusChanged {
+                host: host_name,
+                status: PeerConnectionState::Disconnected,
+            });
             relay_task.abort();
         }
         other => {
@@ -1405,6 +1419,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn daemon_server_replays_configured_hosts_as_disconnected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("config");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join("hosts.toml"),
+            "[hosts.udder]\nhostname = \"udder\"\ndaemon_socket = \"/tmp/udder.sock\"\n\n[hosts.feta]\nhostname = \"feta\"\ndaemon_socket = \"/tmp/feta.sock\"\n",
+        )
+        .unwrap();
+
+        let config = Arc::new(ConfigStore::with_base(&base));
+        let server = DaemonServer::new(
+            vec![],
+            config,
+            tmp.path().join("test.sock"),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+
+        let events = server.daemon.replay_since(&HashMap::new()).await.unwrap();
+        let mut statuses: Vec<(HostName, PeerConnectionState)> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                DaemonEvent::PeerStatusChanged { host, status } => Some((host, status)),
+                _ => None,
+            })
+            .collect();
+        statuses.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(
+            statuses,
+            vec![
+                (HostName::new("feta"), PeerConnectionState::Disconnected),
+                (HostName::new("udder"), PeerConnectionState::Disconnected),
+            ]
+        );
+    }
+
     fn test_peer_msg(host: &str) -> PeerDataMessage {
         PeerDataMessage {
             origin_host: HostName::new(host),
@@ -1422,6 +1476,7 @@ mod tests {
     async fn handle_client_forwards_peer_data_and_registers_peer() {
         let (_tmp, daemon) = empty_daemon().await;
         let expected_local_host = daemon.host_name().clone();
+        let daemon_events = daemon.subscribe();
         let (peer_data_tx, mut peer_data_rx) = mpsc::channel(16);
         let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1434,10 +1489,11 @@ mod tests {
         let pm = Arc::clone(&peer_manager);
         let count_ref = Arc::clone(&client_count);
         let notify_ref = Arc::clone(&client_notify);
+        let daemon_for_task = Arc::clone(&daemon);
         let handle = tokio::spawn(async move {
             handle_client(
                 server_stream,
-                daemon,
+                daemon_for_task,
                 shutdown_rx,
                 peer_data_tx,
                 pm,
@@ -1480,6 +1536,19 @@ mod tests {
             other => panic!("expected hello response, got {other:?}"),
         }
 
+        let mut daemon_events = daemon_events;
+        let connected_event = tokio::time::timeout(Duration::from_secs(2), daemon_events.recv())
+            .await
+            .expect("timeout waiting for peer status")
+            .expect("peer status event");
+        match connected_event {
+            DaemonEvent::PeerStatusChanged { host, status } => {
+                assert_eq!(host, HostName::new("remote-host"));
+                assert_eq!(status, PeerConnectionState::Connected);
+            }
+            other => panic!("expected peer status event, got {other:?}"),
+        }
+
         // Send a peer message from the client side
         let peer_msg = test_peer_msg("remote-host");
         let wire_msg = Message::Peer(Box::new(PeerWireMessage::Data(peer_msg.clone())));
@@ -1513,6 +1582,18 @@ mod tests {
 
         drop(writer);
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+        let disconnected_event = tokio::time::timeout(Duration::from_secs(2), daemon_events.recv())
+            .await
+            .expect("timeout waiting for peer disconnect")
+            .expect("peer disconnect event");
+        match disconnected_event {
+            DaemonEvent::PeerStatusChanged { host, status } => {
+                assert_eq!(host, HostName::new("remote-host"));
+                assert_eq!(status, PeerConnectionState::Disconnected);
+            }
+            other => panic!("expected peer disconnect event, got {other:?}"),
+        }
 
         let pm = peer_manager.lock().await;
         assert!(
