@@ -251,12 +251,7 @@ impl App {
             }
             DaemonEvent::PeerStatusChanged { host, status } => {
                 let peer_status = PeerStatus::from(status);
-                if let Some(existing) = self
-                    .model
-                    .peer_hosts
-                    .iter_mut()
-                    .find(|p| p.name == host)
-                {
+                if let Some(existing) = self.model.peer_hosts.iter_mut().find(|p| p.name == host) {
                     existing.status = peer_status;
                 } else {
                     self.model.peer_hosts.push(PeerHostStatus {

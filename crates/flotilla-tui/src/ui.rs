@@ -221,10 +221,10 @@ fn render_status_bar(
             .iter()
             .map(|p| {
                 let icon = match p.status {
-                    PeerStatus::Disconnected => "\u{25cb}",  // ○
-                    PeerStatus::Connecting => "\u{25d0}",    // ◐
-                    PeerStatus::Reconnecting => "\u{25d0}",  // ◐
-                    PeerStatus::Connected => "\u{25cf}",     // ● (shouldn't reach here)
+                    PeerStatus::Disconnected => "\u{25cb}", // ○
+                    PeerStatus::Connecting => "\u{25d0}",   // ◐
+                    PeerStatus::Reconnecting => "\u{25d0}", // ◐
+                    PeerStatus::Connected => "\u{25cf}",    // ● (shouldn't reach here)
                 };
                 format!("{icon} {}", p.name)
             })
