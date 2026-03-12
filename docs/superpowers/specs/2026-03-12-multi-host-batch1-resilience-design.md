@@ -1,326 +1,702 @@
 # Multi-Host Phase 2 Batch 1: Resilience Hardening
 
-Addresses four independent issues in the peer relay/connection infrastructure:
+Addresses four peer-relay / connection-management issues:
 [#259](https://github.com/rjwittams/flotilla/issues/259),
 [#262](https://github.com/rjwittams/flotilla/issues/262),
 [#263](https://github.com/rjwittams/flotilla/issues/263),
 [#264](https://github.com/rjwittams/flotilla/issues/264).
 
-## New types
+This draft replaces the earlier patch-by-patch version with one coherent model:
 
-A newtype enforces the distinction between connection config labels and peer identities at compile time:
+- one peer wire message plane
+- one connection activation path
+- one routing model for targeted control traffic
+- one authority model for state acceptance and cleanup
+
+## Scope
+
+Batch 1 introduces:
+
+- protocol-version `Hello`
+- unified peer sending for outbound SSH peers and inbound socket peers
+- routed control traffic for resync
+- generation-guarded connection ownership and cleanup
+- route failover with stale-state retention
+- concurrent fanout for flooded relay sends
+
+Batch 1 does not introduce:
+
+- cryptographic proof of third-party authorship
+- arbitrary mesh trust promotion based only on fresher claims
+- delta application beyond the existing resync fallback behavior
+
+## Core Types
 
 ```rust
-/// Connection config label from hosts.toml. Used to key transports and
-/// reconnect loops. Not a peer identity — the canonical name comes from
-/// the Hello handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConfigLabel(pub String);
 
-/// Protocol version constant. Bump on incompatible wire format changes.
 pub const PROTOCOL_VERSION: u32 = 1;
 ```
 
-`HostName` (existing) continues to represent the canonical peer identity, established via `Hello.host_name`.
+`HostName` remains the canonical protocol identity of a daemon.
 
-## #262: Unify peer send path with `PeerSender` trait
+The user-facing configured transport label is `ConfigLabel`, not `HostName`.
+
+## Message Model
+
+### Top-level Wire Protocol
+
+Add two new `Message` variants:
+
+```rust
+#[serde(tag = "type")]
+pub enum Message {
+    // existing variants...
+    #[serde(rename = "hello")]
+    Hello {
+        protocol_version: u32,
+        host_name: HostName,
+    },
+    #[serde(rename = "peer")]
+    Peer(Box<PeerWireMessage>),
+}
+```
+
+`Message::Peer` is the single peer-to-peer wire envelope.
+
+### Peer Wire Messages
+
+```rust
+#[serde(tag = "peer_type")]
+pub enum PeerWireMessage {
+    Data(PeerDataMessage),
+    Routed(RoutedPeerMessage),
+}
+
+#[serde(tag = "routed_type")]
+pub enum RoutedPeerMessage {
+    RequestResync {
+        request_id: u64,
+        requester_host: HostName,
+        target_host: HostName,
+        remaining_hops: u8,
+        repo_identity: RepoIdentity,
+        since_seq: u64,
+    },
+    ResyncSnapshot {
+        request_id: u64,
+        requester_host: HostName,
+        responder_host: HostName,
+        remaining_hops: u8,
+        repo_identity: RepoIdentity,
+        repo_path: PathBuf,
+        clock: VectorClock,
+        seq: u64,
+        data: Box<ProviderData>,
+    },
+}
+```
+
+`PeerWireMessage` should use an explicit tagged serde representation so
+`Message::Peer` round-trips deterministically; add an early protocol roundtrip
+test for nested enum serialization/deserialization.
+
+Semantics:
+
+- `PeerDataMessage` is the existing flooded replication message type already defined in
+  `crates/flotilla-protocol/src/peer.rs`; Batch 1 reuses it unchanged inside
+  `PeerWireMessage::Data`.
+- `PeerDataMessage.origin_host` means the host whose replicated state this message describes.
+- `RequestResync.target_host` is the final destination of the request.
+- `RequestResync.requester_host` is where the response must return.
+- `ResyncSnapshot.responder_host` is the host that produced the snapshot.
+- `ResyncSnapshot.requester_host` is the final return destination.
+- `remaining_hops` is a routed-control loop guard. Each forwarding hop decrements it; messages
+  are dropped when it reaches zero.
+
+## Delivery Model
+
+Batch 1 has two peer traffic classes:
+
+- `PeerWireMessage::Data(PeerDataMessage)`
+  - `Snapshot` and `Delta` use flooded relay with vector-clock dedup
+  - forwarding and local acceptance are separate decisions
+- `PeerWireMessage::Routed(RoutedPeerMessage)`
+  - `RequestResync` and `ResyncSnapshot` are targeted control traffic
+  - they are not flood-relayed
+
+### Flood Forwarding vs Local Acceptance
+
+For flooded state traffic:
+
+- forwarding is governed by vector-clock relay rules
+- local acceptance into `peer_data` is governed by route authority rules
+- relay dedup state and accepted-state authority state are tracked separately
+
+A node may forward a state message that it does not locally accept into `peer_data`.
+This keeps flood topology simple while making route trust a local authority decision.
+
+Concretely:
+
+- relay dedup may advance when a flooded message is forwarded
+- accepted-state clocks / provenance only advance when the message is authority-accepted
+- a rejected-but-forwarded message must not update stored repo state, provenance, or
+  accepted-state freshness for that `origin_host`
+
+## #262: Unified Send Path
 
 ### Problem
 
-`PeerManager::relay()` only iterates SSH transports. Peers that connected to our socket (inbound connections) never receive relayed messages. The root cause: two separate data structures track peers — `PeerManager.peers` for outbound SSH connections and `PeerClientMap` in `server.rs` for inbound socket connections.
-
-A secondary consequence: `send_to()` (used for resync responses) also only reaches SSH transports. If the requesting peer is an inbound socket peer, the resync response is lost.
+`PeerManager::relay()` and `send_to()` currently only reach outbound SSH peers. Inbound socket peers are tracked separately in `server.rs`, so relay and resync responses can be lost.
 
 ### Design
 
-Extract a `PeerSender` trait that captures the one capability relay needs — sending a message:
+Unify all peer sending behind one sender trait and one peer wire envelope.
 
 ```rust
 #[async_trait]
 pub trait PeerSender: Send + Sync {
-    async fn send(&self, msg: PeerDataMessage) -> Result<(), String>;
+    async fn send(&self, msg: PeerWireMessage) -> Result<(), String>;
 }
 ```
 
-`PeerTransport` loses its `send()` method — it keeps only lifecycle methods (`connect`, `disconnect`, `subscribe`). Sending is now exclusively through `PeerSender`.
-
-Two concrete `PeerSender` implementations:
-
-- **`ChannelPeerSender`** — wraps an `mpsc::Sender<PeerDataMessage>`. Used for SSH transports: `SshTransport::connect()` creates the outbound channel internally, then exposes a method (e.g. `sender()`) that returns a cloneable `mpsc::Sender<PeerDataMessage>`. The caller wraps it in `ChannelPeerSender` and registers it. `SshTransport` itself does not implement `PeerSender`.
-- **`SocketPeerSender`** — wraps an `mpsc::Sender<Message>`, converting `PeerDataMessage` to `Message::PeerData` before sending. Used for inbound socket peers.
-
-Both are thin wrappers around cloneable channel senders. The transport owns the channel; the `PeerSender` holds a clone.
-
-`PeerManager` gains a unified senders map and renames the existing map:
-
-| Map | Key type | Value type | Purpose |
-|-----|----------|------------|---------|
-| `transports` | `ConfigLabel` | `Box<dyn PeerTransport>` | Lifecycle management (connect, disconnect, subscribe). Keyed by hosts.toml label, not peer identity. |
-| `senders` | `HostName` | `Arc<dyn PeerSender>` | Messaging. All peers, regardless of transport. Keyed by canonical `Hello.host_name`. Used by `prepare_relay()` and `send_to()`. |
-| `transport_peers` | `ConfigLabel` | `HostName` | Mapping established after Hello. Lets the reconnect loop find the canonical name to clean up when a transport-managed connection drops. |
-
-Lifecycle:
-
-- **SSH peer connects:** transport does Hello handshake, returns canonical `HostName`. Caller wraps the outbound channel in `Arc<ChannelPeerSender>`, registers via `register_sender(canonical_name)`, and stores the `ConfigLabel` → `HostName` mapping.
-- **Socket peer connects (after Hello handshake — see #259):** wrap its `mpsc::Sender<Message>` in `Arc<SocketPeerSender>`, register via `register_sender(hello.host_name)`.
-- **Either disconnects:** call `disconnect_peer(canonical_name, generation)` (#263).
-
-`send_local_to_peers()` in `server.rs` simplifies: remove the `peer_clients` parameter and the separate `PeerClientMap` send loop. All sends go through `pm.senders()`. The `PeerClientMap` type is removed — connection tracking moves into PeerManager's generation counter (#263).
-
-### Files changed
-
-- `crates/flotilla-protocol/src/lib.rs` — `ConfigLabel` newtype, `PROTOCOL_VERSION` constant
-- `crates/flotilla-daemon/src/peer/transport.rs` — add `PeerSender` trait; remove `send()` from `PeerTransport`
-- `crates/flotilla-daemon/src/peer/manager.rs` — rename `peers` to `transports` (keyed by `ConfigLabel`); add `senders` map (keyed by `HostName`), `transport_peers` map, `register_sender()`, `senders()` accessor; `send_to()` uses `senders`
-- `crates/flotilla-daemon/src/peer/ssh_transport.rs` — add `sender()` method; add `ChannelPeerSender` implementing `PeerSender`
-- `crates/flotilla-daemon/src/server.rs` — add `SocketPeerSender`; register/unregister senders on peer connect/disconnect; simplify `send_local_to_peers()` (remove `peer_clients` parameter and send loop); remove `PeerClientMap` type
-
-### Tests
-
-- Existing relay tests in `manager.rs` must be updated: `MockTransport` no longer has `send()`; tests register a mock `PeerSender` via `register_sender()` so relay finds senders.
-- New test: register a mock sender via `register_sender()` (without a transport), verify relay reaches it.
-- New test: `send_to()` reaches a socket-only peer registered via `register_sender()`.
-
----
-
-## #264: Head-of-line blocking in relay
-
-### Problem
-
-`relay()` sends to peers sequentially. A slow peer blocks all subsequent peers.
-
-### Design
-
-Collect sender references and clone messages while holding `&self`, then drop the borrow and send concurrently. This matters because `PeerManager` sits behind `Arc<Mutex<PeerManager>>` — holding the lock across async sends would block other tasks.
-
-Pattern for `relay()`:
+`PeerTransport` keeps only lifecycle methods:
 
 ```rust
-pub fn prepare_relay(&self, origin: &HostName, msg: &PeerDataMessage)
-    -> Vec<(HostName, Arc<dyn PeerSender>, PeerDataMessage)>
-{
-    let mut relayed_msg = msg.clone();
-    relayed_msg.clock.tick(&self.local_host);
-
-    self.senders.iter()
-        .filter(|(name, _)| {
-            *name != origin
-                && *name != &self.local_host
-                && msg.clock.get(name) == 0
-        })
-        .map(|(name, sender)| {
-            (name.clone(), Arc::clone(sender), relayed_msg.clone())
-        })
-        .collect()
+#[async_trait]
+pub trait PeerTransport: Send + Sync {
+    async fn connect(&mut self) -> Result<(), String>;
+    async fn disconnect(&mut self) -> Result<(), String>;
+    fn status(&self) -> PeerConnectionStatus;
+    async fn subscribe(&mut self) -> Result<mpsc::Receiver<PeerWireMessage>, String>;
 }
 ```
 
-The caller in `server.rs` calls `prepare_relay()` under the lock, drops the lock, then fans out sends concurrently:
+Concrete senders:
+
+- `ChannelPeerSender`
+  - wraps `mpsc::Sender<PeerWireMessage>`
+  - used by outbound SSH transports
+- `SocketPeerSender`
+  - wraps `mpsc::Sender<Message>`
+  - converts `PeerWireMessage` into `Message::Peer`
+  - used by inbound socket peers
+
+### PeerManager State
+
+| Map | Key | Value | Purpose |
+|-----|-----|-------|---------|
+| `transports` | `ConfigLabel` | `Box<dyn PeerTransport>` | lifecycle management for configured transports |
+| `senders` | `HostName` | `Arc<dyn PeerSender>` | active sender for the canonical peer identity |
+| `transport_peers` | `ConfigLabel` | `HostName` | current config-label -> canonical-host mapping for reconnect/status only |
+| `routes` | `HostName` | `RouteState` | authoritative next-hop state for targeted control traffic |
+| `reverse_paths` | `ReversePathKey` | `ReversePathHop` | transient request-scoped reply routing for `ResyncSnapshot` |
+| `pending_resync_requests` | `ReversePathKey` | `PendingResyncRequest` | requester-owned timeout/cancel tracking for routed resync |
+
+`transport_peers` is not the source of truth for retiring a live connection. A specific connection is retired using its captured `(HostName, generation)`.
+
+### Activation Lifecycle
+
+Both inbound and outbound peers go through the same method:
 
 ```rust
-let relays = pm.prepare_relay(&origin, &msg);
-drop(pm); // release Mutex before async sends
+pub enum ConnectionDirection {
+    Inbound,
+    Outbound,
+}
 
-let futures = relays.into_iter().map(|(name, sender, msg)| async move {
-    if let Err(e) = sender.send(msg).await {
-        warn!(to = %name, err = %e, "failed to relay peer data");
-    }
-});
-futures::future::join_all(futures).await;
+pub struct ConnectionMeta {
+    pub direction: ConnectionDirection,
+    pub config_label: Option<ConfigLabel>,
+    pub expected_peer: Option<HostName>,
+}
+
+pub fn activate_connection(
+    &mut self,
+    host: HostName,
+    sender: Arc<dyn PeerSender>,
+    meta: ConnectionMeta,
+) -> u64
 ```
 
-Apply the same collect-then-send pattern to `send_local_to_peers()`.
+`activate_connection(...)`:
 
-### Dependency
+1. applies the single-active-connection arbitration rule
+2. retires any displaced connection
+3. installs or updates the sender
+4. increments the generation for that canonical host
+5. returns the new generation
 
-Add `futures` (or `futures-util`) to `flotilla-daemon/Cargo.toml`.
+Single-active-connection arbitration rule:
 
-### Files changed
+- there is at most one active connection owner per canonical `HostName`
+- the pairwise initiator rule determines which side is allowed to run the reconnect loop
+- successful duplicate activation for the same canonical `HostName` supersedes the older live
+  connection for that host
+- superseding a connection always retires the displaced reader/writer tasks rather than leaving a
+  stale-but-open standby path behind
 
-- `crates/flotilla-daemon/src/peer/manager.rs` — add `prepare_relay()` method
-- `crates/flotilla-daemon/src/server.rs` — concurrent relay dispatch; concurrent `send_local_to_peers()`
-- `crates/flotilla-daemon/Cargo.toml` — add `futures`
+There is no separate generation-returning `register_sender()` in the final design.
+
+### `send_to()`
+
+`send_to(target_host, msg)` is only for forward targeted peer traffic.
+
+- if `target_host` is directly connected, send to that peer
+- otherwise use `routes[target_host].primary`
+- if neither a direct sender nor a route exists, return an error to the caller
+
+`send_to()` does not send reverse-path replies. `ResyncSnapshot` uses `reverse_paths`.
+
+### Files Changed
+
+- `crates/flotilla-protocol/src/lib.rs`
+  - add `ConfigLabel`, `PROTOCOL_VERSION`, `Message::Hello`, `Message::Peer`
+  - add `PeerWireMessage`, `RoutedPeerMessage`
+- `crates/flotilla-core/src/config/...`
+  - transport config records expected canonical peer `HostName`
+- `crates/flotilla-daemon/src/peer/transport.rs`
+  - add `PeerSender`, remove transport send method
+- `crates/flotilla-daemon/src/peer/manager.rs`
+  - unified sender map
+  - `activate_connection(...)`
+  - `send_to(...)`
+  - route / reverse-path state
+- `crates/flotilla-daemon/src/peer/ssh_transport.rs`
+  - sender channel emits `PeerWireMessage`
+- `crates/flotilla-daemon/src/server.rs`
+  - inbound socket peers use `SocketPeerSender`
+  - route `Message::Peer`
+  - remove `PeerClientMap`
+
+Config migration:
+
+- `hosts.<label>` remains the user-facing `ConfigLabel`
+- existing `hostname` remains the network address / SSH host to dial
+- add `expected_host_name` for the canonical daemon `HostName` used by the
+  pairwise initiator rule, Hello validation, and status/routing identity
 
 ### Tests
 
-Existing relay tests need updating (they called `relay()` directly). The new `prepare_relay()` returns data to assert on — test that the correct peers are included/excluded. Sending behavior is tested via mock senders.
+- `Message::Peer(PeerWireMessage)` serde roundtrips for both `Data` and `Routed` variants
+- relay reaches a registered inbound-only peer sender
+- `send_to()` reaches a socket-only direct peer
+- `send_to()` routes a `RequestResync` to a relayed target via `routes[target].primary`
+- `ResyncSnapshot` returns using reverse-path state rather than ordinary route authority
 
----
+## Routing and Authority
 
-## #259: Protocol version handshake
+### Pairwise Initiator Rule
 
-### Problem
+For peer pair `(A, B)`, only the lexicographically smaller canonical `HostName` initiates the transport connection.
 
-Daemons at different protocol versions silently exchange incompatible data, producing undefined behavior.
+That means:
 
-### Design
+- the smaller host runs the reconnect loop for the pair
+- the larger host accepts inbound from that peer
+- a config that would make the larger host initiate toward the smaller host is quiesced as misconfiguration
 
-Add a new `Message` variant:
+This replaces the earlier reliance on the narrower Phase 1 leader-hub topology.
+
+### Identity Layers
+
+| Layer | Type | Role |
+|-------|------|------|
+| connection config | `ConfigLabel` | user-facing transport label |
+| expected peer identity | `HostName` | configured remote identity for initiation + Hello validation |
+| confirmed peer identity | `HostName` | canonical peer identity after successful Hello |
+
+User-facing semantics:
+
+- transport config / status surfaces show `ConfigLabel`
+- peer state, routing, provenance, and protocol identity use canonical `HostName`
+
+### Route State
 
 ```rust
-#[serde(rename = "hello")]
-Hello {
-    protocol_version: u32,
-    host_name: HostName,
+pub struct RouteHop {
+    pub next_hop: HostName,
+    pub next_hop_generation: u64,
+    pub learned_epoch: u64,
+}
+
+pub struct RouteState {
+    pub primary: RouteHop,
+    pub fallbacks: Vec<RouteHop>,
+    pub candidates: Vec<RouteHop>,
 }
 ```
 
-### Session model
+`RouteState` exists only while at least one viable route exists for that `origin_host`.
+If all routes are lost, remove the whole entry rather than keeping a `None` primary.
 
-The daemon socket is shared between TUI clients and peer connections. `Hello` acts as a **mode switch**: the first message a client sends determines its role.
+`learned_epoch` comes from a single monotonic counter in `PeerManager`:
 
-- If the first message is `Message::Hello` → peer mode. Server responds with its own `Hello`, checks version compatibility, and enters the peer data exchange loop. No non-peer traffic is sent until the `Hello` exchange completes.
-- If the first message is `Message::Request` → normal TUI client. Handled as today, no `Hello` required.
+```rust
+route_epoch: u64
+```
 
-This means `handle_client` reads one message, branches on its type, and enters the appropriate handler loop.
+Every accepted route update increments `route_epoch` and stamps the new `RouteHop`.
+Because `routes` is keyed by canonical `HostName`, route ranking is also host-scoped.
+It must not depend on repo-local `seq` values from unrelated repos on that host.
+Route replacement is ordered by:
 
-### Identity model
+1. direct-route preference over relayed paths
+2. greater `learned_epoch` as the deterministic recency signal for host-level route observations
 
-Each host owns its identity. A host's canonical name comes from its `daemon.toml` `host_name` setting (or OS hostname as fallback), advertised via `Hello.host_name`. This is the `HostName` used for peer messaging state: senders, generations, peer data, dedup clocks, UI display.
+Direct-route priority:
 
-The `hosts.toml` key is a `ConfigLabel` — it names the SSH connection config, not the peer's identity. Once connected, the remote's self-advertised `Hello.host_name` becomes the canonical `HostName` for that peer. If you want a host to appear as "build-box," configure `host_name = "build-box"` in that host's `daemon.toml`.
+- a live direct route to `origin_host` is always `primary`
+- relay paths are only fallbacks or candidates while the direct route exists
+- relay-path ordering uses host-level route observation recency, not repo-level data freshness
 
-Two identity layers, enforced by distinct types:
+### Reverse-Path State
 
-| Layer | Type | Scope | Lifetime |
-|-------|------|-------|----------|
-| **Connection config** | `ConfigLabel` | `transports` map, reconnect loop | Static — exists before Hello |
-| **Peer identity** | `HostName` | `senders`, `peer_data`, `generations`, `last_seen_clocks` | Established at Hello time |
+```rust
+pub struct ReversePathKey {
+    pub request_id: u64,
+    pub requester_host: HostName,
+    pub target_host: HostName,
+    pub repo_identity: RepoIdentity,
+}
 
-For outbound SSH, `PeerManager` stores a mapping (`transport_peers`) from `ConfigLabel` → `HostName` after Hello completes. The reconnect loop uses the `ConfigLabel` to find the transport, performs the handshake, learns the canonical `HostName`, and registers the sender under it. If the canonical name changes on reconnect (remote reconfigured), the old-generation cleanup removes state under the old name, and the new connection registers under the new name.
+pub struct ReversePathHop {
+    pub next_hop: HostName,
+    pub next_hop_generation: u64,
+    pub learned_at: u64,
+}
 
-For inbound socket peers, there is no `ConfigLabel` — only the canonical `HostName` from Hello.
+pub struct PendingResyncRequest {
+    pub deadline_at: Instant,
+}
+```
 
-**Supersede on duplicate identity:** If a Hello arrives with a `host_name` that's already registered (from a different connection), the new connection **supersedes** the old one. `register_sender()` bumps the generation, and the old connection's eventual cleanup no-ops because its generation is stale. This handles the rapid-reconnect case correctly (see #263).
+`request_id` is generated by the requester from a per-process monotonic `u64` counter.
+Generation is stored in `ReversePathHop` so reply routing obeys the same authority model as normal route ownership.
 
-**PeerData messages and provenance:** No `origin_host` validation or rewriting. `PeerDataMessage.origin_host` is accepted as-is. Direct messages carry the connection peer's name; relayed messages carry a third party's name. Both are legitimate. Vector clock dedup prevents replays and loops.
+Reverse-path entries expire on:
 
-Every inbound message is tagged with the forwarding connection's `connection_peer` and `connection_generation` (see #263). If that generation has gone stale, the message is dropped before processing. This applies to both direct and relayed messages. After supersede, the old connection may still have a live reader task, but none of its messages remain authoritative.
+- successful `ResyncSnapshot` delivery
+- local TTL expiry aligned with the request timeout budget
+- disconnect of the stored next hop
+- generation mismatch for the stored next hop
 
-**Relayed data ownership:** `peer_data` remains keyed by `origin_host` (the host the snapshot is about), but each stored snapshot also carries provenance: which connection peer introduced it, and at which generation. Batch 1 keeps a single active snapshot per `(origin_host, repo)`; it does not retain multiple alternate relay paths. If the same `origin_host` snapshot later arrives through a different connection, the newer accepted snapshot replaces the old one and its provenance becomes authoritative. On disconnect, cleanup removes any active snapshots whose provenance matches the disconnecting connection/generation. If another path still exists, that peer will republish and become the new active provenance source.
+Requester-owned timeout/cancel tracking lives in `pending_resync_requests`. The requester
+creates that entry when it emits `RequestResync`; intermediate hops only create
+`reverse_paths`. Requester timeout/cancel removes the local pending request immediately;
+intermediate hops lazily evict their reverse-path entry once its TTL has expired.
 
-### Handshake mechanics
+Intermediate forwarding rules:
 
-**Outbound (SSH transport):** The Hello handshake happens *before* spawning reader/writer tasks. After `connect_socket()` opens the `UnixStream` but before splitting it into read/write halves and spawning tasks:
-1. Write `Message::Hello` as a JSON line to the stream.
-2. Read one JSON line from the stream. If it's a `Hello` with a matching version, proceed to spawn reader/writer tasks. Otherwise, close the stream and return an error.
-3. Return the remote's `Hello.host_name` to the caller. The caller uses this (not the `ConfigLabel`) to register the sender and key all peer state.
+- on receiving `RequestResync` where `target_host != local_host`:
+  - require `remaining_hops > 0`
+  - record `reverse_paths[key]` pointing at the upstream sender and its captured generation
+  - decrement `remaining_hops`
+  - forward the request with `send_to(target_host, PeerWireMessage::Routed(...))`
+- on receiving `RequestResync` where `target_host == local_host`:
+  - produce `ResyncSnapshot`
+- on receiving `ResyncSnapshot` where `requester_host != local_host`:
+  - require `remaining_hops > 0`
+  - look up `reverse_paths[key]`
+  - require the stored `next_hop_generation` to still be current
+  - decrement `remaining_hops`
+  - forward by direct sender lookup to that `next_hop`
+- on receiving `ResyncSnapshot` where `requester_host == local_host`:
+  - require a matching `pending_resync_requests` entry to still exist
+  - clear the matching `pending_resync_requests` entry
+  - apply normal failover-resync acceptance rules
 
-This requires restructuring `connect_socket()`: do the handshake on the raw stream first, then split and spawn tasks.
+Late or abandoned `ResyncSnapshot` replies are dropped if the matching requester-owned
+`pending_resync_requests` entry no longer exists.
 
-**Inbound (socket peer):** In `handle_client`, after reading the first message and identifying it as `Hello`:
-1. Check version. On mismatch, log a warning and close the connection (no error message — the remote sees EOF and will reconnect with backoff).
-2. Respond with the server's own `Hello`.
-3. Register the peer sender (#262) using the advertised `host_name`. If the name is already registered, the new connection supersedes the old one (generation bump per #263).
-4. Enter the peer data forwarding loop. Each forwarded message is tagged with this connection's generation.
+### Trust Model for Third-Party State
 
-This replaces the current implicit peer identification (extracting `origin_host` from the first `PeerData` message).
+Batch 1 has no cryptographic proof for third-party authorship. Therefore:
 
-### Files changed
+- direct self-claims are accepted normally
+- first discovery of an unknown `origin_host` may come from any currently authenticated direct peer
+- once `origin_host` is known, only the current `primary` or `fallbacks` may refresh active state or route ownership
+- unrelated claimants do not become authoritative immediately
 
-- `crates/flotilla-protocol/src/lib.rs` — `PROTOCOL_VERSION` constant, `Message::Hello` variant, `ConfigLabel` newtype
-- `crates/flotilla-daemon/src/peer/ssh_transport.rs` — restructure `connect_socket()` to handshake before spawning tasks; use `ConfigLabel` for transport identity
-- `crates/flotilla-daemon/src/server.rs` — `handle_client` branches on first message type; `Hello` path does version check, responds, registers peer sender, enters peer loop with generation tagging
+Unrelated but valid observations may be stored as `candidates` only.
 
-### Tests
+An eligible candidate is one learned from:
 
-- Serde roundtrip test for `Message::Hello`.
-- Unit test: version mismatch produces error.
-- Integration test in `multi_host.rs`: mock transport that sends wrong version, verify connection fails.
+- a clock-accepted `Snapshot` / `Delta` observation, or
+- a gap-detecting `Delta`
 
----
+and additionally:
 
-## #263: Cleanup race on rapid reconnect
+- its `next_hop_generation` is still current
+- its next hop is still connected
+- it does not conflict with a live direct route
+- it has been validated by one of:
+  - a later authority-accepted state-bearing update through the active route set
+  - a direct connection from `origin_host` itself
+
+Candidates do not refresh active state while the current route set is still healthy.
+Successful routed resync through an untrusted intermediary does not, by itself, promote that
+intermediary to authoritative route ownership.
+
+## #259: Protocol Version Handshake
 
 ### Problem
 
-When a peer disconnects, `clear_peer_data()` removes its stored data and rebuilds overlays. If the peer reconnects quickly and sends new data before cleanup runs, the stale cleanup wipes fresh data. The same race applies to sender cleanup — `unregister_sender()` from an old connection would remove the live sender registered by the new connection.
+Different protocol versions can silently exchange incompatible data.
 
-A related race: after supersede, the old connection's reader task may still be running and forwarding messages. These stale messages must not update peer state, including relayed third-party state.
+### Session Model
+
+The daemon socket is shared between TUI clients and peer connections.
+
+The first inbound message decides the session role:
+
+- `Message::Hello`
+  - peer mode
+- `Message::Request`
+  - normal TUI client
+- anything else
+  - warn and close
+
+No server-originated traffic may be written on that socket until this role switch completes.
+In particular, the daemon must not start event streaming or any other background writer task
+until it has classified the connection as:
+
+- TUI client mode after an initial `Message::Request`, or
+- peer mode after a successful `Message::Hello` handshake
+
+### Handshake
+
+Outbound transport:
+
+1. open raw stream
+2. send `Message::Hello`
+3. read one `Message::Hello`
+4. require matching protocol version
+5. require advertised `host_name` to match the configured expected peer `HostName`
+6. call `activate_connection(...)`
+7. then split the stream and spawn background tasks using the returned generation
+
+Inbound socket peer:
+
+1. read first message
+2. require `Message::Hello`
+3. require matching version
+4. reply with local `Message::Hello`
+5. call `activate_connection(...)`
+6. enter peer-message loop
+
+### Files Changed
+
+- `crates/flotilla-protocol/src/lib.rs`
+  - `Message::Hello`
+- `crates/flotilla-daemon/src/peer/ssh_transport.rs`
+  - pre-split Hello handshake
+- `crates/flotilla-daemon/src/server.rs`
+  - first-message role switch
+  - delay event-stream task startup until the socket has been classified as TUI-client mode
+
+Pairwise initiator enforcement happens before reconnect-loop startup for configured outbound
+transports. If `local_host` is lexicographically larger than `expected_host_name`, keep the
+transport quiesced and warn; do not attempt outbound dialing for that pair.
+
+### Tests
+
+- Hello roundtrip
+- version mismatch rejects connection
+- expected peer `HostName` mismatch rejects connection
+- invalid first-message type closes connection
+- no daemon `Event` is emitted on a fresh socket before Hello/Request classification completes
+
+## #263: Generation-Guarded Ownership and Cleanup
+
+### Problem
+
+Rapid reconnect can let stale cleanup remove the live sender or wipe fresh data. A superseded connection may also keep reading and forwarding messages after it should no longer be authoritative.
 
 ### Design
 
-Add a generation counter to `PeerManager`:
+`PeerManager` tracks:
 
 ```rust
 generations: HashMap<HostName, u64>,
+request_id_counter: u64,
+route_epoch: u64,
+pending_resync_requests: HashMap<ReversePathKey, PendingResyncRequest>,
 ```
 
-`register_sender()` increments the generation for that host and returns the new value. The caller captures this generation at connect time.
+All peer messages arriving from a connection are tagged with:
 
-Each stored peer snapshot gains provenance metadata:
+```rust
+struct InboundPeerEnvelope {
+    msg: PeerWireMessage,
+    connection_generation: u64,
+    connection_peer: HostName,
+}
+```
+
+Generation gating applies to both:
+
+- flooded state messages
+- routed control messages
+
+If the connection generation is stale, drop the message.
+
+`InboundPeerEnvelope` is constructed by the connection-specific reader loop that captured the
+generation returned from `activate_connection(...)`:
+
+- outbound SSH subscriber tasks wrap every received `PeerWireMessage`
+- inbound socket peer loops wrap every decoded `Message::Peer`
+
+The captured generation is immutable per reader task; it must not be looked up dynamically for
+each message.
+
+### Per-Repo State
+
+`PerRepoPeerState` extends the existing struct with provenance and stale tracking:
 
 ```rust
 pub struct PerRepoPeerState {
     pub provider_data: ProviderData,
     pub repo_path: PathBuf,
     pub seq: u64,
-    /// Which connection peer introduced the currently active snapshot.
     pub via_peer: HostName,
-    /// Generation of `via_peer` when this snapshot was accepted.
     pub via_generation: u64,
+    pub stale: bool,
 }
 ```
 
-**Inbound message gating:** The forwarding path (in `server.rs`) tags each inbound `PeerDataMessage` with the connection's generation. A wrapper type carries the tag:
+### State Acceptance
+
+Authority-accepted `Snapshot` / `Delta` messages:
+
+- update repo state for `msg.origin_host`
+- record provenance from the forwarding connection
+- may update route state if the claim passes the trust rules
+- create `routes[msg.origin_host]` on first authority-accepted discovery when no route exists yet
+
+Gap-detecting delta:
+
+- may create or refresh a route candidate
+- may trigger `RequestResync`
+- does not update stored repo state or provenance
+
+Failover-triggered `ResyncSnapshot`:
+
+- may clear `stale`
+- may rebind provenance
+- may do so even when payload and clock match the retained stale snapshot exactly
+
+This exception exists only for explicit failover resync replies.
+
+### Disconnect Cleanup
 
 ```rust
-struct InboundPeerData {
-    msg: PeerDataMessage,
-    /// The generation of the connection that forwarded this message.
-    connection_generation: u64,
-    /// The Hello-established identity of the connection.
-    connection_peer: HostName,
+pub struct DisconnectPlan {
+    pub affected_repos: Vec<RepoIdentity>,
+    pub resync_requests: Vec<RoutedPeerMessage>,
 }
+
+pub fn disconnect_peer(&mut self, name: &HostName, generation: u64) -> DisconnectPlan
 ```
 
-The processing loop checks before accepting: is this generation still current for this peer? If not, drop the message. This applies to all messages from that connection, including relays. This ensures that after supersede, only the new connection's messages are processed — even if the old connection's reader task hasn't stopped yet.
+`disconnect_peer()` returns:
 
-When a message is accepted, the resulting stored state is tagged with `via_peer = connection_peer` and `via_generation = connection_generation`, regardless of whether the message is direct or relayed. The state is still keyed by `msg.origin_host`; provenance is metadata used for authority and cleanup, not the primary storage key.
+- `affected_repos`: repo identities whose overlays / peer-provider views must be rebuilt by the
+  caller after cleanup and/or route promotion
+- `resync_requests`: concrete routed `RequestResync` messages that the caller must dispatch with
+  `send_to(target_host, PeerWireMessage::Routed(...))`
 
-**Disconnect cleanup:** Combine sender and data cleanup into a single generation-guarded method:
+Generation rules:
 
-```rust
-pub fn disconnect_peer(&mut self, name: &HostName, generation: u64) -> Vec<RepoIdentity> {
-    if self.generations.get(name).copied().unwrap_or(0) != generation {
-        debug!(peer = %name, "skipping stale disconnect (generation mismatch)");
-        return vec![];
-    }
-    // Remove sender
-    self.senders.remove(name);
-    // Remove direct peer data for `name`
-    // Remove relayed peer data whose provenance is (via_peer = name,
-    // via_generation = generation)
-    // Remove last-seen clocks owned by that removed state
-}
-```
+- generations start at `1`
+- `0` is invalid and never issued
+- stale disconnects are complete no-ops
 
-Both sender removal and data removal happen atomically under the same generation check. A stale disconnect (from an earlier generation) is a complete no-op — it touches neither the sender nor the data.
+Cleanup behavior is driven by remaining reachability of each `origin_host`, not by whether the lost path was direct or relayed.
 
-`disconnect_peer` removes two classes of state:
+If a path to `origin_host` is lost:
 
-- Direct state keyed by the disconnecting peer's own `HostName`
-- Relayed state for any third-party `origin_host` whose active snapshot provenance is `(via_peer = disconnecting peer, via_generation = disconnecting generation)`
+1. prefer any remaining live direct route
+2. otherwise promote the fallback with greatest `observed_seq`, using `learned_epoch` only as a
+   tie-break among equally fresh paths
+3. otherwise promote the eligible candidate with greatest `observed_seq`, using
+   `learned_epoch` only as a tie-break among equally fresh paths
+4. if a replacement path exists:
+   - retain current snapshot as `stale`
+   - allocate a new `request_id`
+   - record `pending_resync_requests`
+   - return a routed `RequestResync` in `DisconnectPlan.resync_requests`
+5. if no replacement path exists:
+   - remove route
+   - remove active state for that `origin_host`
 
-This gives relayed data a deterministic cleanup path and prevents stale relay paths from leaving orphaned state behind indefinitely.
+### Files Changed
 
-Both peer connection paths capture and use generations:
-
-- **SSH outbound peers:** The reconnect loop in `server.rs` captures the generation from `register_sender()` when the connection establishes. The forwarding task tags messages with this generation. On disconnect, passes that generation to `disconnect_peer()`. A stale cleanup becomes a no-op.
-- **Inbound socket peers:** When `handle_client` registers a socket peer sender via `register_sender()`, it captures the generation. The forwarding loop tags messages with this generation. On client disconnect, it calls `disconnect_peer()` with that generation.
-
-### Files changed
-
-- `crates/flotilla-daemon/src/peer/manager.rs` — `generations` map, `disconnect_peer()` replacing `remove_peer_data()`; generation check method for inbound message gating
-- `crates/flotilla-daemon/src/server.rs` — `InboundPeerData` wrapper; capture generation on both SSH and socket peer connect; tag forwarded messages; gate inbound messages by generation; pass generation to `disconnect_peer()` on disconnect
+- `crates/flotilla-daemon/src/peer/manager.rs`
+  - generations
+  - `request_id_counter`
+  - `route_epoch`
+  - `pending_resync_requests`
+  - `activate_connection(...)`
+  - `disconnect_peer()`
+  - reverse-path cleanup
+- `crates/flotilla-daemon/src/server.rs`
+  - `InboundPeerEnvelope`
+  - generation-tagged forwarding for all peer wire messages
 
 ### Tests
 
-- Register a sender (generation 1), register again (generation 2, simulating reconnect), call `disconnect_peer` with generation 1 — verify neither sender nor data is removed.
-- Register, disconnect with matching generation — verify both sender and data are removed (existing behavior preserved).
-- Verify the sender registered at generation 2 is still functional after stale generation 1 disconnect.
-- Inbound direct message from stale generation is dropped.
-- Inbound relayed message from stale generation is also dropped.
-- Relayed snapshot stores provenance (`via_peer`, `via_generation`) and is removed when that provenance disconnects.
-- Same `origin_host` snapshot received through a new relay path replaces the old active snapshot and updates provenance.
-- Test both paths: SSH reconnect scenario and socket peer reconnect scenario.
+- stale disconnect does not remove live sender or data
+- stale-generation inbound `PeerWireMessage` is dropped
+- direct sender ownership is replaced only through `activate_connection(...)`
+- `disconnect_peer()` returns both overlay rebuilds and routed resync requests
+- failover keeps snapshot `stale` while replacement path exists
+- failover resync may rebind provenance with identical payload/clock
+- generations start at `1`
+
+## #264: Head-of-Line Blocking
+
+### Problem
+
+Flooded relay currently sends sequentially, so one slow peer blocks later peers.
+
+### Design
+
+`prepare_relay()` becomes a pure collection step for flooded state messages only:
+
+```rust
+pub fn prepare_relay(&self, origin: &HostName, msg: &PeerDataMessage)
+    -> Vec<(HostName, Arc<dyn PeerSender>, PeerWireMessage)>
+```
+
+It:
+
+- clones sender refs while holding the lock
+- stamps the local host into the vector clock
+- applies only vector-clock relay filtering
+
+Route trust does not affect flood forwarding. It only affects local acceptance.
+
+Callers:
+
+1. collect under lock
+2. drop lock
+3. `join_all` concurrent sends
+
+Apply the same pattern to local flooded fanout.
+
+### Files Changed
+
+- `crates/flotilla-daemon/src/peer/manager.rs`
+  - `prepare_relay()`
+- `crates/flotilla-daemon/src/server.rs`
+  - concurrent flood dispatch
+- `crates/flotilla-daemon/Cargo.toml`
+  - `futures` / `futures-util`
+
+### Tests
+
+- flooded relay includes / excludes the right peers by clock
+- slow peer does not block later peers
+- node may relay a flooded state message that it does not locally accept
