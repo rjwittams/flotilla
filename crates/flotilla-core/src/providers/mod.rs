@@ -322,13 +322,19 @@ macro_rules! http_execute {
         let __label = $crate::providers::http_channel_label_with::<
             { $crate::providers::REPLAY_LABELS_ENABLED },
             _,
-        >(__request.method().as_str(), __request.url().as_str(), &$labeler);
+        >(
+            __request.method().as_str(),
+            __request.url().as_str(),
+            &$labeler,
+        );
         $http.execute(__request, &__label).await
     }};
     ($http:expr, $request:expr $(,)?) => {{
         let __request = $request;
-        let __label =
-            $crate::providers::http_channel_label(__request.method().as_str(), __request.url().as_str());
+        let __label = $crate::providers::http_channel_label(
+            __request.method().as_str(),
+            __request.url().as_str(),
+        );
         $http.execute(__request, &__label).await
     }};
 }
@@ -527,8 +533,28 @@ mod tests {
     }
 
     #[test]
+    fn gh_api_label_disabled_skips_labeler() {
+        let label = gh_api_channel_label_with::<false, _>("GET", "repos/a/b/issues", &PanicLabeler);
+        assert_eq!(label, ChannelLabel::Noop);
+    }
+
+    #[test]
     fn http_label_enabled_uses_labeler() {
-        let label = http_channel_label_with::<true, _>("POST", "https://api.example.com/v1", &TaskId("http"));
+        let label = http_channel_label_with::<true, _>(
+            "POST",
+            "https://api.example.com/v1",
+            &TaskId("http"),
+        );
         assert_eq!(label, ChannelLabel::Http("http".to_string()));
+    }
+
+    #[test]
+    fn http_label_disabled_skips_labeler() {
+        let label = http_channel_label_with::<false, _>(
+            "POST",
+            "https://api.example.com/v1",
+            &PanicLabeler,
+        );
+        assert_eq!(label, ChannelLabel::Noop);
     }
 }
