@@ -40,7 +40,6 @@ pub struct SshTransport {
     local_socket_path: PathBuf,
     ssh_process: Option<tokio::process::Child>,
     status: PeerConnectionStatus,
-    inbound_tx: Option<mpsc::Sender<PeerDataMessage>>,
     /// Receiver for inbound peer data, produced by `connect_socket()` and
     /// returned once via `subscribe()`.
     inbound_rx: Option<mpsc::Receiver<PeerDataMessage>>,
@@ -64,7 +63,6 @@ impl SshTransport {
             local_socket_path,
             ssh_process: None,
             status: PeerConnectionStatus::Disconnected,
-            inbound_tx: None,
             inbound_rx: None,
             outbound_tx: None,
             task_handles: Vec::new(),
@@ -160,7 +158,6 @@ impl SshTransport {
 
         // Inbound: reader task → inbound channel → subscriber
         let (inbound_tx, inbound_rx) = mpsc::channel::<PeerDataMessage>(CHANNEL_BUFFER);
-        self.inbound_tx = Some(inbound_tx.clone());
 
         // Outbound: send() → outbound channel → writer task
         let (outbound_tx, outbound_rx) = mpsc::channel::<PeerDataMessage>(CHANNEL_BUFFER);
@@ -333,7 +330,6 @@ impl PeerTransport for SshTransport {
         self.abort_tasks();
 
         // Drop channels
-        self.inbound_tx = None;
         self.inbound_rx = None;
         self.outbound_tx = None;
 
