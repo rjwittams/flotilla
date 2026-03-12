@@ -8,6 +8,9 @@
 pub mod detectors;
 pub mod factories;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
