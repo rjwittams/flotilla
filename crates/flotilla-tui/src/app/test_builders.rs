@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use flotilla_protocol::{
-    CheckoutRef, RepoInfo, RepoLabels, WorkItem, WorkItemIdentity, WorkItemKind,
+    CheckoutRef, HostName, HostPath, RepoInfo, RepoLabels, WorkItem, WorkItemIdentity, WorkItemKind,
 };
 
 pub fn bare_item() -> WorkItem {
@@ -46,13 +46,14 @@ pub fn issue_item(id: impl Into<String>) -> WorkItem {
 }
 
 pub fn checkout_item(branch: &str, path: &str, is_main: bool) -> WorkItem {
+    let host_path = HostPath::new(HostName::local(), PathBuf::from(path));
     WorkItem {
         kind: WorkItemKind::Checkout,
-        identity: WorkItemIdentity::Checkout(PathBuf::from(path)),
+        identity: WorkItemIdentity::Checkout(host_path.clone()),
         branch: Some(branch.into()),
         description: format!("checkout {branch}"),
         checkout: Some(CheckoutRef {
-            key: PathBuf::from(path),
+            key: host_path,
             is_main_checkout: is_main,
         }),
         change_request_key: None,

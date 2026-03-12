@@ -758,7 +758,10 @@ mod tests {
         snap2.work_items = vec![checkout_item("feat", "/wt", false)];
         let mut different_providers = ProviderData::default();
         different_providers.checkouts.insert(
-            PathBuf::from("/wt"),
+            flotilla_protocol::HostPath::new(
+                flotilla_protocol::HostName::new("test-host"),
+                PathBuf::from("/wt"),
+            ),
             flotilla_protocol::Checkout {
                 branch: "feat".into(),
                 is_trunk: false,

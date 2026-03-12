@@ -52,6 +52,73 @@ impl fmt::Display for HostPath {
     }
 }
 
+impl std::str::FromStr for HostPath {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Format: "host:path" — split on the first colon
+        if let Some((host, path)) = s.split_once(':') {
+            Ok(Self {
+                host: HostName::new(host),
+                path: PathBuf::from(path),
+            })
+        } else {
+            Err(format!("invalid HostPath: expected 'host:path', got '{s}'"))
+        }
+    }
+}
+
+/// Serde helpers for `IndexMap<HostPath, V>` — serializes keys as `"host:path"` strings
+/// so they work as JSON object keys.
+pub mod host_path_map {
+    use super::HostPath;
+    use indexmap::IndexMap;
+    use serde::de::{self, Deserializer, MapAccess, Visitor};
+    use serde::ser::{SerializeMap, Serializer};
+    use serde::{Deserialize, Serialize};
+    use std::fmt;
+    use std::marker::PhantomData;
+
+    pub fn serialize<V, S>(map: &IndexMap<HostPath, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        V: Serialize,
+        S: Serializer,
+    {
+        let mut m = serializer.serialize_map(Some(map.len()))?;
+        for (k, v) in map {
+            m.serialize_entry(&k.to_string(), v)?;
+        }
+        m.end()
+    }
+
+    pub fn deserialize<'de, V, D>(deserializer: D) -> Result<IndexMap<HostPath, V>, D::Error>
+    where
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        struct MapVisitor<V>(PhantomData<V>);
+
+        impl<'de, V: Deserialize<'de>> Visitor<'de> for MapVisitor<V> {
+            type Value = IndexMap<HostPath, V>;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a map with HostPath string keys")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut access: M) -> Result<Self::Value, M::Error> {
+                let mut map = IndexMap::with_capacity(access.size_hint().unwrap_or(0));
+                while let Some((key_str, value)) = access.next_entry::<String, V>()? {
+                    let key: HostPath = key_str.parse().map_err(de::Error::custom)?;
+                    map.insert(key, value);
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(MapVisitor(PhantomData))
+    }
+}
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepoIdentity {
     pub authority: String,
@@ -226,8 +293,7 @@ mod tests {
     #[test]
     fn repo_identity_different_authorities() {
         let gh = RepoIdentity::from_remote_url("git@github.com:team/project.git").unwrap();
-        let gl =
-            RepoIdentity::from_remote_url("git@gitlab.company.com:team/project.git").unwrap();
+        let gl = RepoIdentity::from_remote_url("git@gitlab.company.com:team/project.git").unwrap();
         assert_ne!(gh, gl);
     }
 

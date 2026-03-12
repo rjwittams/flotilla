@@ -140,9 +140,11 @@ impl GitCheckoutManager {
         is_trunk: bool,
         default_branch: &str,
     ) -> (PathBuf, Checkout) {
+        let host_path =
+            flotilla_protocol::HostPath::new(flotilla_protocol::HostName::local(), path);
         let correlation_keys = vec![
             CorrelationKey::Branch(branch.to_string()),
-            CorrelationKey::CheckoutPath(path.to_path_buf()),
+            CorrelationKey::CheckoutPath(host_path),
         ];
 
         let trunk_ref = format!("HEAD...{default_branch}");

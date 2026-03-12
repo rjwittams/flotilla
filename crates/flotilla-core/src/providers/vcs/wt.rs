@@ -66,9 +66,11 @@ struct WtCommit {
 impl WtWorktree {
     fn into_checkout(self) -> (PathBuf, Checkout) {
         let path = self.path;
+        let host_path =
+            flotilla_protocol::HostPath::new(flotilla_protocol::HostName::local(), path.clone());
         let correlation_keys = vec![
             CorrelationKey::Branch(self.branch.clone()),
-            CorrelationKey::CheckoutPath(path.clone()),
+            CorrelationKey::CheckoutPath(host_path),
         ];
         (
             path,
@@ -412,7 +414,12 @@ mod tests {
             .contains(&CorrelationKey::Branch("feature/foo".to_string())));
         assert!(co_feat
             .correlation_keys
-            .contains(&CorrelationKey::CheckoutPath(path_feat.clone())));
+            .contains(&CorrelationKey::CheckoutPath(
+                flotilla_protocol::HostPath::new(
+                    flotilla_protocol::HostName::local(),
+                    path_feat.clone()
+                ),
+            )));
 
         session.finish();
     }

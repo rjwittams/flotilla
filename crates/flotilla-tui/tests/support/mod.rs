@@ -196,8 +196,13 @@ fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
 
 // ── Provider data builders (unique to snapshot tests) ───────────────────
 
-pub fn make_checkout(branch: &str, path: &str, is_trunk: bool) -> (PathBuf, Checkout) {
-    let key = PathBuf::from(path);
+pub fn make_checkout(
+    branch: &str,
+    path: &str,
+    is_trunk: bool,
+) -> (flotilla_protocol::HostPath, Checkout) {
+    let key =
+        flotilla_protocol::HostPath::new(flotilla_protocol::HostName::local(), PathBuf::from(path));
     let checkout = Checkout {
         branch: branch.to_string(),
         is_trunk,

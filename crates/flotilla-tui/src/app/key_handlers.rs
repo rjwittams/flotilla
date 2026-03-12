@@ -478,8 +478,12 @@ mod tests {
         checkout_item, key, setup_selectable_table as setup_table, stub_app,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use flotilla_protocol::{CheckoutStatus, Command, WorkItemIdentity};
+    use flotilla_protocol::{CheckoutStatus, Command, HostName, HostPath, WorkItemIdentity};
     use std::path::PathBuf;
+
+    fn hp(path: &str) -> HostPath {
+        HostPath::new(HostName::local(), PathBuf::from(path))
+    }
     use tui_input::Input;
 
     fn make_work_item(id: &str) -> flotilla_protocol::WorkItem {
@@ -653,7 +657,7 @@ mod tests {
         setup_table(&mut app, vec![make_work_item("a")]);
         app.active_ui_mut()
             .multi_selected
-            .insert(WorkItemIdentity::Checkout(PathBuf::from("/tmp/a")));
+            .insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
         assert!(!app.active_ui().multi_selected.is_empty());
         app.handle_key(key(KeyCode::Esc));
         assert!(app.active_ui().multi_selected.is_empty());
@@ -1267,10 +1271,10 @@ mod tests {
         // Multi-select both items
         app.active_ui_mut()
             .multi_selected
-            .insert(WorkItemIdentity::Checkout(PathBuf::from("/tmp/a")));
+            .insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
         app.active_ui_mut()
             .multi_selected
-            .insert(WorkItemIdentity::Checkout(PathBuf::from("/tmp/b")));
+            .insert(WorkItemIdentity::Checkout(hp("/tmp/b")));
 
         app.action_enter();
 
@@ -1302,7 +1306,7 @@ mod tests {
 
         app.active_ui_mut()
             .multi_selected
-            .insert(WorkItemIdentity::Checkout(PathBuf::from("/tmp/a")));
+            .insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
 
         app.action_enter();
 

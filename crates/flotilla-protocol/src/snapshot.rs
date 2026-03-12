@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::host::HostPath;
 use crate::provider_data::{Issue, ProviderData};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,8 +98,8 @@ pub struct WorkItem {
 }
 
 impl WorkItem {
-    pub fn checkout_key(&self) -> Option<&Path> {
-        self.checkout.as_ref().map(|co| co.key.as_path())
+    pub fn checkout_key(&self) -> Option<&HostPath> {
+        self.checkout.as_ref().map(|co| &co.key)
     }
 }
 
@@ -113,7 +114,7 @@ pub enum WorkItemKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum WorkItemIdentity {
-    Checkout(PathBuf),
+    Checkout(HostPath),
     ChangeRequest(String),
     Session(String),
     Issue(String),
@@ -122,15 +123,20 @@ pub enum WorkItemIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutRef {
-    pub key: PathBuf,
+    pub key: HostPath,
     pub is_main_checkout: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::HostName;
     use crate::provider_data::ProviderData;
     use crate::test_helpers::assert_json_roundtrip;
+
+    fn hp(path: &str) -> HostPath {
+        HostPath::new(HostName::new("test-host"), PathBuf::from(path))
+    }
 
     #[test]
     fn category_labels_defaults_and_capitalization() {
@@ -237,11 +243,11 @@ mod tests {
             work_items: vec![
                 WorkItem {
                     kind: WorkItemKind::Checkout,
-                    identity: WorkItemIdentity::Checkout(PathBuf::from("/repos/project/wt")),
+                    identity: WorkItemIdentity::Checkout(hp("/repos/project/wt")),
                     branch: Some("feat-x".into()),
                     description: "Feature X".into(),
                     checkout: Some(CheckoutRef {
-                        key: PathBuf::from("/repos/project/wt"),
+                        key: hp("/repos/project/wt"),
                         is_main_checkout: false,
                     }),
                     change_request_key: None,
@@ -309,11 +315,11 @@ mod tests {
             },
             WorkItem {
                 kind: WorkItemKind::Checkout,
-                identity: WorkItemIdentity::Checkout(PathBuf::from("/wt")),
+                identity: WorkItemIdentity::Checkout(hp("/wt")),
                 branch: Some("main".into()),
                 description: "Main".into(),
                 checkout: Some(CheckoutRef {
-                    key: PathBuf::from("/repos/main"),
+                    key: hp("/repos/main"),
                     is_main_checkout: true,
                 }),
                 change_request_key: Some("PR#1".into()),
@@ -337,7 +343,7 @@ mod tests {
         let without_checkout = &cases[0];
         assert!(without_checkout.checkout_key().is_none());
         let with_checkout = &cases[1];
-        assert_eq!(with_checkout.checkout_key(), Some(Path::new("/repos/main")));
+        assert_eq!(with_checkout.checkout_key(), Some(&hp("/repos/main")));
     }
 
     #[test]
@@ -371,7 +377,7 @@ mod tests {
         }
 
         let identities = vec![
-            WorkItemIdentity::Checkout(PathBuf::from("/path/to/wt")),
+            WorkItemIdentity::Checkout(hp("/path/to/wt")),
             WorkItemIdentity::ChangeRequest("PR#99".into()),
             WorkItemIdentity::Session("sess-abc".into()),
             WorkItemIdentity::Issue("GH-42".into()),
@@ -386,11 +392,11 @@ mod tests {
     fn checkout_ref_roundtrip_covers_both_boolean_values() {
         let cases = vec![
             CheckoutRef {
-                key: PathBuf::from("/repos/proj/wt-1"),
+                key: hp("/repos/proj/wt-1"),
                 is_main_checkout: true,
             },
             CheckoutRef {
-                key: PathBuf::from("/tmp/wt"),
+                key: hp("/tmp/wt"),
                 is_main_checkout: false,
             },
         ];

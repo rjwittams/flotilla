@@ -502,7 +502,7 @@ fn build_item_row<'a>(
     let branch_width = col_widths.get(4).copied().unwrap_or(25) as usize;
 
     let path_display = if let Some(p) = item.checkout_key() {
-        ui_helpers::shorten_path(p, repo_root, path_width)
+        ui_helpers::shorten_path(&p.path, repo_root, path_width)
     } else if let Some(ref ses_key) = item.session_key {
         ses_key.clone()
     } else {
@@ -624,7 +624,7 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
 
         if let Some(wt_key) = item.checkout_key() {
             if let Some(co) = providers.checkouts.get(wt_key) {
-                lines.push(format!("Path: {}", wt_key.display()));
+                lines.push(format!("Path: {}", wt_key.path.display()));
                 if let Some(commit) = &co.last_commit {
                     let sha = if commit.short_sha.is_empty() {
                         "?"

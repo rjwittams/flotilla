@@ -270,7 +270,16 @@ async fn refresh_providers(
         }
     }
 
-    pd.checkouts = checkouts.into_iter().collect();
+    let local_host = flotilla_protocol::HostName::local();
+    pd.checkouts = checkouts
+        .into_iter()
+        .map(|(path, co)| {
+            (
+                flotilla_protocol::HostPath::new(local_host.clone(), path),
+                co,
+            )
+        })
+        .collect();
     collect_errors(&mut errors, "checkouts", checkout_errors);
 
     pd.change_requests = crs.into_iter().collect();

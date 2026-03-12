@@ -67,7 +67,12 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
 
                 let correlation_keys: Vec<CorrelationKey> = directories
                     .iter()
-                    .map(|d| CorrelationKey::CheckoutPath(d.clone()))
+                    .map(|d| {
+                        CorrelationKey::CheckoutPath(flotilla_protocol::HostPath::new(
+                            flotilla_protocol::HostName::local(),
+                            d.clone(),
+                        ))
+                    })
                     .collect();
 
                 Some((
@@ -250,7 +255,12 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
         let directories = vec![config.working_directory.clone()];
         let correlation_keys = directories
             .iter()
-            .map(|d| CorrelationKey::CheckoutPath(d.clone()))
+            .map(|d| {
+                CorrelationKey::CheckoutPath(flotilla_protocol::HostPath::new(
+                    flotilla_protocol::HostName::local(),
+                    d.clone(),
+                ))
+            })
             .collect();
 
         info!(workspace = %config.name, %ws_ref, "cmux: workspace ready");

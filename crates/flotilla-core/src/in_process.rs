@@ -1143,9 +1143,13 @@ mod tests {
     #[test]
     fn collect_linked_issue_ids_deduplicates_across_sources() {
         let mut providers = ProviderData::default();
-        providers
-            .checkouts
-            .insert(PathBuf::from("/tmp/repo"), checkout_with_issue("123"));
+        providers.checkouts.insert(
+            flotilla_protocol::HostPath::new(
+                flotilla_protocol::HostName::new("test-host"),
+                PathBuf::from("/tmp/repo"),
+            ),
+            checkout_with_issue("123"),
+        );
         providers
             .change_requests
             .insert("1".into(), cr_with_issue("123"));

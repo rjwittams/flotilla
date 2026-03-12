@@ -1,10 +1,8 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ChangeRequest, Checkout, CloudAgentSession, Issue, ProviderError, WorkItem, WorkItemIdentity,
-    Workspace,
+    ChangeRequest, Checkout, CloudAgentSession, HostPath, Issue, ProviderError, WorkItem,
+    WorkItemIdentity, Workspace,
 };
 
 /// Operation on a keyed collection entry.
@@ -36,7 +34,7 @@ pub struct Branch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Change {
     Checkout {
-        key: PathBuf,
+        key: HostPath,
         op: EntryOp<Checkout>,
     },
     ChangeRequest {
@@ -86,6 +84,12 @@ pub struct DeltaEntry {
 mod tests {
     use super::*;
     use crate::test_helpers::{assert_json_roundtrip, assert_roundtrip};
+    use crate::HostName;
+    use std::path::PathBuf;
+
+    fn hp(path: &str) -> HostPath {
+        HostPath::new(HostName::new("test-host"), PathBuf::from(path))
+    }
 
     #[test]
     fn entry_op_added_roundtrip() {
@@ -109,7 +113,7 @@ mod tests {
     #[test]
     fn change_checkout_roundtrip() {
         let change = Change::Checkout {
-            key: PathBuf::from("/repos/wt-1"),
+            key: hp("/repos/wt-1"),
             op: EntryOp::Added(Checkout {
                 branch: "feat-x".into(),
                 is_trunk: false,

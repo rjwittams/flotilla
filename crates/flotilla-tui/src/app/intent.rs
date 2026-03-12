@@ -86,7 +86,7 @@ impl Intent {
             Intent::CreateWorkspace => {
                 item.checkout_key()
                     .map(|p| Command::CreateWorkspaceForCheckout {
-                        checkout_path: p.to_path_buf(),
+                        checkout_path: p.path.clone(),
                     })
             }
             Intent::RemoveCheckout => {
@@ -94,7 +94,7 @@ impl Intent {
                     return None;
                 }
                 let branch = item.branch.as_ref()?.to_string();
-                let checkout_path = item.checkout_key().map(|p| p.to_path_buf());
+                let checkout_path = item.checkout_key().map(|p| p.path.clone());
                 let change_request_id = item.change_request_key.clone();
                 Some(Command::FetchCheckoutStatus {
                     branch,
@@ -168,7 +168,7 @@ impl Intent {
                 item.session_key.as_ref().map(|k| Command::TeleportSession {
                     session_id: k.clone(),
                     branch: item.branch.clone(),
-                    checkout_key: item.checkout_key().map(|p| p.to_path_buf()),
+                    checkout_key: item.checkout_key().map(|p| p.path.clone()),
                 })
             }
             Intent::ArchiveSession => item.session_key.as_ref().map(|k| Command::ArchiveSession {
@@ -209,7 +209,7 @@ mod tests {
     use crate::app::test_support::{
         bare_item, checkout_item, pr_item, remote_branch_item, session_item, stub_app,
     };
-    use flotilla_protocol::{CategoryLabels, CheckoutRef, RepoLabels};
+    use flotilla_protocol::{CategoryLabels, CheckoutRef, HostName, HostPath, RepoLabels};
     use std::path::PathBuf;
 
     // ── Helpers ──
@@ -659,7 +659,7 @@ mod tests {
         let mut item = pr_item("42");
         // Even with a checkout path, the kind check prevents resolve
         item.checkout = Some(CheckoutRef {
-            key: PathBuf::from("/tmp/pr-co"),
+            key: HostPath::new(HostName::new("test-host"), PathBuf::from("/tmp/pr-co")),
             is_main_checkout: false,
         });
         assert!(Intent::RemoveCheckout.resolve(&item, &app).is_none());
@@ -827,7 +827,7 @@ mod tests {
         let app = stub_app();
         let mut item = session_item("sess-42");
         item.checkout = Some(CheckoutRef {
-            key: PathBuf::from("/tmp/co"),
+            key: HostPath::new(HostName::new("test-host"), PathBuf::from("/tmp/co")),
             is_main_checkout: false,
         });
         let cmd = Intent::TeleportSession.resolve(&item, &app);
@@ -916,7 +916,7 @@ mod tests {
                 provider_display_name: String::new(),
             },
         );
-        let co_path = PathBuf::from("/tmp/feat-x");
+        let co_path = HostPath::new(HostName::local(), PathBuf::from("/tmp/feat-x"));
         providers.checkouts.insert(
             co_path.clone(),
             Checkout {

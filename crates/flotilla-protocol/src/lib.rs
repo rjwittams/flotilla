@@ -176,6 +176,10 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
+    fn hp(path: &str) -> HostPath {
+        HostPath::new(HostName::new("test-host"), PathBuf::from(path))
+    }
+
     #[test]
     fn message_request_roundtrip() {
         let msg = Message::Request {
@@ -257,11 +261,11 @@ mod tests {
             repo: PathBuf::from("/tmp/my-repo"),
             work_items: vec![WorkItem {
                 kind: WorkItemKind::Checkout,
-                identity: WorkItemIdentity::Checkout(PathBuf::from("/tmp/my-repo/wt")),
+                identity: WorkItemIdentity::Checkout(hp("/tmp/my-repo/wt")),
                 branch: Some("feature-x".to_string()),
                 description: "Feature X".to_string(),
                 checkout: Some(CheckoutRef {
-                    key: PathBuf::from("/tmp/my-repo/wt"),
+                    key: hp("/tmp/my-repo/wt"),
                     is_main_checkout: false,
                 }),
                 change_request_key: Some("PR#10".to_string()),

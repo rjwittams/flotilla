@@ -133,8 +133,8 @@ impl CorrelationResult {
         }
     }
 
-    pub fn checkout_key(&self) -> Option<&Path> {
-        self.checkout().map(|co| co.key.as_path())
+    pub fn checkout_key(&self) -> Option<&flotilla_protocol::HostPath> {
+        self.checkout().map(|co| &co.key)
     }
 
     pub fn is_main_checkout(&self) -> bool {
@@ -422,7 +422,10 @@ pub fn correlate(providers: &ProviderData) -> (Vec<CorrelationResult>, Vec<Corre
         )];
         if !terminal.working_directory.as_os_str().is_empty() {
             keys.push(crate::providers::types::CorrelationKey::CheckoutPath(
-                terminal.working_directory.clone(),
+                flotilla_protocol::HostPath::new(
+                    flotilla_protocol::HostName::local(),
+                    terminal.working_directory.clone(),
+                ),
             ));
         }
         items.push(CorrelatedItem {
@@ -474,8 +477,8 @@ pub fn correlate(providers: &ProviderData) -> (Vec<CorrelationResult>, Vec<Corre
         }
 
         // Also link issues via association keys on checkouts (from git config)
-        if let Some(co_key) = work_item.checkout_key().map(|p| p.to_path_buf()) {
-            if let Some(co) = providers.checkouts.get(&co_key) {
+        if let Some(co_key) = work_item.checkout_key() {
+            if let Some(co) = providers.checkouts.get(co_key) {
                 let issue_ids: Vec<String> = co
                     .association_keys
                     .iter()
@@ -794,6 +797,13 @@ mod tests {
     use crate::providers::types::*;
     use std::path::PathBuf;
 
+    fn hp(path: &str) -> flotilla_protocol::HostPath {
+        flotilla_protocol::HostPath::new(
+            flotilla_protocol::HostName::new("test-host"),
+            PathBuf::from(path),
+        )
+    }
+
     // -----------------------------------------------------------------------
     // Helper: build a minimal CorrelatedWorkItem with sensible defaults
     // -----------------------------------------------------------------------
@@ -817,7 +827,7 @@ mod tests {
             branch: branch.map(|s| s.to_string()),
             description: branch.unwrap_or("").to_string(),
             ..correlated(CorrelatedAnchor::Checkout(CheckoutRef {
-                key: PathBuf::from(path),
+                key: hp(path),
                 is_main_checkout: is_main,
             }))
         })
@@ -852,7 +862,6 @@ mod tests {
     }
 
     fn make_checkout(branch: &str, path: &str, is_trunk: bool) -> Checkout {
-        let p = PathBuf::from(path);
         Checkout {
             branch: branch.to_string(),
             is_trunk,
@@ -862,7 +871,7 @@ mod tests {
             last_commit: None,
             correlation_keys: vec![
                 CorrelationKey::Branch(branch.to_string()),
-                CorrelationKey::CheckoutPath(p),
+                CorrelationKey::CheckoutPath(hp(path)),
             ],
             association_keys: vec![],
         }
@@ -1121,7 +1130,7 @@ mod tests {
     fn checkout_returns_some_for_checkout_anchor() {
         let wi = checkout_item("/tmp/wt", Some("main"), true);
         let co = wi.checkout().expect("should return checkout");
-        assert_eq!(co.key, PathBuf::from("/tmp/wt"));
+        assert_eq!(co.key, hp("/tmp/wt"));
         assert!(co.is_main_checkout);
     }
 
@@ -1136,7 +1145,7 @@ mod tests {
     #[test]
     fn checkout_key_returns_path() {
         let wi = checkout_item("/repos/proj", None, false);
-        assert_eq!(wi.checkout_key(), Some(Path::new("/repos/proj")));
+        assert_eq!(wi.checkout_key(), Some(&hp("/repos/proj")));
     }
 
     #[test]
@@ -1176,7 +1185,7 @@ mod tests {
         let wi = CorrelationResult::Correlated(CorrelatedWorkItem {
             linked_change_request: Some("99".to_string()),
             ..correlated(CorrelatedAnchor::Checkout(CheckoutRef {
-                key: PathBuf::from("/tmp/wt"),
+                key: hp("/tmp/wt"),
                 is_main_checkout: false,
             }))
         });
@@ -1204,7 +1213,7 @@ mod tests {
         let wi = CorrelationResult::Correlated(CorrelatedWorkItem {
             linked_session: Some("linked-sess".to_string()),
             ..correlated(CorrelatedAnchor::Checkout(CheckoutRef {
-                key: PathBuf::from("/tmp/wt"),
+                key: hp("/tmp/wt"),
                 is_main_checkout: false,
             }))
         });
@@ -1225,7 +1234,7 @@ mod tests {
         let wi = CorrelationResult::Correlated(CorrelatedWorkItem {
             linked_issues: vec!["10".to_string(), "20".to_string()],
             ..correlated(CorrelatedAnchor::Checkout(CheckoutRef {
-                key: PathBuf::from("/tmp/wt"),
+                key: hp("/tmp/wt"),
                 is_main_checkout: false,
             }))
         });
@@ -1253,7 +1262,7 @@ mod tests {
         let wi = CorrelationResult::Correlated(CorrelatedWorkItem {
             workspace_refs: vec!["ws-1".to_string()],
             ..correlated(CorrelatedAnchor::Checkout(CheckoutRef {
-                key: PathBuf::from("/tmp/wt"),
+                key: hp("/tmp/wt"),
                 is_main_checkout: false,
             }))
         });
@@ -1310,10 +1319,7 @@ mod tests {
     #[test]
     fn identity_checkout() {
         let wi = checkout_item("/tmp/foo", None, false);
-        assert_eq!(
-            wi.identity(),
-            WorkItemIdentity::Checkout(PathBuf::from("/tmp/foo"))
-        );
+        assert_eq!(wi.identity(), WorkItemIdentity::Checkout(hp("/tmp/foo")));
     }
 
     #[test]
@@ -1364,10 +1370,9 @@ mod tests {
     #[test]
     fn correlate_single_checkout() {
         let mut providers = new_providers();
-        providers.checkouts.insert(
-            PathBuf::from("/tmp/feat"),
-            make_checkout("feat", "/tmp/feat", false),
-        );
+        providers
+            .checkouts
+            .insert(hp("/tmp/feat"), make_checkout("feat", "/tmp/feat", false));
 
         let (items, groups) = correlate(&providers);
         assert_eq!(items.len(), 1);
@@ -1379,10 +1384,9 @@ mod tests {
     #[test]
     fn correlate_trunk_checkout_marked_as_main() {
         let mut providers = new_providers();
-        providers.checkouts.insert(
-            PathBuf::from("/tmp/main"),
-            make_checkout("main", "/tmp/main", true),
-        );
+        providers
+            .checkouts
+            .insert(hp("/tmp/main"), make_checkout("main", "/tmp/main", true));
 
         let (items, _) = correlate(&providers);
         assert_eq!(items.len(), 1);
@@ -1393,7 +1397,7 @@ mod tests {
     fn correlate_checkout_and_pr_merge_on_branch() {
         let mut providers = new_providers();
         providers.checkouts.insert(
-            PathBuf::from("/tmp/feat-x"),
+            hp("/tmp/feat-x"),
             make_checkout("feat-x", "/tmp/feat-x", false),
         );
         providers.change_requests.insert(
@@ -1414,7 +1418,7 @@ mod tests {
     fn correlate_checkout_pr_session_merge_on_branch() {
         let mut providers = new_providers();
         providers.checkouts.insert(
-            PathBuf::from("/tmp/feat-y"),
+            hp("/tmp/feat-y"),
             make_checkout("feat-y", "/tmp/feat-y", false),
         );
         providers.change_requests.insert(
@@ -1519,7 +1523,7 @@ mod tests {
         let mut providers = new_providers();
         // A checkout on branch "feat-z"
         providers.checkouts.insert(
-            PathBuf::from("/tmp/feat-z"),
+            hp("/tmp/feat-z"),
             make_checkout("feat-z", "/tmp/feat-z", false),
         );
         // Same branch also in remote
@@ -1556,10 +1560,9 @@ mod tests {
     #[test]
     fn correlate_pr_links_issue_via_association_key() {
         let mut providers = new_providers();
-        providers.checkouts.insert(
-            PathBuf::from("/tmp/feat"),
-            make_checkout("feat", "/tmp/feat", false),
-        );
+        providers
+            .checkouts
+            .insert(hp("/tmp/feat"), make_checkout("feat", "/tmp/feat", false));
         let mut cr = make_change_request("5", "Impl feature", "feat");
         cr.association_keys
             .push(AssociationKey::IssueRef("gh".to_string(), "77".to_string()));
@@ -1582,7 +1585,7 @@ mod tests {
     fn checkout_association_keys_link_issues() {
         let mut providers = new_providers();
 
-        let co_path = PathBuf::from("/tmp/feat-x");
+        let co_path = hp("/tmp/feat-x");
         let mut co = make_checkout("feat-x", "/tmp/feat-x", false);
         co.association_keys
             .push(AssociationKey::IssueRef("github".into(), "42".into()));
@@ -1627,7 +1630,7 @@ mod tests {
     #[test]
     fn correlate_workspace_linked_to_checkout() {
         let mut providers = new_providers();
-        let co_path = PathBuf::from("/tmp/feat-ws");
+        let co_path = hp("/tmp/feat-ws");
         providers.checkouts.insert(
             co_path.clone(),
             make_checkout("feat-ws", "/tmp/feat-ws", false),
@@ -1637,7 +1640,7 @@ mod tests {
             make_workspace(
                 "ws-1",
                 "dev-session",
-                vec![co_path.clone()],
+                vec![co_path.path.clone()],
                 vec![CorrelationKey::CheckoutPath(co_path)],
             ),
         );
@@ -1650,10 +1653,9 @@ mod tests {
     #[test]
     fn correlate_description_prefers_pr_title() {
         let mut providers = new_providers();
-        providers.checkouts.insert(
-            PathBuf::from("/tmp/feat"),
-            make_checkout("feat", "/tmp/feat", false),
-        );
+        providers
+            .checkouts
+            .insert(hp("/tmp/feat"), make_checkout("feat", "/tmp/feat", false));
         providers.change_requests.insert(
             "1".to_string(),
             make_change_request("1", "My PR Title", "feat"),
@@ -1670,10 +1672,9 @@ mod tests {
     #[test]
     fn correlate_description_falls_back_to_session_title() {
         let mut providers = new_providers();
-        providers.checkouts.insert(
-            PathBuf::from("/tmp/feat"),
-            make_checkout("feat", "/tmp/feat", false),
-        );
+        providers
+            .checkouts
+            .insert(hp("/tmp/feat"), make_checkout("feat", "/tmp/feat", false));
         providers.sessions.insert(
             "s1".to_string(),
             make_session("s1", "Session Title", Some("feat")),
@@ -1687,7 +1688,7 @@ mod tests {
     fn correlate_description_falls_back_to_branch() {
         let mut providers = new_providers();
         providers.checkouts.insert(
-            PathBuf::from("/tmp/my-branch"),
+            hp("/tmp/my-branch"),
             make_checkout("my-branch", "/tmp/my-branch", false),
         );
 
@@ -1699,7 +1700,7 @@ mod tests {
     fn correlate_multiple_items_sharing_branch_merge() {
         let mut providers = new_providers();
         providers.checkouts.insert(
-            PathBuf::from("/tmp/shared"),
+            hp("/tmp/shared"),
             make_checkout("shared-branch", "/tmp/shared", false),
         );
         providers.change_requests.insert(
@@ -1722,14 +1723,12 @@ mod tests {
     #[test]
     fn correlate_two_checkouts_stay_separate() {
         let mut providers = new_providers();
-        providers.checkouts.insert(
-            PathBuf::from("/tmp/a"),
-            make_checkout("branch-a", "/tmp/a", false),
-        );
-        providers.checkouts.insert(
-            PathBuf::from("/tmp/b"),
-            make_checkout("branch-b", "/tmp/b", false),
-        );
+        providers
+            .checkouts
+            .insert(hp("/tmp/a"), make_checkout("branch-a", "/tmp/a", false));
+        providers
+            .checkouts
+            .insert(hp("/tmp/b"), make_checkout("branch-b", "/tmp/b", false));
 
         let (items, _) = correlate(&providers);
         assert_eq!(items.len(), 2);
@@ -2103,10 +2102,10 @@ mod tests {
         // trunk checkout
         providers
             .checkouts
-            .insert(PathBuf::from("/repo"), make_checkout("main", "/repo", true));
+            .insert(hp("/repo"), make_checkout("main", "/repo", true));
         // feature checkout + PR
         providers.checkouts.insert(
-            PathBuf::from("/repo.feat"),
+            hp("/repo.feat"),
             make_checkout("feat-login", "/repo.feat", false),
         );
         providers.change_requests.insert(

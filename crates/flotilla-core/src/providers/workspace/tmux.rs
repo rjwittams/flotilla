@@ -140,7 +140,12 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
 
                 if let Some(window) = state.windows.get(name) {
                     let path = PathBuf::from(&window.working_directory);
-                    correlation_keys.push(CorrelationKey::CheckoutPath(path.clone()));
+                    correlation_keys.push(CorrelationKey::CheckoutPath(
+                        flotilla_protocol::HostPath::new(
+                            flotilla_protocol::HostName::local(),
+                            path.clone(),
+                        ),
+                    ));
                     directories.push(path);
                 }
 
@@ -274,7 +279,12 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
         let directories = vec![config.working_directory.clone()];
         let correlation_keys = directories
             .iter()
-            .map(|d| CorrelationKey::CheckoutPath(d.clone()))
+            .map(|d| {
+                CorrelationKey::CheckoutPath(flotilla_protocol::HostPath::new(
+                    flotilla_protocol::HostName::local(),
+                    d.clone(),
+                ))
+            })
             .collect();
 
         info!(workspace = %config.name, "tmux: workspace ready");

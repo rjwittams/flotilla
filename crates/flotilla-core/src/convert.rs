@@ -111,14 +111,18 @@ pub fn snapshot_to_proto(repo: &Path, seq: u64, refresh: &RefreshSnapshot) -> Sn
 mod tests {
     use super::*;
     use crate::data::{CorrelatedAnchor, CorrelatedWorkItem, StandaloneResult};
-    use flotilla_protocol::{WorkItemIdentity, WorkItemKind};
+    use flotilla_protocol::{HostName, HostPath, WorkItemIdentity, WorkItemKind};
     use std::path::PathBuf;
+
+    fn hp(path: &str) -> HostPath {
+        HostPath::new(HostName::new("test-host"), PathBuf::from(path))
+    }
 
     #[test]
     fn convert_correlated_checkout() {
         let item = CorrelationResult::Correlated(CorrelatedWorkItem {
             anchor: CorrelatedAnchor::Checkout(CheckoutRef {
-                key: PathBuf::from("/repos/my-project/wt-1"),
+                key: hp("/repos/my-project/wt-1"),
                 is_main_checkout: false,
             }),
             branch: Some("feature-login".to_string()),
@@ -136,13 +140,13 @@ mod tests {
         assert_eq!(proto.kind, WorkItemKind::Checkout);
         assert_eq!(
             proto.identity,
-            WorkItemIdentity::Checkout(PathBuf::from("/repos/my-project/wt-1"))
+            WorkItemIdentity::Checkout(hp("/repos/my-project/wt-1"))
         );
         assert_eq!(proto.branch.as_deref(), Some("feature-login"));
         assert_eq!(proto.description, "Implement login flow");
 
         let checkout = proto.checkout.expect("should have checkout ref");
-        assert_eq!(checkout.key, PathBuf::from("/repos/my-project/wt-1"));
+        assert_eq!(checkout.key, hp("/repos/my-project/wt-1"));
         assert!(!checkout.is_main_checkout);
 
         assert_eq!(proto.change_request_key.as_deref(), Some("PR#55"));
@@ -179,7 +183,7 @@ mod tests {
         let hostname = gethostname::gethostname().to_string_lossy().into_owned();
         let item = CorrelationResult::Correlated(CorrelatedWorkItem {
             anchor: CorrelatedAnchor::Checkout(CheckoutRef {
-                key: PathBuf::from("/repos/proj/wt"),
+                key: hp("/repos/proj/wt"),
                 is_main_checkout: false,
             }),
             branch: Some("feat".to_string()),
