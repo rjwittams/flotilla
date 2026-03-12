@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-03-11-cmux-cross-window-workspace-discovery-design.md`
 
+**Status:** Implemented in PR #248 (`codex/cmux-cross-window-workspace-discovery`).
+
 ---
 
 ## Chunk 1: Parser And Aggregation Changes

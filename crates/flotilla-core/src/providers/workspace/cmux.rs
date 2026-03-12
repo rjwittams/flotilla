@@ -43,10 +43,15 @@ impl CmuxWorkspaceManager {
         let windows = parsed["windows"]
             .as_array()
             .ok_or("cmux list-windows: response missing 'windows' array")?;
-        Ok(windows
-            .iter()
-            .filter_map(|window| window["ref"].as_str().map(ToString::to_string))
-            .collect())
+        let mut refs = Vec::new();
+        for window in windows {
+            if let Some(window_ref) = window["ref"].as_str() {
+                refs.push(window_ref.to_string());
+            } else {
+                warn!(window = %window, "cmux: skipping window without ref");
+            }
+        }
+        Ok(refs)
     }
 
     fn parse_workspaces(output: &str) -> Result<Vec<(String, Workspace)>, String> {
@@ -348,10 +353,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_workspaces_parses_json_response() {
-        let output =
-            r#"{"workspaces":[{"ref":"workspace:10","title":"Main","directories":["/tmp/repo","/tmp/repo2"]}]}"#;
-        let workspaces =
-            CmuxWorkspaceManager::parse_workspaces(output).expect("parse workspaces");
+        let output = r#"{"workspaces":[{"ref":"workspace:10","title":"Main","directories":["/tmp/repo","/tmp/repo2"]}]}"#;
+        let workspaces = CmuxWorkspaceManager::parse_workspaces(output).expect("parse workspaces");
         assert_eq!(workspaces.len(), 1);
         let (ws_ref, ws) = &workspaces[0];
         assert_eq!(ws_ref, "workspace:10");
@@ -438,7 +441,10 @@ mod tests {
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].0, "workspace:10");
         assert_eq!(workspaces[0].1.name, "Main");
-        assert_eq!(workspaces[0].1.directories, vec![PathBuf::from("/tmp/repo-a")]);
+        assert_eq!(
+            workspaces[0].1.directories,
+            vec![PathBuf::from("/tmp/repo-a")]
+        );
     }
 
     #[tokio::test]
