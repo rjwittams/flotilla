@@ -420,6 +420,21 @@ impl InProcessDaemon {
             .map(|(id, _)| id.clone())
     }
 
+    /// Get the local-only provider data for a repo (without peer overlay).
+    ///
+    /// Used by the outbound replication task to send only this host's
+    /// authoritative data to peers, avoiding echo-back of merged peer data.
+    pub async fn get_local_providers(&self, repo: &Path) -> Option<(ProviderData, u64)> {
+        let repos = self.repos.read().await;
+        let state = repos.get(repo)?;
+        let providers = inject_issues(
+            &state.last_snapshot.providers,
+            &state.issue_cache,
+            &state.search_results,
+        );
+        Some((providers, state.seq))
+    }
+
     /// Update the peer provider data overlay for a repo and trigger re-broadcast.
     ///
     /// Called by the DaemonServer when PeerManager receives updated peer data.

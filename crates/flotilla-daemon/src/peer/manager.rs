@@ -289,6 +289,15 @@ impl PeerManager {
         &self.peers
     }
 
+    /// Send a message to a specific peer by name.
+    pub async fn send_to(&self, name: &HostName, msg: PeerDataMessage) -> Result<(), String> {
+        let transport = self
+            .peers
+            .get(name)
+            .ok_or_else(|| format!("unknown peer: {name}"))?;
+        transport.send(msg).await
+    }
+
     /// Reconnect a specific peer: disconnect, then connect + subscribe.
     ///
     /// Returns the new inbound receiver on success.

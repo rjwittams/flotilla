@@ -189,7 +189,6 @@ impl DaemonServer {
         let outbound_peer_manager = Arc::clone(&peer_manager);
         let peer_data_tx_for_ssh = peer_data_tx.clone();
         let peer_daemon = Arc::clone(&daemon);
-        let peer_clients_for_task = Arc::clone(&peer_clients);
         tokio::spawn(async move {
             if let Some(mut rx) = peer_data_rx {
                 // Connect all peers and collect initial receivers into a map
@@ -263,7 +262,10 @@ impl DaemonServer {
                     });
                 }
 
-                // Process inbound peer data
+                // Process inbound peer data.
+                // Persistent clock for reply messages (resync responses).
+                let mut reply_clock = flotilla_protocol::VectorClock::default();
+
                 while let Some(msg) = rx.recv().await {
                     let origin = msg.origin_host.clone();
                     let repo_path = msg.repo_path.clone();
@@ -347,55 +349,59 @@ impl DaemonServer {
                             repo,
                             since_seq: _,
                         } => {
-                            // Send our local data back to the requesting peer
                             let local_host = pm.local_host().clone();
-                            drop(pm);
 
+                            // Send local-only providers (not merged) back to requesting peer
                             if let Some(local_path) = peer_daemon.find_repo_by_identity(&repo).await
                             {
-                                if let Ok(snapshot) = peer_daemon.get_state(&local_path).await {
-                                    let mut clock = flotilla_protocol::VectorClock::default();
-                                    clock.tick(&local_host);
+                                if let Some((local_providers, seq)) =
+                                    peer_daemon.get_local_providers(&local_path).await
+                                {
+                                    reply_clock.tick(&local_host);
                                     let response = PeerDataMessage {
                                         origin_host: local_host,
                                         repo_identity: repo,
                                         repo_path,
-                                        clock,
+                                        clock: reply_clock.clone(),
                                         kind: flotilla_protocol::PeerDataKind::Snapshot {
-                                            data: Box::new(snapshot.providers),
-                                            seq: snapshot.seq,
+                                            data: Box::new(local_providers),
+                                            seq,
                                         },
                                     };
-                                    // Send back to the requesting peer
-                                    let clients = peer_clients_for_task.lock().await;
-                                    if let Some(sender) = clients.get(&from) {
-                                        let _ = sender
-                                            .send(Message::PeerData(Box::new(response)))
-                                            .await;
+                                    // Send via PeerManager transport (works for SSH peers)
+                                    if let Err(e) = pm.send_to(&from, response).await {
+                                        warn!(
+                                            peer = %from,
+                                            err = %e,
+                                            "failed to send resync response"
+                                        );
                                     }
                                 }
                             }
+                            drop(pm);
                         }
                         HandleResult::NeedsResync { from, repo } => {
-                            // Send RequestResync to the origin peer
                             let local_host = pm.local_host().clone();
-                            drop(pm);
 
-                            let mut clock = flotilla_protocol::VectorClock::default();
-                            clock.tick(&local_host);
+                            reply_clock.tick(&local_host);
                             let request = PeerDataMessage {
                                 origin_host: local_host,
                                 repo_identity: repo,
                                 repo_path,
-                                clock,
+                                clock: reply_clock.clone(),
                                 kind: flotilla_protocol::PeerDataKind::RequestResync {
                                     since_seq: 0,
                                 },
                             };
-                            let clients = peer_clients_for_task.lock().await;
-                            if let Some(sender) = clients.get(&from) {
-                                let _ = sender.send(Message::PeerData(Box::new(request))).await;
+                            // Send via PeerManager transport (works for SSH peers)
+                            if let Err(e) = pm.send_to(&from, request).await {
+                                warn!(
+                                    peer = %from,
+                                    err = %e,
+                                    "failed to send resync request"
+                                );
                             }
+                            drop(pm);
                         }
                         HandleResult::Ignored => {}
                     }
@@ -403,37 +409,48 @@ impl DaemonServer {
             }
         });
 
-        // Spawn outbound task: forward local snapshots to peers as PeerDataMessages
+        // Spawn outbound task: forward local snapshots to peers as PeerDataMessages.
+        // Uses local-only providers (no peer overlay) to avoid echoing peer data back.
+        // Maintains a persistent vector clock so each message has a strictly increasing clock.
         let outbound_daemon = Arc::clone(&daemon);
         tokio::spawn(async move {
             let mut event_rx = outbound_daemon.subscribe();
+            let mut outbound_clock = flotilla_protocol::VectorClock::default();
+            let host_name = outbound_daemon.host_name().clone();
+
             loop {
                 match event_rx.recv().await {
                     Ok(DaemonEvent::SnapshotFull(snapshot)) => {
                         let repo_path = snapshot.repo.clone();
-                        let host_name = outbound_daemon.host_name().clone();
 
                         // Look up RepoIdentity for this repo
-                        if let Some(identity) =
+                        let Some(identity) =
                             outbound_daemon.find_identity_for_path(&repo_path).await
-                        {
-                            let mut clock = flotilla_protocol::VectorClock::default();
-                            clock.tick(&host_name);
-                            let msg = PeerDataMessage {
-                                origin_host: host_name,
-                                repo_identity: identity,
-                                repo_path,
-                                clock,
-                                kind: flotilla_protocol::PeerDataKind::Snapshot {
-                                    data: Box::new(snapshot.providers),
-                                    seq: snapshot.seq,
-                                },
-                            };
-                            let pm = outbound_peer_manager.lock().await;
-                            // Send to all peers
-                            for transport in pm.peers().values() {
-                                let _ = transport.send(msg.clone()).await;
-                            }
+                        else {
+                            continue;
+                        };
+
+                        // Get local-only providers to avoid sending merged peer data
+                        let Some((local_providers, seq)) =
+                            outbound_daemon.get_local_providers(&repo_path).await
+                        else {
+                            continue;
+                        };
+
+                        outbound_clock.tick(&host_name);
+                        let msg = PeerDataMessage {
+                            origin_host: host_name.clone(),
+                            repo_identity: identity,
+                            repo_path,
+                            clock: outbound_clock.clone(),
+                            kind: flotilla_protocol::PeerDataKind::Snapshot {
+                                data: Box::new(local_providers),
+                                seq,
+                            },
+                        };
+                        let pm = outbound_peer_manager.lock().await;
+                        for transport in pm.peers().values() {
+                            let _ = transport.send(msg.clone()).await;
                         }
                     }
                     Ok(_) => {} // Ignore non-snapshot events
