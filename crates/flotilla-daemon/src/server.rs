@@ -493,7 +493,7 @@ impl DaemonServer {
                                             request_id,
                                             requester_host: local_host,
                                             target_host: from.clone(),
-                                            remaining_hops: 8,
+                                            remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
                                             repo_identity: repo,
                                             since_seq: 0,
                                         },
