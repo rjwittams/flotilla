@@ -202,14 +202,25 @@ impl ShpoolTerminalPool {
         // Send SIGTERM
         let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
         if rc != 0 {
-            tracing::warn!(%pid, "failed to send SIGTERM to shpool daemon");
-            let _ = std::fs::remove_file(socket_path);
-            let _ = std::fs::remove_file(&pid_path);
+            // ESRCH = process already dead, safe to clean up.
+            // EPERM = alive but can't signal — leave socket so start_daemon reuses it.
+            if !Self::is_process_alive(pid) {
+                tracing::debug!(%pid, "shpool daemon already dead, cleaning up");
+                let _ = std::fs::remove_file(socket_path);
+                let _ = std::fs::remove_file(&pid_path);
+            } else {
+                tracing::warn!(%pid, "cannot signal shpool daemon, keeping existing");
+            }
             return;
         }
 
-        // Wait for process to exit (up to 2s)
+        // Wait for process to exit (up to 2s).
+        // If the daemon was started in this same process (same-session config
+        // restart), it becomes a zombie after SIGTERM until reaped. waitpid
+        // with WNOHANG reaps it so is_process_alive sees it as dead. If the
+        // daemon is not our child, waitpid returns ECHILD which we ignore.
         for _ in 0..20 {
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
             if !Self::is_process_alive(pid) {
                 tracing::debug!(%pid, "shpool daemon exited after SIGTERM");
                 let _ = std::fs::remove_file(socket_path);
@@ -219,9 +230,10 @@ impl ShpoolTerminalPool {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        tracing::warn!(%pid, "shpool daemon did not exit within 2s after SIGTERM");
-        let _ = std::fs::remove_file(socket_path);
-        let _ = std::fs::remove_file(&pid_path);
+        // Daemon still alive after timeout — leave socket in place so
+        // start_daemon() reuses the existing daemon rather than racing
+        // a second one against it.
+        tracing::warn!(%pid, "shpool daemon did not exit within 2s after SIGTERM, keeping existing");
     }
 
     #[cfg(not(unix))]
@@ -665,6 +677,42 @@ mod tests {
 
         // Socket should still be removed (best-effort cleanup)
         assert!(!socket_path.exists(), "socket should be removed");
+    }
+
+    #[tokio::test]
+    async fn stop_daemon_sigterms_live_process() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let socket_path = dir.path().join("shpool.socket");
+        let pid_path = dir.path().join("daemonized-shpool.pid");
+
+        // Spawn a real process that will respond to SIGTERM
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep process");
+        let pid = child.id();
+
+        std::fs::write(&socket_path, b"").expect("create fake socket");
+        std::fs::write(&pid_path, pid.to_string()).expect("write pid file");
+
+        ShpoolTerminalPool::stop_daemon(&socket_path).await;
+
+        assert!(
+            !socket_path.exists(),
+            "socket should be removed after SIGTERM"
+        );
+        assert!(
+            !pid_path.exists(),
+            "pid file should be removed after SIGTERM"
+        );
+        // Process should be dead
+        assert!(
+            !ShpoolTerminalPool::is_process_alive(pid as i32),
+            "process should be dead after SIGTERM"
+        );
     }
 
     /// Create a ShpoolTerminalPool via the async factory method.
