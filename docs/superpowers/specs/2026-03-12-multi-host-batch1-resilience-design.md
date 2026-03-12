@@ -161,10 +161,17 @@ This means `handle_client` reads one message, branches on its type, and enters t
 
 ### Identity rule
 
-Peers are keyed by `HostName` throughout the system (senders, transports, generations). One authoritative rule:
+Peers are keyed by `HostName` throughout the system (senders, transports, generations, peer data, dedup clocks). One authoritative identity per connection, established at Hello time:
 
 - **Outbound (SSH) peers:** the *configured* name (from `hosts.toml`) is authoritative. The `Hello.host_name` from the remote is logged but not used for keying. If it differs from the configured name, log a warning. This prevents a misconfigured remote from hijacking another peer's identity.
 - **Inbound (socket) peers:** the *self-advertised* `Hello.host_name` is authoritative, since there is no prior configuration for them.
+
+**Enforcement on PeerData messages:** After identity is established, all `PeerDataMessage.origin_host` values on that connection must be validated against the authoritative name:
+
+- **Outbound SSH:** rewrite `origin_host` to the configured name before processing. The remote may legitimately use a different self-name, but our system keys everything by the configured name.
+- **Inbound socket:** reject (drop with warning) any message whose `origin_host` differs from the `Hello.host_name`. A peer must not impersonate another host.
+
+This ensures cleanup (`disconnect_peer`), dedup (`last_seen_clocks`), resync (`send_to`), and relay all use a single consistent key per connection.
 
 ### Handshake mechanics
 
@@ -175,10 +182,10 @@ Peers are keyed by `HostName` throughout the system (senders, transports, genera
 This requires restructuring `connect_socket()`: do the handshake on the raw stream first, then split and spawn tasks.
 
 **Inbound (socket peer):** In `handle_client`, after reading the first message and identifying it as `Hello`:
-1. Check version. On mismatch, send an error response and close.
+1. Check version. On mismatch, log a warning and close the connection (no error message — the remote sees EOF and will reconnect with backoff).
 2. Respond with the server's own `Hello`.
 3. Register the peer sender (#262) using the advertised `host_name`.
-4. Enter the peer data forwarding loop (suppressing all other output until this point).
+4. Enter the peer data forwarding loop (suppressing all other output until this point). Validate `origin_host` on each `PeerData` message per the identity rule above.
 
 This replaces the current implicit peer identification (extracting `origin_host` from the first `PeerData` message).
 
