@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use flotilla_protocol::{HostName, PeerDataKind, PeerDataMessage, ProviderData, RepoIdentity};
+use flotilla_protocol::{
+    HostName, PeerDataKind, PeerDataMessage, ProviderData, RepoIdentity, VectorClock,
+};
 
 use super::transport::PeerTransport;
 
@@ -53,6 +56,9 @@ pub struct PeerManager {
     /// RepoIdentity values that exist only on remote peers — no local repo
     /// matches. Each maps to the synthetic path used for tab identity.
     known_remote_repos: HashMap<RepoIdentity, PathBuf>,
+    /// Last-seen vector clock per (origin_host, repo_identity) — used to
+    /// detect and drop duplicate / already-seen messages.
+    last_seen_clocks: HashMap<(HostName, RepoIdentity), VectorClock>,
 }
 
 impl PeerManager {
@@ -63,6 +69,7 @@ impl PeerManager {
             peers: HashMap::new(),
             peer_data: HashMap::new(),
             known_remote_repos: HashMap::new(),
+            last_seen_clocks: HashMap::new(),
         }
     }
 
@@ -87,6 +94,26 @@ impl PeerManager {
             debug!(host = %origin, "ignoring peer data from self");
             return HandleResult::Ignored;
         }
+
+        // Vector clock dedup: drop if the incoming clock is dominated by
+        // (i.e. ≤ in every entry) our last-seen clock for this origin+repo.
+        let dedup_key = (origin.clone(), repo.clone());
+        if let Some(last_seen) = self.last_seen_clocks.get(&dedup_key) {
+            if msg.clock.dominated_by(last_seen) {
+                debug!(
+                    origin = %origin,
+                    repo = %repo,
+                    "dropping duplicate peer message (clock dominated)"
+                );
+                return HandleResult::Ignored;
+            }
+        }
+
+        // Update last-seen clock (merge to handle concurrent paths)
+        self.last_seen_clocks
+            .entry(dedup_key)
+            .or_default()
+            .merge(&msg.clock);
 
         match msg.kind {
             PeerDataKind::Snapshot { data, seq } => {
@@ -144,13 +171,21 @@ impl PeerManager {
     }
 
     /// Forward a message to all connected peers except the origin.
+    ///
+    /// Before forwarding, the local host's entry in the vector clock is
+    /// incremented so downstream receivers can detect duplicates if the
+    /// message arrives via multiple paths.
     pub async fn relay(&self, origin: &HostName, msg: &PeerDataMessage) {
+        // Stamp our own host into the clock before relaying
+        let mut relayed_msg = msg.clone();
+        relayed_msg.clock.tick(&self.local_host);
+
         for (name, transport) in &self.peers {
             if name == origin || name == &self.local_host {
                 continue;
             }
 
-            match transport.send(msg.clone()).await {
+            match transport.send(relayed_msg.clone()).await {
                 Ok(()) => {
                     debug!(
                         from = %origin,
@@ -171,19 +206,37 @@ impl PeerManager {
         }
     }
 
+    /// Accessor for the local host name.
+    pub fn local_host(&self) -> &HostName {
+        &self.local_host
+    }
+
     /// Accessor for all stored peer data — used by the merge layer.
     pub fn get_peer_data(&self) -> &HashMap<HostName, HashMap<RepoIdentity, PerRepoPeerState>> {
         &self.peer_data
     }
 
-    /// Connect all registered peer transports.
-    pub async fn connect_all(&mut self) {
+    /// Connect all registered peer transports and return inbound receivers.
+    ///
+    /// For each successfully connected peer, calls `subscribe()` to obtain the
+    /// inbound message receiver. The caller should spawn forwarding tasks that
+    /// feed these receivers into the shared `peer_data_tx` channel.
+    pub async fn connect_all(&mut self) -> Vec<(HostName, mpsc::Receiver<PeerDataMessage>)> {
         let names: Vec<HostName> = self.peers.keys().cloned().collect();
+        let mut receivers = Vec::new();
         for name in names {
             if let Some(transport) = self.peers.get_mut(&name) {
                 match transport.connect().await {
                     Ok(()) => {
                         info!(peer = %name, "peer transport connected");
+                        match transport.subscribe().await {
+                            Ok(rx) => {
+                                receivers.push((name.clone(), rx));
+                            }
+                            Err(e) => {
+                                warn!(peer = %name, err = %e, "failed to subscribe to peer");
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!(peer = %name, err = %e, "failed to connect peer transport");
@@ -191,6 +244,7 @@ impl PeerManager {
                 }
             }
         }
+        receivers
     }
 
     /// Disconnect all registered peer transports.
@@ -228,6 +282,30 @@ impl PeerManager {
     /// Accessor for all known remote-only repos and their synthetic paths.
     pub fn known_remote_repos(&self) -> &HashMap<RepoIdentity, PathBuf> {
         &self.known_remote_repos
+    }
+
+    /// Iterate over all registered peer transports.
+    pub fn peers(&self) -> &HashMap<HostName, Box<dyn PeerTransport>> {
+        &self.peers
+    }
+
+    /// Reconnect a specific peer: disconnect, then connect + subscribe.
+    ///
+    /// Returns the new inbound receiver on success.
+    pub async fn reconnect_peer(
+        &mut self,
+        name: &HostName,
+    ) -> Result<mpsc::Receiver<PeerDataMessage>, String> {
+        let transport = self
+            .peers
+            .get_mut(name)
+            .ok_or_else(|| format!("unknown peer: {name}"))?;
+
+        // Best-effort disconnect before reconnecting
+        let _ = transport.disconnect().await;
+
+        transport.connect().await?;
+        transport.subscribe().await
     }
 }
 
@@ -294,10 +372,15 @@ mod tests {
     }
 
     fn snapshot_msg(origin: &str, seq: u64) -> PeerDataMessage {
+        let mut clock = VectorClock::default();
+        for _ in 0..seq {
+            clock.tick(&HostName::new(origin));
+        }
         PeerDataMessage {
             origin_host: HostName::new(origin),
             repo_identity: test_repo(),
             repo_path: PathBuf::from("/home/dev/repo"),
+            clock,
             kind: PeerDataKind::Snapshot {
                 data: Box::new(ProviderData::default()),
                 seq,
@@ -347,6 +430,7 @@ mod tests {
             origin_host: HostName::new("remote"),
             repo_identity: test_repo(),
             repo_path: PathBuf::from("/home/dev/repo"),
+            clock: VectorClock::default(),
             kind: PeerDataKind::RequestResync { since_seq: 3 },
         };
 
@@ -372,6 +456,7 @@ mod tests {
             origin_host: HostName::new("remote"),
             repo_identity: test_repo(),
             repo_path: PathBuf::from("/home/dev/repo"),
+            clock: VectorClock::default(),
             kind: PeerDataKind::Delta {
                 changes: vec![Change::Branch {
                     key: "feat-x".into(),

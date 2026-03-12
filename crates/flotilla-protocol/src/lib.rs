@@ -6,7 +6,7 @@ pub mod provider_data;
 pub mod snapshot;
 
 pub use host::{HostName, HostPath, RepoIdentity};
-pub use peer::{PeerDataKind, PeerDataMessage};
+pub use peer::{PeerDataKind, PeerDataMessage, VectorClock};
 
 #[cfg(test)]
 pub(crate) mod test_helpers {

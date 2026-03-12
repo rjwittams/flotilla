@@ -41,6 +41,9 @@ pub struct SshTransport {
     ssh_process: Option<tokio::process::Child>,
     status: PeerConnectionStatus,
     inbound_tx: Option<mpsc::Sender<PeerDataMessage>>,
+    /// Receiver for inbound peer data, produced by `connect_socket()` and
+    /// returned once via `subscribe()`.
+    inbound_rx: Option<mpsc::Receiver<PeerDataMessage>>,
     outbound_tx: Option<mpsc::Sender<PeerDataMessage>>,
     /// Holds JoinHandles for the reader and writer background tasks so we can
     /// abort them on disconnect.
@@ -62,6 +65,7 @@ impl SshTransport {
             ssh_process: None,
             status: PeerConnectionStatus::Disconnected,
             inbound_tx: None,
+            inbound_rx: None,
             outbound_tx: None,
             task_handles: Vec::new(),
         }
@@ -311,9 +315,12 @@ impl PeerTransport for SshTransport {
         self.wait_for_socket().await.inspect_err(|_| {
             self.cleanup_socket();
         })?;
-        self.connect_socket().await.inspect_err(|_| {
+        let rx = self.connect_socket().await.inspect_err(|_| {
             self.cleanup_socket();
         })?;
+
+        // Store the inbound receiver for subscribe() to return
+        self.inbound_rx = Some(rx);
 
         self.status = PeerConnectionStatus::Connected;
         info!(host = %self.host_name, "peer connection established");
@@ -325,8 +332,9 @@ impl PeerTransport for SshTransport {
 
         self.abort_tasks();
 
-        // Drop channel senders
+        // Drop channels
         self.inbound_tx = None;
+        self.inbound_rx = None;
         self.outbound_tx = None;
 
         self.kill_ssh().await;
@@ -341,19 +349,15 @@ impl PeerTransport for SshTransport {
     }
 
     async fn subscribe(&mut self) -> Result<mpsc::Receiver<PeerDataMessage>, String> {
-        // If we're already connected and have an inbound_tx, create a new
-        // receiver by replacing the channel. For simplicity, we reconnect
-        // the socket to get a fresh inbound channel.
         if self.status != PeerConnectionStatus::Connected {
             return Err("not connected".to_string());
         }
 
-        // Re-establish the socket connection to get a fresh inbound channel.
-        // First abort existing tasks.
-        self.abort_tasks();
-
-        let rx = self.connect_socket().await?;
-        Ok(rx)
+        // Return the receiver from connect(). This is a one-shot call —
+        // the receiver is produced during connect() and consumed here.
+        self.inbound_rx
+            .take()
+            .ok_or_else(|| "already subscribed (receiver already taken)".to_string())
     }
 
     async fn send(&self, msg: PeerDataMessage) -> Result<(), String> {
@@ -439,6 +443,7 @@ mod tests {
                 path: "owner/repo".into(),
             },
             repo_path: PathBuf::from("/tmp/repo"),
+            clock: flotilla_protocol::VectorClock::default(),
             kind: flotilla_protocol::PeerDataKind::RequestResync { since_seq: 0 },
         };
 

@@ -21,6 +21,7 @@ use flotilla_daemon::peer::merge::merge_provider_data;
 use flotilla_daemon::peer::{HandleResult, PeerConnectionStatus, PeerManager, PeerTransport};
 use flotilla_protocol::{
     Checkout, HostName, HostPath, PeerDataKind, PeerDataMessage, ProviderData, RepoIdentity,
+    VectorClock,
 };
 
 // ---------------------------------------------------------------------------
@@ -95,10 +96,15 @@ fn make_checkout(branch: &str) -> Checkout {
 }
 
 fn snapshot_msg(origin: &str, seq: u64, data: ProviderData) -> PeerDataMessage {
+    let mut clock = VectorClock::default();
+    for _ in 0..seq {
+        clock.tick(&HostName::new(origin));
+    }
     PeerDataMessage {
         origin_host: HostName::new(origin),
         repo_identity: test_repo(),
         repo_path: PathBuf::from("/home/dev/repo"),
+        clock,
         kind: PeerDataKind::Snapshot {
             data: Box::new(data),
             seq,
@@ -504,6 +510,7 @@ fn delta_message_returns_needs_resync() {
         origin_host: HostName::new("follower"),
         repo_identity: test_repo(),
         repo_path: PathBuf::from("/home/dev/repo"),
+        clock: VectorClock::default(),
         kind: PeerDataKind::Delta {
             changes: vec![Change::Branch {
                 key: "feat-x".into(),
@@ -538,7 +545,8 @@ async fn follower_mode_has_only_local_providers() {
     std::fs::create_dir_all(repo.join(".git")).expect("create .git dir");
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new_with_options(vec![repo], config, true).await;
+    let daemon =
+        InProcessDaemon::new_with_options(vec![repo], config, true, HostName::local()).await;
 
     assert!(daemon.is_follower(), "daemon should be in follower mode");
 

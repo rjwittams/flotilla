@@ -5,7 +5,7 @@ use std::sync::Arc;
 use flotilla_core::config::ConfigStore;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::in_process::InProcessDaemon;
-use flotilla_protocol::{Command, DaemonEvent, ProviderData};
+use flotilla_protocol::{Command, DaemonEvent, HostName, ProviderData};
 
 async fn daemon_for_cwd() -> (PathBuf, Arc<InProcessDaemon>) {
     let repo = std::env::current_dir().unwrap();
@@ -313,7 +313,7 @@ async fn follower_mode_flag_is_stored() {
         "default daemon should not be follower"
     );
 
-    let follower = InProcessDaemon::new_with_options(vec![], config, true).await;
+    let follower = InProcessDaemon::new_with_options(vec![], config, true, HostName::local()).await;
     assert!(
         follower.is_follower(),
         "follower daemon should report follower=true"
@@ -328,7 +328,9 @@ async fn follower_mode_skips_external_providers() {
     std::fs::create_dir_all(repo.join(".git")).unwrap();
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new_with_options(vec![repo.clone()], config, true).await;
+    let daemon =
+        InProcessDaemon::new_with_options(vec![repo.clone()], config, true, HostName::local())
+            .await;
 
     assert!(daemon.is_follower());
 
