@@ -147,6 +147,43 @@ impl RepoModel {
             refresh_handle,
         }
     }
+
+    /// Create a model for a virtual (remote-only) repo.
+    ///
+    /// Uses an empty `ProviderRegistry` and an idle refresh handle that
+    /// never polls — provider data for virtual repos arrives via PeerData
+    /// messages rather than local filesystem scanning.
+    pub fn new_virtual() -> Self {
+        let registry = ProviderRegistry::new();
+        let labels = RepoLabels {
+            checkouts: CategoryLabels {
+                section: "Checkouts".into(),
+                noun: "checkout".into(),
+                abbr: "CO".into(),
+            },
+            code_review: CategoryLabels {
+                section: "Change Requests".into(),
+                noun: "PR".into(),
+                abbr: "PR".into(),
+            },
+            issues: CategoryLabels {
+                section: "Issues".into(),
+                noun: "issue".into(),
+                abbr: "I".into(),
+            },
+            sessions: CategoryLabels {
+                section: "Sessions".into(),
+                noun: "session".into(),
+                abbr: "S".into(),
+            },
+        };
+        Self {
+            registry: Arc::new(registry),
+            data: DataStore::default(),
+            labels,
+            refresh_handle: RepoRefreshHandle::idle(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -575,5 +612,94 @@ mod tests {
         assert_eq!(model.labels.checkouts.section, "\u{2014}");
         assert_eq!(model.labels.code_review.section, "\u{2014}");
         model.refresh_handle.trigger_refresh();
+    }
+
+    #[tokio::test]
+    async fn repo_model_new_virtual_has_empty_registry_and_default_labels() {
+        let model = RepoModel::new_virtual();
+        assert!(model.registry.vcs.is_empty());
+        assert!(model.registry.checkout_managers.is_empty());
+        assert!(model.registry.code_review.is_empty());
+        assert!(model.registry.issue_trackers.is_empty());
+        assert!(model.registry.cloud_agents.is_empty());
+        assert!(model.registry.workspace_manager.is_none());
+        assert_eq!(model.labels.checkouts.section, "Checkouts");
+        assert_eq!(model.labels.code_review.section, "Change Requests");
+        assert_eq!(model.labels.issues.section, "Issues");
+        assert_eq!(model.labels.sessions.section, "Sessions");
+        assert!(!model.data.loading);
+    }
+
+    // -------------------------------------------------------
+    // strip_external_providers
+    // -------------------------------------------------------
+
+    #[test]
+    fn strip_external_providers_keeps_local_removes_external() {
+        let mut reg = full_registry();
+
+        // Before stripping: everything populated
+        assert!(!reg.vcs.is_empty());
+        assert!(!reg.checkout_managers.is_empty());
+        assert!(!reg.code_review.is_empty());
+        assert!(!reg.issue_trackers.is_empty());
+        assert!(!reg.cloud_agents.is_empty());
+        assert!(!reg.ai_utilities.is_empty());
+        assert!(reg.workspace_manager.is_some());
+
+        reg.strip_external_providers();
+
+        // Local providers are kept
+        assert!(!reg.vcs.is_empty(), "VCS should be kept");
+        assert!(
+            !reg.checkout_managers.is_empty(),
+            "checkout managers should be kept"
+        );
+        assert!(
+            reg.workspace_manager.is_some(),
+            "workspace manager should be kept"
+        );
+
+        // External providers are removed
+        assert!(reg.code_review.is_empty(), "code review should be removed");
+        assert!(
+            reg.issue_trackers.is_empty(),
+            "issue trackers should be removed"
+        );
+        assert!(
+            reg.cloud_agents.is_empty(),
+            "cloud agents should be removed"
+        );
+        assert!(
+            reg.ai_utilities.is_empty(),
+            "AI utilities should be removed"
+        );
+    }
+
+    #[test]
+    fn strip_external_providers_on_empty_registry_is_noop() {
+        let mut reg = ProviderRegistry::new();
+        reg.strip_external_providers();
+        assert!(reg.vcs.is_empty());
+        assert!(reg.checkout_managers.is_empty());
+        assert!(reg.code_review.is_empty());
+    }
+
+    #[test]
+    fn provider_names_after_strip_omits_external() {
+        let mut reg = full_registry();
+        reg.strip_external_providers();
+        let names = provider_names_from_registry(&reg);
+
+        // Local providers remain
+        assert!(names.contains_key("vcs"));
+        assert!(names.contains_key("checkout_manager"));
+        assert!(names.contains_key("workspace_manager"));
+
+        // External providers gone
+        assert!(!names.contains_key("code_review"));
+        assert!(!names.contains_key("issue_tracker"));
+        assert!(!names.contains_key("cloud_agent"));
+        assert!(!names.contains_key("ai_utility"));
     }
 }

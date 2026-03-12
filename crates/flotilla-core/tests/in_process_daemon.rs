@@ -5,7 +5,7 @@ use std::sync::Arc;
 use flotilla_core::config::ConfigStore;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::in_process::InProcessDaemon;
-use flotilla_protocol::{Command, DaemonEvent};
+use flotilla_protocol::{Command, DaemonEvent, HostName, ProviderData};
 
 async fn daemon_for_cwd() -> (PathBuf, Arc<InProcessDaemon>) {
     let repo = std::env::current_dir().unwrap();
@@ -302,4 +302,130 @@ async fn execute_on_untracked_repo_returns_error_without_started_event() {
         started.is_err() || !started.unwrap(),
         "should not emit CommandStarted for invalid repo"
     );
+}
+
+#[tokio::test]
+async fn follower_mode_flag_is_stored() {
+    let config = Arc::new(ConfigStore::new());
+    let leader = InProcessDaemon::new(vec![], config.clone()).await;
+    assert!(
+        !leader.is_follower(),
+        "default daemon should not be follower"
+    );
+
+    let follower = InProcessDaemon::new_with_options(vec![], config, true, HostName::local()).await;
+    assert!(
+        follower.is_follower(),
+        "follower daemon should report follower=true"
+    );
+}
+
+#[tokio::test]
+async fn follower_mode_skips_external_providers() {
+    // Use a temp dir with a .git directory to guarantee VCS detection
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().to_path_buf();
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon =
+        InProcessDaemon::new_with_options(vec![repo.clone()], config, true, HostName::local())
+            .await;
+
+    assert!(daemon.is_follower());
+
+    // list_repos gives us RepoInfo with provider_names populated from the registry
+    let repos = daemon.list_repos().await.expect("list_repos");
+    assert_eq!(repos.len(), 1);
+    let provider_names = &repos[0].provider_names;
+
+    // VCS should be present (local provider, .git dir exists)
+    assert!(
+        provider_names.contains_key("vcs"),
+        "follower should have VCS provider"
+    );
+    // checkout_manager should also be present (git-based fallback)
+    assert!(
+        provider_names.contains_key("checkout_manager"),
+        "follower should have checkout_manager provider"
+    );
+
+    // External providers should be absent
+    assert!(
+        !provider_names.contains_key("code_review"),
+        "follower should not have code_review provider"
+    );
+    assert!(
+        !provider_names.contains_key("issue_tracker"),
+        "follower should not have issue_tracker provider"
+    );
+    // cloud_agent and ai_utility depend on Claude/Codex/Cursor being
+    // installed, so they may or may not be present in non-follower mode.
+    // In follower mode they should always be absent.
+    assert!(
+        !provider_names.contains_key("cloud_agent"),
+        "follower should not have cloud_agent provider"
+    );
+    assert!(
+        !provider_names.contains_key("ai_utility"),
+        "follower should not have ai_utility provider"
+    );
+}
+
+#[tokio::test]
+async fn add_virtual_repo_emits_repo_added_and_appears_in_list() {
+    let config = Arc::new(ConfigStore::new());
+    let daemon = InProcessDaemon::new(vec![], config).await;
+    let mut rx = daemon.subscribe();
+
+    let synthetic_path = PathBuf::from("<remote>/desktop/home/dev/repo");
+    daemon
+        .add_virtual_repo(synthetic_path.clone(), ProviderData::default())
+        .await
+        .expect("add_virtual_repo should succeed");
+
+    // Should receive a RepoAdded event
+    let added = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::RepoAdded(info)) => break *info,
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for RepoAdded");
+    assert_eq!(added.path, synthetic_path);
+    assert!(
+        !added.loading,
+        "virtual repos should not be in loading state"
+    );
+
+    // Should appear in list_repos
+    let repos = daemon.list_repos().await.expect("list_repos");
+    assert_eq!(repos.len(), 1);
+    assert_eq!(repos[0].path, synthetic_path);
+    assert!(!repos[0].loading);
+}
+
+#[tokio::test]
+async fn add_virtual_repo_is_idempotent() {
+    let config = Arc::new(ConfigStore::new());
+    let daemon = InProcessDaemon::new(vec![], config).await;
+
+    let synthetic_path = PathBuf::from("<remote>/desktop/home/dev/repo");
+    daemon
+        .add_virtual_repo(synthetic_path.clone(), ProviderData::default())
+        .await
+        .expect("first add should succeed");
+
+    // Second add with same path should be a no-op
+    daemon
+        .add_virtual_repo(synthetic_path.clone(), ProviderData::default())
+        .await
+        .expect("second add should succeed (idempotent)");
+
+    let repos = daemon.list_repos().await.expect("list_repos");
+    assert_eq!(repos.len(), 1, "should still have exactly one repo");
 }

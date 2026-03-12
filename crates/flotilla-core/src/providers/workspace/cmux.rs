@@ -76,7 +76,12 @@ impl CmuxWorkspaceManager {
 
                 let correlation_keys: Vec<CorrelationKey> = directories
                     .iter()
-                    .map(|d| CorrelationKey::CheckoutPath(d.clone()))
+                    .map(|d| {
+                        CorrelationKey::CheckoutPath(flotilla_protocol::HostPath::new(
+                            flotilla_protocol::HostName::local(),
+                            d.clone(),
+                        ))
+                    })
                     .collect();
 
                 Some((
@@ -302,7 +307,12 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
         let directories = vec![config.working_directory.clone()];
         let correlation_keys = directories
             .iter()
-            .map(|d| CorrelationKey::CheckoutPath(d.clone()))
+            .map(|d| {
+                CorrelationKey::CheckoutPath(flotilla_protocol::HostPath::new(
+                    flotilla_protocol::HostName::local(),
+                    d.clone(),
+                ))
+            })
             .collect();
 
         info!(workspace = %config.name, %ws_ref, "cmux: workspace ready");
@@ -387,11 +397,21 @@ mod tests {
         assert_eq!(workspaces[1].0, "workspace:11");
         assert_eq!(
             workspaces[0].1.correlation_keys,
-            vec![CorrelationKey::CheckoutPath(PathBuf::from("/tmp/repo-a"))]
+            vec![CorrelationKey::CheckoutPath(
+                flotilla_protocol::HostPath::new(
+                    flotilla_protocol::HostName::local(),
+                    "/tmp/repo-a"
+                )
+            )]
         );
         assert_eq!(
             workspaces[1].1.correlation_keys,
-            vec![CorrelationKey::CheckoutPath(PathBuf::from("/tmp/repo-b"))]
+            vec![CorrelationKey::CheckoutPath(
+                flotilla_protocol::HostPath::new(
+                    flotilla_protocol::HostName::local(),
+                    "/tmp/repo-b"
+                )
+            )]
         );
     }
 

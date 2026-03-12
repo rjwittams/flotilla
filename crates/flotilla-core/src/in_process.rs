@@ -14,7 +14,8 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use flotilla_protocol::{
-    AssociationKey, Command, DaemonEvent, DeltaEntry, Issue, ProviderError, RepoInfo, Snapshot,
+    AssociationKey, Command, DaemonEvent, DeltaEntry, HostName, Issue, PeerConnectionState,
+    ProviderError, RepoInfo, Snapshot,
 };
 
 use flotilla_protocol::ProviderData;
@@ -82,8 +83,36 @@ fn build_repo_snapshot(
     base: &RefreshSnapshot,
     cache: &IssueCache,
     search_results: &Option<Vec<(String, Issue)>>,
+    host_name: &HostName,
 ) -> Snapshot {
-    let providers = Arc::new(inject_issues(&base.providers, cache, search_results));
+    build_repo_snapshot_with_peers(path, seq, base, cache, search_results, host_name, None)
+}
+
+/// Build a proto Snapshot, optionally merging peer provider data before correlation.
+fn build_repo_snapshot_with_peers(
+    path: &Path,
+    seq: u64,
+    base: &RefreshSnapshot,
+    cache: &IssueCache,
+    search_results: &Option<Vec<(String, Issue)>>,
+    host_name: &HostName,
+    peer_overlay: Option<&[(HostName, ProviderData)]>,
+) -> Snapshot {
+    let local_providers = inject_issues(&base.providers, cache, search_results);
+
+    // Merge peer provider data if any
+    let providers = if let Some(peers) = peer_overlay {
+        let peer_refs: Vec<(HostName, &ProviderData)> =
+            peers.iter().map(|(h, d)| (h.clone(), d)).collect();
+        Arc::new(crate::merge::merge_provider_data(
+            &local_providers,
+            host_name,
+            &peer_refs,
+        ))
+    } else {
+        Arc::new(local_providers)
+    };
+
     let (work_items, correlation_groups) = crate::data::correlate(&providers);
     let re_snapshot = RefreshSnapshot {
         providers,
@@ -92,7 +121,7 @@ fn build_repo_snapshot(
         errors: base.errors.clone(),
         provider_health: base.provider_health.clone(),
     };
-    let mut snapshot = snapshot_to_proto(path, seq, &re_snapshot);
+    let mut snapshot = snapshot_to_proto(path, seq, &re_snapshot, host_name);
     snapshot.issue_total = cache.total_count;
     snapshot.issue_has_more = cache.has_more;
     snapshot.issue_search_results = search_results.clone();
@@ -246,6 +275,22 @@ pub struct InProcessDaemon {
     config: Arc<ConfigStore>,
     runner: Arc<dyn CommandRunner>,
     next_command_id: AtomicU64,
+    host_name: HostName,
+    /// When true, only local providers (VCS, checkout manager, workspace
+    /// manager, terminal pool) are registered. External providers (code
+    /// review, issue tracker, cloud agents, AI utilities) are skipped
+    /// because the follower receives that data from the leader via PeerData.
+    follower: bool,
+    /// Peer provider data overlay, keyed by local repo path.
+    /// Set by the DaemonServer when peer snapshots arrive. Merged into
+    /// the local snapshot during broadcast.
+    peer_providers: RwLock<HashMap<PathBuf, Vec<(HostName, ProviderData)>>>,
+    /// Maps RepoIdentity → local repo path, built during repo setup.
+    /// Used to route inbound peer data to the correct local repo.
+    repo_identities: RwLock<HashMap<flotilla_protocol::RepoIdentity, PathBuf>>,
+    /// Current peer connection status, updated via `set_peer_status()` and
+    /// replayed to late-subscribing clients via `replay_since()`.
+    peer_status: RwLock<HashMap<HostName, PeerConnectionState>>,
 }
 
 impl InProcessDaemon {
@@ -255,18 +300,48 @@ impl InProcessDaemon {
     /// holds a reference. The poll loop checks every 100ms for new refresh
     /// snapshots and broadcasts delta or full events for each change.
     pub async fn new(repo_paths: Vec<PathBuf>, config: Arc<ConfigStore>) -> Arc<Self> {
+        Self::new_with_options(repo_paths, config, false, HostName::local()).await
+    }
+
+    /// Create a new in-process daemon with explicit follower mode.
+    ///
+    /// When `follower` is true, external providers (code review, issue
+    /// tracker, cloud agents, AI utilities) are skipped during provider
+    /// discovery. The follower daemon only reports local state (VCS,
+    /// checkouts, workspace manager, terminal pool). Service-level data
+    /// arrives from the leader via PeerData messages.
+    pub async fn new_with_options(
+        repo_paths: Vec<PathBuf>,
+        config: Arc<ConfigStore>,
+        follower: bool,
+        host_name: HostName,
+    ) -> Arc<Self> {
         let (event_tx, _) = broadcast::channel(256);
         let runner: Arc<dyn CommandRunner> = Arc::new(crate::providers::ProcessCommandRunner);
         let mut repos = HashMap::new();
         let mut order = Vec::new();
+        let mut identities = HashMap::new();
 
         for path in repo_paths {
             if repos.contains_key(&path) {
                 continue;
             }
-            let (registry, repo_slug) =
-                crate::providers::discovery::detect_providers(&path, &config, Arc::clone(&runner))
-                    .await;
+            let (registry, repo_slug) = crate::providers::discovery::detect_providers_with_mode(
+                &path,
+                &config,
+                Arc::clone(&runner),
+                follower,
+            )
+            .await;
+
+            // Extract RepoIdentity from git remote URL for peer data routing
+            if let Some(url) = crate::providers::discovery::first_remote_url(&path, &*runner).await
+            {
+                if let Some(identity) = crate::providers::discovery::extract_repo_identity(&url) {
+                    identities.insert(identity, path.clone());
+                }
+            }
+
             let mut model = RepoModel::new(path.clone(), registry, repo_slug);
             model.data.loading = true;
             repos.insert(
@@ -294,6 +369,11 @@ impl InProcessDaemon {
             config,
             runner,
             next_command_id: AtomicU64::new(1),
+            host_name,
+            follower,
+            peer_providers: RwLock::new(HashMap::new()),
+            repo_identities: RwLock::new(identities),
+            peer_status: RwLock::new(HashMap::new()),
         });
 
         // Spawn self-driving poll loop with a Weak reference.
@@ -312,6 +392,63 @@ impl InProcessDaemon {
         });
 
         daemon
+    }
+
+    /// Returns the host name for this daemon.
+    pub fn host_name(&self) -> &HostName {
+        &self.host_name
+    }
+
+    /// Returns whether this daemon is running in follower mode.
+    pub fn is_follower(&self) -> bool {
+        self.follower
+    }
+
+    /// Find the local repo path that matches a given RepoIdentity, if any.
+    pub async fn find_repo_by_identity(
+        &self,
+        identity: &flotilla_protocol::RepoIdentity,
+    ) -> Option<PathBuf> {
+        self.repo_identities.read().await.get(identity).cloned()
+    }
+
+    /// Reverse lookup: find the RepoIdentity for a given local repo path.
+    pub async fn find_identity_for_path(
+        &self,
+        repo_path: &Path,
+    ) -> Option<flotilla_protocol::RepoIdentity> {
+        let identities = self.repo_identities.read().await;
+        identities
+            .iter()
+            .find(|(_, path)| path.as_path() == repo_path)
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Get the local-only provider data for a repo (without peer overlay).
+    ///
+    /// Used by the outbound replication task to send only this host's
+    /// authoritative data to peers, avoiding echo-back of merged peer data.
+    pub async fn get_local_providers(&self, repo: &Path) -> Option<(ProviderData, u64)> {
+        let repos = self.repos.read().await;
+        let state = repos.get(repo)?;
+        let providers = inject_issues(
+            &state.last_snapshot.providers,
+            &state.issue_cache,
+            &state.search_results,
+        );
+        Some((providers, state.seq))
+    }
+
+    /// Update the peer provider data overlay for a repo and trigger re-broadcast.
+    ///
+    /// Called by the DaemonServer when PeerManager receives updated peer data.
+    /// The peer data is merged into the local snapshot during the next broadcast.
+    pub async fn set_peer_providers(&self, repo_path: &Path, peers: Vec<(HostName, ProviderData)>) {
+        {
+            let mut pp = self.peer_providers.write().await;
+            pp.insert(repo_path.to_path_buf(), peers);
+        }
+        self.broadcast_snapshot(repo_path).await;
     }
 
     /// Poll all repos for new refresh snapshots.
@@ -357,10 +494,24 @@ impl InProcessDaemon {
             return;
         }
 
+        // Read peer overlay once (brief read lock)
+        let peer_overlay = self.peer_providers.read().await.clone();
+
         // Correlate and build proto snapshots outside any lock
         let mut updates = Vec::new();
         for (path, snapshot, providers, issue_total, issue_has_more, search_results) in changed {
-            let providers = Arc::new(providers);
+            // Merge peer provider data if any
+            let providers = if let Some(peers) = peer_overlay.get(&path) {
+                let peer_refs: Vec<(HostName, &ProviderData)> =
+                    peers.iter().map(|(h, d)| (h.clone(), d)).collect();
+                Arc::new(crate::merge::merge_provider_data(
+                    &providers,
+                    &self.host_name,
+                    &peer_refs,
+                ))
+            } else {
+                Arc::new(providers)
+            };
             let (work_items, correlation_groups) = crate::data::correlate(&providers);
 
             let re_snapshot = RefreshSnapshot {
@@ -392,7 +543,8 @@ impl InProcessDaemon {
             state.model.data.provider_health = snapshot.provider_health.clone();
             state.model.data.loading = false;
 
-            let mut proto_snapshot = snapshot_to_proto(&path, state.seq + 1, &re_snapshot);
+            let mut proto_snapshot =
+                snapshot_to_proto(&path, state.seq + 1, &re_snapshot, &self.host_name);
             proto_snapshot.provider_health =
                 crate::convert::health_to_proto(&state.model.data.provider_health);
             proto_snapshot.issue_total = issue_total;
@@ -750,19 +902,103 @@ impl InProcessDaemon {
         }
     }
 
+    /// Add a virtual repo (no local filesystem path) for a remote-only repo.
+    ///
+    /// Unlike `add_repo`, this skips provider discovery entirely — there is
+    /// no local path to scan. Instead it creates a dormant `RepoState` with
+    /// an empty provider registry and an idle refresh handle.
+    ///
+    /// The `synthetic_path` serves as a stable key for tab identity (e.g.
+    /// `<remote>/desktop/home/dev/repo`). The `provider_data` is the
+    /// initial merged data from peer snapshots.
+    ///
+    /// Emits `DaemonEvent::RepoAdded` so the TUI creates a tab.
+    pub async fn add_virtual_repo(
+        &self,
+        synthetic_path: PathBuf,
+        provider_data: ProviderData,
+    ) -> Result<(), String> {
+        // Check if already tracked
+        {
+            let repos = self.repos.read().await;
+            if repos.contains_key(&synthetic_path) {
+                return Ok(());
+            }
+        }
+
+        let mut model = RepoModel::new_virtual();
+        model.data.providers = Arc::new(provider_data);
+        model.data.loading = false;
+
+        let repo_info = RepoInfo {
+            path: synthetic_path.clone(),
+            name: repo_name(&synthetic_path),
+            labels: model.labels.clone(),
+            provider_names: provider_names_from_registry(&model.registry),
+            provider_health: HashMap::new(),
+            loading: false,
+        };
+
+        // Insert under write lock — re-check to avoid TOCTOU duplicate
+        {
+            let mut repos = self.repos.write().await;
+            let mut order = self.repo_order.write().await;
+            if repos.contains_key(&synthetic_path) {
+                return Ok(());
+            }
+            repos.insert(
+                synthetic_path.clone(),
+                RepoState {
+                    model,
+                    seq: 0,
+                    last_snapshot: Arc::new(RefreshSnapshot::default()),
+                    issue_cache: IssueCache::new(),
+                    search_results: None,
+                    issue_fetch_mutex: Arc::new(Mutex::new(())),
+                    last_broadcast_providers: ProviderData::default(),
+                    last_broadcast_health: HashMap::new(),
+                    last_broadcast_errors: Vec::new(),
+                    delta_log: VecDeque::new(),
+                },
+            );
+            order.push(synthetic_path.clone());
+        }
+
+        // Virtual repos are not persisted to config — they come and go
+        // with peer connections.
+
+        info!(repo = %synthetic_path.display(), "added virtual repo");
+        let _ = self
+            .event_tx
+            .send(DaemonEvent::RepoAdded(Box::new(repo_info)));
+
+        Ok(())
+    }
+
     /// Re-build and broadcast a snapshot for the given repo using current cache state.
+    ///
+    /// If peer provider data has been set for this repo via [`set_peer_providers`],
+    /// it is merged into the snapshot before correlation and broadcasting.
     async fn broadcast_snapshot(&self, repo: &Path) {
+        // Read peer overlay (brief read lock)
+        let peer_overlay = {
+            let pp = self.peer_providers.read().await;
+            pp.get(repo).cloned()
+        };
+
         let mut repos = self.repos.write().await;
         let Some(state) = repos.get_mut(repo) else {
             return;
         };
 
-        let proto_snapshot = build_repo_snapshot(
+        let proto_snapshot = build_repo_snapshot_with_peers(
             repo,
             state.seq + 1,
             &state.last_snapshot,
             &state.issue_cache,
             &state.search_results,
+            &self.host_name,
+            peer_overlay.as_deref(),
         );
 
         // Compute and log delta
@@ -777,6 +1013,25 @@ impl InProcessDaemon {
         let event = choose_event(proto_snapshot, delta_entry);
         let _ = self.event_tx.send(event);
     }
+
+    /// Send an arbitrary event to all subscribers.
+    ///
+    /// If the event is a `PeerStatusChanged`, also records the status so
+    /// `replay_since` can include it for late-subscribing clients.
+    pub fn send_event(&self, event: DaemonEvent) {
+        if let DaemonEvent::PeerStatusChanged {
+            ref host,
+            ref status,
+        } = event
+        {
+            // Use try_write to avoid blocking; if contended, the replay
+            // will use a slightly stale value — acceptable for display.
+            if let Ok(mut map) = self.peer_status.try_write() {
+                map.insert(host.clone(), *status);
+            }
+        }
+        let _ = self.event_tx.send(event);
+    }
 }
 
 #[async_trait]
@@ -786,17 +1041,23 @@ impl DaemonHandle for InProcessDaemon {
     }
 
     async fn get_state(&self, repo: &Path) -> Result<Snapshot, String> {
+        let peer_overlay = {
+            let pp = self.peer_providers.read().await;
+            pp.get(repo).cloned()
+        };
         let repos = self.repos.read().await;
         let state = repos
             .get(repo)
             .ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
 
-        Ok(build_repo_snapshot(
+        Ok(build_repo_snapshot_with_peers(
             repo,
             state.seq,
             &state.last_snapshot,
             &state.issue_cache,
             &state.search_results,
+            &self.host_name,
+            peer_overlay.as_deref(),
         ))
     }
 
@@ -957,10 +1218,11 @@ impl DaemonHandle for InProcessDaemon {
         }
 
         // Create the model outside the lock (spawns provider detection and refresh)
-        let (registry, repo_slug) = crate::providers::discovery::detect_providers(
+        let (registry, repo_slug) = crate::providers::discovery::detect_providers_with_mode(
             &path,
             &self.config,
             Arc::clone(&self.runner),
+            self.follower,
         )
         .await;
         let mut model = RepoModel::new(path.clone(), registry, repo_slug);
@@ -1000,6 +1262,17 @@ impl DaemonHandle for InProcessDaemon {
             order.push(path.clone());
         }
 
+        // Register RepoIdentity for peer routing
+        if let Some(url) = crate::providers::discovery::first_remote_url(&path, &*self.runner).await
+        {
+            if let Some(identity) = crate::providers::discovery::extract_repo_identity(&url) {
+                self.repo_identities
+                    .write()
+                    .await
+                    .insert(identity, path.clone());
+            }
+        }
+
         // Persist to config
         self.config.save_repo(&path);
         let order = self.repo_order.read().await;
@@ -1037,6 +1310,7 @@ impl DaemonHandle for InProcessDaemon {
                     &state.last_snapshot,
                     &state.issue_cache,
                     &state.search_results,
+                    &self.host_name,
                 )
             };
 
@@ -1082,6 +1356,15 @@ impl DaemonHandle for InProcessDaemon {
             }
         }
 
+        // Include current peer status so late-subscribing clients see it
+        let peer_status = self.peer_status.read().await;
+        for (host, status) in peer_status.iter() {
+            events.push(DaemonEvent::PeerStatusChanged {
+                host: host.clone(),
+                status: *status,
+            });
+        }
+
         Ok(events)
     }
 
@@ -1095,6 +1378,16 @@ impl DaemonHandle for InProcessDaemon {
                 return Err(format!("repo not tracked: {}", path.display()));
             }
             order.retain(|p| p != &path);
+        }
+
+        // Remove from identity map and peer overlay
+        {
+            let mut ids = self.repo_identities.write().await;
+            ids.retain(|_, p| p != &path);
+        }
+        {
+            let mut pp = self.peer_providers.write().await;
+            pp.remove(&path);
         }
 
         // Persist to config
@@ -1117,7 +1410,7 @@ mod tests {
     fn checkout_with_issue(issue_id: &str) -> Checkout {
         Checkout {
             branch: "main".into(),
-            is_trunk: true,
+            is_main: true,
             trunk_ahead_behind: None,
             remote_ahead_behind: None,
             working_tree: None,
@@ -1143,9 +1436,13 @@ mod tests {
     #[test]
     fn collect_linked_issue_ids_deduplicates_across_sources() {
         let mut providers = ProviderData::default();
-        providers
-            .checkouts
-            .insert(PathBuf::from("/tmp/repo"), checkout_with_issue("123"));
+        providers.checkouts.insert(
+            flotilla_protocol::HostPath::new(
+                flotilla_protocol::HostName::new("test-host"),
+                PathBuf::from("/tmp/repo"),
+            ),
+            checkout_with_issue("123"),
+        );
         providers
             .change_requests
             .insert("1".into(), cr_with_issue("123"));
@@ -1203,6 +1500,7 @@ mod tests {
         let snapshot = Snapshot {
             seq: 2,
             repo: repo.clone(),
+            host_name: HostName::local(),
             work_items: vec![],
             providers: ProviderData::default(),
             provider_health: HashMap::new(),
@@ -1243,6 +1541,7 @@ mod tests {
         let snapshot = Snapshot {
             seq: 3,
             repo: PathBuf::from("/tmp/repo"),
+            host_name: HostName::local(),
             work_items: vec![],
             providers: ProviderData::default(),
             provider_health: HashMap::new(),
@@ -1290,6 +1589,7 @@ mod tests {
             &RefreshSnapshot::default(),
             &cache,
             &None,
+            &HostName::local(),
         );
         assert_eq!(snap.seq, 7);
         assert_eq!(snap.issue_total, Some(5));

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+
+use flotilla_protocol::HostPath;
 
 use super::types::CorrelationKey;
 
@@ -18,7 +19,7 @@ pub enum ItemKind {
 /// A key that uniquely identifies a provider item by its natural identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProviderItemKey {
-    Checkout(PathBuf),
+    Checkout(HostPath),
     ChangeRequest(String),
     Session(String),
     Workspace(String),
@@ -207,6 +208,13 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn hp(path: &str) -> HostPath {
+        HostPath::new(
+            flotilla_protocol::HostName::new("test-host"),
+            PathBuf::from(path),
+        )
+    }
+
     fn item(
         provider: &str,
         kind: ItemKind,
@@ -236,7 +244,7 @@ mod tests {
             ItemKind::Checkout,
             "feat-x",
             vec![CorrelationKey::Branch("feat-x".into())],
-            ProviderItemKey::Checkout(PathBuf::from("/code/feat-x")),
+            ProviderItemKey::Checkout(hp("/code/feat-x")),
         )];
         let groups = correlate(items);
         assert_eq!(groups.len(), 1);
@@ -252,7 +260,7 @@ mod tests {
                 ItemKind::Checkout,
                 "feat-x checkout",
                 vec![CorrelationKey::Branch("feat-x".into())],
-                ProviderItemKey::Checkout(PathBuf::from("/code/feat-x")),
+                ProviderItemKey::Checkout(hp("/code/feat-x")),
             ),
             item(
                 "github",
@@ -281,9 +289,9 @@ mod tests {
                 "feat-x checkout",
                 vec![
                     CorrelationKey::Branch("feat-x".into()),
-                    CorrelationKey::CheckoutPath("/code/feat-x".into()),
+                    CorrelationKey::CheckoutPath(hp("/code/feat-x")),
                 ],
-                ProviderItemKey::Checkout(PathBuf::from("/code/feat-x")),
+                ProviderItemKey::Checkout(hp("/code/feat-x")),
             ),
             item(
                 "github",
@@ -296,7 +304,7 @@ mod tests {
                 "cmux",
                 ItemKind::Workspace,
                 "my-workspace",
-                vec![CorrelationKey::CheckoutPath("/code/feat-x".into())],
+                vec![CorrelationKey::CheckoutPath(hp("/code/feat-x"))],
                 ProviderItemKey::Workspace("cmux:my-workspace".into()),
             ),
         ];
@@ -317,14 +325,14 @@ mod tests {
                 ItemKind::Checkout,
                 "branch-a",
                 vec![CorrelationKey::Branch("branch-a".into())],
-                ProviderItemKey::Checkout(PathBuf::from("/code/branch-a")),
+                ProviderItemKey::Checkout(hp("/code/branch-a")),
             ),
             item(
                 "git",
                 ItemKind::Checkout,
                 "branch-b",
                 vec![CorrelationKey::Branch("branch-b".into())],
-                ProviderItemKey::Checkout(PathBuf::from("/code/branch-b")),
+                ProviderItemKey::Checkout(hp("/code/branch-b")),
             ),
             item(
                 "claude",
@@ -347,7 +355,7 @@ mod tests {
                 ItemKind::Checkout,
                 "orphan-a",
                 vec![],
-                ProviderItemKey::Checkout(PathBuf::from("/code/orphan-a")),
+                ProviderItemKey::Checkout(hp("/code/orphan-a")),
             ),
             item(
                 "github",
@@ -371,7 +379,7 @@ mod tests {
 
     #[test]
     fn workspace_correlates_via_checkout_path() {
-        let repo = PathBuf::from("/home/user/project");
+        let repo = hp("/home/user/project");
         let items = vec![
             item(
                 "git",
@@ -400,8 +408,8 @@ mod tests {
     fn two_checkouts_never_merge() {
         // A workspace with paths matching two different checkouts should NOT
         // cause those checkouts to merge into one group.
-        let main_path = PathBuf::from("/code/project");
-        let feat_path = PathBuf::from("/code/project.feat-x");
+        let main_path = hp("/code/project");
+        let feat_path = hp("/code/project.feat-x");
         let items = vec![
             item(
                 "git",
@@ -480,7 +488,7 @@ mod tests {
                 ItemKind::Checkout,
                 "feat-x",
                 vec![CorrelationKey::Branch("feat-x".into())],
-                ProviderItemKey::Checkout(PathBuf::from("/code/feat-x")),
+                ProviderItemKey::Checkout(hp("/code/feat-x")),
             ),
             item(
                 "claude",
@@ -505,7 +513,7 @@ mod tests {
 
     #[test]
     fn managed_terminal_correlates_via_branch() {
-        let path = PathBuf::from("/code/feat-x");
+        let path = hp("/code/feat-x");
         let items = vec![
             item(
                 "git",

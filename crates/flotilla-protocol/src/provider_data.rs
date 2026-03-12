@@ -3,12 +3,14 @@ use std::path::PathBuf;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::HostPath;
+
 /// Identity keys — safe for union-find grouping. Items sharing a
 /// CorrelationKey are the same work unit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CorrelationKey {
     Branch(String),
-    CheckoutPath(PathBuf),
+    CheckoutPath(HostPath),
     ChangeRequestRef(String, String), // (provider_name, CR id)
     SessionRef(String, String),       // (provider_name, session_id)
 }
@@ -23,7 +25,7 @@ pub enum AssociationKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkout {
     pub branch: String,
-    pub is_trunk: bool,
+    pub is_main: bool,
     pub trunk_ahead_behind: Option<AheadBehind>,
     pub remote_ahead_behind: Option<AheadBehind>,
     pub working_tree: Option<WorkingTreeStatus>,
@@ -167,7 +169,8 @@ pub struct Workspace {
 /// All raw provider data for a single repo, keyed for lookup.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderData {
-    pub checkouts: IndexMap<PathBuf, Checkout>,
+    #[serde(with = "crate::host::host_path_map")]
+    pub checkouts: IndexMap<HostPath, Checkout>,
     pub change_requests: IndexMap<String, ChangeRequest>,
     pub issues: IndexMap<String, Issue>,
     pub sessions: IndexMap<String, CloudAgentSession>,
@@ -180,12 +183,17 @@ pub struct ProviderData {
 mod tests {
     use super::*;
     use crate::test_helpers::assert_roundtrip;
+    use crate::HostName;
+
+    fn hp(path: &str) -> HostPath {
+        HostPath::new(HostName::new("test-host"), PathBuf::from(path))
+    }
 
     #[test]
     fn key_types_roundtrip_all_variants() {
         let correlation_cases = vec![
             CorrelationKey::Branch("main".into()),
-            CorrelationKey::CheckoutPath(PathBuf::from("/x")),
+            CorrelationKey::CheckoutPath(hp("/x")),
             CorrelationKey::ChangeRequestRef("gh".into(), "1".into()),
             CorrelationKey::SessionRef("cl".into(), "s".into()),
         ];
@@ -224,7 +232,7 @@ mod tests {
         let cases = vec![
             Checkout {
                 branch: "main".into(),
-                is_trunk: true,
+                is_main: true,
                 trunk_ahead_behind: None,
                 remote_ahead_behind: None,
                 working_tree: None,
@@ -234,7 +242,7 @@ mod tests {
             },
             Checkout {
                 branch: "feat-x".into(),
-                is_trunk: false,
+                is_main: false,
                 trunk_ahead_behind: Some(AheadBehind {
                     ahead: 2,
                     behind: 1,
@@ -254,7 +262,7 @@ mod tests {
                 }),
                 correlation_keys: vec![
                     CorrelationKey::Branch("feat-x".into()),
-                    CorrelationKey::CheckoutPath(PathBuf::from("/repos/proj/wt-1")),
+                    CorrelationKey::CheckoutPath(hp("/repos/proj/wt-1")),
                 ],
                 association_keys: vec![AssociationKey::IssueRef("gh".into(), "10".into())],
             },
@@ -370,9 +378,7 @@ mod tests {
                     PathBuf::from("/repos/proj/wt-1"),
                     PathBuf::from("/repos/proj/wt-2"),
                 ],
-                correlation_keys: vec![CorrelationKey::CheckoutPath(PathBuf::from(
-                    "/repos/proj/wt-1",
-                ))],
+                correlation_keys: vec![CorrelationKey::CheckoutPath(hp("/repos/proj/wt-1"))],
             },
             Workspace {
                 name: "n".into(),
@@ -481,10 +487,10 @@ mod tests {
             },
         );
         pd.checkouts.insert(
-            PathBuf::from("/repos/proj"),
+            hp("/repos/proj"),
             Checkout {
                 branch: "main".into(),
-                is_trunk: true,
+                is_main: true,
                 trunk_ahead_behind: None,
                 remote_ahead_behind: None,
                 working_tree: None,

@@ -19,8 +19,8 @@ use flotilla_core::config::{ConfigStore, RepoViewLayoutConfig};
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::data::{self, GroupEntry, SectionLabels};
 use flotilla_protocol::{
-    Command, DaemonEvent, ProviderData, ProviderError, RepoInfo, RepoLabels, Snapshot,
-    SnapshotDelta, WorkItem,
+    Command, DaemonEvent, HostName, PeerConnectionState, ProviderData, ProviderError, RepoInfo,
+    RepoLabels, Snapshot, SnapshotDelta, WorkItem,
 };
 use std::collections::VecDeque;
 
@@ -34,6 +34,33 @@ pub use ui_state::{
 pub enum ProviderStatus {
     Ok,
     Error,
+}
+
+/// Connection status for a remote peer host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerStatus {
+    Connected,
+    Disconnected,
+    Connecting,
+    Reconnecting,
+}
+
+impl From<PeerConnectionState> for PeerStatus {
+    fn from(state: PeerConnectionState) -> Self {
+        match state {
+            PeerConnectionState::Connected => PeerStatus::Connected,
+            PeerConnectionState::Disconnected => PeerStatus::Disconnected,
+            PeerConnectionState::Connecting => PeerStatus::Connecting,
+            PeerConnectionState::Reconnecting => PeerStatus::Reconnecting,
+        }
+    }
+}
+
+/// Status of a configured remote peer host, for display in the config view.
+#[derive(Debug, Clone)]
+pub struct PeerHostStatus {
+    pub name: HostName,
+    pub status: PeerStatus,
 }
 
 #[derive(Default)]
@@ -77,6 +104,10 @@ pub struct TuiModel {
     /// Key: (repo_path, provider_category, provider_name)
     pub provider_statuses: HashMap<(PathBuf, String, String), ProviderStatus>,
     pub status_message: Option<String>,
+    /// The daemon's hostname, set from the first Snapshot received.
+    pub my_host: Option<HostName>,
+    /// Status of configured remote peer hosts.
+    pub peer_hosts: Vec<PeerHostStatus>,
 }
 
 impl TuiModel {
@@ -107,6 +138,8 @@ impl TuiModel {
             active_repo: 0,
             provider_statuses: HashMap::new(),
             status_message: None,
+            my_host: None,
+            peer_hosts: Vec::new(),
         }
     }
 
@@ -235,10 +268,25 @@ impl App {
                     executor::handle_result(result, self);
                 }
             }
+            DaemonEvent::PeerStatusChanged { host, status } => {
+                let peer_status = PeerStatus::from(status);
+                if let Some(existing) = self.model.peer_hosts.iter_mut().find(|p| p.name == host) {
+                    existing.status = peer_status;
+                } else {
+                    self.model.peer_hosts.push(PeerHostStatus {
+                        name: host,
+                        status: peer_status,
+                    });
+                }
+            }
         }
     }
 
     fn apply_snapshot(&mut self, snap: Snapshot) {
+        if self.model.my_host.is_none() {
+            self.model.my_host = Some(snap.host_name.clone());
+        }
+
         let path = snap.repo.clone();
         let rm = match self.model.repos.get_mut(&path) {
             Some(rm) => rm,
@@ -445,7 +493,6 @@ impl App {
         );
         self.model.repo_order.push(path.clone());
         self.ui.repo_ui.insert(path, RepoUiState::default());
-        self.switch_tab(self.model.repo_order.len() - 1);
     }
 
     fn handle_repo_removed(&mut self, path: &Path) {
@@ -869,10 +916,13 @@ mod tests {
         snap2.work_items = vec![checkout_item("feat", "/wt", false)];
         let mut different_providers = ProviderData::default();
         different_providers.checkouts.insert(
-            PathBuf::from("/wt"),
+            flotilla_protocol::HostPath::new(
+                flotilla_protocol::HostName::new("test-host"),
+                PathBuf::from("/wt"),
+            ),
             flotilla_protocol::Checkout {
                 branch: "feat".into(),
-                is_trunk: false,
+                is_main: false,
                 trunk_ahead_behind: None,
                 remote_ahead_behind: None,
                 working_tree: None,
@@ -1044,7 +1094,8 @@ mod tests {
             app.model.repo_order.last().unwrap(),
             Path::new("/tmp/new-repo")
         );
-        assert_eq!(app.model.active_repo, 1);
+        // Adding a repo should not switch to it (it may arrive asynchronously)
+        assert_eq!(app.model.active_repo, 0);
     }
 
     #[test]

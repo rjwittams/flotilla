@@ -125,6 +125,12 @@ fn detect_host_from_url(url: &str) -> Option<String> {
     }
 }
 
+/// Extract a RepoIdentity from a git remote URL.
+/// Delegates to `RepoIdentity::from_remote_url`.
+pub fn extract_repo_identity(url: &str) -> Option<flotilla_protocol::RepoIdentity> {
+    flotilla_protocol::RepoIdentity::from_remote_url(url)
+}
+
 /// Extract "owner/repo" from a git remote URL.
 /// Handles SSH (git@github.com:owner/repo.git) and HTTPS (https://github.com/owner/repo.git).
 pub fn extract_repo_slug(url: &str) -> Option<String> {
@@ -154,10 +160,37 @@ pub fn extract_repo_slug(url: &str) -> Option<String> {
 /// 4. Cloud agents: check for Cursor `agent` and `claude` CLI
 /// 5. AI utility: check for `claude` CLI
 /// 6. Workspace manager: check for cmux binary
+///
+/// When `follower` is true, only local providers (VCS, checkout manager,
+/// workspace manager, terminal pool) are registered. External providers
+/// (code review, issue tracker, cloud agents, AI utilities) are skipped
+/// because the follower receives that data from the leader via PeerData.
 pub async fn detect_providers(
     repo_root: &Path,
     config: &ConfigStore,
     runner: Arc<dyn CommandRunner>,
+) -> (ProviderRegistry, Option<String>) {
+    detect_providers_inner(repo_root, config, runner, false).await
+}
+
+/// Like [`detect_providers`] but accepts a `follower` flag.
+///
+/// When `follower` is true, external providers are stripped after discovery
+/// so the daemon only reports local state.
+pub async fn detect_providers_with_mode(
+    repo_root: &Path,
+    config: &ConfigStore,
+    runner: Arc<dyn CommandRunner>,
+    follower: bool,
+) -> (ProviderRegistry, Option<String>) {
+    detect_providers_inner(repo_root, config, runner, follower).await
+}
+
+async fn detect_providers_inner(
+    repo_root: &Path,
+    config: &ConfigStore,
+    runner: Arc<dyn CommandRunner>,
+    follower: bool,
 ) -> (ProviderRegistry, Option<String>) {
     let mut registry = ProviderRegistry::new();
     let repo_name = repo_root
@@ -363,6 +396,11 @@ pub async fn detect_providers(
         info!(%repo_name, "Terminal pool → passthrough (no persistence)");
     }
 
+    if follower {
+        info!(%repo_name, "follower mode — stripping external providers");
+        registry.strip_external_providers();
+    }
+
     (registry, repo_slug)
 }
 
@@ -522,6 +560,18 @@ mod tests {
         );
         std::fs::write(repo_file, content).unwrap();
         ConfigStore::with_base(base)
+    }
+
+    #[test]
+    fn test_extract_repo_identity() {
+        let id = extract_repo_identity("git@github.com:rjwittams/flotilla.git");
+        assert_eq!(
+            id,
+            Some(flotilla_protocol::RepoIdentity {
+                authority: "github.com".into(),
+                path: "rjwittams/flotilla".into(),
+            })
+        );
     }
 
     #[test]

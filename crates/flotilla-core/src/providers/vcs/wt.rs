@@ -66,15 +66,17 @@ struct WtCommit {
 impl WtWorktree {
     fn into_checkout(self) -> (PathBuf, Checkout) {
         let path = self.path;
+        let host_path =
+            flotilla_protocol::HostPath::new(flotilla_protocol::HostName::local(), path.clone());
         let correlation_keys = vec![
             CorrelationKey::Branch(self.branch.clone()),
-            CorrelationKey::CheckoutPath(path.clone()),
+            CorrelationKey::CheckoutPath(host_path),
         ];
         (
             path,
             Checkout {
                 branch: self.branch,
-                is_trunk: self.is_main,
+                is_main: self.is_main,
                 trunk_ahead_behind: self.main.map(|m| AheadBehind {
                     ahead: m.ahead,
                     behind: m.behind,
@@ -361,7 +363,7 @@ mod tests {
             .find(|(_, co)| co.branch == "main")
             .expect("should have main worktree");
         assert_eq!(path_main, &repo_path);
-        assert!(co_main.is_trunk);
+        assert!(co_main.is_main);
         // main has remote tracking since we cloned
         assert!(co_main.remote_ahead_behind.is_some());
         let commit_main = co_main
@@ -377,7 +379,7 @@ mod tests {
             .iter()
             .find(|(_, co)| co.branch == "feature/foo")
             .expect("should have feature/foo worktree");
-        assert!(!co_feat.is_trunk);
+        assert!(!co_feat.is_main);
         // The worktree path should be a sibling of the repo
         assert!(
             path_feat.to_str().unwrap().contains("feature-foo"),
@@ -412,7 +414,12 @@ mod tests {
             .contains(&CorrelationKey::Branch("feature/foo".to_string())));
         assert!(co_feat
             .correlation_keys
-            .contains(&CorrelationKey::CheckoutPath(path_feat.clone())));
+            .contains(&CorrelationKey::CheckoutPath(
+                flotilla_protocol::HostPath::new(
+                    flotilla_protocol::HostName::local(),
+                    path_feat.clone()
+                ),
+            )));
 
         session.finish();
     }
@@ -447,7 +454,7 @@ mod tests {
             path.display()
         );
         assert_eq!(checkout.branch, "new-feature");
-        assert!(!checkout.is_trunk);
+        assert!(!checkout.is_main);
         let trunk_ab = checkout
             .trunk_ahead_behind
             .as_ref()

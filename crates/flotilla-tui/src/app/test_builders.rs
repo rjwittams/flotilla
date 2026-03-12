@@ -7,13 +7,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use flotilla_protocol::{
-    CheckoutRef, RepoInfo, RepoLabels, WorkItem, WorkItemIdentity, WorkItemKind,
+    CheckoutRef, HostName, HostPath, RepoInfo, RepoLabels, WorkItem, WorkItemIdentity, WorkItemKind,
 };
 
 pub fn bare_item() -> WorkItem {
     WorkItem {
         kind: WorkItemKind::Issue,
         identity: WorkItemIdentity::Issue("1".into()),
+        host: HostName::local(),
         branch: None,
         description: String::new(),
         checkout: None,
@@ -33,6 +34,7 @@ pub fn issue_item(id: impl Into<String>) -> WorkItem {
     WorkItem {
         kind: WorkItemKind::Issue,
         identity: WorkItemIdentity::Issue(id.clone()),
+        host: HostName::local(),
         branch: None,
         description: format!("Item {id}"),
         checkout: None,
@@ -48,13 +50,15 @@ pub fn issue_item(id: impl Into<String>) -> WorkItem {
 }
 
 pub fn checkout_item(branch: &str, path: &str, is_main: bool) -> WorkItem {
+    let host_path = HostPath::new(HostName::local(), PathBuf::from(path));
     WorkItem {
         kind: WorkItemKind::Checkout,
-        identity: WorkItemIdentity::Checkout(PathBuf::from(path)),
+        identity: WorkItemIdentity::Checkout(host_path.clone()),
+        host: HostName::local(),
         branch: Some(branch.into()),
         description: format!("checkout {branch}"),
         checkout: Some(CheckoutRef {
-            key: PathBuf::from(path),
+            key: host_path,
             is_main_checkout: is_main,
         }),
         change_request_key: None,
@@ -72,6 +76,7 @@ pub fn pr_item(pr_id: &str) -> WorkItem {
     WorkItem {
         kind: WorkItemKind::ChangeRequest,
         identity: WorkItemIdentity::ChangeRequest(pr_id.into()),
+        host: HostName::local(),
         branch: Some("feat/pr-branch".into()),
         description: format!("PR #{pr_id}"),
         checkout: None,
@@ -90,6 +95,7 @@ pub fn session_item(session_id: &str) -> WorkItem {
     WorkItem {
         kind: WorkItemKind::Session,
         identity: WorkItemIdentity::Session(session_id.into()),
+        host: HostName::local(),
         branch: Some("feat/session-branch".into()),
         description: format!("session {session_id}"),
         checkout: None,
@@ -108,6 +114,7 @@ pub fn remote_branch_item(branch: &str) -> WorkItem {
     WorkItem {
         kind: WorkItemKind::RemoteBranch,
         identity: WorkItemIdentity::RemoteBranch(branch.into()),
+        host: HostName::local(),
         branch: Some(branch.into()),
         description: format!("remote {branch}"),
         checkout: None,

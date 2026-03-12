@@ -1083,6 +1083,7 @@ dependencies = [
  "flotilla-client",
  "flotilla-core",
  "flotilla-protocol",
+ "indexmap",
  "serde",
  "serde_json",
  "tempfile",
@@ -1095,9 +1096,12 @@ dependencies = [
 name = "flotilla-protocol"
 version = "0.1.0"
 dependencies = [
+ "gethostname",
  "indexmap",
  "serde",
  "serde_json",
+ "tracing",
+ "url",
 ]
 
 [[package]]

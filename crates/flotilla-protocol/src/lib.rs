@@ -1,7 +1,12 @@
 pub mod commands;
 pub mod delta;
+mod host;
+pub mod peer;
 pub mod provider_data;
 pub mod snapshot;
+
+pub use host::{HostName, HostPath, RepoIdentity};
+pub use peer::{PeerDataKind, PeerDataMessage, VectorClock};
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
@@ -62,6 +67,8 @@ pub enum Message {
     },
     #[serde(rename = "event")]
     Event { event: Box<DaemonEvent> },
+    #[serde(rename = "peer_data")]
+    PeerData(Box<PeerDataMessage>),
 }
 
 /// Parsed response from the wire — before type-specific deserialization.
@@ -150,6 +157,21 @@ pub enum DaemonEvent {
         repo: std::path::PathBuf,
         result: commands::CommandResult,
     },
+    /// A peer host's connection status changed.
+    #[serde(rename = "peer_status")]
+    PeerStatusChanged {
+        host: HostName,
+        status: PeerConnectionState,
+    },
+}
+
+/// Peer connection state as seen by the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PeerConnectionState {
+    Connected,
+    Disconnected,
+    Connecting,
+    Reconnecting,
 }
 
 /// A delta update for a repo snapshot.
@@ -172,6 +194,10 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    fn hp(path: &str) -> HostPath {
+        HostPath::new(HostName::new("test-host"), PathBuf::from(path))
+    }
 
     #[test]
     fn message_request_roundtrip() {
@@ -252,13 +278,15 @@ mod tests {
         let snapshot = Snapshot {
             seq: 7,
             repo: PathBuf::from("/tmp/my-repo"),
+            host_name: HostName::new("test-host"),
             work_items: vec![WorkItem {
                 kind: WorkItemKind::Checkout,
-                identity: WorkItemIdentity::Checkout(PathBuf::from("/tmp/my-repo/wt")),
+                identity: WorkItemIdentity::Checkout(hp("/tmp/my-repo/wt")),
+                host: HostName::new("test-host"),
                 branch: Some("feature-x".to_string()),
                 description: "Feature X".to_string(),
                 checkout: Some(CheckoutRef {
-                    key: PathBuf::from("/tmp/my-repo/wt"),
+                    key: hp("/tmp/my-repo/wt"),
                     is_main_checkout: false,
                 }),
                 change_request_key: Some("PR#10".to_string()),

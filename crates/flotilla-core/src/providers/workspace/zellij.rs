@@ -187,7 +187,12 @@ impl super::WorkspaceManager for ZellijWorkspaceManager {
 
                 if let Some(tab) = state.tabs.get(name) {
                     let path = PathBuf::from(&tab.working_directory);
-                    correlation_keys.push(CorrelationKey::CheckoutPath(path.clone()));
+                    correlation_keys.push(CorrelationKey::CheckoutPath(
+                        flotilla_protocol::HostPath::new(
+                            flotilla_protocol::HostName::local(),
+                            path.clone(),
+                        ),
+                    ));
                     directories.push(path);
                 }
 
@@ -300,7 +305,12 @@ impl super::WorkspaceManager for ZellijWorkspaceManager {
         let directories = vec![config.working_directory.clone()];
         let correlation_keys = directories
             .iter()
-            .map(|d| CorrelationKey::CheckoutPath(d.clone()))
+            .map(|d| {
+                CorrelationKey::CheckoutPath(flotilla_protocol::HostPath::new(
+                    flotilla_protocol::HostName::local(),
+                    d.clone(),
+                ))
+            })
             .collect();
 
         info!(workspace = %config.name, "zellij: workspace ready");

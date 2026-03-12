@@ -134,16 +134,20 @@ mod tests {
 
     use flotilla_protocol::delta::{Branch, BranchStatus};
     use flotilla_protocol::{
-        ChangeRequest, ChangeRequestStatus, Checkout, CloudAgentSession, Issue, ProviderError,
-        SessionStatus, Workspace,
+        ChangeRequest, ChangeRequestStatus, Checkout, CloudAgentSession, HostName, HostPath, Issue,
+        ProviderError, SessionStatus, Workspace,
     };
 
     use super::*;
 
+    fn hp(path: &str) -> HostPath {
+        HostPath::new(HostName::new("test-host"), PathBuf::from(path))
+    }
+
     fn checkout(branch: &str) -> Checkout {
         Checkout {
             branch: branch.into(),
-            is_trunk: false,
+            is_main: false,
             trunk_ahead_behind: None,
             remote_ahead_behind: None,
             working_tree: None,
@@ -267,8 +271,7 @@ mod tests {
     fn diff_checkout_added() {
         let prev = ProviderData::default();
         let mut curr = ProviderData::default();
-        curr.checkouts
-            .insert(PathBuf::from("/wt/feat"), checkout("feat"));
+        curr.checkouts.insert(hp("/wt/feat"), checkout("feat"));
         let changes = diff_provider_data(&prev, &curr);
         assert_eq!(changes.len(), 1);
         match &changes[0] {
@@ -276,7 +279,7 @@ mod tests {
                 key,
                 op: EntryOp::Added(co),
             } => {
-                assert_eq!(key, &PathBuf::from("/wt/feat"));
+                assert_eq!(key, &hp("/wt/feat"));
                 assert_eq!(co.branch, "feat");
             }
             other => panic!("unexpected change: {other:?}"),
@@ -286,8 +289,7 @@ mod tests {
     #[test]
     fn diff_checkout_removed() {
         let mut prev = ProviderData::default();
-        prev.checkouts
-            .insert(PathBuf::from("/wt/old"), checkout("old"));
+        prev.checkouts.insert(hp("/wt/old"), checkout("old"));
         let curr = ProviderData::default();
         let changes = diff_provider_data(&prev, &curr);
         assert_eq!(changes.len(), 1);
@@ -296,7 +298,7 @@ mod tests {
                 key,
                 op: EntryOp::Removed,
             } => {
-                assert_eq!(key, &PathBuf::from("/wt/old"));
+                assert_eq!(key, &hp("/wt/old"));
             }
             other => panic!("unexpected change: {other:?}"),
         }
@@ -356,14 +358,12 @@ mod tests {
     #[test]
     fn diff_mixed_collections() {
         let mut prev = ProviderData::default();
-        prev.checkouts
-            .insert(PathBuf::from("/wt/main"), checkout("main"));
+        prev.checkouts.insert(hp("/wt/main"), checkout("main"));
         prev.issues.insert("1".into(), issue("bug"));
         prev.sessions.insert("s1".into(), session("session 1"));
 
         let mut curr = ProviderData::default();
-        curr.checkouts
-            .insert(PathBuf::from("/wt/main"), checkout("main")); // unchanged
+        curr.checkouts.insert(hp("/wt/main"), checkout("main")); // unchanged
         curr.issues.insert("1".into(), issue("bug fix")); // updated title
         curr.workspaces.insert("w1".into(), workspace("dev")); // added
                                                                // sessions removed
@@ -388,6 +388,7 @@ mod tests {
         flotilla_protocol::WorkItem {
             kind: flotilla_protocol::WorkItemKind::Checkout,
             identity,
+            host: flotilla_protocol::HostName::new("test-host"),
             branch: None,
             description: desc.into(),
             checkout: None,
@@ -448,7 +449,7 @@ mod tests {
 
     #[test]
     fn diff_work_items_updated() {
-        let id = flotilla_protocol::WorkItemIdentity::Checkout(PathBuf::from("/wt"));
+        let id = flotilla_protocol::WorkItemIdentity::Checkout(hp("/wt"));
         let prev = vec![work_item(id.clone(), "old desc")];
         let curr = vec![work_item(id.clone(), "new desc")];
         let changes = diff_work_items(&prev, &curr);
@@ -477,8 +478,7 @@ mod tests {
     #[test]
     fn diff_identical_snapshots_no_changes() {
         let mut pd = ProviderData::default();
-        pd.checkouts
-            .insert(PathBuf::from("/wt/main"), checkout("main"));
+        pd.checkouts.insert(hp("/wt/main"), checkout("main"));
         pd.change_requests
             .insert("1".into(), change_request("pr 1"));
         pd.issues.insert("10".into(), issue("task"));
@@ -507,8 +507,7 @@ mod tests {
     fn roundtrip_empty_to_populated() {
         let prev = ProviderData::default();
         let mut curr = ProviderData::default();
-        curr.checkouts
-            .insert(PathBuf::from("/wt/feat"), checkout("feat"));
+        curr.checkouts.insert(hp("/wt/feat"), checkout("feat"));
         curr.change_requests
             .insert("1".into(), change_request("pr"));
         curr.issues.insert("10".into(), issue("bug"));
@@ -526,8 +525,7 @@ mod tests {
     #[test]
     fn roundtrip_populated_to_empty() {
         let mut prev = ProviderData::default();
-        prev.checkouts
-            .insert(PathBuf::from("/wt/feat"), checkout("feat"));
+        prev.checkouts.insert(hp("/wt/feat"), checkout("feat"));
         prev.issues.insert("10".into(), issue("bug"));
         prev.sessions.insert("s1".into(), session("sess"));
         let curr = ProviderData::default();
@@ -537,14 +535,12 @@ mod tests {
     #[test]
     fn roundtrip_mixed_changes() {
         let mut prev = ProviderData::default();
-        prev.checkouts
-            .insert(PathBuf::from("/wt/main"), checkout("main"));
+        prev.checkouts.insert(hp("/wt/main"), checkout("main"));
         prev.issues.insert("1".into(), issue("old bug"));
         prev.sessions.insert("s1".into(), session("session 1"));
 
         let mut curr = ProviderData::default();
-        curr.checkouts
-            .insert(PathBuf::from("/wt/main"), checkout("main")); // unchanged
+        curr.checkouts.insert(hp("/wt/main"), checkout("main")); // unchanged
         curr.issues.insert("1".into(), issue("new bug")); // updated
         curr.workspaces.insert("w1".into(), workspace("dev")); // added
                                                                // sessions removed
@@ -555,8 +551,7 @@ mod tests {
     #[test]
     fn roundtrip_identical() {
         let mut pd = ProviderData::default();
-        pd.checkouts
-            .insert(PathBuf::from("/wt/main"), checkout("main"));
+        pd.checkouts.insert(hp("/wt/main"), checkout("main"));
         pd.branches.insert(
             "feat".into(),
             Branch {

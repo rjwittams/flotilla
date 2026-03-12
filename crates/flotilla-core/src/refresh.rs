@@ -93,6 +93,24 @@ impl RepoRefreshHandle {
         }
     }
 
+    /// Create a dormant refresh handle that never polls providers.
+    ///
+    /// Used for virtual (remote-only) repos where provider data arrives
+    /// via PeerData messages rather than local filesystem polling.
+    pub fn idle() -> Self {
+        let (_snapshot_tx, snapshot_rx) = watch::channel(Arc::new(RefreshSnapshot::default()));
+        let refresh_trigger = Arc::new(Notify::new());
+
+        // Spawn a task that just parks forever — it will be aborted on Drop.
+        let task_handle = tokio::spawn(std::future::pending::<()>());
+
+        Self {
+            refresh_trigger,
+            snapshot_rx,
+            _task_handle: task_handle,
+        }
+    }
+
     pub fn trigger_refresh(&self) {
         self.refresh_trigger.notify_one();
     }
@@ -270,7 +288,16 @@ async fn refresh_providers(
         }
     }
 
-    pd.checkouts = checkouts.into_iter().collect();
+    let local_host = flotilla_protocol::HostName::local();
+    pd.checkouts = checkouts
+        .into_iter()
+        .map(|(path, co)| {
+            (
+                flotilla_protocol::HostPath::new(local_host.clone(), path),
+                co,
+            )
+        })
+        .collect();
     collect_errors(&mut errors, "checkouts", checkout_errors);
 
     pd.change_requests = crs.into_iter().collect();
@@ -677,7 +704,7 @@ mod tests {
     fn make_checkout(branch: &str) -> Checkout {
         Checkout {
             branch: branch.to_string(),
-            is_trunk: false,
+            is_main: false,
             trunk_ahead_behind: None,
             remote_ahead_behind: None,
             working_tree: None,

@@ -29,9 +29,12 @@ pub async fn execute(
     runner: &dyn CommandRunner,
     config_base: &Path,
 ) -> CommandResult {
+    let local_host = flotilla_protocol::HostName::local();
     match cmd {
         Command::CreateWorkspaceForCheckout { checkout_path } => {
-            if let Some(co) = providers_data.checkouts.get(&checkout_path).cloned() {
+            let host_key =
+                flotilla_protocol::HostPath::new(local_host.clone(), checkout_path.clone());
+            if let Some(co) = providers_data.checkouts.get(&host_key).cloned() {
                 info!(branch = %co.branch, "entering workspace");
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
                     let mut config = workspace_config(
@@ -333,7 +336,8 @@ pub async fn execute(
                     Err(message) => return CommandResult::Error { message },
                 };
             let wt_path = if let Some(ref key) = checkout_key {
-                providers_data.checkouts.get(key).map(|_| key.clone())
+                let host_key = flotilla_protocol::HostPath::new(local_host.clone(), key.clone());
+                providers_data.checkouts.get(&host_key).map(|_| key.clone())
             } else if let Some(branch_name) = &branch {
                 let checkout_result = if let Some(cm) = registry.checkout_managers.values().next() {
                     cm.create_checkout(repo_root, branch_name, false).await.ok()
@@ -527,6 +531,11 @@ mod tests {
     use crate::providers::vcs::CheckoutManager;
     use crate::providers::workspace::WorkspaceManager;
     use async_trait::async_trait;
+    use flotilla_protocol::{HostName, HostPath};
+
+    fn hp(path: &str) -> HostPath {
+        HostPath::new(HostName::local(), PathBuf::from(path))
+    }
 
     // -----------------------------------------------------------------------
     // Mock providers
@@ -545,7 +554,7 @@ mod tests {
                     PathBuf::from(path),
                     Checkout {
                         branch: branch.to_string(),
-                        is_trunk: false,
+                        is_main: false,
                         trunk_ahead_behind: None,
                         remote_ahead_behind: None,
                         working_tree: None,
@@ -807,7 +816,7 @@ mod tests {
     fn make_checkout(branch: &str, _path: &str) -> Checkout {
         Checkout {
             branch: branch.to_string(),
-            is_trunk: false,
+            is_main: false,
             trunk_ahead_behind: None,
             remote_ahead_behind: None,
             working_tree: None,
@@ -933,7 +942,7 @@ mod tests {
         let mut data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
-            .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
+            .insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
 
         let result = run_execute(
@@ -987,7 +996,7 @@ mod tests {
         let mut data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
-            .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
+            .insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
 
         let result = run_execute(
@@ -1032,7 +1041,7 @@ mod tests {
         let mut data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
-            .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
+            .insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
 
         let result = run_execute(
@@ -1872,7 +1881,7 @@ mod tests {
         let mut data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
-            .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
+            .insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         data.sessions
             .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();
@@ -1910,7 +1919,7 @@ mod tests {
         let mut data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
-            .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
+            .insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         data.sessions
             .insert("sess-1".to_string(), make_session_for("cursor", "sess-1"));
         let runner = runner_ok();
@@ -2008,7 +2017,7 @@ mod tests {
         let mut data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
-            .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
+            .insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         data.sessions
             .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();
@@ -2042,7 +2051,7 @@ mod tests {
         let mut data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
         data.checkouts
-            .insert(path.clone(), make_checkout("feat", "/repo/wt-feat"));
+            .insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         data.sessions
             .insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
         let runner = runner_ok();

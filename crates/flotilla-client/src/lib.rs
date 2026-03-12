@@ -111,6 +111,9 @@ impl SocketDaemon {
                             Message::Request { .. } => {
                                 warn!("received unexpected request from daemon");
                             }
+                            Message::PeerData(_) => {
+                                warn!("received unexpected peer_data from daemon");
+                            }
                         }
                     }
                     Ok(None) => {
@@ -546,7 +549,8 @@ fn handle_event(
         }
         DaemonEvent::RepoAdded(_)
         | DaemonEvent::CommandStarted { .. }
-        | DaemonEvent::CommandFinished { .. } => {
+        | DaemonEvent::CommandFinished { .. }
+        | DaemonEvent::PeerStatusChanged { .. } => {
             let _ = event_tx.send(event);
         }
     }
@@ -726,6 +730,7 @@ mod tests {
         Snapshot {
             seq,
             repo: repo.to_path_buf(),
+            host_name: flotilla_protocol::HostName::new("test-host"),
             work_items: vec![],
             providers: flotilla_protocol::ProviderData::default(),
             provider_health: HashMap::new(),

@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::app::{
-    BranchInputKind, InFlightCommand, Intent, ProviderStatus, RepoViewLayout, TabId, TuiModel,
-    UiMode, UiState,
+    BranchInputKind, InFlightCommand, Intent, PeerHostStatus, PeerStatus, ProviderStatus,
+    RepoViewLayout, TabId, TuiModel, UiMode, UiState,
 };
 use crate::event_log::{self, LevelExt};
 use crate::ui_helpers;
@@ -254,6 +254,31 @@ fn render_status_bar(
     if let Some(err) = &model.status_message {
         let msg = format!(" Error: {}", err);
         let status = Paragraph::new(msg).style(Style::default().fg(Color::Red));
+        frame.render_widget(status, area);
+        return;
+    }
+
+    // Show disconnected/reconnecting peers as a warning
+    let problem_peers: Vec<&PeerHostStatus> = model
+        .peer_hosts
+        .iter()
+        .filter(|p| !matches!(p.status, PeerStatus::Connected))
+        .collect();
+    if !problem_peers.is_empty() {
+        let names: Vec<String> = problem_peers
+            .iter()
+            .map(|p| {
+                let icon = match p.status {
+                    PeerStatus::Disconnected => "\u{25cb}", // ○
+                    PeerStatus::Connecting => "\u{25d0}",   // ◐
+                    PeerStatus::Reconnecting => "\u{25d0}", // ◐
+                    PeerStatus::Connected => "\u{25cf}",    // ● (shouldn't reach here)
+                };
+                format!("{icon} {}", p.name)
+            })
+            .collect();
+        let msg = format!(" Hosts: {}", names.join("  "));
+        let status = Paragraph::new(msg).style(Style::default().fg(Color::Yellow));
         frame.render_widget(status, area);
         return;
     }
@@ -575,7 +600,7 @@ fn build_item_row<'a>(
     let branch_width = col_widths.get(4).copied().unwrap_or(25) as usize;
 
     let path_display = if let Some(p) = item.checkout_key() {
-        ui_helpers::shorten_path(p, repo_root, path_width)
+        ui_helpers::shorten_path(&p.path, repo_root, path_width)
     } else if let Some(ref ses_key) = item.session_key {
         ses_key.clone()
     } else {
@@ -697,7 +722,7 @@ fn render_preview_content(model: &TuiModel, ui: &UiState, frame: &mut Frame, are
 
         if let Some(wt_key) = item.checkout_key() {
             if let Some(co) = providers.checkouts.get(wt_key) {
-                lines.push(format!("Path: {}", wt_key.display()));
+                lines.push(format!("Path: {}", wt_key.path.display()));
                 if let Some(commit) = &co.last_commit {
                     let sha = if commit.short_sha.is_empty() {
                         "?"
@@ -1169,7 +1194,18 @@ fn render_config_screen(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(area);
 
-    render_global_status(model, frame, chunks[0]);
+    if model.peer_hosts.is_empty() {
+        render_global_status(model, frame, chunks[0]);
+    } else {
+        // Split left panel: providers on top, hosts below.
+        let host_height = (model.peer_hosts.len() as u16 + 2).min(8);
+        let left_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(host_height)])
+            .split(chunks[0]);
+        render_global_status(model, frame, left_chunks[0]);
+        render_hosts_status(frame, left_chunks[1], &model.peer_hosts);
+    }
     render_event_log(ui, frame, chunks[1]);
 }
 
@@ -1237,6 +1273,27 @@ fn render_global_status(model: &TuiModel, frame: &mut Frame, area: Rect) {
         .header(provider_table_header())
         .block(Block::bordered().title(" Providers "));
     frame.render_widget(table, area);
+}
+
+fn render_hosts_status(frame: &mut Frame, area: Rect, hosts: &[PeerHostStatus]) {
+    let items: Vec<ListItem> = hosts
+        .iter()
+        .map(|h| {
+            let (icon, style) = match h.status {
+                PeerStatus::Connected => ("\u{25cf}", Style::default().fg(Color::Green)),
+                PeerStatus::Disconnected => ("\u{25cb}", Style::default().fg(Color::Red)),
+                PeerStatus::Connecting => ("\u{25d0}", Style::default().fg(Color::Yellow)),
+                PeerStatus::Reconnecting => ("\u{25d0}", Style::default().fg(Color::Yellow)),
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{icon} "), style),
+                Span::raw(h.name.as_str()),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items).block(Block::bordered().title(" Connected Hosts "));
+    frame.render_widget(list, area);
 }
 
 fn render_event_log(ui: &mut UiState, frame: &mut Frame, area: Rect) {
