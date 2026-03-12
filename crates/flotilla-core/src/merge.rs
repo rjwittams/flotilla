@@ -31,7 +31,9 @@ pub fn merge_provider_data(
                 .insert(namespaced, terminal.clone());
         }
 
-        // Merge branches from peers
+        // Merge branches from peers. Followers don't run the remote-branch
+        // provider, so peer branch maps are expected to be empty.
+        // "or_insert" keeps local data if both sides have the same key.
         for (name, branch) in &peer_data.branches {
             merged
                 .branches

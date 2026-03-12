@@ -119,7 +119,7 @@ impl SshTransport {
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| format!("failed to spawn ssh: {e}"))?;
 
@@ -128,7 +128,11 @@ impl SshTransport {
     }
 
     /// Wait for the forwarded local socket file to appear on disk.
-    async fn wait_for_socket(&self) -> Result<(), String> {
+    ///
+    /// Also checks whether the SSH child has exited early (bad key,
+    /// unreachable host, etc.) to fail fast instead of waiting the
+    /// full timeout.
+    async fn wait_for_socket(&mut self) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + SOCKET_POLL_TIMEOUT;
 
         loop {
@@ -138,6 +142,13 @@ impl SshTransport {
                     "forwarded socket appeared"
                 );
                 return Ok(());
+            }
+
+            // Detect early SSH exit (auth failure, unreachable host, etc.)
+            if let Some(ref mut child) = self.ssh_process {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(format!("ssh exited prematurely with {status}"));
+                }
             }
 
             if tokio::time::Instant::now() >= deadline {
