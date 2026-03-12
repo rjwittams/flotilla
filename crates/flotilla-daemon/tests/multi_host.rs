@@ -77,7 +77,7 @@ impl PeerTransport for MockTransport {
         self.status.clone()
     }
 
-    async fn subscribe(&mut self) -> Result<mpsc::Receiver<PeerDataMessage>, String> {
+    async fn subscribe(&mut self) -> Result<mpsc::Receiver<PeerWireMessage>, String> {
         let (_tx, rx) = mpsc::channel(1);
         Ok(rx)
     }

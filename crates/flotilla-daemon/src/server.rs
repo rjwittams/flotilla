@@ -13,7 +13,8 @@ use flotilla_core::config::ConfigStore;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::in_process::InProcessDaemon;
 use flotilla_protocol::{
-    Command, DaemonEvent, HostName, Message, PeerConnectionState, PeerDataMessage,
+    Command, ConfigLabel, DaemonEvent, HostName, Message, PeerConnectionState, PeerDataMessage,
+    PeerWireMessage,
 };
 
 use crate::peer::{HandleResult, PeerManager, SshTransport};
@@ -68,14 +69,14 @@ impl DaemonServer {
         let peer_count = hosts_config.hosts.len();
         let mut peer_manager = PeerManager::new(host_name.clone());
         for (name, host_config) in hosts_config.hosts {
-            let peer_host = HostName::new(&name);
+            let peer_host = HostName::new(&host_config.expected_host_name);
             if peer_host == host_name {
                 warn!(
                     host = %host_name,
                     "peer config uses same name as local host — messages will be ignored"
                 );
             }
-            match SshTransport::new(peer_host.clone(), host_config) {
+            match SshTransport::new(host_name.clone(), ConfigLabel(name.clone()), host_config) {
                 Ok(transport) => {
                     peer_manager.add_peer(peer_host, Box::new(transport));
                 }
@@ -216,7 +217,7 @@ impl DaemonServer {
         tokio::spawn(async move {
             if let Some(mut rx) = peer_data_rx {
                 // Connect all peers and collect initial receivers into a map
-                let mut initial_rx_map: HashMap<HostName, mpsc::Receiver<PeerDataMessage>> =
+                let mut initial_rx_map: HashMap<HostName, mpsc::Receiver<PeerWireMessage>> =
                     HashMap::new();
                 let peer_names = {
                     let mut pm = peer_manager.lock().await;
@@ -729,13 +730,23 @@ async fn send_local_to_peers(
 /// `false` if the outbound channel was closed (daemon shutting down).
 async fn forward_until_closed(
     tx: &mpsc::Sender<PeerDataMessage>,
-    inbound_rx: &mut mpsc::Receiver<PeerDataMessage>,
+    inbound_rx: &mut mpsc::Receiver<PeerWireMessage>,
     peer_name: &HostName,
 ) -> bool {
     while let Some(msg) = inbound_rx.recv().await {
-        if let Err(e) = tx.send(msg).await {
-            warn!(peer = %peer_name, err = %e, "forwarding channel closed");
-            return false;
+        match msg {
+            PeerWireMessage::Data(msg) => {
+                if let Err(e) = tx.send(msg).await {
+                    warn!(peer = %peer_name, err = %e, "forwarding channel closed");
+                    return false;
+                }
+            }
+            PeerWireMessage::Routed(_) => {
+                debug!(
+                    peer = %peer_name,
+                    "dropping routed peer message until routed control handling is implemented"
+                );
+            }
         }
     }
     true

@@ -241,7 +241,7 @@ impl PeerManager {
     /// For each successfully connected peer, calls `subscribe()` to obtain the
     /// inbound message receiver. The caller should spawn forwarding tasks that
     /// feed these receivers into the shared `peer_data_tx` channel.
-    pub async fn connect_all(&mut self) -> Vec<(HostName, mpsc::Receiver<PeerDataMessage>)> {
+    pub async fn connect_all(&mut self) -> Vec<(HostName, mpsc::Receiver<PeerWireMessage>)> {
         let names: Vec<HostName> = self.peers.keys().cloned().collect();
         let mut receivers = Vec::new();
         for name in names {
@@ -370,7 +370,7 @@ impl PeerManager {
     pub async fn reconnect_peer(
         &mut self,
         name: &HostName,
-    ) -> Result<mpsc::Receiver<PeerDataMessage>, String> {
+    ) -> Result<mpsc::Receiver<PeerWireMessage>, String> {
         let (sender, rx) = {
             let transport = self
                 .peers
@@ -460,7 +460,7 @@ mod tests {
             self.status.clone()
         }
 
-        async fn subscribe(&mut self) -> Result<mpsc::Receiver<PeerDataMessage>, String> {
+        async fn subscribe(&mut self) -> Result<mpsc::Receiver<PeerWireMessage>, String> {
             let (_tx, rx) = mpsc::channel(1);
             Ok(rx)
         }
