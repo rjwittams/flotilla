@@ -785,6 +785,79 @@ impl InProcessDaemon {
         }
     }
 
+    /// Add a virtual repo (no local filesystem path) for a remote-only repo.
+    ///
+    /// Unlike `add_repo`, this skips provider discovery entirely — there is
+    /// no local path to scan. Instead it creates a dormant `RepoState` with
+    /// an empty provider registry and an idle refresh handle.
+    ///
+    /// The `synthetic_path` serves as a stable key for tab identity (e.g.
+    /// `<remote>/desktop//home/dev/repo`). The `provider_data` is the
+    /// initial merged data from peer snapshots.
+    ///
+    /// Emits `DaemonEvent::RepoAdded` so the TUI creates a tab.
+    pub async fn add_virtual_repo(
+        &self,
+        synthetic_path: PathBuf,
+        provider_data: ProviderData,
+    ) -> Result<(), String> {
+        // Check if already tracked
+        {
+            let repos = self.repos.read().await;
+            if repos.contains_key(&synthetic_path) {
+                return Ok(());
+            }
+        }
+
+        let mut model = RepoModel::new_virtual();
+        model.data.providers = Arc::new(provider_data);
+        model.data.loading = false;
+
+        let repo_info = RepoInfo {
+            path: synthetic_path.clone(),
+            name: repo_name(&synthetic_path),
+            labels: model.labels.clone(),
+            provider_names: provider_names_from_registry(&model.registry),
+            provider_health: HashMap::new(),
+            loading: false,
+        };
+
+        // Insert under write lock — re-check to avoid TOCTOU duplicate
+        {
+            let mut repos = self.repos.write().await;
+            let mut order = self.repo_order.write().await;
+            if repos.contains_key(&synthetic_path) {
+                return Ok(());
+            }
+            repos.insert(
+                synthetic_path.clone(),
+                RepoState {
+                    model,
+                    seq: 0,
+                    last_snapshot: Arc::new(RefreshSnapshot::default()),
+                    issue_cache: IssueCache::new(),
+                    search_results: None,
+                    issue_fetch_mutex: Arc::new(Mutex::new(())),
+                    last_broadcast_providers: ProviderData::default(),
+                    last_broadcast_health: HashMap::new(),
+                    last_broadcast_errors: Vec::new(),
+                    delta_log: VecDeque::new(),
+                },
+            );
+            order.push(synthetic_path.clone());
+        }
+
+        // Virtual repos are not persisted to config — they come and go
+        // with peer connections.
+
+        info!(repo = %synthetic_path.display(), "added virtual repo");
+        let _ = self
+            .event_tx
+            .send(DaemonEvent::RepoAdded(Box::new(repo_info)));
+
+        Ok(())
+    }
+
     /// Re-build and broadcast a snapshot for the given repo using current cache state.
     async fn broadcast_snapshot(&self, repo: &Path) {
         let mut repos = self.repos.write().await;

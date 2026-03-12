@@ -147,6 +147,22 @@ impl RepoModel {
             refresh_handle,
         }
     }
+
+    /// Create a model for a virtual (remote-only) repo.
+    ///
+    /// Uses an empty `ProviderRegistry` and an idle refresh handle that
+    /// never polls — provider data for virtual repos arrives via PeerData
+    /// messages rather than local filesystem scanning.
+    pub fn new_virtual() -> Self {
+        let registry = ProviderRegistry::new();
+        let labels = labels_from_registry(&registry);
+        Self {
+            registry: Arc::new(registry),
+            data: DataStore::default(),
+            labels,
+            refresh_handle: RepoRefreshHandle::idle(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -575,6 +591,20 @@ mod tests {
         assert_eq!(model.labels.checkouts.section, "\u{2014}");
         assert_eq!(model.labels.code_review.section, "\u{2014}");
         model.refresh_handle.trigger_refresh();
+    }
+
+    #[tokio::test]
+    async fn repo_model_new_virtual_has_empty_registry_and_default_labels() {
+        let model = RepoModel::new_virtual();
+        assert!(model.registry.vcs.is_empty());
+        assert!(model.registry.checkout_managers.is_empty());
+        assert!(model.registry.code_review.is_empty());
+        assert!(model.registry.issue_trackers.is_empty());
+        assert!(model.registry.cloud_agents.is_empty());
+        assert!(model.registry.workspace_manager.is_none());
+        assert_eq!(model.labels.checkouts.section, "\u{2014}");
+        assert_eq!(model.labels.code_review.section, "\u{2014}");
+        assert!(!model.data.loading);
     }
 
     // -------------------------------------------------------

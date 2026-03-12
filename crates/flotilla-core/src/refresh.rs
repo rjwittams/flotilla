@@ -93,6 +93,24 @@ impl RepoRefreshHandle {
         }
     }
 
+    /// Create a dormant refresh handle that never polls providers.
+    ///
+    /// Used for virtual (remote-only) repos where provider data arrives
+    /// via PeerData messages rather than local filesystem polling.
+    pub fn idle() -> Self {
+        let (_snapshot_tx, snapshot_rx) = watch::channel(Arc::new(RefreshSnapshot::default()));
+        let refresh_trigger = Arc::new(Notify::new());
+
+        // Spawn a task that just parks forever — it will be aborted on Drop.
+        let task_handle = tokio::spawn(std::future::pending::<()>());
+
+        Self {
+            refresh_trigger,
+            snapshot_rx,
+            _task_handle: task_handle,
+        }
+    }
+
     pub fn trigger_refresh(&self) {
         self.refresh_trigger.notify_one();
     }

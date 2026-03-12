@@ -1,11 +1,20 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing::{debug, info, warn};
 
 use flotilla_protocol::{HostName, PeerDataKind, PeerDataMessage, ProviderData, RepoIdentity};
 
 use super::transport::PeerTransport;
+
+/// Generate a synthetic path for a remote-only repo.
+///
+/// Remote-only repos have no local filesystem path. This function produces
+/// a deterministic `PathBuf` that serves as a stable key for tab identity
+/// and repo tracking, e.g. `<remote>/desktop//home/dev/repo`.
+pub fn synthetic_repo_path(host: &HostName, repo_path: &Path) -> PathBuf {
+    PathBuf::from(format!("<remote>/{}/{}", host, repo_path.display()))
+}
 
 /// Result of handling an inbound PeerDataMessage.
 #[derive(Debug, PartialEq, Eq)]
@@ -41,6 +50,9 @@ pub struct PeerManager {
     local_host: HostName,
     peers: HashMap<HostName, Box<dyn PeerTransport>>,
     peer_data: HashMap<HostName, HashMap<RepoIdentity, PerRepoPeerState>>,
+    /// RepoIdentity values that exist only on remote peers — no local repo
+    /// matches. Each maps to the synthetic path used for tab identity.
+    known_remote_repos: HashMap<RepoIdentity, PathBuf>,
 }
 
 impl PeerManager {
@@ -50,6 +62,7 @@ impl PeerManager {
             local_host,
             peers: HashMap::new(),
             peer_data: HashMap::new(),
+            known_remote_repos: HashMap::new(),
         }
     }
 
@@ -195,6 +208,26 @@ impl PeerManager {
                 }
             }
         }
+    }
+
+    /// Register a repo identity as remote-only.
+    ///
+    /// Called by the wiring layer after determining that a peer's repo has
+    /// no matching local repo. The `synthetic_path` is used as the stable
+    /// key for tab identity in the TUI.
+    pub fn register_remote_repo(&mut self, identity: RepoIdentity, synthetic_path: PathBuf) {
+        info!(repo = %identity, path = %synthetic_path.display(), "registered remote-only repo");
+        self.known_remote_repos.insert(identity, synthetic_path);
+    }
+
+    /// Check whether a repo identity is known to be remote-only.
+    pub fn is_remote_repo(&self, identity: &RepoIdentity) -> bool {
+        self.known_remote_repos.contains_key(identity)
+    }
+
+    /// Accessor for all known remote-only repos and their synthetic paths.
+    pub fn known_remote_repos(&self) -> &HashMap<RepoIdentity, PathBuf> {
+        &self.known_remote_repos
     }
 }
 
@@ -451,5 +484,37 @@ mod tests {
 
         let peer_transport = mgr.peers.get(&HostName::new("peer")).expect("peer exists");
         assert_eq!(peer_transport.status(), PeerConnectionStatus::Disconnected);
+    }
+
+    #[test]
+    fn synthetic_repo_path_format() {
+        let host = HostName::new("desktop");
+        let repo_path = std::path::Path::new("/home/dev/repo");
+        let path = super::synthetic_repo_path(&host, repo_path);
+        assert_eq!(path, PathBuf::from("<remote>/desktop//home/dev/repo"));
+    }
+
+    #[test]
+    fn synthetic_repo_path_different_hosts_produce_different_paths() {
+        let repo_path = std::path::Path::new("/home/dev/repo");
+        let path_a = super::synthetic_repo_path(&HostName::new("host-a"), repo_path);
+        let path_b = super::synthetic_repo_path(&HostName::new("host-b"), repo_path);
+        assert_ne!(path_a, path_b);
+    }
+
+    #[test]
+    fn register_and_query_remote_repos() {
+        let mut mgr = PeerManager::new(HostName::new("local"));
+        let repo = test_repo();
+        let synthetic = PathBuf::from("<remote>/desktop//home/dev/repo");
+
+        assert!(!mgr.is_remote_repo(&repo));
+        assert!(mgr.known_remote_repos().is_empty());
+
+        mgr.register_remote_repo(repo.clone(), synthetic.clone());
+
+        assert!(mgr.is_remote_repo(&repo));
+        assert_eq!(mgr.known_remote_repos().len(), 1);
+        assert_eq!(mgr.known_remote_repos()[&repo], synthetic);
     }
 }
