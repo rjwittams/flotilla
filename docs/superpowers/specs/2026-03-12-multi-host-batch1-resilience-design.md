@@ -6,6 +6,23 @@ Addresses four independent issues in the peer relay/connection infrastructure:
 [#263](https://github.com/rjwittams/flotilla/issues/263),
 [#264](https://github.com/rjwittams/flotilla/issues/264).
 
+## New types
+
+Two newtypes enforce the distinction between connection config labels and peer identities at compile time:
+
+```rust
+/// Connection config label from hosts.toml. Used to key transports and
+/// reconnect loops. Not a peer identity — the canonical name comes from
+/// the Hello handshake.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConfigLabel(pub String);
+
+/// Protocol version constant. Bump on incompatible wire format changes.
+pub const PROTOCOL_VERSION: u32 = 1;
+```
+
+`HostName` (existing) continues to represent the canonical peer identity, established via `Hello.host_name`.
+
 ## #262: Unify peer send path with `PeerSender` trait
 
 ### Problem
@@ -36,15 +53,15 @@ Both are thin wrappers around cloneable channel senders. The transport owns the 
 
 `PeerManager` gains a unified senders map and renames the existing map:
 
-| Map | Key | Type | Purpose |
-|-----|-----|------|---------|
-| `transports` | Config label | `HashMap<String, Box<dyn PeerTransport>>` | Lifecycle management (connect, disconnect, subscribe). Keyed by hosts.toml label, not peer identity. SSH-specific today; future transports later. |
-| `senders` | Canonical name | `HashMap<HostName, Arc<dyn PeerSender>>` | Messaging. All peers, regardless of transport. Keyed by `Hello.host_name`. Used by `prepare_relay()` and `send_to()`. |
-| `transport_peers` | Config label → canonical name | `HashMap<String, HostName>` | Mapping established after Hello. Lets the reconnect loop find the canonical name to clean up when a transport-managed connection drops. |
+| Map | Key type | Value type | Purpose |
+|-----|----------|------------|---------|
+| `transports` | `ConfigLabel` | `Box<dyn PeerTransport>` | Lifecycle management (connect, disconnect, subscribe). Keyed by hosts.toml label, not peer identity. |
+| `senders` | `HostName` | `Arc<dyn PeerSender>` | Messaging. All peers, regardless of transport. Keyed by canonical `Hello.host_name`. Used by `prepare_relay()` and `send_to()`. |
+| `transport_peers` | `ConfigLabel` | `HostName` | Mapping established after Hello. Lets the reconnect loop find the canonical name to clean up when a transport-managed connection drops. |
 
 Lifecycle:
 
-- **SSH peer connects:** transport does Hello handshake, returns canonical name. Caller wraps the outbound channel in `Arc<ChannelPeerSender>`, registers via `register_sender(canonical_name)`, and stores the config-label → canonical-name mapping.
+- **SSH peer connects:** transport does Hello handshake, returns canonical `HostName`. Caller wraps the outbound channel in `Arc<ChannelPeerSender>`, registers via `register_sender(canonical_name)`, and stores the `ConfigLabel` → `HostName` mapping.
 - **Socket peer connects (after Hello handshake — see #259):** wrap its `mpsc::Sender<Message>` in `Arc<SocketPeerSender>`, register via `register_sender(hello.host_name)`.
 - **Either disconnects:** call `disconnect_peer(canonical_name, generation)` (#263).
 
@@ -52,8 +69,9 @@ Lifecycle:
 
 ### Files changed
 
+- `crates/flotilla-protocol/src/lib.rs` — `ConfigLabel` newtype, `PROTOCOL_VERSION` constant
 - `crates/flotilla-daemon/src/peer/transport.rs` — add `PeerSender` trait; remove `send()` from `PeerTransport`
-- `crates/flotilla-daemon/src/peer/manager.rs` — rename `peers` to `transports`; add `senders` map, `register_sender()`, `senders()` accessor; `send_to()` uses `senders`
+- `crates/flotilla-daemon/src/peer/manager.rs` — rename `peers` to `transports` (keyed by `ConfigLabel`); add `senders` map (keyed by `HostName`), `transport_peers` map, `register_sender()`, `senders()` accessor; `send_to()` uses `senders`
 - `crates/flotilla-daemon/src/peer/ssh_transport.rs` — add `sender()` method; add `ChannelPeerSender` implementing `PeerSender`
 - `crates/flotilla-daemon/src/server.rs` — add `SocketPeerSender`; register/unregister senders on peer connect/disconnect; simplify `send_local_to_peers()` (remove `peer_clients` parameter and send loop); remove `PeerClientMap` type
 
@@ -137,13 +155,9 @@ Daemons at different protocol versions silently exchange incompatible data, prod
 
 ### Design
 
-Add a constant and a new `Message` variant:
+Add a new `Message` variant:
 
 ```rust
-// flotilla-protocol/src/lib.rs
-pub const PROTOCOL_VERSION: u32 = 1;
-
-// In the Message enum:
 #[serde(rename = "hello")]
 Hello {
     protocol_version: u32,
@@ -160,33 +174,37 @@ The daemon socket is shared between TUI clients and peer connections. `Hello` ac
 
 This means `handle_client` reads one message, branches on its type, and enters the appropriate handler loop.
 
-### Identity rule
+### Identity model
 
-Each host owns its identity. A host's canonical name comes from its `daemon.toml` `host_name` setting (or OS hostname as fallback), advertised via `Hello.host_name`. This is the name used for peer messaging state: senders, generations, peer data, dedup clocks, UI display.
+Each host owns its identity. A host's canonical name comes from its `daemon.toml` `host_name` setting (or OS hostname as fallback), advertised via `Hello.host_name`. This is the `HostName` used for peer messaging state: senders, generations, peer data, dedup clocks, UI display.
 
-The `hosts.toml` key is a **connection config label** — it names the SSH connection config, not the peer's identity. Once connected, the remote's self-advertised `Hello.host_name` becomes the canonical key for that peer. If you want a host to appear as "build-box," configure `host_name = "build-box"` in that host's `daemon.toml`.
+The `hosts.toml` key is a `ConfigLabel` — it names the SSH connection config, not the peer's identity. Once connected, the remote's self-advertised `Hello.host_name` becomes the canonical `HostName` for that peer. If you want a host to appear as "build-box," configure `host_name = "build-box"` in that host's `daemon.toml`.
 
-This creates two identity layers:
+Two identity layers, enforced by distinct types:
 
-| Layer | Key | Scope | Lifetime |
-|-------|-----|-------|----------|
-| **Connection config** | hosts.toml label | `transports` map, reconnect loop | Static — exists before Hello |
-| **Peer identity** | `Hello.host_name` | `senders`, `peer_data`, `generations`, `last_seen_clocks` | Established at Hello time |
+| Layer | Type | Scope | Lifetime |
+|-------|------|-------|----------|
+| **Connection config** | `ConfigLabel` | `transports` map, reconnect loop | Static — exists before Hello |
+| **Peer identity** | `HostName` | `senders`, `peer_data`, `generations`, `last_seen_clocks` | Established at Hello time |
 
-For outbound SSH, `PeerManager` stores a mapping from config label → canonical name after Hello completes. The reconnect loop uses the config label to find the transport, performs the handshake, learns the canonical name, and registers the sender under it. If the canonical name changes on reconnect (remote reconfigured), the old-generation cleanup removes state under the old name, and the new connection registers under the new name.
+For outbound SSH, `PeerManager` stores a mapping (`transport_peers`) from `ConfigLabel` → `HostName` after Hello completes. The reconnect loop uses the `ConfigLabel` to find the transport, performs the handshake, learns the canonical `HostName`, and registers the sender under it. If the canonical name changes on reconnect (remote reconfigured), the old-generation cleanup removes state under the old name, and the new connection registers under the new name.
 
-For inbound socket peers, there is no config label — only the canonical name from Hello.
+For inbound socket peers, there is no `ConfigLabel` — only the canonical `HostName` from Hello.
 
-**Duplicate identity — supersede, not reject:** If a Hello arrives with a `host_name` that's already registered (from a different connection), the new connection **supersedes** the old one. This is consistent with #263's generation model — `register_sender()` bumps the generation, and the old connection's eventual cleanup no-ops because its generation is stale. This handles the rapid-reconnect case correctly: the replacement connection is accepted, not refused.
+**Supersede on duplicate identity:** If a Hello arrives with a `host_name` that's already registered (from a different connection), the new connection **supersedes** the old one. `register_sender()` bumps the generation, and the old connection's eventual cleanup no-ops because its generation is stale. This handles the rapid-reconnect case correctly (see #263).
 
-**PeerData messages:** No origin_host validation or rewriting. `PeerDataMessage.origin_host` is accepted as-is on all messages. Direct messages carry the connection peer's name; relayed messages carry a third party's name. Both are legitimate. Vector clock dedup already prevents replays and loops. This keeps the system simple and works correctly in mesh topologies where the first time you hear about a peer may be through relay.
+**PeerData messages and the inbound generation gate:** No `origin_host` validation or rewriting. `PeerDataMessage.origin_host` is accepted as-is. Direct messages carry the connection peer's name; relayed messages carry a third party's name. Both are legitimate. Vector clock dedup prevents replays and loops.
+
+However, each inbound message from a connection is tagged with that connection's generation (see #263). If the connection has been superseded (generation is stale), the message is dropped before processing. This ensures that after supersede, only the new connection's data stream is authoritative — the old connection's reader task may still be running, but its messages are ignored.
+
+**Relayed data ownership:** Data received via relay (where `origin_host` differs from the connection peer's Hello name) is keyed by `origin_host`, not by the connection peer. This data is not owned by any single connection's generation. It persists until superseded by a newer snapshot from the same `origin_host` (via any relay path), or until the system restarts. This is intentional — the system trusts peers to relay data on behalf of third parties, and relay paths may change without invalidating the data.
 
 ### Handshake mechanics
 
 **Outbound (SSH transport):** The Hello handshake happens *before* spawning reader/writer tasks. After `connect_socket()` opens the `UnixStream` but before splitting it into read/write halves and spawning tasks:
 1. Write `Message::Hello` as a JSON line to the stream.
 2. Read one JSON line from the stream. If it's a `Hello` with a matching version, proceed to spawn reader/writer tasks. Otherwise, close the stream and return an error.
-3. Return the remote's `Hello.host_name` to the caller. The caller uses this (not the hosts.toml config key) to register the sender and key all peer state.
+3. Return the remote's `Hello.host_name` to the caller. The caller uses this (not the `ConfigLabel`) to register the sender and key all peer state.
 
 This requires restructuring `connect_socket()`: do the handshake on the raw stream first, then split and spawn tasks.
 
@@ -194,15 +212,15 @@ This requires restructuring `connect_socket()`: do the handshake on the raw stre
 1. Check version. On mismatch, log a warning and close the connection (no error message — the remote sees EOF and will reconnect with backoff).
 2. Respond with the server's own `Hello`.
 3. Register the peer sender (#262) using the advertised `host_name`. If the name is already registered, the new connection supersedes the old one (generation bump per #263).
-4. Enter the peer data forwarding loop.
+4. Enter the peer data forwarding loop. Each forwarded message is tagged with this connection's generation.
 
 This replaces the current implicit peer identification (extracting `origin_host` from the first `PeerData` message).
 
 ### Files changed
 
-- `crates/flotilla-protocol/src/lib.rs` — `PROTOCOL_VERSION` constant, `Message::Hello` variant
-- `crates/flotilla-daemon/src/peer/ssh_transport.rs` — restructure `connect_socket()` to handshake before spawning tasks
-- `crates/flotilla-daemon/src/server.rs` — `handle_client` branches on first message type; `Hello` path does version check, responds, registers peer sender, enters peer loop
+- `crates/flotilla-protocol/src/lib.rs` — `PROTOCOL_VERSION` constant, `Message::Hello` variant, `ConfigLabel` newtype
+- `crates/flotilla-daemon/src/peer/ssh_transport.rs` — restructure `connect_socket()` to handshake before spawning tasks; use `ConfigLabel` for transport identity
+- `crates/flotilla-daemon/src/server.rs` — `handle_client` branches on first message type; `Hello` path does version check, responds, registers peer sender, enters peer loop with generation tagging
 
 ### Tests
 
@@ -218,6 +236,8 @@ This replaces the current implicit peer identification (extracting `origin_host`
 
 When a peer disconnects, `clear_peer_data()` removes its stored data and rebuilds overlays. If the peer reconnects quickly and sends new data before cleanup runs, the stale cleanup wipes fresh data. The same race applies to sender cleanup — `unregister_sender()` from an old connection would remove the live sender registered by the new connection.
 
+A related race: after supersede, the old connection's reader task may still be running and forwarding messages. These stale messages must not update peer state.
+
 ### Design
 
 Add a generation counter to `PeerManager`:
@@ -228,7 +248,23 @@ generations: HashMap<HostName, u64>,
 
 `register_sender()` increments the generation for that host and returns the new value. The caller captures this generation at connect time.
 
-Combine sender and data cleanup into a single generation-guarded method:
+**Inbound message gating:** The forwarding path (in `server.rs`) tags each inbound `PeerDataMessage` with the connection's generation. A wrapper type carries the tag:
+
+```rust
+struct InboundPeerData {
+    msg: PeerDataMessage,
+    /// The generation of the connection that forwarded this message.
+    connection_generation: u64,
+    /// The Hello-established identity of the connection.
+    connection_peer: HostName,
+}
+```
+
+The processing loop checks before accepting: is this generation still current for this peer? If not, drop the message. This ensures that after supersede, only the new connection's messages are processed — even if the old connection's reader task hasn't stopped yet.
+
+Note: generation gating applies to messages where `origin_host` matches `connection_peer` (direct messages). Relayed messages (`origin_host` ≠ `connection_peer`) are not gated — they carry third-party data that isn't tied to any single connection's generation.
+
+**Disconnect cleanup:** Combine sender and data cleanup into a single generation-guarded method:
 
 ```rust
 pub fn disconnect_peer(&mut self, name: &HostName, generation: u64) -> Vec<RepoIdentity> {
@@ -245,19 +281,23 @@ pub fn disconnect_peer(&mut self, name: &HostName, generation: u64) -> Vec<RepoI
 
 Both sender removal and data removal happen atomically under the same generation check. A stale disconnect (from an earlier generation) is a complete no-op — it touches neither the sender nor the data.
 
+Note: `disconnect_peer` only removes data keyed by the direct peer's `HostName`. Relayed data (keyed by third-party `origin_host` values) is intentionally left in place — it may still be valid via other relay paths and will be superseded by future snapshots.
+
 Both peer connection paths capture and use generations:
 
-- **SSH outbound peers:** The reconnect loop in `server.rs` captures the generation from `register_sender()` when the connection establishes. On disconnect, passes that generation to `disconnect_peer()`. A stale cleanup becomes a no-op.
-- **Inbound socket peers:** When `handle_client` registers a socket peer sender via `register_sender()`, it captures the generation. On client disconnect, it calls `disconnect_peer()` with that generation. This replaces the current `PeerClientMap` connection ID scheme — the generation counter on `PeerManager` serves the same purpose.
+- **SSH outbound peers:** The reconnect loop in `server.rs` captures the generation from `register_sender()` when the connection establishes. The forwarding task tags messages with this generation. On disconnect, passes that generation to `disconnect_peer()`. A stale cleanup becomes a no-op.
+- **Inbound socket peers:** When `handle_client` registers a socket peer sender via `register_sender()`, it captures the generation. The forwarding loop tags messages with this generation. On client disconnect, it calls `disconnect_peer()` with that generation.
 
 ### Files changed
 
-- `crates/flotilla-daemon/src/peer/manager.rs` — `generations` map, `disconnect_peer()` replacing `remove_peer_data()` and `unregister_sender()`
-- `crates/flotilla-daemon/src/server.rs` — capture generation on both SSH and socket peer connect; pass to `disconnect_peer()` on disconnect; update `clear_peer_data()` to use `disconnect_peer()`
+- `crates/flotilla-daemon/src/peer/manager.rs` — `generations` map, `disconnect_peer()` replacing `remove_peer_data()`; generation check method for inbound message gating
+- `crates/flotilla-daemon/src/server.rs` — `InboundPeerData` wrapper; capture generation on both SSH and socket peer connect; tag forwarded messages; gate inbound messages by generation; pass generation to `disconnect_peer()` on disconnect
 
 ### Tests
 
 - Register a sender (generation 1), register again (generation 2, simulating reconnect), call `disconnect_peer` with generation 1 — verify neither sender nor data is removed.
 - Register, disconnect with matching generation — verify both sender and data are removed (existing behavior preserved).
 - Verify the sender registered at generation 2 is still functional after stale generation 1 disconnect.
+- Inbound message from stale generation is dropped.
+- Relayed message (origin ≠ connection peer) from stale generation is still accepted (relay data is connection-independent).
 - Test both paths: SSH reconnect scenario and socket peer reconnect scenario.
