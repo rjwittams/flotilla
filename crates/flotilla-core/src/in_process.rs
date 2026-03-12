@@ -326,7 +326,7 @@ impl InProcessDaemon {
             if repos.contains_key(&path) {
                 continue;
             }
-            let (registry, repo_slug) = crate::providers::discovery::detect_providers_with_mode(
+            let (registry, repo_slug) = crate::providers::discovery::detect_providers(
                 &path,
                 &config,
                 Arc::clone(&runner),
@@ -1218,7 +1218,7 @@ impl DaemonHandle for InProcessDaemon {
         }
 
         // Create the model outside the lock (spawns provider detection and refresh)
-        let (registry, repo_slug) = crate::providers::discovery::detect_providers_with_mode(
+        let (registry, repo_slug) = crate::providers::discovery::detect_providers(
             &path,
             &self.config,
             Arc::clone(&self.runner),

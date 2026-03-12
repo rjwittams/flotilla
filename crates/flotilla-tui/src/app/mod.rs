@@ -588,56 +588,6 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use test_support::*;
-    use tokio::sync::broadcast;
-
-    struct TestDaemon {
-        tx: broadcast::Sender<DaemonEvent>,
-    }
-
-    impl TestDaemon {
-        fn new() -> Self {
-            let (tx, _) = broadcast::channel(1);
-            Self { tx }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl DaemonHandle for TestDaemon {
-        fn subscribe(&self) -> broadcast::Receiver<DaemonEvent> {
-            self.tx.subscribe()
-        }
-
-        async fn get_state(&self, _repo: &Path) -> Result<Snapshot, String> {
-            Err("stub".into())
-        }
-
-        async fn list_repos(&self) -> Result<Vec<RepoInfo>, String> {
-            Ok(vec![])
-        }
-
-        async fn execute(&self, _repo: &Path, _command: Command) -> Result<u64, String> {
-            Ok(1)
-        }
-
-        async fn refresh(&self, _repo: &Path) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn add_repo(&self, _path: &Path) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn remove_repo(&self, _path: &Path) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn replay_since(
-            &self,
-            _last_seen: &HashMap<PathBuf, u64>,
-        ) -> Result<Vec<DaemonEvent>, String> {
-            Ok(vec![])
-        }
-    }
 
     // -- CommandQueue --
 
@@ -719,7 +669,7 @@ mod tests {
         )
         .unwrap();
 
-        let daemon: Arc<dyn DaemonHandle> = Arc::new(TestDaemon::new());
+        let daemon: Arc<dyn DaemonHandle> = Arc::new(test_support::StubDaemon::new());
         let config = Arc::new(ConfigStore::with_base(dir.path()));
         let app = App::new(
             daemon,
@@ -733,7 +683,7 @@ mod tests {
     #[test]
     fn persist_layout_writes_current_ui_state() {
         let dir = tempdir().unwrap();
-        let daemon: Arc<dyn DaemonHandle> = Arc::new(TestDaemon::new());
+        let daemon: Arc<dyn DaemonHandle> = Arc::new(test_support::StubDaemon::new());
         let config = Arc::new(ConfigStore::with_base(dir.path()));
         let mut app = App::new(
             daemon,

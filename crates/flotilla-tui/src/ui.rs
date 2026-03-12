@@ -1400,4 +1400,43 @@ mod tests {
         let position = resolve_preview_position(Rect::new(0, 0, 160, 40), RepoViewLayout::Zoom);
         assert_eq!(position, None);
     }
+
+    #[test]
+    fn auto_neither_viable_falls_back_to_right() {
+        // 60x10: right_preview_width = 24 (< MIN_PREVIEW_WIDTH 32),
+        //        below_preview_height = 4 (< MIN_PREVIEW_HEIGHT 6)
+        // Both layouts are non-viable, so fallback to Right.
+        let result = resolve_auto_preview_position(Rect::new(0, 0, 60, 10));
+        assert_eq!(result, ResolvedPreviewPosition::Right);
+    }
+
+    #[test]
+    fn auto_only_right_viable() {
+        // 210x10: right_preview_width = 84 (>= 32), right_table_width = 126 (>= 50) → viable
+        //         below_preview_height = 4 (< 6) → not viable
+        let result = resolve_auto_preview_position(Rect::new(0, 0, 210, 10));
+        assert_eq!(result, ResolvedPreviewPosition::Right);
+    }
+
+    #[test]
+    fn auto_only_below_viable() {
+        // 60x40: right_preview_width = 24 (< 32) → not viable
+        //        below_preview_height = 16 (>= 6), below_table_height = 24 (>= 8) → viable
+        let result = resolve_auto_preview_position(Rect::new(0, 0, 60, 40));
+        assert_eq!(result, ResolvedPreviewPosition::Below);
+    }
+
+    #[test]
+    fn auto_both_viable_wide_prefers_right() {
+        // 160x40: both viable, aspect_ratio = 4.0 (>= 2.0) → Right
+        let result = resolve_auto_preview_position(Rect::new(0, 0, 160, 40));
+        assert_eq!(result, ResolvedPreviewPosition::Right);
+    }
+
+    #[test]
+    fn auto_both_viable_tall_prefers_below() {
+        // 90x50: both viable, aspect_ratio = 1.8 (< 2.0) → Below
+        let result = resolve_auto_preview_position(Rect::new(0, 0, 90, 50));
+        assert_eq!(result, ResolvedPreviewPosition::Below);
+    }
 }

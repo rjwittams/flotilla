@@ -169,27 +169,6 @@ pub async fn detect_providers(
     repo_root: &Path,
     config: &ConfigStore,
     runner: Arc<dyn CommandRunner>,
-) -> (ProviderRegistry, Option<String>) {
-    detect_providers_inner(repo_root, config, runner, false).await
-}
-
-/// Like [`detect_providers`] but accepts a `follower` flag.
-///
-/// When `follower` is true, external providers are stripped after discovery
-/// so the daemon only reports local state.
-pub async fn detect_providers_with_mode(
-    repo_root: &Path,
-    config: &ConfigStore,
-    runner: Arc<dyn CommandRunner>,
-    follower: bool,
-) -> (ProviderRegistry, Option<String>) {
-    detect_providers_inner(repo_root, config, runner, follower).await
-}
-
-async fn detect_providers_inner(
-    repo_root: &Path,
-    config: &ConfigStore,
-    runner: Arc<dyn CommandRunner>,
     follower: bool,
 ) -> (ProviderRegistry, Option<String>) {
     let mut registry = ProviderRegistry::new();
@@ -799,7 +778,7 @@ mod tests {
                 .build(),
         );
 
-        let (registry, slug) = detect_providers(&repo, &config, runner).await;
+        let (registry, slug) = detect_providers(&repo, &config, runner, false).await;
         assert!(registry.vcs.is_empty());
         assert!(!registry.checkout_managers.is_empty());
         assert_eq!(slug, None);
@@ -817,7 +796,7 @@ mod tests {
                 .tool_exists("claude", false)
                 .build(),
         );
-        let (registry, _) = detect_providers(&repo, &config, runner).await;
+        let (registry, _) = detect_providers(&repo, &config, runner, false).await;
         assert!(registry.vcs.contains_key("git"));
     }
 
@@ -839,7 +818,7 @@ mod tests {
                 .build(),
         );
 
-        let (registry, slug) = detect_providers(&repo, &config, runner).await;
+        let (registry, slug) = detect_providers(&repo, &config, runner, false).await;
         assert!(registry.code_review.contains_key("github"));
         assert!(registry.issue_trackers.contains_key("github"));
         assert_eq!(slug, Some("owner/repo".to_string()));
@@ -863,7 +842,7 @@ mod tests {
                 .build(),
         );
 
-        let (registry, slug) = detect_providers(&repo, &config, runner).await;
+        let (registry, slug) = detect_providers(&repo, &config, runner, false).await;
         assert!(registry.code_review.is_empty());
         assert!(registry.issue_trackers.is_empty());
         assert_eq!(slug, Some("owner/repo".to_string()));
@@ -887,7 +866,7 @@ mod tests {
                 .build(),
         );
 
-        let (registry, slug) = detect_providers(&repo, &config, runner).await;
+        let (registry, slug) = detect_providers(&repo, &config, runner, false).await;
         assert!(registry.code_review.is_empty());
         assert!(registry.issue_trackers.is_empty());
         assert_eq!(slug, None);
@@ -911,7 +890,7 @@ mod tests {
                 .build(),
         );
 
-        let (registry, slug) = detect_providers(&repo, &config, runner).await;
+        let (registry, slug) = detect_providers(&repo, &config, runner, false).await;
         assert!(registry.code_review.is_empty());
         assert!(registry.issue_trackers.is_empty());
         assert_eq!(slug, Some("owner/repo".to_string()));
@@ -932,7 +911,7 @@ mod tests {
                     .build(),
             );
 
-            let (registry, _) = detect_providers(&repo, &config, runner).await;
+            let (registry, _) = detect_providers(&repo, &config, runner, false).await;
             assert_eq!(
                 registry.cloud_agents.contains_key("claude"),
                 should_register
@@ -960,7 +939,7 @@ mod tests {
                     .tool_exists("claude", false)
                     .build(),
             );
-            let (registry, _) = detect_providers(&repo, &config, runner).await;
+            let (registry, _) = detect_providers(&repo, &config, runner, false).await;
             assert!(registry.cloud_agents.contains_key("cursor"));
         }
         std::env::remove_var("CURSOR_API_KEY");
@@ -978,7 +957,7 @@ mod tests {
                     .tool_exists("claude", false)
                     .build(),
             );
-            let (registry, _) = detect_providers(&repo, &config, runner).await;
+            let (registry, _) = detect_providers(&repo, &config, runner, false).await;
             assert!(!registry.cloud_agents.contains_key("cursor"));
         }
 
@@ -995,7 +974,7 @@ mod tests {
                     .tool_exists("claude", false)
                     .build(),
             );
-            let (registry, _) = detect_providers(&repo, &config, runner).await;
+            let (registry, _) = detect_providers(&repo, &config, runner, false).await;
             assert!(!registry.cloud_agents.contains_key("cursor"));
         }
     }
@@ -1013,7 +992,7 @@ mod tests {
                 .build(),
         );
         let runner_dyn: Arc<dyn CommandRunner> = runner.clone();
-        let (registry, _) = detect_providers(&repo, &config, runner_dyn).await;
+        let (registry, _) = detect_providers(&repo, &config, runner_dyn, false).await;
         assert!(!registry.checkout_managers.is_empty());
         assert_eq!(runner.exists_call_count("wt"), 0);
     }
@@ -1031,7 +1010,7 @@ mod tests {
                 .build(),
         );
         let runner_dyn: Arc<dyn CommandRunner> = runner.clone();
-        let (registry, _) = detect_providers(&repo, &config, runner_dyn).await;
+        let (registry, _) = detect_providers(&repo, &config, runner_dyn, false).await;
         assert!(!registry.checkout_managers.is_empty());
         assert_eq!(runner.exists_call_count("wt"), 1);
     }
@@ -1049,7 +1028,7 @@ mod tests {
                 .build(),
         );
         let runner_dyn: Arc<dyn CommandRunner> = runner.clone();
-        let (registry, _) = detect_providers(&repo, &config, runner_dyn).await;
+        let (registry, _) = detect_providers(&repo, &config, runner_dyn, false).await;
         assert!(!registry.checkout_managers.is_empty());
         assert_eq!(runner.exists_call_count("wt"), 1);
     }
@@ -1079,7 +1058,7 @@ mod tests {
                     .tool_exists("claude", false)
                     .build(),
             );
-            let (registry, _) = detect_providers(&repo, &config, runner).await;
+            let (registry, _) = detect_providers(&repo, &config, runner, false).await;
             assert!(registry.cloud_agents.contains_key("codex"));
         }
 
@@ -1096,7 +1075,7 @@ mod tests {
                     .tool_exists("claude", false)
                     .build(),
             );
-            let (registry, _) = detect_providers(&repo, &config, runner).await;
+            let (registry, _) = detect_providers(&repo, &config, runner, false).await;
             assert!(!registry.cloud_agents.contains_key("codex"));
         }
 
@@ -1122,7 +1101,7 @@ mod tests {
                 .build(),
         );
 
-        let (registry, slug) = detect_providers(&repo, &config, runner).await;
+        let (registry, slug) = detect_providers(&repo, &config, runner, false).await;
         assert!(registry.code_review.contains_key("github"));
         assert!(registry.issue_trackers.contains_key("github"));
         assert_eq!(slug, Some("owner/repo".to_string()));
@@ -1151,7 +1130,7 @@ mod tests {
                 .build(),
         );
 
-        let (registry, slug) = detect_providers(&repo, &config, runner).await;
+        let (registry, slug) = detect_providers(&repo, &config, runner, false).await;
         assert!(registry.code_review.contains_key("github"));
         assert!(registry.issue_trackers.contains_key("github"));
         assert_eq!(slug, Some("upstream/repo".to_string()));
