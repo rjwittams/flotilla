@@ -182,6 +182,26 @@ impl PeerManager {
         self.request_id_counter
     }
 
+    pub fn note_pending_resync_request(
+        &mut self,
+        target_host: HostName,
+        repo_identity: RepoIdentity,
+    ) -> u64 {
+        let request_id = self.next_request_id();
+        self.pending_resync_requests.insert(
+            ReversePathKey {
+                request_id,
+                requester_host: self.local_host.clone(),
+                target_host,
+                repo_identity,
+            },
+            PendingResyncRequest {
+                deadline_at: Instant::now() + Self::RESYNC_REQUEST_TIMEOUT,
+            },
+        );
+        request_id
+    }
+
     pub fn current_generation(&self, name: &HostName) -> Option<u64> {
         self.generations.get(name).copied()
     }
@@ -570,7 +590,7 @@ impl PeerManager {
     /// For each successfully connected peer, calls `subscribe()` to obtain the
     /// inbound message receiver. The caller should spawn forwarding tasks that
     /// feed these receivers into the shared `peer_data_tx` channel.
-    pub async fn connect_all(&mut self) -> Vec<(HostName, mpsc::Receiver<PeerWireMessage>)> {
+    pub async fn connect_all(&mut self) -> Vec<(HostName, u64, mpsc::Receiver<PeerWireMessage>)> {
         let names: Vec<HostName> = self.peers.keys().cloned().collect();
         let mut receivers = Vec::new();
         for name in names {
@@ -590,8 +610,9 @@ impl PeerManager {
             match connect_result {
                 Ok((sender, subscribe_result)) => {
                     info!(peer = %name, "peer transport connected");
+                    let mut generation = 0;
                     if let Some(sender) = sender {
-                        self.activate_connection(
+                        generation = self.activate_connection(
                             name.clone(),
                             sender,
                             ConnectionMeta {
@@ -602,7 +623,7 @@ impl PeerManager {
                         );
                     }
                     match subscribe_result {
-                        Ok(rx) => receivers.push((name.clone(), rx)),
+                        Ok(rx) => receivers.push((name.clone(), generation, rx)),
                         Err(e) => {
                             warn!(peer = %name, err = %e, "failed to subscribe to peer");
                         }
@@ -657,6 +678,11 @@ impl PeerManager {
     /// Iterate over all registered peer transports.
     pub fn peers(&self) -> &HashMap<HostName, Box<dyn PeerTransport>> {
         &self.peers
+    }
+
+    /// Return the currently addressable peers that have active senders.
+    pub fn active_peers(&self) -> Vec<HostName> {
+        self.senders.keys().cloned().collect()
     }
 
     /// Remove all stored data for a peer (e.g. on disconnect).
@@ -715,7 +741,7 @@ impl PeerManager {
     pub async fn reconnect_peer(
         &mut self,
         name: &HostName,
-    ) -> Result<mpsc::Receiver<PeerWireMessage>, String> {
+    ) -> Result<(u64, mpsc::Receiver<PeerWireMessage>), String> {
         let (sender, rx) = {
             let transport = self
                 .peers
@@ -731,8 +757,9 @@ impl PeerManager {
             (sender, rx)
         };
 
+        let mut generation = 0;
         if let Some(sender) = sender {
-            self.activate_connection(
+            generation = self.activate_connection(
                 name.clone(),
                 sender,
                 ConnectionMeta {
@@ -743,7 +770,7 @@ impl PeerManager {
             );
         }
 
-        Ok(rx)
+        Ok((generation, rx))
     }
 
     pub fn disconnect_peer(&mut self, name: &HostName, generation: u64) -> DisconnectPlan {
