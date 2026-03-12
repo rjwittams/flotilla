@@ -25,7 +25,10 @@ use flotilla_protocol::{
 use std::collections::VecDeque;
 
 pub use intent::Intent;
-pub use ui_state::{BranchInputKind, DirEntry, RepoUiState, TabId, UiMode, UiState};
+pub use ui_state::{
+    BranchInputKind, DirEntry, PreviewPositionMode, PreviewState, RepoUiState, TabId, UiMode,
+    UiState,
+};
 
 /// Per-provider auth/health status from last refresh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

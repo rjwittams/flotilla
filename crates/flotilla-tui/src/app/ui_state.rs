@@ -65,6 +65,29 @@ impl UiMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PreviewPositionMode {
+    #[default]
+    Auto,
+    Right,
+    Below,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreviewState {
+    pub position_mode: PreviewPositionMode,
+    pub visible: bool,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            position_mode: PreviewPositionMode::Auto,
+            visible: true,
+        }
+    }
+}
+
 /// Per-repo UI state (selection, table widget state, visual flags).
 #[derive(Default)]
 pub struct RepoUiState {
@@ -196,6 +219,7 @@ impl Default for EventLogUiState {
 pub struct UiState {
     pub mode: UiMode,
     pub repo_ui: HashMap<PathBuf, RepoUiState>,
+    pub preview: PreviewState,
     pub layout: LayoutAreas,
     pub drag: DragState,
     pub double_click: DoubleClickState,
@@ -213,6 +237,7 @@ impl UiState {
         Self {
             mode: UiMode::default(),
             repo_ui,
+            preview: PreviewState::default(),
             layout: LayoutAreas::default(),
             drag: DragState::default(),
             double_click: DoubleClickState::default(),
@@ -224,6 +249,18 @@ impl UiState {
 
     pub fn active_repo_ui(&self, repo_order: &[PathBuf], active_repo: usize) -> &RepoUiState {
         &self.repo_ui[&repo_order[active_repo]]
+    }
+
+    pub fn cycle_preview_position_mode(&mut self) {
+        self.preview.position_mode = match self.preview.position_mode {
+            PreviewPositionMode::Auto => PreviewPositionMode::Right,
+            PreviewPositionMode::Right => PreviewPositionMode::Below,
+            PreviewPositionMode::Below => PreviewPositionMode::Auto,
+        };
+    }
+
+    pub fn toggle_preview_visibility(&mut self) {
+        self.preview.visible = !self.preview.visible;
     }
 }
 
@@ -295,6 +332,8 @@ mod tests {
         assert!(state.repo_ui.is_empty());
         assert!(matches!(state.mode, UiMode::Normal));
         assert!(!state.show_debug);
+        assert!(state.preview.visible);
+        assert_eq!(state.preview.position_mode, PreviewPositionMode::Auto);
     }
 
     #[test]
@@ -317,6 +356,41 @@ mod tests {
         for p in &paths {
             assert!(state.repo_ui.contains_key(p));
         }
+    }
+
+    #[test]
+    fn ui_state_defaults_to_visible_auto_preview() {
+        let state = UiState::new(&[]);
+        assert!(state.preview.visible);
+        assert_eq!(state.preview.position_mode, PreviewPositionMode::Auto);
+    }
+
+    #[test]
+    fn preview_position_mode_cycles_auto_right_below_auto() {
+        let mut state = UiState::new(&[]);
+
+        state.cycle_preview_position_mode();
+        assert_eq!(state.preview.position_mode, PreviewPositionMode::Right);
+
+        state.cycle_preview_position_mode();
+        assert_eq!(state.preview.position_mode, PreviewPositionMode::Below);
+
+        state.cycle_preview_position_mode();
+        assert_eq!(state.preview.position_mode, PreviewPositionMode::Auto);
+    }
+
+    #[test]
+    fn preview_visibility_toggle_flips_boolean() {
+        let mut state = UiState::new(&[]);
+        assert!(state.preview.visible);
+
+        state.toggle_preview_visibility();
+        assert!(!state.preview.visible);
+        assert_eq!(state.preview.position_mode, PreviewPositionMode::Auto);
+
+        state.toggle_preview_visibility();
+        assert!(state.preview.visible);
+        assert_eq!(state.preview.position_mode, PreviewPositionMode::Auto);
     }
 
     // ── active_repo_ui tests ──────────────────────────────────────────

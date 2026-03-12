@@ -15,7 +15,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::app::{
-    BranchInputKind, InFlightCommand, Intent, ProviderStatus, TabId, TuiModel, UiMode, UiState,
+    BranchInputKind, InFlightCommand, Intent, PreviewPositionMode, ProviderStatus, TabId,
+    TuiModel, UiMode, UiState,
 };
 use crate::event_log::{self, LevelExt};
 use crate::ui_helpers;
@@ -24,6 +25,13 @@ use flotilla_protocol::{ProviderData, WorkItem};
 
 const HIGHLIGHT_SYMBOL: &str = "▸ ";
 const HIGHLIGHT_SYMBOL_WIDTH: u16 = 2;
+const PREVIEW_SPLIT_RIGHT_PERCENT: u16 = 40;
+const PREVIEW_SPLIT_BELOW_PERCENT: u16 = 40;
+const MIN_TABLE_WIDTH: u16 = 50;
+const MIN_PREVIEW_WIDTH: u16 = 32;
+const MIN_TABLE_HEIGHT: u16 = 8;
+const MIN_PREVIEW_HEIGHT: u16 = 6;
+const PREVIEW_BELOW_ASPECT_RATIO_THRESHOLD: f32 = 2.0;
 const PROVIDER_CATEGORIES: [(&str, &str); 8] = [
     ("VCS", "vcs"),
     ("Checkout mgr", "checkout_manager"),
@@ -34,6 +42,50 @@ const PROVIDER_CATEGORIES: [(&str, &str); 8] = [
     ("Workspace mgr", "workspace_manager"),
     ("Terminal pool", "terminal_pool"),
 ];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedPreviewPosition {
+    Right,
+    Below,
+}
+
+fn resolve_preview_position(area: Rect, mode: PreviewPositionMode) -> ResolvedPreviewPosition {
+    match mode {
+        PreviewPositionMode::Right => ResolvedPreviewPosition::Right,
+        PreviewPositionMode::Below => ResolvedPreviewPosition::Below,
+        PreviewPositionMode::Auto => resolve_auto_preview_position(area),
+    }
+}
+
+fn resolve_auto_preview_position(area: Rect) -> ResolvedPreviewPosition {
+    let right_preview_width = area.width.saturating_mul(PREVIEW_SPLIT_RIGHT_PERCENT) / 100;
+    let right_table_width = area.width.saturating_sub(right_preview_width);
+    let below_preview_height = area.height.saturating_mul(PREVIEW_SPLIT_BELOW_PERCENT) / 100;
+    let below_table_height = area.height.saturating_sub(below_preview_height);
+
+    let right_viable =
+        right_table_width >= MIN_TABLE_WIDTH && right_preview_width >= MIN_PREVIEW_WIDTH;
+    let below_viable =
+        below_table_height >= MIN_TABLE_HEIGHT && below_preview_height >= MIN_PREVIEW_HEIGHT;
+
+    match (right_viable, below_viable) {
+        (true, false) => ResolvedPreviewPosition::Right,
+        (false, true) => ResolvedPreviewPosition::Below,
+        (false, false) => ResolvedPreviewPosition::Right,
+        (true, true) => {
+            if area.height == 0 {
+                return ResolvedPreviewPosition::Right;
+            }
+
+            let aspect_ratio = area.width as f32 / area.height as f32;
+            if aspect_ratio < PREVIEW_BELOW_ASPECT_RATIO_THRESHOLD {
+                ResolvedPreviewPosition::Below
+            } else {
+                ResolvedPreviewPosition::Right
+            }
+        }
+    }
+}
 
 pub fn render(
     model: &TuiModel,
@@ -1224,4 +1276,34 @@ fn render_event_log(ui: &mut UiState, frame: &mut Frame, area: Rect) {
     let mut state = ListState::default();
     state.select(ui.event_log.selected);
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::PreviewPositionMode;
+
+    #[test]
+    fn auto_preview_prefers_right_when_wide_layout_meets_minimums() {
+        let position = resolve_preview_position(Rect::new(0, 0, 160, 40), PreviewPositionMode::Auto);
+        assert_eq!(position, ResolvedPreviewPosition::Right);
+    }
+
+    #[test]
+    fn auto_preview_prefers_below_when_only_vertical_layout_meets_minimums() {
+        let position = resolve_preview_position(Rect::new(0, 0, 90, 50), PreviewPositionMode::Auto);
+        assert_eq!(position, ResolvedPreviewPosition::Below);
+    }
+
+    #[test]
+    fn explicit_right_mode_ignores_terminal_shape() {
+        let position = resolve_preview_position(Rect::new(0, 0, 90, 50), PreviewPositionMode::Right);
+        assert_eq!(position, ResolvedPreviewPosition::Right);
+    }
+
+    #[test]
+    fn explicit_below_mode_ignores_terminal_shape() {
+        let position = resolve_preview_position(Rect::new(0, 0, 160, 40), PreviewPositionMode::Below);
+        assert_eq!(position, ResolvedPreviewPosition::Below);
+    }
 }
