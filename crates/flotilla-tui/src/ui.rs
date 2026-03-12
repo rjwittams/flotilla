@@ -1326,7 +1326,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_preview_prefers_below_when_only_vertical_layout_meets_minimums() {
+    fn auto_preview_prefers_below_when_aspect_ratio_is_below_threshold() {
         let position = resolve_preview_position(Rect::new(0, 0, 90, 50), PreviewPositionMode::Auto);
         assert_eq!(position, ResolvedPreviewPosition::Below);
     }
