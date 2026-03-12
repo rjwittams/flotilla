@@ -32,13 +32,21 @@ impl ShpoolTerminalPool {
         let config_stale = Self::config_needs_update(&config_path);
         Self::clean_stale_socket(&socket_path);
         if config_stale && socket_path.exists() {
-            // Daemon is alive but config changed — try to stop it.
-            // Only write the new config if the stop succeeds, so that
-            // a failed stop leaves the old config on disk and the next
-            // create() call retries the restart.
-            tracing::info!("shpool config changed, restarting daemon");
-            if Self::stop_daemon(&socket_path).await {
-                Self::write_config(&config_path);
+            // Daemon is alive but config changed. Validate we can persist
+            // the new config BEFORE killing the daemon, so a write failure
+            // doesn't tear down sessions for nothing.
+            let tmp_path = config_path.with_extension("toml.tmp");
+            if Self::write_config(&tmp_path) {
+                tracing::info!("shpool config changed, restarting daemon");
+                if Self::stop_daemon(&socket_path, "shpool").await {
+                    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
+                        tracing::warn!(err = %e, "failed to rename config, cleaning up temp");
+                        let _ = std::fs::remove_file(&tmp_path);
+                    }
+                } else {
+                    // Stop failed — delete temp, old config stays for retry.
+                    let _ = std::fs::remove_file(&tmp_path);
+                }
             }
         } else if config_stale {
             // No daemon running, safe to write config directly.
@@ -77,6 +85,24 @@ impl ShpoolTerminalPool {
         }
         // EPERM means the process exists but we can't signal it
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    /// Verify that the process at `pid` has a name containing `expected_name`.
+    /// Used to guard against PID reuse: if shpool died uncleanly and another
+    /// process got the same PID, we must not SIGTERM it.
+    #[cfg(unix)]
+    fn is_expected_process(pid: i32, expected_name: &str) -> bool {
+        use sysinfo::{Pid, System};
+        let mut sys = System::new();
+        let sysinfo_pid = Pid::from(pid as usize);
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[sysinfo_pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        sys.process(sysinfo_pid)
+            .map(|p| p.name().to_string_lossy().contains(expected_name))
+            .unwrap_or(false)
     }
 
     /// Remove stale shpool socket and pid files when the daemon is dead.
@@ -187,9 +213,10 @@ impl ShpoolTerminalPool {
     /// This is load-bearing: `start_daemon()` checks socket existence as
     /// its first guard, so the socket must be gone for a replacement to spawn.
     /// Returns true if the daemon was stopped (or was already dead),
-    /// false if it's still alive.
+    /// false if it's still alive. `expected_name` is checked against the
+    /// process name to guard against PID reuse.
     #[cfg(unix)]
-    async fn stop_daemon(socket_path: &Path) -> bool {
+    async fn stop_daemon(socket_path: &Path, expected_name: &str) -> bool {
         let pid_path = socket_path.with_file_name("daemonized-shpool.pid");
 
         // Read and parse the pid — if we can't, just clean up files
@@ -209,6 +236,15 @@ impl ShpoolTerminalPool {
                 return true;
             }
         };
+
+        // Guard against PID reuse: if shpool died uncleanly and another
+        // process got the same PID, we must not SIGTERM it.
+        if !Self::is_expected_process(pid, expected_name) {
+            tracing::warn!(%pid, "pid file references non-shpool process, removing stale artifacts");
+            let _ = std::fs::remove_file(socket_path);
+            let _ = std::fs::remove_file(&pid_path);
+            return true;
+        }
 
         // Send SIGTERM
         let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
@@ -249,7 +285,7 @@ impl ShpoolTerminalPool {
     }
 
     #[cfg(not(unix))]
-    async fn stop_daemon(_socket_path: &Path) -> bool {
+    async fn stop_daemon(_socket_path: &Path, _expected_name: &str) -> bool {
         true
     }
 
@@ -674,7 +710,7 @@ mod tests {
         std::fs::write(&socket_path, b"").expect("create fake socket");
         std::fs::write(&pid_path, "99999999").expect("create fake pid");
 
-        ShpoolTerminalPool::stop_daemon(&socket_path).await;
+        ShpoolTerminalPool::stop_daemon(&socket_path, "shpool").await;
 
         assert!(!socket_path.exists(), "socket should be removed");
         assert!(!pid_path.exists(), "pid file should be removed");
@@ -688,7 +724,7 @@ mod tests {
         // Socket exists but no pid file — should not panic
         std::fs::write(&socket_path, b"").expect("create fake socket");
 
-        ShpoolTerminalPool::stop_daemon(&socket_path).await;
+        ShpoolTerminalPool::stop_daemon(&socket_path, "shpool").await;
 
         // Socket should still be removed (best-effort cleanup)
         assert!(!socket_path.exists(), "socket should be removed");
@@ -700,7 +736,8 @@ mod tests {
         let socket_path = dir.path().join("shpool.socket");
         let pid_path = dir.path().join("daemonized-shpool.pid");
 
-        // Spawn a real process that will respond to SIGTERM
+        // Spawn a real process that will respond to SIGTERM.
+        // Pass "sleep" as expected_name so the PID-reuse guard accepts it.
         let child = std::process::Command::new("sleep")
             .arg("60")
             .stdin(std::process::Stdio::null())
@@ -713,7 +750,7 @@ mod tests {
         std::fs::write(&socket_path, b"").expect("create fake socket");
         std::fs::write(&pid_path, pid.to_string()).expect("write pid file");
 
-        ShpoolTerminalPool::stop_daemon(&socket_path).await;
+        ShpoolTerminalPool::stop_daemon(&socket_path, "sleep").await;
 
         assert!(
             !socket_path.exists(),
@@ -728,6 +765,41 @@ mod tests {
             !ShpoolTerminalPool::is_process_alive(pid as i32),
             "process should be dead after SIGTERM"
         );
+    }
+
+    #[tokio::test]
+    async fn stop_daemon_rejects_wrong_process_name() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let socket_path = dir.path().join("shpool.socket");
+        let pid_path = dir.path().join("daemonized-shpool.pid");
+
+        // Spawn a sleep process but tell stop_daemon to expect "shpool"
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep process");
+        let pid = child.id();
+
+        std::fs::write(&socket_path, b"").expect("create fake socket");
+        std::fs::write(&pid_path, pid.to_string()).expect("write pid file");
+
+        // Should detect PID reuse (sleep != shpool), clean up files,
+        // but NOT kill the process.
+        let stopped = ShpoolTerminalPool::stop_daemon(&socket_path, "shpool").await;
+        assert!(stopped, "should return true (stale artifacts cleaned)");
+        assert!(!socket_path.exists(), "socket should be removed");
+        assert!(!pid_path.exists(), "pid file should be removed");
+        // Process should still be alive — we didn't SIGTERM it
+        assert!(
+            ShpoolTerminalPool::is_process_alive(pid as i32),
+            "non-shpool process should NOT be killed"
+        );
+
+        // Clean up the sleep process
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
     }
 
     /// Create a ShpoolTerminalPool via the async factory method.
