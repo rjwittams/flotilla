@@ -558,23 +558,47 @@ async fn clear_peer_data(
             };
             daemon.set_peer_providers(&local_path, peers).await;
         } else {
-            // Remote-only repo — remove the virtual tab if no peers remain
+            // Remote-only repo — rebuild or remove depending on remaining peers
             let mut pm = peer_manager.lock().await;
-            if !pm.has_peer_data_for(&repo_id) {
-                if let Some(synthetic_path) = pm.unregister_remote_repo(&repo_id) {
+            if pm.has_peer_data_for(&repo_id) {
+                // Still has peer data — re-merge from remaining peers
+                let peers: Vec<(HostName, flotilla_protocol::ProviderData)> = pm
+                    .get_peer_data()
+                    .iter()
+                    .filter_map(|(host, repos)| {
+                        repos
+                            .get(&repo_id)
+                            .map(|state| (host.clone(), state.provider_data.clone()))
+                    })
+                    .collect();
+
+                if let Some(synthetic_path) = pm.known_remote_repos().get(&repo_id).cloned() {
                     drop(pm);
-                    info!(
-                        repo = %repo_id,
-                        path = %synthetic_path.display(),
-                        "removing virtual repo — no peers remaining"
+                    let merged = crate::peer::merge_provider_data(
+                        &flotilla_protocol::ProviderData::default(),
+                        daemon.host_name(),
+                        &peers
+                            .iter()
+                            .map(|(h, d)| (h.clone(), d))
+                            .collect::<Vec<_>>(),
                     );
-                    if let Err(e) = daemon.remove_repo(&synthetic_path).await {
-                        warn!(
-                            repo = %repo_id,
-                            err = %e,
-                            "failed to remove virtual repo"
-                        );
-                    }
+                    daemon.update_virtual_repo(&synthetic_path, merged).await;
+                    daemon.set_peer_providers(&synthetic_path, peers).await;
+                }
+            } else if let Some(synthetic_path) = pm.unregister_remote_repo(&repo_id) {
+                // No peers remain — remove the virtual tab
+                drop(pm);
+                info!(
+                    repo = %repo_id,
+                    path = %synthetic_path.display(),
+                    "removing virtual repo — no peers remaining"
+                );
+                if let Err(e) = daemon.remove_repo(&synthetic_path).await {
+                    warn!(
+                        repo = %repo_id,
+                        err = %e,
+                        "failed to remove virtual repo"
+                    );
                 }
             }
         }
