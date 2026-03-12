@@ -153,6 +153,7 @@ fn selected_item_preview_below() {
 
     let mut harness = TestHarness::single_repo("my-project")
         .with_provider_data(providers, items)
+        .with_preview_mode(PreviewPositionMode::Below)
         .with_width(90)
         .with_height(40);
     let output = harness.render_to_string();

@@ -73,10 +73,6 @@ fn resolve_auto_preview_position(area: Rect) -> ResolvedPreviewPosition {
         (false, true) => ResolvedPreviewPosition::Below,
         (false, false) => ResolvedPreviewPosition::Right,
         (true, true) => {
-            if area.height == 0 {
-                return ResolvedPreviewPosition::Right;
-            }
-
             let aspect_ratio = area.width as f32 / area.height as f32;
             if aspect_ratio < PREVIEW_BELOW_ASPECT_RATIO_THRESHOLD {
                 ResolvedPreviewPosition::Below

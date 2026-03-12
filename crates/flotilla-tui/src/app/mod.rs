@@ -183,7 +183,8 @@ impl App {
     ) -> Self {
         let model = TuiModel::from_repo_info(repos_info);
         let mut ui = UiState::new(&model.repo_order);
-        let preview = &config.load_config().ui.preview;
+        let loaded_config = config.load_config();
+        let preview = &loaded_config.ui.preview;
         ui.preview.position_mode = match preview.position_mode {
             PreviewPositionModeConfig::Auto => PreviewPositionMode::Auto,
             PreviewPositionModeConfig::Right => PreviewPositionMode::Right,

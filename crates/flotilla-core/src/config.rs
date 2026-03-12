@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Global flotilla config from ~/.config/flotilla/config.toml
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -151,7 +150,7 @@ pub fn path_to_slug(path: &Path) -> String {
 /// Owns the config base path and caches the global `FlotillaConfig`.
 pub struct ConfigStore {
     base: PathBuf,
-    global_config: OnceLock<FlotillaConfig>,
+    global_config: OnceLock<Mutex<FlotillaConfig>>,
 }
 
 impl Default for ConfigStore {
@@ -258,20 +257,26 @@ impl ConfigStore {
     }
 
     /// Load global flotilla config (cached for the lifetime of the store).
-    pub fn load_config(&self) -> &FlotillaConfig {
-        self.global_config.get_or_init(|| {
-            let path = self.base.join("config.toml");
-            std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|content| {
-                    toml::from_str(&content)
-                        .map_err(
-                            |e| tracing::warn!(path = %path.display(), err = %e, "failed to parse"),
-                        )
+    pub fn load_config(&self) -> FlotillaConfig {
+        self.global_config
+            .get_or_init(|| {
+                Mutex::new({
+                    let path = self.base.join("config.toml");
+                    std::fs::read_to_string(&path)
                         .ok()
+                        .and_then(|content| {
+                            toml::from_str(&content)
+                                .map_err(
+                                    |e| tracing::warn!(path = %path.display(), err = %e, "failed to parse"),
+                                )
+                                .ok()
+                        })
+                        .unwrap_or_default()
                 })
-                .unwrap_or_default()
-        })
+            })
+            .lock()
+            .expect("config cache mutex poisoned")
+            .clone()
     }
 
     pub fn save_preview_preferences(
@@ -280,16 +285,30 @@ impl ConfigStore {
         visible: bool,
     ) {
         let path = self.base.join("config.toml");
-        let mut config = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|content| toml::from_str::<FlotillaConfig>(&content).ok())
-            .unwrap_or_default();
+        let mut config = self.load_config();
         config.ui.preview.position_mode = position_mode;
         config.ui.preview.visible = visible;
 
-        let _ = std::fs::create_dir_all(&self.base);
-        if let Ok(content) = toml::to_string_pretty(&config) {
-            let _ = std::fs::write(path, content);
+        if let Err(err) = std::fs::create_dir_all(&self.base) {
+            tracing::warn!(path = %self.base.display(), err = %err, "failed to create config dir");
+            return;
+        }
+
+        let content = match toml::to_string_pretty(&config) {
+            Ok(content) => content,
+            Err(err) => {
+                tracing::warn!(path = %path.display(), err = %err, "failed to serialize config");
+                return;
+            }
+        };
+
+        if let Err(err) = std::fs::write(&path, content) {
+            tracing::warn!(path = %path.display(), err = %err, "failed to write config");
+            return;
+        }
+
+        if let Some(cached) = self.global_config.get() {
+            *cached.lock().expect("config cache mutex poisoned") = config;
         }
     }
 
@@ -585,6 +604,27 @@ mod tests {
         assert_eq!(
             cfg.ui.preview.position_mode,
             PreviewPositionModeConfig::Right
+        );
+        assert!(!cfg.ui.preview.visible);
+    }
+
+    #[test]
+    fn save_preview_preferences_updates_same_store_cache() {
+        let dir = tempdir().unwrap();
+        let store = ConfigStore::with_base(dir.path());
+
+        assert_eq!(
+            store.load_config().ui.preview.position_mode,
+            PreviewPositionModeConfig::Auto
+        );
+        assert!(store.load_config().ui.preview.visible);
+
+        store.save_preview_preferences(PreviewPositionModeConfig::Below, false);
+
+        let cfg = store.load_config();
+        assert_eq!(
+            cfg.ui.preview.position_mode,
+            PreviewPositionModeConfig::Below
         );
         assert!(!cfg.ui.preview.visible);
     }
