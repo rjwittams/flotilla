@@ -15,7 +15,7 @@ use flotilla_protocol::{
     PROTOCOL_VERSION,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, BufReader, BufWriter},
     net::UnixListener,
     sync::{mpsc, watch, Mutex, Notify},
 };
@@ -812,11 +812,7 @@ async fn forward_until_closed(
 /// Write a JSON message followed by a newline to the writer.
 async fn write_message(writer: &tokio::sync::Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>, msg: &Message) -> Result<(), ()> {
     let mut w = writer.lock().await;
-    let json = serde_json::to_string(msg).map_err(|_| ())?;
-    w.write_all(json.as_bytes()).await.map_err(|_| ())?;
-    w.write_all(b"\n").await.map_err(|_| ())?;
-    w.flush().await.map_err(|_| ())?;
-    Ok(())
+    flotilla_protocol::framing::write_message_line(&mut *w, msg).await.map_err(|_| ())
 }
 
 /// Handle a single client connection.
@@ -1385,10 +1381,7 @@ mod tests {
         let mut writer = BufWriter::new(write_half);
 
         let hello = Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: HostName::new("remote-host") };
-        let hello_json = serde_json::to_string(&hello).expect("serialize hello");
-        writer.write_all(hello_json.as_bytes()).await.expect("write");
-        writer.write_all(b"\n").await.expect("newline");
-        writer.flush().await.expect("flush");
+        flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");
 
         let line = reader.next_line().await.expect("read hello response").expect("hello line");
         let hello_back: Message = serde_json::from_str(&line).expect("parse hello");
@@ -1416,10 +1409,7 @@ mod tests {
         // Send a peer message from the client side
         let peer_msg = test_peer_msg("remote-host");
         let wire_msg = Message::Peer(Box::new(PeerWireMessage::Data(peer_msg.clone())));
-        let json = serde_json::to_string(&wire_msg).expect("serialize");
-        writer.write_all(json.as_bytes()).await.expect("write");
-        writer.write_all(b"\n").await.expect("newline");
-        writer.flush().await.expect("flush");
+        flotilla_protocol::framing::write_message_line(&mut writer, &wire_msg).await.expect("write peer message");
 
         // The server should forward the peer envelope
         let received = tokio::time::timeout(Duration::from_secs(2), peer_data_rx.recv())
@@ -1540,10 +1530,7 @@ mod tests {
         let mut writer = BufWriter::new(write_half);
 
         let hello = Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: HostName::new("relay-target") };
-        let hello_json = serde_json::to_string(&hello).expect("serialize");
-        writer.write_all(hello_json.as_bytes()).await.expect("write");
-        writer.write_all(b"\n").await.expect("newline");
-        writer.flush().await.expect("flush");
+        flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");
         let _ = reader.next_line().await.expect("read hello").expect("line");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1619,10 +1606,7 @@ mod tests {
             let mut reader = BufReader::new(read_half).lines();
             let mut writer = BufWriter::new(write_half);
             let hello = Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: HostName::new("peer") };
-            let hello_json = serde_json::to_string(&hello).expect("serialize hello");
-            writer.write_all(hello_json.as_bytes()).await.expect("write hello");
-            writer.write_all(b"\n").await.expect("newline");
-            writer.flush().await.expect("flush");
+            flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");
 
             let line = reader.next_line().await.expect("read hello response").expect("hello response line");
             let msg: Message = serde_json::from_str(&line).expect("parse hello response");

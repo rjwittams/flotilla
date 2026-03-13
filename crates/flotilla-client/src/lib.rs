@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_protocol::{Command, DaemonEvent, Message, RawResponse, RepoInfo, Snapshot};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, BufReader, BufWriter},
     net::UnixStream,
     sync::{broadcast, oneshot, Mutex},
 };
@@ -23,6 +23,33 @@ use tracing::{debug, error, warn};
 /// avoids the race where a spawned seq update hasn't run before the next delta
 /// arrives.
 type SeqMap = std::sync::RwLock<HashMap<PathBuf, u64>>;
+
+/// RAII guard that removes a lock file when dropped.
+///
+/// Holds the open file handle (which keeps the OS flock) and removes the
+/// lock file on drop.  The flock is released *before* the path is unlinked
+/// so that concurrent clients racing on the same path always contend on the
+/// same inode — unlinking first would let them create a new file and flock
+/// a different inode, breaking mutual exclusion.
+struct SpawnLockGuard {
+    file: Option<std::fs::File>,
+    path: PathBuf,
+}
+
+impl SpawnLockGuard {
+    fn new(file: std::fs::File, path: PathBuf) -> Self {
+        Self { file: Some(file), path }
+    }
+}
+
+impl Drop for SpawnLockGuard {
+    fn drop(&mut self) {
+        // Release the flock before unlinking, preserving the
+        // mutual-exclusion contract during the handoff window.
+        drop(self.file.take());
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 pub struct SocketDaemon {
     writer: Arc<Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>>,
@@ -234,14 +261,14 @@ pub async fn connect_or_spawn(
     // path already ends in ".lock" (with_extension would replace it).
     let lock_path = PathBuf::from(format!("{}.lock", socket_path.display()));
     const MAX_LOCK_RETRIES: u32 = 3;
-    let mut lock_file = None;
+    let mut _lock_guard: Option<SpawnLockGuard> = None;
     for attempt in 0..MAX_LOCK_RETRIES {
         let lock_path_clone = lock_path.clone();
         let lock_result =
             tokio::task::spawn_blocking(move || acquire_spawn_lock(&lock_path_clone)).await.map_err(|e| format!("spawn_blocking: {e}"))?;
         match lock_result {
             Ok(Some(file)) => {
-                lock_file = Some(file);
+                _lock_guard = Some(SpawnLockGuard::new(file, lock_path.clone()));
                 break;
             }
             Ok(None) => {
@@ -264,7 +291,7 @@ pub async fn connect_or_spawn(
                     .map_err(|e| format!("spawn_blocking: {e}"))?;
                 match final_lock {
                     Ok(Some(file)) => {
-                        lock_file = Some(file);
+                        _lock_guard = Some(SpawnLockGuard::new(file, lock_path.clone()));
                         break;
                     }
                     Ok(None) => {
@@ -290,14 +317,7 @@ pub async fn connect_or_spawn(
         let _ = std::fs::remove_file(socket_path);
 
         // Spawn daemon process
-        let spawn_result = spawn_daemon(config_dir, config_dir_override, socket_override);
-        if let Err(e) = spawn_result {
-            if lock_file.is_some() {
-                drop(lock_file);
-                let _ = std::fs::remove_file(&lock_path);
-            }
-            return Err(e);
-        }
+        spawn_daemon(config_dir, config_dir_override, socket_override)?;
     }
 
     // Poll for connection with a 10s deadline.
@@ -305,18 +325,9 @@ pub async fn connect_or_spawn(
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
-            // Release lock and clean up lock file (only if we hold it)
-            if lock_file.is_some() {
-                drop(lock_file);
-                let _ = std::fs::remove_file(&lock_path);
-            }
             return Ok(daemon);
         }
         if tokio::time::Instant::now() >= deadline {
-            if lock_file.is_some() {
-                drop(lock_file);
-                let _ = std::fs::remove_file(&lock_path);
-            }
             return Err("timed out waiting for daemon to start (10s)".into());
         }
     }
@@ -344,20 +355,9 @@ async fn send_request(
 
     let msg = Message::Request { id, method: method.to_string(), params };
 
-    let line = match serde_json::to_string(&msg) {
-        Ok(line) => line,
-        Err(e) => {
-            pending.lock().await.remove(&id);
-            return Err(format!("failed to serialize request: {e}"));
-        }
-    };
-
     let write_result = async {
         let mut w = writer.lock().await;
-        w.write_all(line.as_bytes()).await.map_err(|e| format!("failed to write to daemon socket: {e}"))?;
-        w.write_all(b"\n").await.map_err(|e| format!("failed to write newline to daemon socket: {e}"))?;
-        w.flush().await.map_err(|e| format!("failed to flush daemon socket: {e}"))?;
-        Ok::<(), String>(())
+        flotilla_protocol::framing::write_message_line(&mut *w, &msg).await
     }
     .await;
 
@@ -920,5 +920,25 @@ mod tests {
         let waiter_result = waiter.join().expect("join waiter");
         assert!(waiter_result.is_none(), "waiter should return None after spawner releases lock");
         let _ = std::fs::remove_file(&lock_path);
+    }
+}
+
+#[cfg(test)]
+mod spawn_lock_tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn spawn_lock_guard_removes_file_on_drop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock_path = dir.path().join("test.lock");
+        fs::write(&lock_path, "").expect("create lock file");
+        let file = fs::File::open(&lock_path).expect("open lock file");
+        {
+            let _guard = SpawnLockGuard::new(file, lock_path.clone());
+            assert!(lock_path.exists(), "lock file should exist while guard is held");
+        }
+        assert!(!lock_path.exists(), "lock file should be removed after guard drops");
     }
 }

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use flotilla_core::config::{flotilla_config_dir, RemoteHostConfig};
 use flotilla_protocol::{ConfigLabel, GoodbyeReason, HostName, Message, PeerWireMessage, PROTOCOL_VERSION};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, BufReader},
     net::UnixStream,
     sync::mpsc,
 };
@@ -185,8 +185,11 @@ impl SshTransport {
             .await
             .map_err(|e| format!("failed to connect to forwarded socket {}: {e}", self.local_socket_path.display()))?;
 
-        Self::write_message_line(&mut stream, &Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: self.local_host.clone() })
-            .await?;
+        flotilla_protocol::framing::write_message_line(&mut stream, &Message::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            host_name: self.local_host.clone(),
+        })
+        .await?;
 
         let (read_half, write_half) = stream.into_split();
         let mut lines = BufReader::new(read_half).lines();
@@ -262,28 +265,8 @@ impl SshTransport {
 
             while let Some(peer_msg) = outbound_rx.recv().await {
                 let msg = Message::Peer(Box::new(peer_msg));
-                let json = match serde_json::to_string(&msg) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        error!(
-                            host = %host_name_w,
-                            err = %e,
-                            "failed to serialize outbound message"
-                        );
-                        continue;
-                    }
-                };
-
-                let mut buf = json.into_bytes();
-                buf.push(b'\n');
-
-                if let Err(e) = writer.write_all(&buf).await {
+                if let Err(e) = flotilla_protocol::framing::write_message_line(&mut writer, &msg).await {
                     error!(host = %host_name_w, err = %e, "failed to write to peer socket");
-                    break;
-                }
-
-                if let Err(e) = writer.flush().await {
-                    error!(host = %host_name_w, err = %e, "failed to flush peer socket");
                     break;
                 }
             }
@@ -347,14 +330,6 @@ impl SshTransport {
             }
             other => Err(format!("expected peer hello, got {:?}", other)),
         }
-    }
-
-    async fn write_message_line(stream: &mut UnixStream, msg: &Message) -> Result<(), String> {
-        let json = serde_json::to_string(msg).map_err(|e| format!("failed to serialize peer message: {e}"))?;
-        stream.write_all(json.as_bytes()).await.map_err(|e| format!("failed to write peer message: {e}"))?;
-        stream.write_all(b"\n").await.map_err(|e| format!("failed to terminate peer message: {e}"))?;
-        stream.flush().await.map_err(|e| format!("failed to flush peer message: {e}"))?;
-        Ok(())
     }
 }
 
@@ -437,6 +412,7 @@ impl Drop for SshTransport {
 #[cfg(test)]
 mod tests {
     use flotilla_protocol::PeerDataMessage;
+    use tokio::io::AsyncWriteExt;
 
     use super::*;
 
