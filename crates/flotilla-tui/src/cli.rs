@@ -1,10 +1,12 @@
 use std::path::Path;
 
 use flotilla_core::daemon::DaemonHandle;
+use flotilla_protocol::output::OutputFormat;
 
 use crate::socket::SocketDaemon;
 
-pub async fn run_status(socket_path: &Path) -> Result<(), String> {
+pub async fn run_status(socket_path: &Path, format: OutputFormat) -> Result<(), String> {
+    let _ = format;
     let daemon = SocketDaemon::connect(socket_path).await.map_err(|e| format!("cannot connect to daemon: {e}"))?;
 
     let repos = daemon.list_repos().await.map_err(|e| e.to_string())?;
@@ -34,7 +36,8 @@ pub async fn run_status(socket_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn run_watch(socket_path: &Path) -> Result<(), String> {
+pub async fn run_watch(socket_path: &Path, format: OutputFormat) -> Result<(), String> {
+    let _ = format;
     let daemon = SocketDaemon::connect(socket_path).await.map_err(|e| format!("cannot connect to daemon: {e}"))?;
 
     let mut rx = daemon.subscribe();

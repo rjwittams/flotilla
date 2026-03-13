@@ -1029,6 +1029,7 @@ dependencies = [
  "color-eyre",
  "flotilla-core",
  "flotilla-daemon",
+ "flotilla-protocol",
  "flotilla-tui",
  "ratatui",
  "tokio",
