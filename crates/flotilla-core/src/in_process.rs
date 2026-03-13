@@ -489,7 +489,7 @@ impl InProcessDaemon {
             let mut pp = self.peer_providers.write().await;
             pp.insert(repo_path.to_path_buf(), peers);
         }
-        self.broadcast_snapshot(repo_path).await;
+        self.broadcast_snapshot_inner(repo_path, false).await;
     }
 
     /// Poll all repos for new refresh snapshots.
@@ -1023,6 +1023,10 @@ impl InProcessDaemon {
     /// If peer provider data has been set for this repo via [`set_peer_providers`],
     /// it is merged into the snapshot before correlation and broadcasting.
     async fn broadcast_snapshot(&self, repo: &Path) {
+        self.broadcast_snapshot_inner(repo, true).await;
+    }
+
+    async fn broadcast_snapshot_inner(&self, repo: &Path, is_local_change: bool) {
         // Read peer overlay (brief read lock)
         let peer_overlay = {
             let pp = self.peer_providers.read().await;
@@ -1052,6 +1056,9 @@ impl InProcessDaemon {
             proto_snapshot.work_items.clone(),
         );
         state.seq += 1;
+        if is_local_change {
+            state.local_data_version += 1;
+        }
 
         let event = choose_event(proto_snapshot, delta_entry);
         let _ = self.event_tx.send(event);

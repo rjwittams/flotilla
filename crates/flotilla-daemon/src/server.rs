@@ -617,20 +617,21 @@ impl DaemonServer {
                 if let Some(repo_path) = repo_path {
                     // Only send to peers when local data has actually changed.
                     // get_local_providers returns a local_data_version that only
-                    // increments on real provider refreshes, not peer data merges.
-                    // This prevents a feedback loop: peer data arrives → merged →
-                    // broadcast_snapshot → outbound task → send unchanged local
-                    // data back to peers → they re-send → loop forever.
-                    if let Some((_, version)) =
-                        outbound_daemon.get_local_providers(&repo_path).await
-                    {
+                    // increments on local changes (provider refreshes, issue
+                    // updates, searches), not peer data merges. This prevents a
+                    // feedback loop where peer data triggers re-sending unchanged
+                    // local data back to peers endlessly.
+                    let version = outbound_daemon
+                        .get_local_providers(&repo_path)
+                        .await
+                        .map(|(_, v)| v);
+                    if let Some(version) = version {
                         let last = last_sent_versions.get(&repo_path).copied().unwrap_or(0);
                         if version <= last {
                             continue;
                         }
-                        last_sent_versions.insert(repo_path.clone(), version);
                     }
-                    send_local_to_peers(
+                    let sent = send_local_to_peers(
                         &outbound_daemon,
                         &outbound_peer_manager,
                         &host_name,
@@ -638,6 +639,14 @@ impl DaemonServer {
                         &repo_path,
                     )
                     .await;
+                    // Only record the version as sent if at least one peer
+                    // received it. Otherwise a version produced while no peers
+                    // are connected would be suppressed forever on reconnect.
+                    if sent {
+                        if let Some(version) = version {
+                            last_sent_versions.insert(repo_path, version);
+                        }
+                    }
                 }
             }
         });
@@ -819,18 +828,20 @@ async fn disconnect_peer_and_rebuild(
 ///
 /// Sends to both configured SSH transports (outbound peers we connected to)
 /// and inbound peer clients (peers that connected to our socket).
+/// Send local provider data to all connected peers.
+/// Returns `true` if at least one peer was successfully sent to.
 async fn send_local_to_peers(
     daemon: &Arc<InProcessDaemon>,
     peer_manager: &Arc<Mutex<PeerManager>>,
     host_name: &HostName,
     clock: &mut flotilla_protocol::VectorClock,
     repo_path: &std::path::Path,
-) {
+) -> bool {
     let Some(identity) = daemon.find_identity_for_path(repo_path).await else {
-        return;
+        return false;
     };
     let Some((local_providers, seq)) = daemon.get_local_providers(repo_path).await else {
-        return;
+        return false;
     };
 
     clock.tick(host_name);
@@ -850,11 +861,15 @@ async fn send_local_to_peers(
         let pm = peer_manager.lock().await;
         pm.active_peer_senders()
     };
+    let mut any_sent = false;
     for (peer_name, sender) in peer_senders {
         if let Err(e) = sender.send(PeerWireMessage::Data(msg.clone())).await {
             debug!(peer = %peer_name, err = %e, "failed to send snapshot to peer");
+        } else {
+            any_sent = true;
         }
     }
+    any_sent
 }
 
 /// Forward messages from an inbound receiver to the shared peer_data channel.
