@@ -621,15 +621,14 @@ impl DaemonServer {
                     // updates, searches), not peer data merges. This prevents a
                     // feedback loop where peer data triggers re-sending unchanged
                     // local data back to peers endlessly.
-                    let version = outbound_daemon
-                        .get_local_providers(&repo_path)
-                        .await
-                        .map(|(_, v)| v);
-                    if let Some(version) = version {
-                        let last = last_sent_versions.get(&repo_path).copied().unwrap_or(0);
-                        if version <= last {
-                            continue;
-                        }
+                    let Some((local_providers, version)) =
+                        outbound_daemon.get_local_providers(&repo_path).await
+                    else {
+                        continue;
+                    };
+                    let last = last_sent_versions.get(&repo_path).copied().unwrap_or(0);
+                    if version <= last {
+                        continue;
                     }
                     let sent = send_local_to_peers(
                         &outbound_daemon,
@@ -637,15 +636,15 @@ impl DaemonServer {
                         &host_name,
                         &mut outbound_clock,
                         &repo_path,
+                        local_providers,
+                        version,
                     )
                     .await;
                     // Only record the version as sent if at least one peer
                     // received it. Otherwise a version produced while no peers
                     // are connected would be suppressed forever on reconnect.
                     if sent {
-                        if let Some(version) = version {
-                            last_sent_versions.insert(repo_path, version);
-                        }
+                        last_sent_versions.insert(repo_path, version);
                     }
                 }
             }
@@ -836,11 +835,10 @@ async fn send_local_to_peers(
     host_name: &HostName,
     clock: &mut flotilla_protocol::VectorClock,
     repo_path: &std::path::Path,
+    local_providers: flotilla_protocol::ProviderData,
+    local_data_version: u64,
 ) -> bool {
     let Some(identity) = daemon.find_identity_for_path(repo_path).await else {
-        return false;
-    };
-    let Some((local_providers, seq)) = daemon.get_local_providers(repo_path).await else {
         return false;
     };
 
@@ -852,7 +850,7 @@ async fn send_local_to_peers(
         clock: clock.clone(),
         kind: flotilla_protocol::PeerDataKind::Snapshot {
             data: Box::new(local_providers),
-            seq,
+            seq: local_data_version,
         },
     };
 
