@@ -629,19 +629,23 @@ impl DaemonHandle for SocketDaemon {
     }
 
     async fn get_status(&self) -> Result<StatusResponse, String> {
-        todo!("Task 10")
+        let resp = self.request("get_status", serde_json::json!({})).await?;
+        resp.parse()
     }
 
-    async fn get_repo_detail(&self, _slug: &str) -> Result<RepoDetailResponse, String> {
-        todo!("Task 10")
+    async fn get_repo_detail(&self, slug: &str) -> Result<RepoDetailResponse, String> {
+        let resp = self.request("get_repo_detail", serde_json::json!({ "slug": slug })).await?;
+        resp.parse()
     }
 
-    async fn get_repo_providers(&self, _slug: &str) -> Result<RepoProvidersResponse, String> {
-        todo!("Task 10")
+    async fn get_repo_providers(&self, slug: &str) -> Result<RepoProvidersResponse, String> {
+        let resp = self.request("get_repo_providers", serde_json::json!({ "slug": slug })).await?;
+        resp.parse()
     }
 
-    async fn get_repo_work(&self, _slug: &str) -> Result<RepoWorkResponse, String> {
-        todo!("Task 10")
+    async fn get_repo_work(&self, slug: &str) -> Result<RepoWorkResponse, String> {
+        let resp = self.request("get_repo_work", serde_json::json!({ "slug": slug })).await?;
+        resp.parse()
     }
 }
 
