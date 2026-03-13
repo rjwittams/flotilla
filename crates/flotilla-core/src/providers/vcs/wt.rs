@@ -162,8 +162,10 @@ impl super::CheckoutManager for WtCheckoutManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::vcs::checkout_test_support::git;
-    use crate::providers::{replay, vcs::CheckoutManager};
+    use crate::providers::{
+        replay,
+        vcs::{checkout_test_support::git, CheckoutManager},
+    };
 
     // ── Setup helpers (only called in record mode) ──
 

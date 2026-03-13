@@ -118,8 +118,10 @@ impl super::Vcs for GitVcs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::vcs::checkout_test_support::git;
-    use crate::providers::{replay, vcs::Vcs};
+    use crate::providers::{
+        replay,
+        vcs::{checkout_test_support::git, Vcs},
+    };
 
     // ── Setup helpers (only called in record mode) ──
 
