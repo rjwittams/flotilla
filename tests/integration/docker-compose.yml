@@ -1,0 +1,21 @@
+# Placeholder compose file. Full topologies defined in Issues 6-8.
+# This minimal setup validates base image SSH key exchange works.
+services:
+  node-a:
+    build:
+      context: ../..
+      dockerfile: tests/integration/docker/jumpbox/Dockerfile
+    hostname: node-a
+    volumes:
+      - shared-keys:/shared-keys
+
+  node-b:
+    build:
+      context: ../..
+      dockerfile: tests/integration/docker/jumpbox/Dockerfile
+    hostname: node-b
+    volumes:
+      - shared-keys:/shared-keys
+
+volumes:
+  shared-keys:
