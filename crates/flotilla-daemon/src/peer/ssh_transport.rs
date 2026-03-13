@@ -226,21 +226,16 @@ impl SshTransport {
         )
         .await?;
 
-        let mut hello_reader = BufReader::new(stream);
-        let mut line = String::new();
-        let bytes = hello_reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("failed to read peer hello: {e}"))?;
-        if bytes == 0 {
-            return Err("peer closed before sending hello".to_string());
-        }
-        let hello = serde_json::from_str(line.trim_end())
-            .map_err(|e| format!("failed to parse peer hello: {e}"))?;
-        Self::validate_remote_hello(&self.expected_host_name, hello)?;
-
-        let stream = hello_reader.into_inner();
         let (read_half, write_half) = stream.into_split();
+        let mut lines = BufReader::new(read_half).lines();
+        let line = lines
+            .next_line()
+            .await
+            .map_err(|e| format!("failed to read peer hello: {e}"))?
+            .ok_or_else(|| "peer closed before sending hello".to_string())?;
+        let hello =
+            serde_json::from_str(&line).map_err(|e| format!("failed to parse peer hello: {e}"))?;
+        Self::validate_remote_hello(&self.expected_host_name, hello)?;
 
         // Inbound: reader task → inbound channel → subscriber
         let (inbound_tx, inbound_rx) = mpsc::channel::<PeerWireMessage>(CHANNEL_BUFFER);
@@ -252,9 +247,6 @@ impl SshTransport {
         // Spawn reader task
         let host_name = self.expected_host_name.clone();
         let reader_handle = tokio::spawn(async move {
-            let reader = BufReader::new(read_half);
-            let mut lines = reader.lines();
-
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
@@ -509,6 +501,7 @@ impl Drop for SshTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flotilla_protocol::PeerDataMessage;
 
     #[test]
     fn backoff_delay_exponential_with_cap() {
@@ -651,6 +644,78 @@ mod tests {
         let result = transport.subscribe().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not connected"));
+    }
+
+    #[tokio::test]
+    async fn connect_socket_preserves_peer_message_buffered_after_hello() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("peer.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind listener");
+
+        let config = RemoteHostConfig {
+            hostname: "example.com".to_string(),
+            expected_host_name: "remote".to_string(),
+            user: None,
+            daemon_socket: "/tmp/daemon.sock".to_string(),
+        };
+        let mut transport = SshTransport::new(
+            HostName::new("local"),
+            ConfigLabel("remote".to_string()),
+            config,
+        )
+        .expect("valid host name");
+        transport.local_socket_path = socket_path.clone();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut line = String::new();
+            let mut reader = BufReader::new(&mut stream);
+            reader.read_line(&mut line).await.expect("read hello");
+            let hello = serde_json::to_string(&Message::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                host_name: HostName::new("remote"),
+            })
+            .expect("serialize hello");
+            let peer = serde_json::to_string(&Message::Peer(Box::new(PeerWireMessage::Data(
+                PeerDataMessage {
+                    origin_host: HostName::new("remote"),
+                    repo_identity: flotilla_protocol::RepoIdentity {
+                        authority: "github.com".into(),
+                        path: "owner/repo".into(),
+                    },
+                    repo_path: PathBuf::from("/home/remote/repo"),
+                    clock: flotilla_protocol::VectorClock::default(),
+                    kind: flotilla_protocol::PeerDataKind::Snapshot {
+                        data: Box::new(flotilla_protocol::ProviderData::default()),
+                        seq: 1,
+                    },
+                },
+            ))))
+            .expect("serialize peer");
+            stream
+                .write_all(format!("{hello}\n{peer}\n").as_bytes())
+                .await
+                .expect("write hello and peer");
+        });
+
+        let mut inbound = transport.connect_socket().await.expect("connect socket");
+        let msg = inbound.recv().await.expect("first peer message");
+        match msg {
+            PeerWireMessage::Data(PeerDataMessage {
+                origin_host,
+                repo_path,
+                kind: flotilla_protocol::PeerDataKind::Snapshot { seq, .. },
+                ..
+            }) => {
+                assert_eq!(origin_host, HostName::new("remote"));
+                assert_eq!(repo_path, PathBuf::from("/home/remote/repo"));
+                assert_eq!(seq, 1);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        transport.disconnect().await.expect("disconnect cleanly");
+        server.await.expect("server task");
     }
 
     /// Integration test that requires a real SSH setup and running daemon.

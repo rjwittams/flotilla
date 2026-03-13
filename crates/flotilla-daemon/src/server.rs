@@ -241,7 +241,7 @@ impl DaemonServer {
                     HashMap::new();
                 let peer_names = {
                     let mut pm = peer_manager_task.lock().await;
-                    let names = pm.outbound_peer_names();
+                    let names = pm.configured_peer_names();
                     for (name, generation, rx) in pm.connect_all().await {
                         initial_rx_map.insert(name, (generation, rx));
                     }
@@ -769,8 +769,18 @@ async fn dispatch_resync_requests(
                 requester_host.clone()
             }
         };
-        let pm = peer_manager.lock().await;
-        if let Err(e) = pm.send_to(&target, PeerWireMessage::Routed(request)).await {
+        let sender = {
+            let pm = peer_manager.lock().await;
+            pm.resolve_sender(&target)
+        };
+        let sender = match sender {
+            Ok(sender) => sender,
+            Err(e) => {
+                warn!(peer = %target, err = %e, "failed to resolve routed resync sender");
+                continue;
+            }
+        };
+        if let Err(e) = sender.send(PeerWireMessage::Routed(request)).await {
             warn!(peer = %target, err = %e, "failed to dispatch routed resync request");
         }
     }
@@ -828,16 +838,12 @@ async fn send_local_to_peers(
     };
 
     // Send to all active peers, including direct socket peers.
-    let peer_names = {
+    let peer_senders = {
         let pm = peer_manager.lock().await;
-        pm.active_peers()
+        pm.active_peer_senders()
     };
-    for peer_name in peer_names {
-        let pm = peer_manager.lock().await;
-        if let Err(e) = pm
-            .send_to(&peer_name, PeerWireMessage::Data(msg.clone()))
-            .await
-        {
+    for (peer_name, sender) in peer_senders {
+        if let Err(e) = sender.send(PeerWireMessage::Data(msg.clone())).await {
             debug!(peer = %peer_name, err = %e, "failed to send snapshot to peer");
         }
     }
@@ -1249,6 +1255,7 @@ fn extract_path_param(params: &serde_json::Value, field: &str) -> Result<PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer::test_support::{ensure_test_connection_generation, handle_test_peer_data};
     use flotilla_protocol::{
         Checkout, DaemonEvent, HostName, HostPath, PeerDataKind, PeerDataMessage, PeerWireMessage,
         ProviderData, RepoIdentity, RepoInfo, VectorClock,
@@ -1961,23 +1968,41 @@ mod tests {
         {
             let mut pm = peer_manager.lock().await;
             assert_eq!(
-                pm.handle_peer_data(peer_snapshot(
-                    "peer-a",
-                    &repo_identity,
-                    &repo_path,
-                    "/srv/peer-a/remote-only",
-                    "feature-a",
-                )),
+                handle_test_peer_data(
+                    &mut pm,
+                    peer_snapshot(
+                        "peer-a",
+                        &repo_identity,
+                        &repo_path,
+                        "/srv/peer-a/remote-only",
+                        "feature-a",
+                    ),
+                    || {
+                        Arc::new(SocketPeerSender {
+                            tx: tokio::sync::Mutex::new(None),
+                        }) as Arc<dyn PeerSender>
+                    },
+                )
+                .await,
                 crate::peer::HandleResult::Updated(repo_identity.clone())
             );
             assert_eq!(
-                pm.handle_peer_data(peer_snapshot(
-                    "peer-b",
-                    &repo_identity,
-                    &repo_path,
-                    "/srv/peer-b/remote-only",
-                    "feature-b",
-                )),
+                handle_test_peer_data(
+                    &mut pm,
+                    peer_snapshot(
+                        "peer-b",
+                        &repo_identity,
+                        &repo_path,
+                        "/srv/peer-b/remote-only",
+                        "feature-b",
+                    ),
+                    || {
+                        Arc::new(SocketPeerSender {
+                            tx: tokio::sync::Mutex::new(None),
+                        }) as Arc<dyn PeerSender>
+                    },
+                )
+                .await,
                 crate::peer::HandleResult::Updated(repo_identity.clone())
             );
         }
@@ -2042,24 +2067,11 @@ mod tests {
         let mut rx = daemon.subscribe();
         let gen_a = {
             let mut pm = peer_manager.lock().await;
-            let sender: Arc<dyn PeerSender> = Arc::new(super::SocketPeerSender {
-                tx: tokio::sync::Mutex::new(Some(mpsc::channel(1).0)),
-            });
-            match pm.activate_connection(
-                HostName::new("peer-a"),
-                sender,
-                crate::peer::ConnectionMeta {
-                    direction: crate::peer::ConnectionDirection::Inbound,
-                    config_label: None,
-                    expected_peer: None,
-                    config_backed: false,
-                },
-            ) {
-                crate::peer::ActivationResult::Accepted { generation, .. } => generation,
-                crate::peer::ActivationResult::Rejected { reason } => {
-                    panic!("expected peer-a activation to succeed, got {:?}", reason)
-                }
-            }
+            ensure_test_connection_generation(&mut pm, &HostName::new("peer-a"), || {
+                Arc::new(super::SocketPeerSender {
+                    tx: tokio::sync::Mutex::new(Some(mpsc::channel(1).0)),
+                }) as Arc<dyn PeerSender>
+            })
         };
 
         disconnect_peer_and_rebuild(&peer_manager, &daemon, &HostName::new("peer-a"), gen_a).await;

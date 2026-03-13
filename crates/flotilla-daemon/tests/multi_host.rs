@@ -18,6 +18,7 @@ use flotilla_core::config::ConfigStore;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::in_process::InProcessDaemon;
 use flotilla_daemon::peer::merge::merge_provider_data;
+use flotilla_daemon::peer::test_support::handle_test_peer_data;
 use flotilla_daemon::peer::{
     HandleResult, PeerConnectionStatus, PeerManager, PeerSender, PeerTransport,
 };
@@ -140,8 +141,8 @@ fn snapshot_msg(origin: &str, seq: u64, data: ProviderData) -> PeerDataMessage {
 // Test 1: PeerManager stores snapshot data and returns Updated
 // ---------------------------------------------------------------------------
 
-#[test]
-fn peer_manager_stores_snapshot_and_returns_updated() {
+#[tokio::test]
+async fn peer_manager_stores_snapshot_and_returns_updated() {
     let mut mgr = PeerManager::new(HostName::new("leader"));
 
     // Build provider data with a checkout from the follower
@@ -152,7 +153,12 @@ fn peer_manager_stores_snapshot_and_returns_updated() {
     );
 
     let msg = snapshot_msg("follower", 1, follower_data);
-    let result = mgr.handle_peer_data(msg);
+    let result = handle_test_peer_data(&mut mgr, msg, || {
+        Arc::new(MockPeerSender {
+            sent: Arc::new(Mutex::new(Vec::new())),
+        }) as Arc<dyn PeerSender>
+    })
+    .await;
 
     // Should return Updated with the repo identity
     assert_eq!(result, HandleResult::Updated(test_repo()));
@@ -232,8 +238,8 @@ fn merge_combines_checkouts_from_leader_and_follower() {
 // Test 3: PeerManager + merge end-to-end flow
 // ---------------------------------------------------------------------------
 
-#[test]
-fn peer_manager_to_merge_end_to_end() {
+#[tokio::test]
+async fn peer_manager_to_merge_end_to_end() {
     // Simulate the full flow: follower sends data -> PeerManager stores it ->
     // merge combines it with leader's local data.
 
@@ -248,7 +254,12 @@ fn peer_manager_to_merge_end_to_end() {
     );
 
     let msg = snapshot_msg("follower", 1, follower_data);
-    let result = mgr.handle_peer_data(msg);
+    let result = handle_test_peer_data(&mut mgr, msg, || {
+        Arc::new(MockPeerSender {
+            sent: Arc::new(Mutex::new(Vec::new())),
+        }) as Arc<dyn PeerSender>
+    })
+    .await;
     assert_eq!(result, HandleResult::Updated(test_repo()));
 
     // Leader has its own local data
@@ -418,12 +429,17 @@ async fn relay_excludes_self_even_if_registered_as_peer() {
 // Test 7: PeerManager ignores messages from self
 // ---------------------------------------------------------------------------
 
-#[test]
-fn peer_manager_ignores_messages_from_self() {
+#[tokio::test]
+async fn peer_manager_ignores_messages_from_self() {
     let mut mgr = PeerManager::new(HostName::new("leader"));
 
     let msg = snapshot_msg("leader", 1, ProviderData::default());
-    let result = mgr.handle_peer_data(msg);
+    let result = handle_test_peer_data(&mut mgr, msg, || {
+        Arc::new(MockPeerSender {
+            sent: Arc::new(Mutex::new(Vec::new())),
+        }) as Arc<dyn PeerSender>
+    })
+    .await;
 
     assert_eq!(result, HandleResult::Ignored);
     assert!(
@@ -436,8 +452,8 @@ fn peer_manager_ignores_messages_from_self() {
 // Test 8: Multiple peers with different repos
 // ---------------------------------------------------------------------------
 
-#[test]
-fn peer_manager_handles_multiple_peers_and_repos() {
+#[tokio::test]
+async fn peer_manager_handles_multiple_peers_and_repos() {
     let mut mgr = PeerManager::new(HostName::new("leader"));
 
     // Follower A sends data
@@ -457,11 +473,21 @@ fn peer_manager_handles_multiple_peers_and_repos() {
     let msg_b = snapshot_msg("follower-b", 2, data_b);
 
     assert_eq!(
-        mgr.handle_peer_data(msg_a),
+        handle_test_peer_data(&mut mgr, msg_a, || {
+            Arc::new(MockPeerSender {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn PeerSender>
+        })
+        .await,
         HandleResult::Updated(test_repo())
     );
     assert_eq!(
-        mgr.handle_peer_data(msg_b),
+        handle_test_peer_data(&mut mgr, msg_b, || {
+            Arc::new(MockPeerSender {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn PeerSender>
+        })
+        .await,
         HandleResult::Updated(test_repo())
     );
 
@@ -533,8 +559,8 @@ fn merge_preserves_local_service_data_with_peer_checkouts() {
 // Test 10: Delta message returns NeedsResync (Phase 1 behavior)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn delta_message_returns_needs_resync() {
+#[tokio::test]
+async fn delta_message_returns_needs_resync() {
     use flotilla_protocol::delta::{Branch, BranchStatus, EntryOp};
     use flotilla_protocol::Change;
 
@@ -557,7 +583,12 @@ fn delta_message_returns_needs_resync() {
         },
     };
 
-    let result = mgr.handle_peer_data(msg);
+    let result = handle_test_peer_data(&mut mgr, msg, || {
+        Arc::new(MockPeerSender {
+            sent: Arc::new(Mutex::new(Vec::new())),
+        }) as Arc<dyn PeerSender>
+    })
+    .await;
     assert_eq!(
         result,
         HandleResult::NeedsResync {
@@ -618,8 +649,8 @@ async fn follower_mode_has_only_local_providers() {
 // Test 12: Snapshot update overwrites previous peer data
 // ---------------------------------------------------------------------------
 
-#[test]
-fn peer_snapshot_update_overwrites_previous() {
+#[tokio::test]
+async fn peer_snapshot_update_overwrites_previous() {
     let mut mgr = PeerManager::new(HostName::new("leader"));
 
     // First snapshot from follower with branch "old-branch"
@@ -628,7 +659,12 @@ fn peer_snapshot_update_overwrites_previous() {
         HostPath::new(HostName::new("follower"), "/repo"),
         make_checkout("old-branch"),
     );
-    mgr.handle_peer_data(snapshot_msg("follower", 1, data1));
+    handle_test_peer_data(&mut mgr, snapshot_msg("follower", 1, data1), || {
+        Arc::new(MockPeerSender {
+            sent: Arc::new(Mutex::new(Vec::new())),
+        }) as Arc<dyn PeerSender>
+    })
+    .await;
 
     // Second snapshot with branch "new-branch"
     let mut data2 = ProviderData::default();
@@ -636,7 +672,12 @@ fn peer_snapshot_update_overwrites_previous() {
         HostPath::new(HostName::new("follower"), "/repo"),
         make_checkout("new-branch"),
     );
-    let result = mgr.handle_peer_data(snapshot_msg("follower", 2, data2));
+    let result = handle_test_peer_data(&mut mgr, snapshot_msg("follower", 2, data2), || {
+        Arc::new(MockPeerSender {
+            sent: Arc::new(Mutex::new(Vec::new())),
+        }) as Arc<dyn PeerSender>
+    })
+    .await;
     assert_eq!(result, HandleResult::Updated(test_repo()));
 
     // Verify the data was updated

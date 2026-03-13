@@ -552,14 +552,14 @@ impl PeerManager {
 
                 HandleResult::NeedsResync { from: origin, repo }
             }
-            PeerDataKind::RequestResync { since_seq } => HandleResult::ResyncRequested {
-                // Legacy direct request-resync path; routed requests carry a real request_id.
-                request_id: 0,
-                requester_host: origin.clone(),
-                reply_via: origin,
-                repo,
-                since_seq,
-            },
+            PeerDataKind::RequestResync { .. } => {
+                debug!(
+                    origin = %origin,
+                    repo = %repo,
+                    "ignoring legacy direct peer request-resync message"
+                );
+                HandleResult::Ignored
+            }
         }
     }
 
@@ -725,21 +725,6 @@ impl PeerManager {
                 HandleResult::Ignored
             }
         }
-    }
-
-    /// Process an inbound PeerDataMessage.
-    ///
-    /// - Snapshot: stores provider_data and seq, returns Updated.
-    /// - Delta: for Phase 1 we don't apply deltas, so we return NeedsResync.
-    /// - RequestResync: returns ResyncRequested so the caller can send a snapshot.
-    pub fn handle_peer_data(&mut self, msg: PeerDataMessage) -> HandleResult {
-        let origin = msg.origin_host.clone();
-        if origin == self.local_host {
-            debug!(host = %origin, "ignoring peer data from self");
-            return HandleResult::Ignored;
-        }
-        let generation = self.generations.get(&origin).copied().unwrap_or(1);
-        self.store_snapshot_from(&origin, generation, msg)
     }
 
     /// Forward a message to all connected peers except the origin, self,
@@ -920,13 +905,31 @@ impl PeerManager {
         self.peers.keys().cloned().collect()
     }
 
-    pub fn outbound_peer_names(&self) -> Vec<HostName> {
-        self.peers.keys().cloned().collect()
-    }
-
     /// Return the currently addressable peers that have active senders.
     pub fn active_peers(&self) -> Vec<HostName> {
         self.senders.keys().cloned().collect()
+    }
+
+    pub fn active_peer_senders(&self) -> Vec<(HostName, Arc<dyn PeerSender>)> {
+        self.senders
+            .iter()
+            .map(|(name, sender)| (name.clone(), Arc::clone(sender)))
+            .collect()
+    }
+
+    pub fn resolve_sender(&self, name: &HostName) -> Result<Arc<dyn PeerSender>, String> {
+        if let Some(sender) = self.senders.get(name) {
+            return Ok(Arc::clone(sender));
+        }
+
+        let route = self
+            .routes
+            .get(name)
+            .ok_or_else(|| format!("unknown peer: {name}"))?;
+        self.senders
+            .get(&route.primary.next_hop)
+            .cloned()
+            .ok_or_else(|| format!("missing next hop sender: {}", route.primary.next_hop))
     }
 
     pub fn take_displaced_sender(
@@ -972,18 +975,7 @@ impl PeerManager {
 
     /// Send a message to a specific peer by name.
     pub async fn send_to(&self, name: &HostName, msg: PeerWireMessage) -> Result<(), String> {
-        if let Some(sender) = self.senders.get(name) {
-            return sender.send(msg).await;
-        }
-
-        let route = self
-            .routes
-            .get(name)
-            .ok_or_else(|| format!("unknown peer: {name}"))?;
-        let sender = self
-            .senders
-            .get(&route.primary.next_hop)
-            .ok_or_else(|| format!("missing next hop sender: {}", route.primary.next_hop))?;
+        let sender = self.resolve_sender(name)?;
         sender.send(msg).await
     }
 
@@ -1159,6 +1151,7 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer::test_support::handle_test_peer_data;
 
     use std::sync::{Arc, Mutex};
 
@@ -1273,12 +1266,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn handle_snapshot_stores_data() {
+    #[tokio::test]
+    async fn handle_snapshot_stores_data() {
         let mut mgr = PeerManager::new(HostName::new("local"));
         let msg = snapshot_msg("remote", 1);
 
-        let result = mgr.handle_peer_data(msg);
+        let result = handle_test_peer_data(&mut mgr, msg, || {
+            Arc::new(MockPeerSender {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn PeerSender>
+        })
+        .await;
         assert_eq!(result, HandleResult::Updated(test_repo()));
 
         let peer_data = mgr.get_peer_data();
@@ -1289,17 +1287,27 @@ mod tests {
         assert_eq!(repo_state.repo_path, PathBuf::from("/home/dev/repo"));
     }
 
-    #[test]
-    fn handle_snapshot_updates_existing_data() {
+    #[tokio::test]
+    async fn handle_snapshot_updates_existing_data() {
         let mut mgr = PeerManager::new(HostName::new("local"));
 
         // First snapshot
         let msg1 = snapshot_msg("remote", 1);
-        mgr.handle_peer_data(msg1);
+        handle_test_peer_data(&mut mgr, msg1, || {
+            Arc::new(MockPeerSender {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn PeerSender>
+        })
+        .await;
 
         // Second snapshot with higher seq
         let msg2 = snapshot_msg("remote", 5);
-        let result = mgr.handle_peer_data(msg2);
+        let result = handle_test_peer_data(&mut mgr, msg2, || {
+            Arc::new(MockPeerSender {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn PeerSender>
+        })
+        .await;
         assert_eq!(result, HandleResult::Updated(test_repo()));
 
         let peer_data = mgr.get_peer_data();
@@ -1307,8 +1315,8 @@ mod tests {
         assert_eq!(repo_state.seq, 5);
     }
 
-    #[test]
-    fn handle_request_resync_returns_resync_requested() {
+    #[tokio::test]
+    async fn legacy_direct_request_resync_is_ignored() {
         let mut mgr = PeerManager::new(HostName::new("local"));
 
         let msg = PeerDataMessage {
@@ -1319,21 +1327,17 @@ mod tests {
             kind: PeerDataKind::RequestResync { since_seq: 3 },
         };
 
-        let result = mgr.handle_peer_data(msg);
-        assert_eq!(
-            result,
-            HandleResult::ResyncRequested {
-                request_id: 0,
-                requester_host: HostName::new("remote"),
-                reply_via: HostName::new("remote"),
-                repo: test_repo(),
-                since_seq: 3,
-            }
-        );
+        let result = handle_test_peer_data(&mut mgr, msg, || {
+            Arc::new(MockPeerSender {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn PeerSender>
+        })
+        .await;
+        assert_eq!(result, HandleResult::Ignored);
     }
 
-    #[test]
-    fn handle_delta_returns_needs_resync() {
+    #[tokio::test]
+    async fn handle_delta_returns_needs_resync() {
         use flotilla_protocol::delta::{Branch, BranchStatus, EntryOp};
         use flotilla_protocol::Change;
 
@@ -1356,7 +1360,12 @@ mod tests {
             },
         };
 
-        let result = mgr.handle_peer_data(msg);
+        let result = handle_test_peer_data(&mut mgr, msg, || {
+            Arc::new(MockPeerSender {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn PeerSender>
+        })
+        .await;
         assert_eq!(
             result,
             HandleResult::NeedsResync {
@@ -1366,12 +1375,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn handle_ignores_messages_from_self() {
+    #[tokio::test]
+    async fn handle_ignores_messages_from_self() {
         let mut mgr = PeerManager::new(HostName::new("local"));
         let msg = snapshot_msg("local", 1);
 
-        let result = mgr.handle_peer_data(msg);
+        let result = handle_test_peer_data(&mut mgr, msg, || {
+            Arc::new(MockPeerSender {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn PeerSender>
+        })
+        .await;
         assert_eq!(result, HandleResult::Ignored);
         assert!(mgr.get_peer_data().is_empty());
     }
@@ -1458,16 +1472,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn get_peer_data_returns_stored_data() {
+    #[tokio::test]
+    async fn get_peer_data_returns_stored_data() {
         let mut mgr = PeerManager::new(HostName::new("local"));
 
         // Initially empty
         assert!(mgr.get_peer_data().is_empty());
 
         // After storing data from two hosts
-        mgr.handle_peer_data(snapshot_msg("desktop", 1));
-        mgr.handle_peer_data(snapshot_msg("server", 2));
+        handle_test_peer_data(&mut mgr, snapshot_msg("desktop", 1), || {
+            Arc::new(MockPeerSender {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn PeerSender>
+        })
+        .await;
+        handle_test_peer_data(&mut mgr, snapshot_msg("server", 2), || {
+            Arc::new(MockPeerSender {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn PeerSender>
+        })
+        .await;
 
         let data = mgr.get_peer_data();
         assert_eq!(data.len(), 2);
@@ -1816,15 +1840,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbound_peer_names_include_all_configured_peers() {
+    async fn configured_peer_names_include_all_configured_peers() {
         let mut mgr = PeerManager::new(HostName::new("m"));
         mgr.add_peer(HostName::new("z"), Box::new(MockTransport::new()));
         mgr.add_peer(HostName::new("a"), Box::new(MockTransport::new()));
 
-        let mut outbound = mgr.outbound_peer_names();
-        outbound.sort();
+        let mut configured = mgr.configured_peer_names();
+        configured.sort();
 
-        assert_eq!(outbound, vec![HostName::new("a"), HostName::new("z")]);
+        assert_eq!(configured, vec![HostName::new("a"), HostName::new("z")]);
     }
 
     #[tokio::test]

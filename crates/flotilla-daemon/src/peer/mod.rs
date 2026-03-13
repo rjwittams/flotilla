@@ -1,6 +1,7 @@
 pub mod manager;
 pub mod merge;
 pub mod ssh_transport;
+pub mod test_support;
 pub mod transport;
 
 pub use manager::{
