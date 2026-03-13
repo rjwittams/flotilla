@@ -106,11 +106,7 @@ impl super::Vcs for GitVcs {
     async fn ahead_behind(&self, repo_root: &Path, branch: &str, reference: &str) -> Result<AheadBehind, String> {
         let range = format!("{}...{}", branch, reference);
         let output = run!(self.runner, "git", &["rev-list", "--count", "--left-right", &range], repo_root)?;
-        let trimmed = output.trim();
-        let mut parts = trimmed.split('\t');
-        let ahead: i64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let behind: i64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        Ok(AheadBehind { ahead, behind })
+        super::parse_ahead_behind(&output).ok_or_else(|| format!("failed to parse ahead/behind from: {output:?}"))
     }
 
     async fn working_tree_status(&self, _repo_root: &Path, checkout_path: &Path) -> Result<WorkingTreeStatus, String> {
@@ -122,15 +118,12 @@ impl super::Vcs for GitVcs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::{replay, vcs::Vcs};
+    use crate::providers::{
+        replay,
+        vcs::{checkout_test_support::git, Vcs},
+    };
 
     // ── Setup helpers (only called in record mode) ──
-
-    /// Run a git command in `repo`, panicking on failure.
-    fn git(repo: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git").args(args).current_dir(repo).stdin(std::process::Stdio::null()).output().unwrap();
-        assert!(out.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
-    }
 
     /// Create a temp git repo with branches: main, feature/foo, fix-bar.
     /// Two commits on main, so commit_log has something to show.
@@ -206,7 +199,7 @@ mod tests {
     }
 
     fn fixture(name: &str) -> String {
-        format!("{}/src/providers/vcs/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+        crate::providers::testing::fixture_path("vcs", name)
     }
 
     // ── Record/replay tests ──
