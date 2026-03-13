@@ -66,6 +66,11 @@ pub async fn build_plan(
             .await
         }
 
+        Command::TeleportSession { session_id, branch, checkout_key } => {
+            build_teleport_session_plan(session_id, branch, checkout_key, repo_root, registry, providers_data, config_base, local_host)
+                .await
+        }
+
         cmd => {
             let result = execute(cmd, &repo_root, &*registry, &*providers_data, &*runner, &config_base).await;
             ExecutionPlan::Immediate(result)
@@ -170,6 +175,121 @@ async fn build_create_checkout_plan(
                             // Checkout was created but workspace failed — log but don't fail
                             error!(err = %e, "workspace creation failed after checkout");
                         }
+                    }
+                    Ok(StepOutcome::Completed)
+                })
+            }),
+        });
+    }
+
+    ExecutionPlan::Steps(StepPlan::new(steps))
+}
+
+/// Build a step plan for `TeleportSession`.
+///
+/// Steps:
+/// 1. Resolve attach command from the session's cloud agent provider
+/// 2. Ensure checkout exists (skipped if checkout_key references a known checkout, or no branch)
+/// 3. Create workspace with the teleport (attach) command
+async fn build_teleport_session_plan(
+    session_id: String,
+    branch: Option<String>,
+    checkout_key: Option<PathBuf>,
+    repo_root: PathBuf,
+    registry: Arc<ProviderRegistry>,
+    providers_data: Arc<ProviderData>,
+    config_base: PathBuf,
+    local_host: flotilla_protocol::HostName,
+) -> ExecutionPlan {
+    // Shared slot for the teleport (attach) command — populated by step 1.
+    let teleport_cmd_slot: Arc<tokio::sync::Mutex<Option<String>>> = Arc::new(tokio::sync::Mutex::new(None));
+
+    // Shared slot for checkout path — pre-populated if checkout_key references a known checkout.
+    let checkout_path_slot: Arc<tokio::sync::Mutex<Option<PathBuf>>> = {
+        let existing = checkout_key.as_ref().and_then(|key| {
+            let host_key = flotilla_protocol::HostPath::new(local_host.clone(), key.clone());
+            providers_data.checkouts.get(&host_key).map(|_| key.clone())
+        });
+        Arc::new(tokio::sync::Mutex::new(existing))
+    };
+
+    let mut steps = Vec::new();
+
+    // Step 1: Resolve attach command
+    {
+        let slot = Arc::clone(&teleport_cmd_slot);
+        let session_id = session_id.clone();
+        let registry = Arc::clone(&registry);
+        let providers_data = Arc::clone(&providers_data);
+        steps.push(Step {
+            description: format!("Resolve attach command for session {session_id}"),
+            action: Box::new(move || {
+                Box::pin(async move {
+                    let cmd = resolve_attach_command(&session_id, &registry, &providers_data).await?;
+                    *slot.lock().await = Some(cmd);
+                    Ok(StepOutcome::Completed)
+                })
+            }),
+        });
+    }
+
+    // Step 2: Ensure checkout if needed
+    // Only runs when there's no pre-existing checkout and a branch is provided.
+    {
+        let slot = Arc::clone(&checkout_path_slot);
+        let branch = branch.clone();
+        let repo_root = repo_root.clone();
+        let registry = Arc::clone(&registry);
+        steps.push(Step {
+            description: "Ensure checkout for teleport".to_string(),
+            action: Box::new(move || {
+                Box::pin(async move {
+                    // Already have a checkout path — skip
+                    if slot.lock().await.is_some() {
+                        return Ok(StepOutcome::Skipped);
+                    }
+                    let branch_name = match &branch {
+                        Some(b) => b.clone(),
+                        None => return Ok(StepOutcome::Skipped),
+                    };
+                    let cm = registry
+                        .checkout_managers
+                        .values()
+                        .next()
+                        .map(|(_, cm)| Arc::clone(cm))
+                        .ok_or_else(|| "No checkout manager available".to_string())?;
+                    let (path, _checkout) = cm.create_checkout(&repo_root, &branch_name, false).await?;
+                    *slot.lock().await = Some(path);
+                    Ok(StepOutcome::Completed)
+                })
+            }),
+        });
+    }
+
+    // Step 3: Create workspace with teleport command
+    {
+        let teleport_slot = Arc::clone(&teleport_cmd_slot);
+        let path_slot = Arc::clone(&checkout_path_slot);
+        let branch = branch.clone();
+        let repo_root = repo_root.clone();
+        let registry = Arc::clone(&registry);
+        let config_base = config_base.clone();
+        steps.push(Step {
+            description: "Create workspace with teleport command".to_string(),
+            action: Box::new(move || {
+                Box::pin(async move {
+                    let path =
+                        path_slot.lock().await.clone().ok_or_else(|| "Could not determine checkout path for teleport".to_string())?;
+                    let teleport_cmd = teleport_slot.lock().await.clone().ok_or_else(|| "Attach command not resolved".to_string())?;
+                    let name = branch.as_deref().unwrap_or("session");
+                    if let Some((_, ws_mgr)) = &registry.workspace_manager {
+                        let mut config = workspace_config(&repo_root, name, &path, &teleport_cmd, &config_base);
+                        if let Some((_, tp)) = &registry.terminal_pool {
+                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                        }
+                        // Unlike CreateCheckout, teleport fails entirely if the workspace
+                        // can't be created — the checkout may already have existed.
+                        ws_mgr.create_workspace(&config).await.map_err(|e| e)?;
                     }
                     Ok(StepOutcome::Completed)
                 })
