@@ -98,18 +98,16 @@ impl TestNetwork {
     /// Replicates the relay-then-handle pattern from server.rs.
     pub async fn process_peer(&mut self, peer_idx: usize) -> usize {
         let mut messages = Vec::new();
-        for (connection_peer, _gen, receiver) in &mut self.peers[peer_idx].receivers {
+        for (connection_peer, gen, receiver) in &mut self.peers[peer_idx].receivers {
             while let Ok(msg) = receiver.try_recv() {
-                messages.push((connection_peer.clone(), msg));
+                messages.push((connection_peer.clone(), *gen, msg));
             }
         }
 
         let count = messages.len();
         let peer = &mut self.peers[peer_idx];
 
-        for (connection_peer, msg) in messages {
-            let generation = peer.manager.current_generation(&connection_peer).expect("no generation for connected peer");
-
+        for (connection_peer, generation, msg) in messages {
             if let PeerWireMessage::Data(ref data_msg) = msg {
                 // Use origin_host (not connection_peer) to match production
                 // semantics in server.rs — relay skips the original author.

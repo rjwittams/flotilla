@@ -8,6 +8,17 @@ use crate::peer::transport::{PeerConnectionStatus, PeerSender, PeerTransport};
 
 const CHANNEL_BUFFER: usize = 256;
 
+/// In-process peer transport using `tokio::mpsc` channels.
+///
+/// Created in pairs via [`channel_transport_pair`] — what one side sends, the
+/// other receives. Unlike [`SshTransport`], this transport is **single-lifecycle**:
+/// once disconnected, it cannot be reconnected (the channels are consumed).
+/// This is inherent to the paired design — there is no persistent listener to
+/// reconnect to. For scenarios requiring reconnection (e.g. `PeerManager::reconnect_peer`),
+/// create a new pair and re-register.
+///
+/// Used for in-process multi-peer testing via [`TestNetwork`](super::test_support::TestNetwork),
+/// and potentially for future in-process daemon topologies.
 pub struct ChannelTransport {
     local_name: HostName,
     remote_name: HostName,
@@ -56,6 +67,8 @@ impl PeerTransport for ChannelTransport {
         if self.outbound_tx.is_none() {
             return Err("cannot connect: transport already used and disconnected".to_string());
         }
+        // Transition through Connecting to match SshTransport's status lifecycle.
+        // For channels the connection is instant — no async work needed.
         self.status = PeerConnectionStatus::Connecting;
         self.status = PeerConnectionStatus::Connected;
         Ok(())
@@ -87,6 +100,8 @@ impl PeerTransport for ChannelTransport {
     }
 }
 
+/// Create a paired set of in-process transports. A's outbound is B's inbound
+/// and vice versa. Both start in `Disconnected` state.
 pub fn channel_transport_pair(local_name: HostName, remote_name: HostName) -> (ChannelTransport, ChannelTransport) {
     let (a_to_b_tx, a_to_b_rx) = mpsc::channel(CHANNEL_BUFFER);
     let (b_to_a_tx, b_to_a_rx) = mpsc::channel(CHANNEL_BUFFER);
