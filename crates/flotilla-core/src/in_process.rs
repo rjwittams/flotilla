@@ -1084,8 +1084,10 @@ impl DaemonHandle for InProcessDaemon {
                 ExecutionPlan::Steps(step_plan) => {
                     // Reject if another step command is already running.
                     // Single-slot design: one step command at a time (global).
+                    // Hold the lock across check-and-set to avoid TOCTOU races.
+                    let token = CancellationToken::new();
                     {
-                        let guard = active_ref.lock().await;
+                        let mut guard = active_ref.lock().await;
                         if let Some(active) = &*guard {
                             let _ = event_tx.send(DaemonEvent::CommandFinished {
                                 command_id: id,
@@ -1096,10 +1098,8 @@ impl DaemonHandle for InProcessDaemon {
                             });
                             return;
                         }
+                        *guard = Some(ActiveCommand { command_id: id, token: token.clone() });
                     }
-
-                    let token = CancellationToken::new();
-                    *active_ref.lock().await = Some(ActiveCommand { command_id: id, token: token.clone() });
 
                     let result = run_step_plan(step_plan, id, repo_path.clone(), token, event_tx.clone()).await;
                     refresh_trigger.notify_one();
