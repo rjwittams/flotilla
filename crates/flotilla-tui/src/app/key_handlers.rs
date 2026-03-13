@@ -83,6 +83,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => {
+                // Cancellation takes priority over other Esc actions while a command is running.
                 if let Some(&command_id) = self.in_flight.keys().next() {
                     self.pending_cancel = Some(command_id);
                 } else if self.active_ui().active_search_query.is_some() {
