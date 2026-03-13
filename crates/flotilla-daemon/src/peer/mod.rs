@@ -13,3 +13,6 @@ pub use manager::{
 pub use merge::merge_provider_data;
 pub use ssh_transport::SshTransport;
 pub use transport::{PeerConnectionStatus, PeerSender, PeerTransport};
+
+#[cfg(test)]
+mod channel_tests;
