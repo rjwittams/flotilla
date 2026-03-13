@@ -48,8 +48,136 @@ pub async fn build_plan(
     runner: Arc<dyn CommandRunner>,
     config_base: PathBuf,
 ) -> ExecutionPlan {
-    let result = execute(cmd, &repo_root, &*registry, &*providers_data, &*runner, &config_base).await;
-    ExecutionPlan::Immediate(result)
+    let local_host = flotilla_protocol::HostName::local();
+
+    match cmd {
+        Command::CreateCheckout { branch, create_branch, issue_ids } => {
+            build_create_checkout_plan(
+                branch,
+                create_branch,
+                issue_ids,
+                repo_root,
+                registry,
+                providers_data,
+                runner,
+                config_base,
+                local_host,
+            )
+            .await
+        }
+
+        cmd => {
+            let result = execute(cmd, &repo_root, &*registry, &*providers_data, &*runner, &config_base).await;
+            ExecutionPlan::Immediate(result)
+        }
+    }
+}
+
+/// Build a step plan for `CreateCheckout`.
+///
+/// Steps:
+/// 1. Create the checkout (skipped if it already exists on the local host)
+/// 2. Link issues to the branch (skipped if no issue_ids)
+/// 3. Create workspace (reads checkout path from shared slot)
+async fn build_create_checkout_plan(
+    branch: String,
+    create_branch: bool,
+    issue_ids: Vec<(String, String)>,
+    repo_root: PathBuf,
+    registry: Arc<ProviderRegistry>,
+    providers_data: Arc<ProviderData>,
+    runner: Arc<dyn CommandRunner>,
+    config_base: PathBuf,
+    local_host: flotilla_protocol::HostName,
+) -> ExecutionPlan {
+    // Shared slot for the checkout path — pre-populated if the checkout already exists.
+    let checkout_path_slot: Arc<tokio::sync::Mutex<Option<PathBuf>>> = {
+        let existing = providers_data.checkouts.iter().find_map(|(hp, co)| {
+            if hp.host == local_host && co.branch == branch {
+                Some(hp.path.clone())
+            } else {
+                None
+            }
+        });
+        Arc::new(tokio::sync::Mutex::new(existing))
+    };
+
+    let mut steps = Vec::new();
+
+    // Step 1: Create checkout
+    {
+        let slot = Arc::clone(&checkout_path_slot);
+        let branch = branch.clone();
+        let repo_root = repo_root.clone();
+        let registry = Arc::clone(&registry);
+        steps.push(Step {
+            description: format!("Create checkout for branch {branch}"),
+            action: Box::new(move || {
+                Box::pin(async move {
+                    // Skip if checkout already exists
+                    if slot.lock().await.is_some() {
+                        return Ok(StepOutcome::Skipped);
+                    }
+                    let cm = registry
+                        .checkout_managers
+                        .values()
+                        .next()
+                        .map(|(_, cm)| Arc::clone(cm))
+                        .ok_or_else(|| "No checkout manager available".to_string())?;
+                    let (path, _checkout) = cm.create_checkout(&repo_root, &branch, create_branch).await?;
+                    info!(checkout_path = %path.display(), "created checkout");
+                    *slot.lock().await = Some(path);
+                    Ok(StepOutcome::CompletedWith(CommandResult::CheckoutCreated { branch }))
+                })
+            }),
+        });
+    }
+
+    // Step 2: Link issues (only if non-empty)
+    if !issue_ids.is_empty() {
+        let branch = branch.clone();
+        let repo_root = repo_root.clone();
+        let runner = Arc::clone(&runner);
+        steps.push(Step {
+            description: "Link issues to branch".to_string(),
+            action: Box::new(move || {
+                Box::pin(async move {
+                    write_branch_issue_links(&repo_root, &branch, &issue_ids, &*runner).await;
+                    Ok(StepOutcome::Completed)
+                })
+            }),
+        });
+    }
+
+    // Step 3: Create workspace
+    {
+        let slot = Arc::clone(&checkout_path_slot);
+        let branch = branch.clone();
+        let repo_root = repo_root.clone();
+        let registry = Arc::clone(&registry);
+        let config_base = config_base.clone();
+        steps.push(Step {
+            description: "Create workspace".to_string(),
+            action: Box::new(move || {
+                Box::pin(async move {
+                    let checkout_path = slot.lock().await.clone().ok_or_else(|| "checkout path not available".to_string())?;
+                    if let Some((_, ws_mgr)) = &registry.workspace_manager {
+                        let mut config = workspace_config(&repo_root, &branch, &checkout_path, "claude", &config_base);
+                        if let Some((_, tp)) = &registry.terminal_pool {
+                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                        }
+                        if let Err(e) = ws_mgr.create_workspace(&config).await {
+                            // Checkout was created but workspace failed — log but don't fail
+                            error!(err = %e, "workspace creation failed after checkout");
+                        }
+                    }
+                    Ok(StepOutcome::Completed)
+                })
+            }),
+        });
+    }
+
+    ExecutionPlan::Steps(StepPlan::new(steps))
 }
 
 /// Execute a `Command` against the given repo context.
