@@ -65,14 +65,6 @@ impl Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Reset SIGPIPE to default behavior so piped CLI commands (e.g. `watch | head`)
-    // exit cleanly instead of panicking on broken pipe.
-    // SAFETY: libc::signal is safe to call before any I/O. Tokio does not configure SIGPIPE.
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
-
     color_eyre::install()?;
     let cli = Cli::parse();
 
@@ -171,10 +163,26 @@ async fn run_daemon(cli: &Cli, timeout_secs: u64) -> Result<()> {
     flotilla_daemon::cli::run(&cli.socket_path(), timeout_secs).await.map_err(|e| color_eyre::eyre::eyre!(e))
 }
 
+/// Reset SIGPIPE so piped CLI commands (e.g. `watch | head`) exit cleanly.
+/// Only called for CLI subcommands — not the TUI (which needs terminal restore on exit)
+/// or the daemon (which shouldn't be killed by a broken stdout pipe).
+#[cfg(unix)]
+fn reset_sigpipe() {
+    // SAFETY: libc::signal is safe to call before I/O begins. Tokio does not configure SIGPIPE.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {}
+
 async fn run_status(cli: &Cli, format: OutputFormat) -> Result<()> {
+    reset_sigpipe();
     flotilla_tui::cli::run_status(&cli.socket_path(), format).await.map_err(|e| color_eyre::eyre::eyre!(e))
 }
 
 async fn run_watch(cli: &Cli, format: OutputFormat) -> Result<()> {
+    reset_sigpipe();
     flotilla_tui::cli::run_watch(&cli.socket_path(), format).await.map_err(|e| color_eyre::eyre::eyre!(e))
 }

@@ -42,8 +42,10 @@ pub(crate) fn format_status_json(repos: &[flotilla_protocol::snapshot::RepoInfo]
 }
 
 /// Extract a short display name from a repo path (last path component).
-fn repo_name(path: &std::path::Path) -> &str {
-    path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+/// Falls back to the full path display for root or non-UTF-8 paths,
+/// matching `flotilla_core::model::repo_name`.
+fn repo_name(path: &std::path::Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
 /// Format a `CommandResult` as a short human-readable string.
