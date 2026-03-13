@@ -20,20 +20,30 @@ impl HostName {
     /// Create a HostName from the local machine's hostname.
     /// Uses `gethostname` crate (already a dependency in flotilla-core).
     /// The result is cached so `gethostname()` is only called once.
+    ///
+    /// The domain suffix is stripped (e.g. `kiwi.mynet` → `kiwi`) because
+    /// macOS often returns the FQDN. This means hosts with the same short
+    /// name but different domains will collide — acceptable for display
+    /// purposes but worth noting.
     pub fn local() -> Self {
         static HOSTNAME: OnceLock<HostName> = OnceLock::new();
         HOSTNAME
             .get_or_init(|| {
-                let name = gethostname::gethostname()
+                let fqdn = gethostname::gethostname()
                     .into_string()
                     .unwrap_or_else(|os| {
                         warn!(hostname = ?os, "hostname is not valid UTF-8, falling back to \"localhost\"");
                         "localhost".to_string()
                     });
-                Self(name)
+                Self(strip_domain(&fqdn).to_string())
             })
             .clone()
     }
+}
+
+/// Strip domain suffix from an FQDN, returning just the short hostname.
+fn strip_domain(fqdn: &str) -> &str {
+    fqdn.split_once('.').map_or(fqdn, |(short, _)| short)
 }
 
 impl fmt::Display for HostName {
@@ -222,6 +232,24 @@ mod tests {
         let c = HostName::new("laptop");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn strip_domain_removes_suffix() {
+        assert_eq!(strip_domain("kiwi.mynet"), "kiwi");
+        assert_eq!(strip_domain("host.domain.com"), "host");
+        assert_eq!(strip_domain("kiwi"), "kiwi");
+        assert_eq!(strip_domain("localhost"), "localhost");
+    }
+
+    #[test]
+    fn host_name_local_strips_domain() {
+        let local = HostName::local();
+        assert!(
+            !local.as_str().contains('.'),
+            "HostName::local() should strip domain suffix, got: {}",
+            local
+        );
     }
 
     #[test]
