@@ -781,6 +781,16 @@ impl PeerManager {
         self.senders.iter().map(|(name, sender)| (name.clone(), Arc::clone(sender))).collect()
     }
 
+    /// Returns the sender for a peer only if the given generation matches
+    /// the peer's current generation. Used by targeted sends to avoid
+    /// sending to a connection that has been superseded.
+    pub fn get_sender_if_current(&self, peer: &HostName, generation: u64) -> Option<Arc<dyn PeerSender>> {
+        if !self.generation_is_current(peer, generation) {
+            return None;
+        }
+        self.senders.get(peer).cloned()
+    }
+
     pub fn resolve_sender(&self, name: &HostName) -> Result<Arc<dyn PeerSender>, String> {
         if let Some(sender) = self.senders.get(name) {
             return Ok(Arc::clone(sender));
@@ -2149,5 +2159,21 @@ mod tests {
             other => panic!("expected RemoveRepo, got {:?}", other),
         }
         assert!(!mgr.is_remote_repo(&test_repo()));
+    }
+
+    #[tokio::test]
+    async fn get_sender_if_current_returns_sender_for_matching_generation() {
+        let mut mgr = PeerManager::new(HostName::new("local"));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sender: Arc<dyn PeerSender> = Arc::new(MockPeerSender { sent: Arc::clone(&sent) });
+        let generation = accepted_generation(mgr.activate_connection(
+            HostName::new("peer"),
+            sender,
+            ConnectionMeta { direction: ConnectionDirection::Inbound, config_label: None, expected_peer: None, config_backed: false },
+        ));
+
+        assert!(mgr.get_sender_if_current(&HostName::new("peer"), generation).is_some());
+        assert!(mgr.get_sender_if_current(&HostName::new("peer"), generation + 1).is_none());
+        assert!(mgr.get_sender_if_current(&HostName::new("unknown"), 1).is_none());
     }
 }
