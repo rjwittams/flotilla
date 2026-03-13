@@ -12,11 +12,10 @@ use crate::peer::transport::{PeerConnectionStatus, PeerSender, PeerTransport};
 const CHANNEL_BUFFER: usize = 256;
 
 /// Control envelopes carried on the persistent backbone channel.
-/// Data (`Packet`) is normally sent via the direct session path; the backbone
-/// serves as fallback when the remote hasn't subscribed yet.
+/// Data is delivered directly via the session channel; the backbone carries
+/// only connection lifecycle signals.
 enum ChannelEnvelope {
     Connected,
-    Packet(PeerWireMessage),
     Disconnected,
 }
 
@@ -62,41 +61,51 @@ impl ChannelTransport {
 }
 
 pub struct ChannelSender {
-    /// Backbone sender for retire (takes on retire to prevent further sends).
-    backbone_tx: tokio::sync::Mutex<Option<mpsc::Sender<ChannelEnvelope>>>,
-    /// Direct path to the remote's session channel. Cloned at sender creation
-    /// time — messages sent here are immediately available to `try_recv()`.
+    /// Taken on retire to prevent further sends (acts as a "retired" gate).
+    retired: tokio::sync::Mutex<bool>,
+    /// Session sender resolved lazily from the remote's slot, then cached.
+    /// Once resolved, this sender is bound to that specific session — after
+    /// disconnect/reconnect, sends fail (closed channel) rather than leaking
+    /// into the new session.
+    session_tx: std::sync::Mutex<Option<mpsc::Sender<PeerWireMessage>>>,
+    /// Reference to the remote's session slot for lazy resolution.
     remote_session_tx_slot: Arc<std::sync::Mutex<Option<mpsc::Sender<PeerWireMessage>>>>,
+}
+
+impl ChannelSender {
+    /// Resolve the session sender: use cached value if available, otherwise
+    /// clone from the remote's slot and cache it. Once resolved, the sender
+    /// is pinned to that session.
+    fn resolve_session_tx(&self) -> Option<mpsc::Sender<PeerWireMessage>> {
+        let mut cached = self.session_tx.lock().expect("session_tx lock");
+        if cached.is_some() {
+            return cached.clone();
+        }
+        let from_slot = self.remote_session_tx_slot.lock().expect("session slot lock").clone();
+        if from_slot.is_some() {
+            *cached = from_slot.clone();
+        }
+        from_slot
+    }
 }
 
 #[async_trait]
 impl PeerSender for ChannelSender {
     async fn send(&self, msg: PeerWireMessage) -> Result<(), String> {
-        let backbone_tx = self.backbone_tx.lock().await;
-        let backbone_tx = backbone_tx.as_ref().ok_or_else(|| "channel sender retired".to_string())?;
-
-        // Try the direct session path first (bypasses the forwarding task,
-        // making messages immediately visible to try_recv()).
-        let direct_tx = self.remote_session_tx_slot.lock().expect("session slot lock").clone();
-        if let Some(tx) = direct_tx {
-            tx.send(msg).await.map_err(|_| "channel closed".to_string())
-        } else {
-            // Fallback: send as Packet envelope on the backbone.
-            // The forwarding task will deliver it when it runs.
-            backbone_tx.send(ChannelEnvelope::Packet(msg)).await.map_err(|_| "channel closed".to_string())
+        if *self.retired.lock().await {
+            return Err("channel sender retired".to_string());
         }
+
+        let tx = self.resolve_session_tx().ok_or_else(|| "channel closed".to_string())?;
+        tx.send(msg).await.map_err(|_| "channel closed".to_string())
     }
 
     async fn retire(&self, reason: GoodbyeReason) -> Result<(), String> {
-        let backbone_tx = self.backbone_tx.lock().await.take();
+        *self.retired.lock().await = true;
         let msg = PeerWireMessage::Goodbye { reason };
 
-        // Try direct path first, then backbone fallback
-        let direct_tx = self.remote_session_tx_slot.lock().expect("session slot lock").clone();
-        if let Some(tx) = direct_tx {
+        if let Some(tx) = self.resolve_session_tx() {
             tx.send(msg).await.map_err(|_| "channel closed".to_string())?;
-        } else if let Some(backbone) = backbone_tx {
-            backbone.send(ChannelEnvelope::Packet(msg)).await.map_err(|_| "channel closed".to_string())?;
         }
         Ok(())
     }
@@ -116,13 +125,6 @@ async fn forwarding_task(
         tokio::select! {
             envelope = backbone_rx.recv() => {
                 match envelope {
-                    Some(ChannelEnvelope::Packet(msg)) => {
-                        // Forward backbone-routed packet to session channel
-                        let tx = local_session_tx_slot.lock().expect("session slot lock").clone();
-                        if let Some(tx) = tx {
-                            let _ = tx.send(msg).await;
-                        }
-                    }
                     Some(ChannelEnvelope::Disconnected) => {
                         // Remote disconnected — update status BEFORE closing session,
                         // so subscribers see Disconnected as soon as recv() returns None
@@ -136,8 +138,10 @@ async fn forwarding_task(
                         // Remote reconnected — no-op
                     }
                     None => {
-                        // Backbone closed (peer transport dropped) — return backbone, exit.
-                        // Don't update status; the owning side will discover the closure.
+                        // Backbone closed (peer transport dropped) — update status,
+                        // close session, return backbone, exit.
+                        *status.lock().expect("status lock") = PeerConnectionStatus::Disconnected;
+                        local_session_tx_slot.lock().expect("session slot lock").take();
                         backbone_rx_slot.lock().expect("backbone lock").replace(backbone_rx);
                         return;
                     }
@@ -155,18 +159,20 @@ async fn forwarding_task(
 #[async_trait]
 impl PeerTransport for ChannelTransport {
     async fn connect(&mut self) -> Result<(), String> {
-        // Await any previous forwarding task to ensure backbone_rx is returned
-        if let Some(handle) = self.task_handle.take() {
-            let _ = handle.await;
-        }
-        self.cancel_tx.take();
-
+        // Check status first — return error immediately if already connected
+        // (before awaiting task_handle, which would block on a live task)
         {
             let status = self.status.lock().expect("status lock");
             if *status != PeerConnectionStatus::Disconnected {
                 return Err(format!("cannot connect: status is {:?}", *status));
             }
         }
+
+        // Await any previous forwarding task to ensure backbone_rx is returned
+        if let Some(handle) = self.task_handle.take() {
+            let _ = handle.await;
+        }
+        self.cancel_tx.take();
 
         // Take backbone_rx, drain stale envelopes, put it back
         let mut backbone_rx =
@@ -200,8 +206,9 @@ impl PeerTransport for ChannelTransport {
             return Ok(());
         }
 
-        // Notify remote side (best-effort)
-        let _ = self.backbone_tx.send(ChannelEnvelope::Disconnected).await;
+        // Notify remote side (best-effort, non-blocking to avoid deadlock
+        // if the backbone buffer is full)
+        let _ = self.backbone_tx.try_send(ChannelEnvelope::Disconnected);
 
         // Signal forwarding task to exit (if running)
         self.cancel_tx.take();
@@ -257,8 +264,15 @@ impl PeerTransport for ChannelTransport {
         if *status != PeerConnectionStatus::Connected {
             return None;
         }
+        drop(status);
+        // Eagerly try to capture the remote's current session sender.
+        // If the remote hasn't connected yet, resolve_session_tx() will
+        // lazily resolve it on first send. Once resolved, the sender is
+        // pinned to that session — after disconnect/reconnect, sends fail.
+        let session_tx = self.remote_session_tx_slot.lock().expect("session slot lock").clone();
         Some(Arc::new(ChannelSender {
-            backbone_tx: tokio::sync::Mutex::new(Some(self.backbone_tx.clone())),
+            retired: tokio::sync::Mutex::new(false),
+            session_tx: std::sync::Mutex::new(session_tx),
             remote_session_tx_slot: Arc::clone(&self.remote_session_tx_slot),
         }) as Arc<dyn PeerSender>)
     }
