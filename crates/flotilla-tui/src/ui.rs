@@ -220,6 +220,7 @@ fn render_status_bar(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, In
                     PeerStatus::Connecting => "\u{25d0}",   // ◐
                     PeerStatus::Reconnecting => "\u{25d0}", // ◐
                     PeerStatus::Connected => "\u{25cf}",    // ● (shouldn't reach here)
+                    PeerStatus::Rejected => "\u{2717}",     // ✗
                 };
                 format!("{icon} {}", p.name)
             })
@@ -1054,6 +1055,7 @@ fn render_hosts_status(frame: &mut Frame, area: Rect, hosts: &[PeerHostStatus]) 
                 PeerStatus::Disconnected => ("\u{25cb}", Style::default().fg(Color::Red)),
                 PeerStatus::Connecting => ("\u{25d0}", Style::default().fg(Color::Yellow)),
                 PeerStatus::Reconnecting => ("\u{25d0}", Style::default().fg(Color::Yellow)),
+                PeerStatus::Rejected => ("\u{2717}", Style::default().fg(Color::Red)),
             };
             ListItem::new(Line::from(vec![Span::styled(format!("{icon} "), style), Span::raw(h.name.as_str())]))
         })
