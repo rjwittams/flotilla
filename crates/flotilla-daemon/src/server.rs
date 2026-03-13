@@ -47,6 +47,14 @@ impl PeerSender for SocketPeerSender {
     }
 }
 
+/// Notification sent from connection sites to the outbound task when a
+/// peer connects or reconnects. The outbound task responds by sending
+/// current local state for all repos to the specific peer.
+struct PeerConnectedNotice {
+    peer: HostName,
+    generation: u64,
+}
+
 /// The daemon server that listens on a Unix socket and dispatches requests
 /// to an `InProcessDaemon`.
 pub struct DaemonServer {
@@ -809,6 +817,62 @@ async fn send_local_to_peers(
     for (peer_name, sender) in peer_senders {
         if let Err(e) = sender.send(PeerWireMessage::Data(msg.clone())).await {
             debug!(peer = %peer_name, err = %e, "failed to send snapshot to peer");
+        } else {
+            any_sent = true;
+        }
+    }
+    any_sent
+}
+
+/// Send current local state for all repos to a specific newly-connected peer.
+///
+/// Unlike `send_local_to_peers` (which broadcasts), this targets a single peer
+/// that has just connected and has no state. Bypasses `last_sent_versions` since
+/// the peer needs everything regardless of what was previously sent to others.
+///
+/// The generation guard ensures this is a no-op if the connection has already
+/// been superseded between the notice being sent and this function running.
+async fn send_local_to_peer(
+    daemon: &Arc<InProcessDaemon>,
+    peer_manager: &Arc<Mutex<PeerManager>>,
+    host_name: &HostName,
+    clock: &mut flotilla_protocol::VectorClock,
+    peer: &HostName,
+    generation: u64,
+) -> bool {
+    let repo_paths = daemon.tracked_repo_paths().await;
+    let mut any_sent = false;
+
+    // Resolve the sender once before iterating repos. If the connection
+    // has already been superseded, skip the entire loop.
+    let sender = {
+        let pm = peer_manager.lock().await;
+        pm.get_sender_if_current(peer, generation)
+    };
+    let Some(sender) = sender else {
+        debug!(peer = %peer, "peer connection superseded, skipping local state send");
+        return false;
+    };
+
+    for repo_path in repo_paths {
+        let Some((local_providers, version)) = daemon.get_local_providers(&repo_path).await else {
+            continue;
+        };
+        let Some(identity) = daemon.find_identity_for_path(&repo_path).await else {
+            continue;
+        };
+
+        clock.tick(host_name);
+        let msg = PeerDataMessage {
+            origin_host: host_name.clone(),
+            repo_identity: identity,
+            repo_path: repo_path.clone(),
+            clock: clock.clone(),
+            kind: flotilla_protocol::PeerDataKind::Snapshot { data: Box::new(local_providers), seq: version },
+        };
+
+        if let Err(e) = sender.send(PeerWireMessage::Data(msg)).await {
+            debug!(peer = %peer, err = %e, "failed to send local state to peer");
         } else {
             any_sent = true;
         }
