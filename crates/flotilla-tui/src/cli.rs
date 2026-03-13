@@ -16,13 +16,14 @@ pub(crate) fn format_status_human(repos: &[flotilla_protocol::snapshot::RepoInfo
         }
         let loading = if repo.loading { "  (loading)" } else { "" };
         writeln!(out, "{}  {}{}", repo.name, repo.path.display(), loading).expect("write to string");
-        let health: Vec<String> = repo
+        let mut health: Vec<String> = repo
             .provider_health
             .iter()
             .flat_map(|(category, providers)| {
                 providers.iter().map(move |(name, v)| format!("{category}/{name}: {}", if *v { "ok" } else { "error" }))
             })
             .collect();
+        health.sort();
         if !health.is_empty() {
             writeln!(out, "  {}", health.join("  ")).expect("write to string");
         }
