@@ -31,20 +31,30 @@ pub fn resolve_repo<'a>(query: &str, repos: impl Iterator<Item = (&'a Path, Opti
         }
     }
 
-    // 2. Exact repo name (last path component)
-    for &(path, _) in &entries {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name == query {
-                return Ok(path.to_path_buf());
-            }
+    // 2. Exact repo name (last path component) — must be unique
+    let name_matches: Vec<_> = entries.iter().filter(|(path, _)| path.file_name().and_then(|n| n.to_str()) == Some(query)).collect();
+    match name_matches.len() {
+        1 => return Ok(name_matches[0].0.to_path_buf()),
+        n if n > 1 => {
+            return Err(ResolveError::Ambiguous {
+                query: query.to_string(),
+                candidates: name_matches.iter().map(|(p, _)| p.to_path_buf()).collect(),
+            });
         }
+        _ => {}
     }
 
-    // 3. Exact slug match
-    for &(path, slug) in &entries {
-        if slug == Some(query) {
-            return Ok(path.to_path_buf());
+    // 3. Exact slug match — must be unique
+    let slug_matches: Vec<_> = entries.iter().filter(|(_, slug)| *slug == Some(query)).collect();
+    match slug_matches.len() {
+        1 => return Ok(slug_matches[0].0.to_path_buf()),
+        n if n > 1 => {
+            return Err(ResolveError::Ambiguous {
+                query: query.to_string(),
+                candidates: slug_matches.iter().map(|(p, _)| p.to_path_buf()).collect(),
+            });
         }
+        _ => {}
     }
 
     // 4. Unique substring match against name and slug
@@ -124,6 +134,20 @@ mod tests {
         let r = repos();
         let result = resolve_repo("nonexistent", iter(&r));
         assert!(matches!(result, Err(ResolveError::NotFound(_))));
+    }
+
+    #[test]
+    fn duplicate_directory_names_are_ambiguous() {
+        // Two repos with the same directory name but different paths
+        let r = vec![
+            (PathBuf::from("/home/alice/dev/myrepo"), Some("alice/myrepo".into())),
+            (PathBuf::from("/home/bob/dev/myrepo"), Some("bob/myrepo".into())),
+        ];
+        let result = resolve_repo("myrepo", iter(&r));
+        assert!(matches!(result, Err(ResolveError::Ambiguous { .. })));
+        if let Err(ResolveError::Ambiguous { candidates, .. }) = result {
+            assert_eq!(candidates.len(), 2);
+        }
     }
 
     #[test]
