@@ -27,9 +27,9 @@ pub fn assertion_to_discovery_entry(assertion: &EnvironmentAssertion) -> Discove
             }
             "binary_available"
         }
-        EnvironmentAssertion::EnvVarSet { key, value } => {
+        EnvironmentAssertion::EnvVarSet { key, .. } => {
             detail.insert("key".into(), key.clone());
-            detail.insert("value".into(), value.clone());
+            detail.insert("value".into(), "<set>".into());
             "env_var_set"
         }
         EnvironmentAssertion::VcsCheckoutDetected { root, kind, is_main_checkout } => {

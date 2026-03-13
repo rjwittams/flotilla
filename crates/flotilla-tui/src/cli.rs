@@ -6,6 +6,23 @@ use flotilla_protocol::{output::OutputFormat, RepoDetailResponse, RepoProvidersR
 
 use crate::socket::SocketDaemon;
 
+fn format_work_items_table(items: &[flotilla_protocol::snapshot::WorkItem]) -> Table {
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL_CONDENSED);
+    table.set_header(vec!["Kind", "Branch", "Description", "PR", "Session", "Issues"]);
+    for item in items {
+        table.add_row(vec![
+            Cell::new(format!("{:?}", item.kind)),
+            Cell::new(item.branch.as_deref().unwrap_or("-")),
+            Cell::new(&item.description),
+            Cell::new(item.change_request_key.as_deref().unwrap_or("-")),
+            Cell::new(item.session_key.as_deref().unwrap_or("-")),
+            Cell::new(if item.issue_keys.is_empty() { "-".into() } else { item.issue_keys.join(", ") }),
+        ]);
+    }
+    table
+}
+
 fn format_status_response_human(status: &StatusResponse) -> String {
     if status.repos.is_empty() {
         return "No repos tracked.\n".into();
@@ -15,13 +32,14 @@ fn format_status_response_human(status: &StatusResponse) -> String {
     table.set_header(vec!["Repo", "Path", "Work Items", "Errors", "Health"]);
     for repo in &status.repos {
         let name = repo.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let health: Vec<String> = repo
+        let mut health: Vec<String> = repo
             .provider_health
             .iter()
             .flat_map(|(cat, providers)| {
                 providers.iter().map(move |(name, ok)| format!("{cat}/{name}: {}", if *ok { "ok" } else { "error" }))
             })
             .collect();
+        health.sort();
         let health_str = if health.is_empty() { "-".into() } else { health.join(", ") };
         table.add_row(vec![
             Cell::new(&name),
@@ -146,16 +164,7 @@ fn format_repo_detail_human(detail: &RepoDetailResponse) -> String {
     out.push('\n');
 
     if !detail.work_items.is_empty() {
-        let mut table = Table::new();
-        table.load_preset(UTF8_FULL_CONDENSED);
-        table.set_header(vec!["Kind", "Branch", "Description"]);
-        for item in &detail.work_items {
-            table.add_row(vec![
-                Cell::new(format!("{:?}", item.kind)),
-                Cell::new(item.branch.as_deref().unwrap_or("-")),
-                Cell::new(&item.description),
-            ]);
-        }
+        let table = format_work_items_table(&detail.work_items);
         out.push_str(&table.to_string());
         out.push('\n');
     }
@@ -179,7 +188,8 @@ fn format_repo_providers_human(resp: &RepoProvidersResponse) -> String {
     if !resp.host_discovery.is_empty() {
         out.push_str("\nHost Discovery:\n");
         for entry in &resp.host_discovery {
-            let details: Vec<String> = entry.detail.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let mut details: Vec<String> = entry.detail.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            details.sort();
             out.push_str(&format!("  {} ({})\n", entry.kind, details.join(", ")));
         }
     }
@@ -187,7 +197,8 @@ fn format_repo_providers_human(resp: &RepoProvidersResponse) -> String {
     if !resp.repo_discovery.is_empty() {
         out.push_str("\nRepo Discovery:\n");
         for entry in &resp.repo_discovery {
-            let details: Vec<String> = entry.detail.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let mut details: Vec<String> = entry.detail.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            details.sort();
             out.push_str(&format!("  {} ({})\n", entry.kind, details.join(", ")));
         }
     }
@@ -224,16 +235,7 @@ fn format_repo_work_human(resp: &RepoWorkResponse) -> String {
     if resp.work_items.is_empty() {
         out.push_str("No work items.\n");
     } else {
-        let mut table = Table::new();
-        table.load_preset(UTF8_FULL_CONDENSED);
-        table.set_header(vec!["Kind", "Branch", "Description"]);
-        for item in &resp.work_items {
-            table.add_row(vec![
-                Cell::new(format!("{:?}", item.kind)),
-                Cell::new(item.branch.as_deref().unwrap_or("-")),
-                Cell::new(&item.description),
-            ]);
-        }
+        let table = format_work_items_table(&resp.work_items);
         out.push_str(&table.to_string());
         out.push('\n');
     }

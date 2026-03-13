@@ -981,13 +981,6 @@ impl InProcessDaemon {
         }
         let _ = self.event_tx.send(event);
     }
-
-    /// Resolve a slug (directory name, explicit slug, or full path) to a repo PathBuf.
-    async fn resolve_slug(&self, slug: &str) -> Result<PathBuf, String> {
-        let repos = self.repos.read().await;
-        let entries: Vec<_> = repos.iter().map(|(path, state)| (path.as_path(), state.slug.as_deref())).collect();
-        crate::resolve::resolve_repo(slug, entries.into_iter()).map_err(|e| e.to_string())
-    }
 }
 
 #[async_trait]
@@ -1385,12 +1378,15 @@ impl DaemonHandle for InProcessDaemon {
     }
 
     async fn get_repo_detail(&self, slug: &str) -> Result<RepoDetailResponse, String> {
-        let path = self.resolve_slug(slug).await?;
+        let repos = self.repos.read().await;
+        let path = {
+            let entries: Vec<_> = repos.iter().map(|(path, state)| (path.as_path(), state.slug.as_deref())).collect();
+            crate::resolve::resolve_repo(slug, entries.into_iter()).map_err(|e| e.to_string())?
+        };
         let peer_overlay = {
             let pp = self.peer_providers.read().await;
             pp.get(&path).cloned()
         };
-        let repos = self.repos.read().await;
         let state = repos.get(&path).ok_or_else(|| format!("repo not found: {}", path.display()))?;
         let snapshot = build_repo_snapshot_with_peers(
             &path,
@@ -1411,12 +1407,15 @@ impl DaemonHandle for InProcessDaemon {
     }
 
     async fn get_repo_providers(&self, slug: &str) -> Result<RepoProvidersResponse, String> {
-        let path = self.resolve_slug(slug).await?;
+        let repos = self.repos.read().await;
+        let path = {
+            let entries: Vec<_> = repos.iter().map(|(path, state)| (path.as_path(), state.slug.as_deref())).collect();
+            crate::resolve::resolve_repo(slug, entries.into_iter()).map_err(|e| e.to_string())?
+        };
         let peer_overlay = {
             let pp = self.peer_providers.read().await;
             pp.get(&path).cloned()
         };
-        let repos = self.repos.read().await;
         let state = repos.get(&path).ok_or_else(|| format!("repo not found: {}", path.display()))?;
         let snapshot = build_repo_snapshot_with_peers(
             &path,
@@ -1459,12 +1458,15 @@ impl DaemonHandle for InProcessDaemon {
     }
 
     async fn get_repo_work(&self, slug: &str) -> Result<RepoWorkResponse, String> {
-        let path = self.resolve_slug(slug).await?;
+        let repos = self.repos.read().await;
+        let path = {
+            let entries: Vec<_> = repos.iter().map(|(path, state)| (path.as_path(), state.slug.as_deref())).collect();
+            crate::resolve::resolve_repo(slug, entries.into_iter()).map_err(|e| e.to_string())?
+        };
         let peer_overlay = {
             let pp = self.peer_providers.read().await;
             pp.get(&path).cloned()
         };
-        let repos = self.repos.read().await;
         let state = repos.get(&path).ok_or_else(|| format!("repo not found: {}", path.display()))?;
         let snapshot = build_repo_snapshot_with_peers(
             &path,

@@ -66,9 +66,17 @@ enum SubCommand {
 #[derive(clap::Subcommand)]
 enum RepoSubCommand {
     /// Show provider discovery and instances
-    Providers,
+    Providers {
+        /// Output as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
     /// Show work items
-    Work,
+    Work {
+        /// Output as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl Cli {
@@ -216,8 +224,14 @@ async fn run_repo(cli: &Cli, slug: &str, format: OutputFormat, command: Option<&
 
     let result = match command {
         None => flotilla_tui::cli::run_repo_detail(&*daemon, slug, format).await,
-        Some(RepoSubCommand::Providers) => flotilla_tui::cli::run_repo_providers(&*daemon, slug, format).await,
-        Some(RepoSubCommand::Work) => flotilla_tui::cli::run_repo_work(&*daemon, slug, format).await,
+        Some(RepoSubCommand::Providers { json: sub_json }) => {
+            let fmt = if *sub_json { OutputFormat::Json } else { format };
+            flotilla_tui::cli::run_repo_providers(&*daemon, slug, fmt).await
+        }
+        Some(RepoSubCommand::Work { json: sub_json }) => {
+            let fmt = if *sub_json { OutputFormat::Json } else { format };
+            flotilla_tui::cli::run_repo_work(&*daemon, slug, fmt).await
+        }
     };
     result.map_err(|e| color_eyre::eyre::eyre!(e))
 }
