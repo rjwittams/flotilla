@@ -24,6 +24,27 @@ use tracing::{debug, error, warn};
 /// arrives.
 type SeqMap = std::sync::RwLock<HashMap<PathBuf, u64>>;
 
+/// RAII guard that removes a lock file when dropped.
+///
+/// Holds the open file handle (which keeps the OS flock) and removes the
+/// lock file on drop.
+struct SpawnLockGuard {
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+impl SpawnLockGuard {
+    fn new(file: std::fs::File, path: PathBuf) -> Self {
+        Self { _file: file, path }
+    }
+}
+
+impl Drop for SpawnLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 pub struct SocketDaemon {
     writer: Arc<Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RawResponse>>>>,
@@ -234,14 +255,14 @@ pub async fn connect_or_spawn(
     // path already ends in ".lock" (with_extension would replace it).
     let lock_path = PathBuf::from(format!("{}.lock", socket_path.display()));
     const MAX_LOCK_RETRIES: u32 = 3;
-    let mut lock_file = None;
+    let mut _lock_guard: Option<SpawnLockGuard> = None;
     for attempt in 0..MAX_LOCK_RETRIES {
         let lock_path_clone = lock_path.clone();
         let lock_result =
             tokio::task::spawn_blocking(move || acquire_spawn_lock(&lock_path_clone)).await.map_err(|e| format!("spawn_blocking: {e}"))?;
         match lock_result {
             Ok(Some(file)) => {
-                lock_file = Some(file);
+                _lock_guard = Some(SpawnLockGuard::new(file, lock_path.clone()));
                 break;
             }
             Ok(None) => {
@@ -264,7 +285,7 @@ pub async fn connect_or_spawn(
                     .map_err(|e| format!("spawn_blocking: {e}"))?;
                 match final_lock {
                     Ok(Some(file)) => {
-                        lock_file = Some(file);
+                        _lock_guard = Some(SpawnLockGuard::new(file, lock_path.clone()));
                         break;
                     }
                     Ok(None) => {
@@ -290,14 +311,7 @@ pub async fn connect_or_spawn(
         let _ = std::fs::remove_file(socket_path);
 
         // Spawn daemon process
-        let spawn_result = spawn_daemon(config_dir, config_dir_override, socket_override);
-        if let Err(e) = spawn_result {
-            if lock_file.is_some() {
-                drop(lock_file);
-                let _ = std::fs::remove_file(&lock_path);
-            }
-            return Err(e);
-        }
+        spawn_daemon(config_dir, config_dir_override, socket_override)?;
     }
 
     // Poll for connection with a 10s deadline.
@@ -305,18 +319,9 @@ pub async fn connect_or_spawn(
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         if let Ok(daemon) = SocketDaemon::connect(socket_path).await {
-            // Release lock and clean up lock file (only if we hold it)
-            if lock_file.is_some() {
-                drop(lock_file);
-                let _ = std::fs::remove_file(&lock_path);
-            }
             return Ok(daemon);
         }
         if tokio::time::Instant::now() >= deadline {
-            if lock_file.is_some() {
-                drop(lock_file);
-                let _ = std::fs::remove_file(&lock_path);
-            }
             return Err("timed out waiting for daemon to start (10s)".into());
         }
     }
@@ -920,5 +925,25 @@ mod tests {
         let waiter_result = waiter.join().expect("join waiter");
         assert!(waiter_result.is_none(), "waiter should return None after spawner releases lock");
         let _ = std::fs::remove_file(&lock_path);
+    }
+}
+
+#[cfg(test)]
+mod spawn_lock_tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn spawn_lock_guard_removes_file_on_drop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock_path = dir.path().join("test.lock");
+        fs::write(&lock_path, "").expect("create lock file");
+        let file = fs::File::open(&lock_path).expect("open lock file");
+        {
+            let _guard = SpawnLockGuard::new(file, lock_path.clone());
+            assert!(lock_path.exists(), "lock file should exist while guard is held");
+        }
+        assert!(!lock_path.exists(), "lock file should be removed after guard drops");
     }
 }
