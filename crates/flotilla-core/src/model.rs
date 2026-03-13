@@ -1,115 +1,59 @@
+use crate::data::DataStore;
+use crate::providers::registry::ProviderRegistry;
+use crate::providers::types::RepoCriteria;
+use crate::refresh::RepoRefreshHandle;
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::data::DataStore;
-use crate::providers::registry::ProviderRegistry;
-use crate::providers::types::RepoCriteria;
-use crate::refresh::RepoRefreshHandle;
-
+use crate::providers::discovery::ProviderDescriptor;
 pub use flotilla_protocol::{CategoryLabels, RepoLabels};
-
 pub fn labels_from_registry(registry: &ProviderRegistry) -> RepoLabels {
+    fn labels<T>(map: &IndexMap<String, (ProviderDescriptor, T)>) -> CategoryLabels {
+        map.values()
+            .next()
+            .map(|(desc, _)| CategoryLabels {
+                section: desc.section_label.clone(),
+                noun: desc.item_noun.clone(),
+                abbr: desc.abbreviation.clone(),
+            })
+            .unwrap_or_default()
+    }
     RepoLabels {
-        checkouts: registry
-            .checkout_managers
-            .values()
-            .next()
-            .map(|cm| CategoryLabels {
-                section: cm.section_label().into(),
-                noun: cm.item_noun().into(),
-                abbr: cm.abbreviation().into(),
-            })
-            .unwrap_or_default(),
-        code_review: registry
-            .code_review
-            .values()
-            .next()
-            .map(|cr| CategoryLabels {
-                section: cr.section_label().into(),
-                noun: cr.item_noun().into(),
-                abbr: cr.abbreviation().into(),
-            })
-            .unwrap_or_default(),
-        issues: registry
-            .issue_trackers
-            .values()
-            .next()
-            .map(|it| CategoryLabels {
-                section: it.section_label().into(),
-                noun: it.item_noun().into(),
-                abbr: it.abbreviation().into(),
-            })
-            .unwrap_or_default(),
-        sessions: registry
-            .cloud_agents
-            .values()
-            .next()
-            .map(|ca| CategoryLabels {
-                section: ca.section_label().into(),
-                noun: ca.item_noun().into(),
-                abbr: ca.abbreviation().into(),
-            })
-            .unwrap_or_default(),
+        checkouts: labels(&registry.checkout_managers),
+        code_review: labels(&registry.code_review),
+        issues: labels(&registry.issue_trackers),
+        cloud_agents: labels(&registry.cloud_agents),
     }
 }
 
 pub fn provider_names_from_registry(registry: &ProviderRegistry) -> HashMap<String, Vec<String>> {
     let mut names: HashMap<String, Vec<String>> = HashMap::new();
-    let vcs: Vec<String> = registry
-        .vcs
-        .values()
-        .map(|v| v.display_name().into())
-        .collect();
-    if !vcs.is_empty() {
-        names.insert("vcs".into(), vcs);
+
+    fn collect_names<T>(
+        names: &mut HashMap<String, Vec<String>>,
+        key: impl Into<String>,
+        map: &IndexMap<String, (ProviderDescriptor, T)>,
+    ) {
+        let list: Vec<String> = map.values().map(|(d, _)| d.display_name.clone()).collect();
+        if !list.is_empty() {
+            names.insert(key.into(), list);
+        }
     }
-    let cms: Vec<String> = registry
-        .checkout_managers
-        .values()
-        .map(|v| v.display_name().into())
-        .collect();
-    if !cms.is_empty() {
-        names.insert("checkout_manager".into(), cms);
+    collect_names(&mut names, "vcs", &registry.vcs);
+    collect_names(&mut names, "checkout_manager", &registry.checkout_managers);
+    collect_names(&mut names, "code_review", &registry.code_review);
+    collect_names(&mut names, "issue_tracker", &registry.issue_trackers);
+    collect_names(&mut names, "cloud_agent", &registry.cloud_agents);
+    collect_names(&mut names, "ai_utility", &registry.ai_utilities);
+
+    if let Some((desc, _)) = &registry.workspace_manager {
+        names.insert("workspace_manager".into(), vec![desc.display_name.clone()]);
     }
-    let crs: Vec<String> = registry
-        .code_review
-        .values()
-        .map(|v| v.display_name().into())
-        .collect();
-    if !crs.is_empty() {
-        names.insert("code_review".into(), crs);
-    }
-    let its: Vec<String> = registry
-        .issue_trackers
-        .values()
-        .map(|v| v.display_name().into())
-        .collect();
-    if !its.is_empty() {
-        names.insert("issue_tracker".into(), its);
-    }
-    let cas: Vec<String> = registry
-        .cloud_agents
-        .values()
-        .map(|v| v.display_name().into())
-        .collect();
-    if !cas.is_empty() {
-        names.insert("cloud_agent".into(), cas);
-    }
-    let ais: Vec<String> = registry
-        .ai_utilities
-        .values()
-        .map(|v| v.display_name().into())
-        .collect();
-    if !ais.is_empty() {
-        names.insert("ai_utility".into(), ais);
-    }
-    if let Some((_, wm)) = &registry.workspace_manager {
-        names.insert("workspace_manager".into(), vec![wm.display_name().into()]);
-    }
-    if let Some((_, tp)) = &registry.terminal_pool {
-        names.insert("terminal_pool".into(), vec![tp.display_name().into()]);
+    if let Some((desc, _)) = &registry.terminal_pool {
+        names.insert("terminal_pool".into(), vec![desc.display_name.clone()]);
     }
     names
 }
@@ -156,26 +100,10 @@ impl RepoModel {
     pub fn new_virtual() -> Self {
         let registry = ProviderRegistry::new();
         let labels = RepoLabels {
-            checkouts: CategoryLabels {
-                section: "Checkouts".into(),
-                noun: "checkout".into(),
-                abbr: "CO".into(),
-            },
-            code_review: CategoryLabels {
-                section: "Change Requests".into(),
-                noun: "PR".into(),
-                abbr: "PR".into(),
-            },
-            issues: CategoryLabels {
-                section: "Issues".into(),
-                noun: "issue".into(),
-                abbr: "I".into(),
-            },
-            sessions: CategoryLabels {
-                section: "Sessions".into(),
-                noun: "session".into(),
-                abbr: "S".into(),
-            },
+            checkouts: CategoryLabels::new("Checkouts", "checkout", "CO"),
+            code_review: CategoryLabels::new("Change Requests", "CR", "CR"),
+            issues: CategoryLabels::new("Issues", "issue", "I"),
+            cloud_agents: CategoryLabels::new("Sessions", "session", "S"),
         };
         Self {
             registry: Arc::new(registry),
@@ -192,20 +120,32 @@ mod tests {
     use crate::providers::ai_utility::AiUtility;
     use crate::providers::code_review::CodeReview;
     use crate::providers::coding_agent::CloudAgentService;
+    use crate::providers::discovery::ProviderDescriptor;
     use crate::providers::issue_tracker::IssueTracker;
     use crate::providers::vcs::{CheckoutManager, Vcs};
     use crate::providers::workspace::WorkspaceManager;
     use async_trait::async_trait;
     use std::path::PathBuf;
 
+    fn named_desc(name: &str) -> ProviderDescriptor {
+        ProviderDescriptor::named(name)
+    }
+
+    fn labeled_desc(
+        name: &str,
+        display_name: &str,
+        abbreviation: &str,
+        section_label: &str,
+        item_noun: &str,
+    ) -> ProviderDescriptor {
+        ProviderDescriptor::labeled(name, display_name, abbreviation, section_label, item_noun)
+    }
+
     // --- Stub providers for populating ProviderRegistry ---
 
     struct StubVcs;
     #[async_trait]
     impl Vcs for StubVcs {
-        fn display_name(&self) -> &str {
-            "StubVcs"
-        }
         fn resolve_repo_root(&self, _path: &Path) -> Option<PathBuf> {
             None
         }
@@ -253,15 +193,6 @@ mod tests {
     struct StubCheckoutManager;
     #[async_trait]
     impl CheckoutManager for StubCheckoutManager {
-        fn display_name(&self) -> &str {
-            "StubCM"
-        }
-        fn item_noun(&self) -> &str {
-            "worktree"
-        }
-        fn abbreviation(&self) -> &str {
-            "WT"
-        }
         async fn list_checkouts(
             &self,
             _: &Path,
@@ -284,18 +215,6 @@ mod tests {
     struct StubCodeReview;
     #[async_trait]
     impl CodeReview for StubCodeReview {
-        fn display_name(&self) -> &str {
-            "StubCR"
-        }
-        fn section_label(&self) -> &str {
-            "Pull Requests"
-        }
-        fn item_noun(&self) -> &str {
-            "pull request"
-        }
-        fn abbreviation(&self) -> &str {
-            "PR"
-        }
         async fn list_change_requests(
             &self,
             _: &Path,
@@ -328,18 +247,6 @@ mod tests {
     struct StubIssueTracker;
     #[async_trait]
     impl IssueTracker for StubIssueTracker {
-        fn display_name(&self) -> &str {
-            "StubIT"
-        }
-        fn section_label(&self) -> &str {
-            "GitHub Issues"
-        }
-        fn item_noun(&self) -> &str {
-            "issue"
-        }
-        fn abbreviation(&self) -> &str {
-            "#"
-        }
         async fn list_issues(
             &self,
             _: &Path,
@@ -355,18 +262,6 @@ mod tests {
     struct StubCloudAgent;
     #[async_trait]
     impl CloudAgentService for StubCloudAgent {
-        fn display_name(&self) -> &str {
-            "StubCA"
-        }
-        fn section_label(&self) -> &str {
-            "Cloud Agents"
-        }
-        fn item_noun(&self) -> &str {
-            "session"
-        }
-        fn abbreviation(&self) -> &str {
-            "CS"
-        }
         async fn list_sessions(
             &self,
             _: &RepoCriteria,
@@ -384,9 +279,6 @@ mod tests {
     struct StubAiUtility;
     #[async_trait]
     impl AiUtility for StubAiUtility {
-        fn display_name(&self) -> &str {
-            "StubAI"
-        }
         async fn generate_branch_name(&self, _: &str) -> Result<String, String> {
             Ok("stub".into())
         }
@@ -395,9 +287,6 @@ mod tests {
     struct StubWorkspaceManager;
     #[async_trait]
     impl WorkspaceManager for StubWorkspaceManager {
-        fn display_name(&self) -> &str {
-            "StubWM"
-        }
         async fn list_workspaces(
             &self,
         ) -> Result<Vec<(String, crate::providers::types::Workspace)>, String> {
@@ -417,18 +306,39 @@ mod tests {
     /// Build a ProviderRegistry with all provider slots populated.
     fn full_registry() -> ProviderRegistry {
         let mut reg = ProviderRegistry::new();
-        reg.vcs.insert("vcs".into(), Arc::new(StubVcs));
-        reg.checkout_managers
-            .insert("cm".into(), Arc::new(StubCheckoutManager));
-        reg.code_review
-            .insert("cr".into(), Arc::new(StubCodeReview));
-        reg.issue_trackers
-            .insert("it".into(), Arc::new(StubIssueTracker));
-        reg.cloud_agents
-            .insert("ca".into(), Arc::new(StubCloudAgent));
+        reg.vcs
+            .insert("vcs".into(), (named_desc("StubVcs"), Arc::new(StubVcs)));
+        reg.checkout_managers.insert(
+            "cm".into(),
+            (
+                labeled_desc("cm", "StubCM", "WT", "Checkouts", "worktree"),
+                Arc::new(StubCheckoutManager),
+            ),
+        );
+        reg.code_review.insert(
+            "cr".into(),
+            (
+                labeled_desc("cr", "StubCR", "PR", "Pull Requests", "pull request"),
+                Arc::new(StubCodeReview),
+            ),
+        );
+        reg.issue_trackers.insert(
+            "it".into(),
+            (
+                labeled_desc("it", "StubIT", "#", "GitHub Issues", "issue"),
+                Arc::new(StubIssueTracker),
+            ),
+        );
+        reg.cloud_agents.insert(
+            "ca".into(),
+            (
+                labeled_desc("ca", "StubCA", "CS", "Cloud Agents", "session"),
+                Arc::new(StubCloudAgent),
+            ),
+        );
         reg.ai_utilities
-            .insert("ai".into(), Arc::new(StubAiUtility));
-        reg.workspace_manager = Some(("wm".into(), Arc::new(StubWorkspaceManager)));
+            .insert("ai".into(), (named_desc("StubAI"), Arc::new(StubAiUtility)));
+        reg.workspace_manager = Some((named_desc("StubWM"), Arc::new(StubWorkspaceManager)));
         reg
     }
 
@@ -446,7 +356,7 @@ mod tests {
         assert_eq!(labels.checkouts.noun, "item");
         assert_eq!(labels.code_review.section, "\u{2014}");
         assert_eq!(labels.issues.section, "\u{2014}");
-        assert_eq!(labels.sessions.section, "\u{2014}");
+        assert_eq!(labels.cloud_agents.section, "\u{2014}");
     }
 
     #[test]
@@ -466,25 +376,35 @@ mod tests {
         assert_eq!(labels.issues.noun, "issue");
         assert_eq!(labels.issues.abbr, "#");
 
-        assert_eq!(labels.sessions.section, "Cloud Agents");
-        assert_eq!(labels.sessions.noun, "session");
-        assert_eq!(labels.sessions.abbr, "CS");
+        assert_eq!(labels.cloud_agents.section, "Cloud Agents");
+        assert_eq!(labels.cloud_agents.noun, "session");
+        assert_eq!(labels.cloud_agents.abbr, "CS");
     }
 
     #[test]
     fn labels_with_partial_registry() {
         // Only checkout_managers and coding_agents registered.
         let mut reg = ProviderRegistry::new();
-        reg.checkout_managers
-            .insert("cm".into(), Arc::new(StubCheckoutManager));
-        reg.cloud_agents
-            .insert("ca".into(), Arc::new(StubCloudAgent));
+        reg.checkout_managers.insert(
+            "cm".into(),
+            (
+                labeled_desc("cm", "StubCM", "WT", "Checkouts", "worktree"),
+                Arc::new(StubCheckoutManager),
+            ),
+        );
+        reg.cloud_agents.insert(
+            "ca".into(),
+            (
+                labeled_desc("ca", "StubCA", "CS", "Cloud Agents", "session"),
+                Arc::new(StubCloudAgent),
+            ),
+        );
 
         let labels = labels_from_registry(&reg);
 
         // Populated providers have real labels.
         assert_eq!(labels.checkouts.section, "Checkouts");
-        assert_eq!(labels.sessions.section, "Cloud Agents");
+        assert_eq!(labels.cloud_agents.section, "Cloud Agents");
 
         // Missing providers fall back to defaults.
         assert_eq!(labels.code_review.section, "\u{2014}");
@@ -538,8 +458,13 @@ mod tests {
     #[test]
     fn provider_names_partial_registry() {
         let mut reg = ProviderRegistry::new();
-        reg.code_review
-            .insert("cr".into(), Arc::new(StubCodeReview));
+        reg.code_review.insert(
+            "cr".into(),
+            (
+                labeled_desc("cr", "StubCR", "PR", "Pull Requests", "pull request"),
+                Arc::new(StubCodeReview),
+            ),
+        );
 
         let names = provider_names_from_registry(&reg);
         assert_eq!(names.len(), 1);
@@ -596,7 +521,7 @@ mod tests {
         assert_eq!(model.labels.checkouts.section, "Checkouts");
         assert_eq!(model.labels.code_review.section, "Pull Requests");
         assert_eq!(model.labels.issues.section, "GitHub Issues");
-        assert_eq!(model.labels.sessions.section, "Cloud Agents");
+        assert_eq!(model.labels.cloud_agents.section, "Cloud Agents");
 
         assert!(!model.data.loading);
         assert!(model.data.provider_health.is_empty());
@@ -629,7 +554,7 @@ mod tests {
         assert_eq!(model.labels.checkouts.section, "Checkouts");
         assert_eq!(model.labels.code_review.section, "Change Requests");
         assert_eq!(model.labels.issues.section, "Issues");
-        assert_eq!(model.labels.sessions.section, "Sessions");
+        assert_eq!(model.labels.cloud_agents.section, "Sessions");
         assert!(!model.data.loading);
     }
 
