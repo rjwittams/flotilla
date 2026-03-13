@@ -191,6 +191,7 @@ pub struct App {
     pub ui: UiState,
     pub proto_commands: CommandQueue,
     pub in_flight: HashMap<u64, InFlightCommand>,
+    pub pending_cancel: Option<u64>,
     pub should_quit: bool,
 }
 
@@ -205,7 +206,16 @@ impl App {
             RepoViewLayoutConfig::Right => RepoViewLayout::Right,
             RepoViewLayoutConfig::Below => RepoViewLayout::Below,
         };
-        Self { daemon, config, model, ui, proto_commands: Default::default(), in_flight: HashMap::new(), should_quit: false }
+        Self {
+            daemon,
+            config,
+            model,
+            ui,
+            proto_commands: Default::default(),
+            in_flight: HashMap::new(),
+            pending_cancel: None,
+            should_quit: false,
+        }
     }
 
     pub fn persist_layout(&self) {
