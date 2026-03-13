@@ -253,13 +253,13 @@ impl App {
                             cmd.description = format!("{} ({}/{})", description, step_index + 1, step_count);
                         }
                         StepStatus::Skipped => {
-                            tracing::info!(command_id, %description, "step skipped");
+                            tracing::info!(%command_id, %description, "step skipped");
                         }
                         StepStatus::Succeeded => {
-                            tracing::info!(command_id, %description, "step succeeded");
+                            tracing::info!(%command_id, %description, "step succeeded");
                         }
                         StepStatus::Failed { ref message } => {
-                            tracing::warn!(command_id, %description, error = %message, "step failed");
+                            tracing::warn!(%command_id, %description, error = %message, "step failed");
                         }
                     }
                 }
