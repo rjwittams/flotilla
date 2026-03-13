@@ -139,6 +139,7 @@ pub struct PeerManager {
     peers: HashMap<HostName, Box<dyn PeerTransport>>,
     senders: HashMap<HostName, Arc<dyn PeerSender>>,
     active_connections: HashMap<HostName, ActiveConnection>,
+    displaced_senders: HashMap<(HostName, u64), Arc<dyn PeerSender>>,
     transport_peers: HashMap<ConfigLabel, HostName>,
     generations: HashMap<HostName, u64>,
     routes: HashMap<HostName, RouteState>,
@@ -170,6 +171,7 @@ impl PeerManager {
             peers: HashMap::new(),
             senders: HashMap::new(),
             active_connections: HashMap::new(),
+            displaced_senders: HashMap::new(),
             transport_peers: HashMap::new(),
             generations: HashMap::new(),
             routes: HashMap::new(),
@@ -440,6 +442,12 @@ impl PeerManager {
             .unwrap_or(0)
             .saturating_add(1);
         self.generations.insert(host.clone(), generation);
+        if let Some(displaced_generation) = displaced {
+            if let Some(displaced_sender) = self.senders.get(&host).cloned() {
+                self.displaced_senders
+                    .insert((host.clone(), displaced_generation), displaced_sender);
+            }
+        }
         self.senders.insert(host.clone(), sender);
         self.active_connections.insert(
             host.clone(),
@@ -785,7 +793,7 @@ impl PeerManager {
                     info!(peer = %name, "peer transport connected");
                     let mut generation = 0;
                     if let Some(sender) = sender {
-                        match self.activate_connection(
+                        let displaced = match self.activate_connection(
                             name.clone(),
                             sender,
                             ConnectionMeta {
@@ -797,13 +805,23 @@ impl PeerManager {
                         ) {
                             ActivationResult::Accepted {
                                 generation: accepted,
-                                ..
-                            } => generation = accepted,
+                                displaced: displaced_generation,
+                            } => {
+                                generation = accepted;
+                                displaced_generation
+                            }
                             ActivationResult::Rejected { .. } => {
                                 if let Some(transport) = self.peers.get_mut(&name) {
                                     let _ = transport.disconnect().await;
                                 }
                                 continue;
+                            }
+                        };
+                        if let Some(displaced_generation) = displaced {
+                            if let Some(displaced_sender) =
+                                self.take_displaced_sender(&name, displaced_generation)
+                            {
+                                let _ = displaced_sender.retire(GoodbyeReason::Superseded).await;
                             }
                         }
                     }
@@ -876,6 +894,14 @@ impl PeerManager {
     /// Return the currently addressable peers that have active senders.
     pub fn active_peers(&self) -> Vec<HostName> {
         self.senders.keys().cloned().collect()
+    }
+
+    pub fn take_displaced_sender(
+        &mut self,
+        name: &HostName,
+        generation: u64,
+    ) -> Option<Arc<dyn PeerSender>> {
+        self.displaced_senders.remove(&(name.clone(), generation))
     }
 
     /// Remove all stored data for a peer (e.g. on disconnect).
@@ -952,7 +978,7 @@ impl PeerManager {
 
         let mut generation = 0;
         if let Some(sender) = sender {
-            match self.activate_connection(
+            let displaced = match self.activate_connection(
                 name.clone(),
                 sender,
                 ConnectionMeta {
@@ -964,13 +990,22 @@ impl PeerManager {
             ) {
                 ActivationResult::Accepted {
                     generation: accepted,
-                    ..
-                } => generation = accepted,
+                    displaced: displaced_generation,
+                } => {
+                    generation = accepted;
+                    displaced_generation
+                }
                 ActivationResult::Rejected { .. } => {
                     if let Some(transport) = self.peers.get_mut(name) {
                         let _ = transport.disconnect().await;
                     }
                     return Err(format!("connection for {name} lost duplicate arbitration"));
+                }
+            };
+            if let Some(displaced_generation) = displaced {
+                if let Some(displaced_sender) = self.take_displaced_sender(name, displaced_generation)
+                {
+                    let _ = displaced_sender.retire(GoodbyeReason::Superseded).await;
                 }
             }
         }
@@ -990,6 +1025,7 @@ impl PeerManager {
         self.senders.remove(name);
         self.active_connections.remove(name);
         self.generations.remove(name);
+        self.displaced_senders.retain(|(host, _), _| host != name);
         self.reverse_paths.retain(|_, hop| hop.next_hop != *name);
         self.pending_resync_requests
             .retain(|key, _| key.target_host != *name);
@@ -1101,6 +1137,14 @@ mod tests {
     impl PeerSender for MockPeerSender {
         async fn send(&self, msg: PeerWireMessage) -> Result<(), String> {
             self.sent.lock().expect("lock poisoned").push(msg);
+            Ok(())
+        }
+
+        async fn retire(&self, reason: GoodbyeReason) -> Result<(), String> {
+            self.sent
+                .lock()
+                .expect("lock poisoned")
+                .push(PeerWireMessage::Goodbye { reason });
             Ok(())
         }
     }
@@ -1575,6 +1619,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn displaced_connection_can_be_retired_after_replacement() {
+        let mut mgr = PeerManager::new(HostName::new("local"));
+        let first_sent = Arc::new(Mutex::new(Vec::new()));
+        let second_sent = Arc::new(Mutex::new(Vec::new()));
+        let first_sender: Arc<dyn PeerSender> = Arc::new(MockPeerSender {
+            sent: Arc::clone(&first_sent),
+        });
+        let second_sender: Arc<dyn PeerSender> = Arc::new(MockPeerSender {
+            sent: Arc::clone(&second_sent),
+        });
+
+        let first_generation = accepted_generation(mgr.activate_connection(
+            HostName::new("peer"),
+            first_sender,
+            ConnectionMeta {
+                direction: ConnectionDirection::Inbound,
+                config_label: None,
+                expected_peer: None,
+                config_backed: false,
+            },
+        ));
+        let replacement = mgr.activate_connection(
+            HostName::new("peer"),
+            second_sender,
+            ConnectionMeta {
+                direction: ConnectionDirection::Outbound,
+                config_label: Some(ConfigLabel("peer".into())),
+                expected_peer: Some(HostName::new("peer")),
+                config_backed: true,
+            },
+        );
+
+        let displaced_generation = match replacement {
+            ActivationResult::Accepted {
+                generation,
+                displaced: Some(displaced),
+            } => {
+                assert_eq!(generation, 2);
+                displaced
+            }
+            other => panic!("expected accepted replacement, got {other:?}"),
+        };
+        assert_eq!(displaced_generation, first_generation);
+
+        let displaced = mgr
+            .take_displaced_sender(&HostName::new("peer"), displaced_generation)
+            .expect("displaced sender should be tracked");
+        displaced
+            .retire(GoodbyeReason::Superseded)
+            .await
+            .expect("retire displaced sender");
+
+        let sent = first_sent.lock().expect("lock");
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            PeerWireMessage::Goodbye {
+                reason: GoodbyeReason::Superseded,
+            } => {}
+            other => panic!("expected superseded goodbye, got {other:?}"),
+        }
+        assert!(second_sent.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
     async fn stale_generation_inbound_message_is_dropped() {
         let mut mgr = PeerManager::new(HostName::new("local"));
         let sender: Arc<dyn PeerSender> = Arc::new(MockPeerSender {
@@ -1692,6 +1800,43 @@ mod tests {
             .expect("reconnect should succeed for configured peer");
 
         assert_eq!(generation, 0);
+    }
+
+    #[tokio::test]
+    async fn reconnect_peer_retires_displaced_connection() {
+        let mut mgr = PeerManager::new(HostName::new("local"));
+        let displaced_sent = Arc::new(Mutex::new(Vec::new()));
+        let displaced_sender: Arc<dyn PeerSender> = Arc::new(MockPeerSender {
+            sent: Arc::clone(&displaced_sent),
+        });
+
+        let _ = accepted_generation(mgr.activate_connection(
+            HostName::new("peer"),
+            displaced_sender,
+            ConnectionMeta {
+                direction: ConnectionDirection::Inbound,
+                config_label: None,
+                expected_peer: None,
+                config_backed: false,
+            },
+        ));
+
+        let (transport, _new_sent) = MockTransport::with_sender();
+        mgr.add_peer(HostName::new("peer"), Box::new(transport));
+
+        let _ = mgr
+            .reconnect_peer(&HostName::new("peer"))
+            .await
+            .expect("reconnect should succeed");
+
+        let sent = displaced_sent.lock().expect("lock");
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            PeerWireMessage::Goodbye {
+                reason: GoodbyeReason::Superseded,
+            } => {}
+            other => panic!("expected superseded goodbye, got {other:?}"),
+        }
     }
 
     #[tokio::test]

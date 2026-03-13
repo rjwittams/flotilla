@@ -14,8 +14,8 @@ use flotilla_core::config::ConfigStore;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_core::in_process::InProcessDaemon;
 use flotilla_protocol::{
-    Command, ConfigLabel, DaemonEvent, HostName, Message, PeerConnectionState, PeerDataMessage,
-    PeerWireMessage, PROTOCOL_VERSION,
+    Command, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message, PeerConnectionState,
+    PeerDataMessage, PeerWireMessage, PROTOCOL_VERSION,
 };
 
 use crate::peer::{
@@ -24,16 +24,33 @@ use crate::peer::{
 };
 
 struct SocketPeerSender {
-    tx: mpsc::Sender<Message>,
+    tx: tokio::sync::Mutex<Option<mpsc::Sender<Message>>>,
 }
 
 #[async_trait]
 impl PeerSender for SocketPeerSender {
     async fn send(&self, msg: PeerWireMessage) -> Result<(), String> {
-        self.tx
+        let tx = self
+            .tx
+            .lock()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "socket peer outbound channel closed".to_string())?;
+        tx
             .send(Message::Peer(Box::new(msg)))
             .await
             .map_err(|_| "socket peer outbound channel closed".to_string())
+    }
+
+    async fn retire(&self, reason: GoodbyeReason) -> Result<(), String> {
+        let tx = self.tx.lock().await.take();
+        if let Some(tx) = tx {
+            tx.send(Message::Peer(Box::new(PeerWireMessage::Goodbye { reason })))
+                .await
+                .map_err(|_| "socket peer outbound channel closed".to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -996,12 +1013,12 @@ async fn handle_client(
                 }
             });
 
-            let generation = {
+            let (generation, displaced_generation) = {
                 let mut pm = peer_manager.lock().await;
                 match pm.activate_connection(
                     host_name.clone(),
                     Arc::new(SocketPeerSender {
-                        tx: outbound_tx.clone(),
+                        tx: tokio::sync::Mutex::new(Some(outbound_tx.clone())),
                     }),
                     ConnectionMeta {
                         direction: ConnectionDirection::Inbound,
@@ -1010,7 +1027,10 @@ async fn handle_client(
                         config_backed: false,
                     },
                 ) {
-                    crate::peer::ActivationResult::Accepted { generation, .. } => generation,
+                    crate::peer::ActivationResult::Accepted {
+                        generation,
+                        displaced,
+                    } => (generation, displaced),
                     crate::peer::ActivationResult::Rejected { reason } => {
                         let _ = write_message(
                             &writer,
@@ -1022,6 +1042,15 @@ async fn handle_client(
                     }
                 }
             };
+            if let Some(displaced_generation) = displaced_generation {
+                let displaced = {
+                    let mut pm = peer_manager.lock().await;
+                    pm.take_displaced_sender(&host_name, displaced_generation)
+                };
+                if let Some(displaced) = displaced {
+                    let _ = displaced.retire(GoodbyeReason::Superseded).await;
+                }
+            }
             daemon.send_event(DaemonEvent::PeerStatusChanged {
                 host: host_name.clone(),
                 status: PeerConnectionState::Connected,
@@ -1994,7 +2023,7 @@ mod tests {
         let gen_a = {
             let mut pm = peer_manager.lock().await;
             let sender: Arc<dyn PeerSender> = Arc::new(super::SocketPeerSender {
-                tx: mpsc::channel(1).0,
+                tx: tokio::sync::Mutex::new(Some(mpsc::channel(1).0)),
             });
             match pm.activate_connection(
                 HostName::new("peer-a"),

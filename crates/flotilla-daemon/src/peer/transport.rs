@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use flotilla_protocol::PeerWireMessage;
+use flotilla_protocol::{GoodbyeReason, PeerWireMessage};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +15,7 @@ pub enum PeerConnectionStatus {
 #[async_trait]
 pub trait PeerSender: Send + Sync {
     async fn send(&self, msg: PeerWireMessage) -> Result<(), String>;
+    async fn retire(&self, reason: GoodbyeReason) -> Result<(), String>;
 }
 
 #[async_trait]

@@ -9,7 +9,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use flotilla_core::config::{flotilla_config_dir, RemoteHostConfig};
-use flotilla_protocol::{ConfigLabel, HostName, Message, PeerWireMessage, PROTOCOL_VERSION};
+use flotilla_protocol::{
+    ConfigLabel, GoodbyeReason, HostName, Message, PeerWireMessage, PROTOCOL_VERSION,
+};
 
 use super::transport::{PeerConnectionStatus, PeerSender, PeerTransport};
 
@@ -29,16 +31,33 @@ const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CHANNEL_BUFFER: usize = 256;
 
 struct ChannelPeerSender {
-    tx: mpsc::Sender<PeerWireMessage>,
+    tx: tokio::sync::Mutex<Option<mpsc::Sender<PeerWireMessage>>>,
 }
 
 #[async_trait]
 impl PeerSender for ChannelPeerSender {
     async fn send(&self, msg: PeerWireMessage) -> Result<(), String> {
-        self.tx
+        let tx = self
+            .tx
+            .lock()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "outbound channel closed".to_string())?;
+        tx
             .send(msg)
             .await
             .map_err(|_| "outbound channel closed".to_string())
+    }
+
+    async fn retire(&self, reason: GoodbyeReason) -> Result<(), String> {
+        let tx = self.tx.lock().await.take();
+        if let Some(tx) = tx {
+            tx.send(PeerWireMessage::Goodbye { reason })
+                .await
+                .map_err(|_| "outbound channel closed".to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -469,7 +488,11 @@ impl PeerTransport for SshTransport {
     fn sender(&self) -> Option<Arc<dyn PeerSender>> {
         self.outbound_tx
             .as_ref()
-            .map(|tx| Arc::new(ChannelPeerSender { tx: tx.clone() }) as Arc<dyn PeerSender>)
+            .map(|tx| {
+                Arc::new(ChannelPeerSender {
+                    tx: tokio::sync::Mutex::new(Some(tx.clone())),
+                }) as Arc<dyn PeerSender>
+            })
     }
 }
 

@@ -22,8 +22,8 @@ use flotilla_daemon::peer::{
     HandleResult, PeerConnectionStatus, PeerManager, PeerSender, PeerTransport,
 };
 use flotilla_protocol::{
-    Checkout, HostName, HostPath, PeerDataKind, PeerDataMessage, PeerWireMessage, ProviderData,
-    RepoIdentity, VectorClock,
+    Checkout, GoodbyeReason, HostName, HostPath, PeerDataKind, PeerDataMessage, PeerWireMessage,
+    ProviderData, RepoIdentity, VectorClock,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,6 +57,14 @@ struct MockPeerSender {
 impl PeerSender for MockPeerSender {
     async fn send(&self, msg: PeerWireMessage) -> Result<(), String> {
         self.sent.lock().expect("lock poisoned").push(msg);
+        Ok(())
+    }
+
+    async fn retire(&self, reason: GoodbyeReason) -> Result<(), String> {
+        self.sent
+            .lock()
+            .expect("lock poisoned")
+            .push(PeerWireMessage::Goodbye { reason });
         Ok(())
     }
 }
