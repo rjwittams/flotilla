@@ -24,12 +24,18 @@ impl HostName {
         static HOSTNAME: OnceLock<HostName> = OnceLock::new();
         HOSTNAME
             .get_or_init(|| {
-                let name = gethostname::gethostname()
+                let fqdn = gethostname::gethostname()
                     .into_string()
                     .unwrap_or_else(|os| {
                         warn!(hostname = ?os, "hostname is not valid UTF-8, falling back to \"localhost\"");
                         "localhost".to_string()
                     });
+                // Strip domain suffix (e.g. "kiwi.mynet" → "kiwi") — macOS
+                // often returns the FQDN from gethostname().
+                let name = match fqdn.split_once('.') {
+                    Some((short, _)) => short.to_string(),
+                    None => fqdn,
+                };
                 Self(name)
             })
             .clone()
@@ -222,6 +228,16 @@ mod tests {
         let c = HostName::new("laptop");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn host_name_local_strips_domain() {
+        let local = HostName::local();
+        assert!(
+            !local.as_str().contains('.'),
+            "HostName::local() should strip domain suffix, got: {}",
+            local
+        );
     }
 
     #[test]
