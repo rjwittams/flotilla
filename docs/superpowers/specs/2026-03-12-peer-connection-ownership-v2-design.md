@@ -59,11 +59,20 @@ The decision inputs are:
 
 - canonical peer `HostName`
 - connection direction: inbound or outbound
-- whether this node has explicit outbound config for that peer
+- whether this specific connection candidate is backed by explicit local
+  outbound config
 - optional config label for status/logging
 
-The "has explicit outbound config" flag reflects local intent. Discovery-only or
-opportunistic connections should not rank above operator-configured ownership.
+The config-backed flag is candidate-specific, not just peer-specific:
+
+- an outbound connection created from local config is config-backed
+- an unsolicited inbound connection from that same peer is not automatically
+  config-backed on receipt
+- discovery-only or opportunistic candidates are not config-backed unless a
+  local outbound transport actually owns them
+
+This preserves the distinction between "I intended to own this connection" and
+"a connection from that peer exists."
 
 ### Arbitration Rule
 
@@ -74,24 +83,29 @@ Winner order:
 
 1. A connection backed by explicit local outbound config for `P` beats one that
    is not.
-2. If both are equally config-backed or equally unconfigured, outbound beats
-   inbound.
-3. If still tied, use a deterministic stable host-identity tie-break so both
-   sides converge on the same winner.
+2. If both are equally config-backed or equally unconfigured, pick a single
+   winning physical connection for peer pair `(local, P)` using a deterministic
+   stable host-identity rule.
+3. Connection direction is only a local heuristic inside that winning
+   physical-connection rule. It must not be applied independently on both sides
+   in a way that can cause both legs to be dropped.
 
-The identity tie-break is a last resort only. It is not the default initiator
-policy.
+The critical requirement is that both peers derive complementary keep/drop
+behavior for the same pair of simultaneous sockets. The arbitration rule must
+choose one physical connection, not merely prefer "outbound" as an abstract
+class.
 
 ### Duplicate Retirement
 
 If arbitration rejects the newly established connection or supersedes the old
 one, the loser is intentionally retired.
 
-Add a routed peer control message:
+Add a direct connection-level control frame:
 
 ```rust
-pub enum RoutedPeerMessage {
-    // existing variants...
+pub enum PeerWireMessage {
+    Data(PeerDataMessage),
+    Routed(RoutedPeerMessage),
     Goodbye {
         reason: GoodbyeReason,
     },
@@ -99,18 +113,20 @@ pub enum RoutedPeerMessage {
 
 pub enum GoodbyeReason {
     Superseded,
-    ProtocolMismatch,
-    UnexpectedPeer,
 }
 ```
 
-`Goodbye` is used only for intentional retirement, not for ordinary network
-disconnects.
+`Goodbye` is used only for intentional retirement between peers that have
+already completed a compatible `Hello` exchange. It is not required for
+ordinary network disconnects.
 
 Behavior:
 
 - before closing the losing connection, send `Goodbye { reason: Superseded }`
 - then close the socket / sender normally
+
+Handshake failures such as protocol mismatch or unexpected peer identity remain
+close-only or best-effort logging cases. They do not rely on `Goodbye`.
 
 ### Reconnect Suppression
 
@@ -159,6 +175,11 @@ The handshake remains identity-first:
 
 Arbitration therefore happens after canonical identity is known, which is the
 minimum information needed to resolve duplicates correctly.
+
+For simultaneous dual-outbound connects, `activate_connection(...)` must compare
+the two concrete physical connection candidates and select one winner for the
+pair. Both sides must derive the same surviving connection from the same stable
+inputs.
 
 ## Implementation Notes
 
