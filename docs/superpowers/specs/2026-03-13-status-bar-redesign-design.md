@@ -22,6 +22,7 @@ It also needs mouse support, adaptive truncation, and the ability to hide only t
 - Allow the keys section to be shown or hidden with keyboard controls.
 - Make errors dismissable from the bar.
 - Adapt gracefully to narrow widths with deterministic truncation priority.
+- Adopt a Zellij-inspired ribbon presentation with strong visual separation between adjacent actions and sections.
 
 ## Non-Goals
 
@@ -30,6 +31,34 @@ It also needs mouse support, adaptive truncation, and the ability to hide only t
 - Persisting dismissed errors across app restarts.
 - Changing daemon-side error production or peer-host state.
 - General-purpose mouse support for every possible shortcut.
+- Solving low-capability terminal fallback comprehensively in this change. Fallbacks can be added later.
+
+## Visual Direction
+
+The status bar should borrow the successful visual language of Zellij's compact/status bar rather than looking like plain inline prose.
+
+The first implementation should use:
+
+- Nerd Font chevron separators (``) between adjacent ribbons
+- white-on-black styling for the left `status / errors` section
+- white-on-black styling for the right `task` section
+- a darker inverted ribbon treatment for the middle `keys` section
+- emphasized key tokens inside action labels, with the key itself highlighted more strongly than the action text
+
+Example shape, not literal final copy:
+
+```text
+ ERRORS  / SEARCH  n NEW  K KEYS  Refreshing repo...
+```
+
+The important point is not strict imitation of Zellij's modes, but reuse of its dense ribbon look:
+
+- short key-first labels
+- strong chevron boundaries
+- clear section contrast
+- less sentence-like hint text
+
+Low-capability terminal fallbacks are deferred for now. The immediate target is terminals with reasonable glyph support. A fallback path can be added later if needed.
 
 ## Layout Model
 
@@ -51,13 +80,22 @@ The first implementation should prioritize rendering currently-active issues rat
 
 ### Middle: Keys
 
-This section shows action labels styled as visually distinct chips/segments so the click targets are obvious.
+This section shows action labels as Zellij-style ribbons rather than prose or flat chips, so the click targets are obvious.
 
 Each visible label is clickable and dispatches the same app behavior as the corresponding keyboard shortcut where that mapping is clean and deterministic.
 
+The default presentation should collapse actions to compact key-first labels rather than long hints. For example:
+
+- `⏎ OPEN`
+- `/ SEARCH`
+- `n NEW`
+- `K KEYS`
+
+The exact copy can be tuned during implementation, but the desired direction is compact and glanceable.
+
 This section can be hidden independently of the rest of the bar. The intended keyboard behavior is:
 
-- `k` toggles the keys section
+- `K` toggles the keys section
 - `?` opens help as today and remains the fallback discoverability path when keys are hidden
 
 ### Right: Task
@@ -83,6 +121,8 @@ Expected behavior:
 - Narrower widths truncate `task`.
 - Only very narrow widths truncate `status / errors`.
 
+Within the `keys` section, width pressure should first collapse the number of visible ribbons before degrading the higher-priority left and right sections. This follows the same philosophy Zellij uses for compacting visible affordances while keeping the bar legible.
+
 Implementation detail is flexible, but the algorithm should be deterministic and testable from pure inputs.
 
 ## Interaction Model
@@ -90,6 +130,8 @@ Implementation detail is flexible, but the algorithm should be deterministic and
 ## Clickable Key Labels
 
 The visible key labels themselves are the click targets. They should be rendered as clearly separated chips/segments rather than undifferentiated prose.
+
+In this design, "segment" means a ribbon with chevron boundaries, not just whitespace-separated tokens.
 
 Clicks should dispatch the same actions as keyboard shortcuts for the supported normal-mode actions shown in the bar. The status bar should not invent separate mouse-only actions for those items.
 
@@ -108,7 +150,7 @@ Dismissal should not mutate daemon state. It only hides the current message from
 
 The hidden state applies only to the `keys` section, not the whole status bar.
 
-There is no requirement for a mouse-only reopen affordance in the bar itself. Keyboard controls (`k`, `?`) are sufficient for the first pass.
+There is no requirement for a mouse-only reopen affordance in the bar itself. Keyboard controls (`K`, `?`) are sufficient for the first pass.
 
 ## State and Hit Testing
 
@@ -165,6 +207,8 @@ Add or update snapshots for:
 - host error visible with dismiss affordance
 - generic error visible with dismiss affordance
 - mixed state with status plus task
+- Zellij-style chevron rendering in the middle keys section
+- expected compact key-first labels
 
 ## Files Likely Involved
 
@@ -176,7 +220,7 @@ Add or update snapshots for:
 | `crates/flotilla-tui/src/app/mod.rs` | Add any app-level helpers/state needed for dismissable status items |
 | `crates/flotilla-tui/tests/support/mod.rs` | Extend test harness support for status-bar scenarios |
 | `crates/flotilla-tui/tests/snapshots.rs` | Add snapshot coverage for new status-bar states |
-| `docs/keybindings.md` | Document `k` and any revised status-bar affordances |
+| `docs/keybindings.md` | Document `K` and any revised status-bar affordances |
 
 ## Recommended Implementation Direction
 
@@ -189,5 +233,6 @@ That approach is the best fit for the requested combination of:
 - click targets
 - dismissable errors
 - testable rendering rules
+- Zellij-inspired ribbon rendering without importing Zellij's mode model
 
 It adds a modest amount of structure without turning the bottom row into a full component system.

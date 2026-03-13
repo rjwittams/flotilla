@@ -114,18 +114,21 @@ impl TuiModel {
         let mut repos = HashMap::new();
         let mut order = Vec::new();
         for info in repos_info {
-            repos.insert(info.path.clone(), TuiRepoModel {
-                providers: Arc::new(ProviderData::default()),
-                labels: info.labels,
-                provider_names: info.provider_names,
-                provider_health: info.provider_health,
-                loading: info.loading,
-                issue_has_more: false,
-                issue_total: None,
-                issue_search_active: false,
-                issue_fetch_pending: false,
-                issue_initial_requested: false,
-            });
+            repos.insert(
+                info.path.clone(),
+                TuiRepoModel {
+                    providers: Arc::new(ProviderData::default()),
+                    labels: info.labels,
+                    provider_names: info.provider_names,
+                    provider_health: info.provider_health,
+                    loading: info.loading,
+                    issue_has_more: false,
+                    issue_total: None,
+                    issue_search_active: false,
+                    issue_fetch_pending: false,
+                    issue_initial_requested: false,
+                },
+            );
             order.push(info.path);
         }
         Self {
@@ -160,6 +163,12 @@ impl TuiModel {
 pub struct InFlightCommand {
     pub repo: PathBuf,
     pub description: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisibleStatusItem {
+    pub id: usize,
+    pub text: String,
 }
 
 /// Log provider errors and format them into a status message.
@@ -226,6 +235,27 @@ impl App {
             RepoViewLayout::Below => RepoViewLayoutConfig::Below,
         };
         self.config.save_layout(layout);
+    }
+
+    pub fn visible_status_items(&self) -> Vec<VisibleStatusItem> {
+        let mut items = vec![];
+
+        if let Some(message) = &self.model.status_message {
+            items.push(VisibleStatusItem { id: 0, text: message.clone() });
+        }
+
+        for (index, peer) in self.model.peer_hosts.iter().enumerate() {
+            if matches!(peer.status, PeerStatus::Connected) {
+                continue;
+            }
+            items.push(VisibleStatusItem { id: index + 1, text: format!("{}: {:?}", peer.name, peer.status) });
+        }
+
+        items.into_iter().filter(|item| !self.ui.status_bar.dismissed_status_ids.contains(&item.id)).collect()
+    }
+
+    pub fn dismiss_status_item(&mut self, id: usize) {
+        self.ui.status_bar.dismissed_status_ids.insert(id);
     }
 
     // ── Daemon event handling ──
@@ -434,18 +464,21 @@ impl App {
         if self.model.repos.contains_key(&path) {
             return;
         }
-        self.model.repos.insert(path.clone(), TuiRepoModel {
-            providers: Arc::new(ProviderData::default()),
-            labels: info.labels,
-            provider_names: info.provider_names,
-            provider_health: info.provider_health,
-            loading: info.loading,
-            issue_has_more: false,
-            issue_total: None,
-            issue_search_active: false,
-            issue_fetch_pending: false,
-            issue_initial_requested: false,
-        });
+        self.model.repos.insert(
+            path.clone(),
+            TuiRepoModel {
+                providers: Arc::new(ProviderData::default()),
+                labels: info.labels,
+                provider_names: info.provider_names,
+                provider_health: info.provider_health,
+                loading: info.loading,
+                issue_has_more: false,
+                issue_total: None,
+                issue_search_active: false,
+                issue_fetch_pending: false,
+                issue_initial_requested: false,
+            },
+        );
         self.model.repo_order.push(path.clone());
         self.ui.repo_ui.insert(path, RepoUiState::default());
     }
@@ -712,6 +745,17 @@ mod tests {
     }
 
     #[test]
+    fn dismissing_status_message_hides_only_that_message() {
+        let mut app = stub_app();
+        app.model.status_message = Some("rate limit exceeded".into());
+
+        let id = app.visible_status_items()[0].id;
+        app.dismiss_status_item(id);
+
+        assert!(app.visible_status_items().is_empty());
+    }
+
+    #[test]
     fn apply_snapshot_clears_status_on_no_errors() {
         let mut app = stub_app();
         let repo = active_repo_path(&app);
@@ -811,11 +855,14 @@ mod tests {
         let mut app = stub_app();
         let repo = active_repo_path(&app);
 
-        let change = delta(&repo, vec![flotilla_protocol::Change::ProviderHealth {
-            category: "vcs".into(),
-            provider: "git".into(),
-            op: flotilla_protocol::EntryOp::Added(true),
-        }]);
+        let change = delta(
+            &repo,
+            vec![flotilla_protocol::Change::ProviderHealth {
+                category: "vcs".into(),
+                provider: "git".into(),
+                op: flotilla_protocol::EntryOp::Added(true),
+            }],
+        );
         app.apply_delta(change);
 
         assert_eq!(app.model.provider_statuses[&(repo.clone(), "vcs".into(), "git".into())], ProviderStatus::Ok,);
@@ -829,11 +876,14 @@ mod tests {
 
         app.model.repos.get_mut(&repo).unwrap().provider_health.entry("vcs".into()).or_default().insert("git".into(), true);
 
-        let change = delta(&repo, vec![flotilla_protocol::Change::ProviderHealth {
-            category: "vcs".into(),
-            provider: "git".into(),
-            op: flotilla_protocol::EntryOp::Removed,
-        }]);
+        let change = delta(
+            &repo,
+            vec![flotilla_protocol::Change::ProviderHealth {
+                category: "vcs".into(),
+                provider: "git".into(),
+                op: flotilla_protocol::EntryOp::Removed,
+            }],
+        );
         app.apply_delta(change);
 
         assert!(!app.model.repos[&repo].provider_health.contains_key("vcs"));
@@ -855,19 +905,22 @@ mod tests {
         let mut app = stub_app_with_repos(2);
         let inactive_repo = app.model.repo_order[1].clone();
 
-        let change = delta(&inactive_repo, vec![flotilla_protocol::Change::Session {
-            key: "s1".into(),
-            op: flotilla_protocol::EntryOp::Added(flotilla_protocol::CloudAgentSession {
-                title: "new session".into(),
-                status: flotilla_protocol::SessionStatus::Running,
-                model: None,
-                updated_at: None,
-                correlation_keys: vec![],
-                provider_name: String::new(),
-                provider_display_name: String::new(),
-                item_noun: String::new(),
-            }),
-        }]);
+        let change = delta(
+            &inactive_repo,
+            vec![flotilla_protocol::Change::Session {
+                key: "s1".into(),
+                op: flotilla_protocol::EntryOp::Added(flotilla_protocol::CloudAgentSession {
+                    title: "new session".into(),
+                    status: flotilla_protocol::SessionStatus::Running,
+                    model: None,
+                    updated_at: None,
+                    correlation_keys: vec![],
+                    provider_name: String::new(),
+                    provider_display_name: String::new(),
+                    item_noun: String::new(),
+                }),
+            }],
+        );
         app.apply_delta(change);
 
         assert!(app.ui.repo_ui[&inactive_repo].has_unseen_changes);
@@ -878,11 +931,14 @@ mod tests {
         let mut app = stub_app_with_repos(2);
         let inactive_repo = app.model.repo_order[1].clone();
 
-        let change = delta(&inactive_repo, vec![flotilla_protocol::Change::ProviderHealth {
-            category: "vcs".into(),
-            provider: "git".into(),
-            op: flotilla_protocol::EntryOp::Added(true),
-        }]);
+        let change = delta(
+            &inactive_repo,
+            vec![flotilla_protocol::Change::ProviderHealth {
+                category: "vcs".into(),
+                provider: "git".into(),
+                op: flotilla_protocol::EntryOp::Added(true),
+            }],
+        );
         app.apply_delta(change);
 
         assert!(!app.ui.repo_ui[&inactive_repo].has_unseen_changes);

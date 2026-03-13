@@ -13,10 +13,11 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
-        BranchInputKind, InFlightCommand, Intent, PeerHostStatus, PeerStatus, ProviderStatus, RepoViewLayout, TabId, TuiModel, UiMode,
-        UiState,
+        BranchInputKind, InFlightCommand, PeerHostStatus, PeerStatus, ProviderStatus, RepoViewLayout, TabId, TuiModel, UiMode, UiState,
+        VisibleStatusItem,
     },
     event_log::{self, LevelExt},
+    status_bar::{KeyChip, StatusBarAction, StatusBarInput, StatusBarModel, StatusBarTarget, StatusSection, TaskSection},
     ui_helpers,
 };
 
@@ -201,94 +202,166 @@ fn selected_work_item<'a>(model: &TuiModel, ui: &'a UiState) -> Option<&'a WorkI
     }
 }
 
-fn render_status_bar(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, InFlightCommand>, frame: &mut Frame, area: Rect) {
-    if let Some(err) = &model.status_message {
-        let msg = format!(" Error: {}", err);
-        let status = Paragraph::new(msg).style(Style::default().fg(Color::Red));
-        frame.render_widget(status, area);
+fn render_status_bar(model: &TuiModel, ui: &mut UiState, in_flight: &HashMap<u64, InFlightCommand>, frame: &mut Frame, area: Rect) {
+    ui.layout.status_bar.area = area;
+    ui.layout.status_bar.key_targets.clear();
+    ui.layout.status_bar.dismiss_targets.clear();
+
+    if matches!(ui.mode, UiMode::Normal) {
+        render_normal_status_bar(model, ui, in_flight, frame, area);
         return;
     }
-
-    // Show disconnected/reconnecting peers as a warning
-    let problem_peers: Vec<&PeerHostStatus> = model.peer_hosts.iter().filter(|p| !matches!(p.status, PeerStatus::Connected)).collect();
-    if !problem_peers.is_empty() {
-        let names: Vec<String> = problem_peers
-            .iter()
-            .map(|p| {
-                let icon = match p.status {
-                    PeerStatus::Disconnected => "\u{25cb}", // ○
-                    PeerStatus::Connecting => "\u{25d0}",   // ◐
-                    PeerStatus::Reconnecting => "\u{25d0}", // ◐
-                    PeerStatus::Connected => "\u{25cf}",    // ● (shouldn't reach here)
-                };
-                format!("{icon} {}", p.name)
-            })
-            .collect();
-        let msg = format!(" Hosts: {}", names.join("  "));
-        let status = Paragraph::new(msg).style(Style::default().fg(Color::Yellow));
-        frame.render_widget(status, area);
-        return;
-    }
-
-    // Show in-flight command progress for the active repo
-    let active_repo = &model.repo_order[model.active_repo];
-    let active_cmds: Vec<&str> = in_flight.values().filter(|cmd| &cmd.repo == active_repo).map(|cmd| cmd.description.as_str()).collect();
-
-    if !active_cmds.is_empty() {
-        let msg = if active_cmds.len() == 1 {
-            format!(" {}", active_cmds[0])
-        } else {
-            format!(" {} ({} commands)", active_cmds[0], active_cmds.len())
-        };
-        let status = Paragraph::new(msg).style(Style::default().fg(Color::Yellow));
-        frame.render_widget(status, area);
-        return;
-    }
-
-    let rui = active_rui(model, ui);
-    let layout_status = layout_status_text(ui);
 
     let text: String = match &ui.mode {
         UiMode::Config => " j/k:scroll log  [/]:switch tab  ?:help  q:quit".into(),
         UiMode::BranchInput { kind: BranchInputKind::Generating, .. } => " Generating branch name...".into(),
         UiMode::BranchInput { kind: BranchInputKind::Manual, .. } => " type branch name  enter:create  esc:cancel".into(),
         UiMode::ActionMenu { .. } => " j/k:navigate  enter:select  esc:close".into(),
-        UiMode::IssueSearch { ref input } => {
-            format!(" / search: {}▏  enter:search  esc:cancel", input.value())
-        }
+        UiMode::IssueSearch { ref input } => format!(" / search: {}▏  enter:search  esc:cancel", input.value()),
         UiMode::FilePicker { .. } => " j/k:navigate  tab:complete  enter:select  esc:cancel".into(),
         UiMode::DeleteConfirm { .. } | UiMode::CloseConfirm { .. } => " y/enter:confirm  n/esc:cancel".into(),
         UiMode::Help => " ?:close help  esc:close help".into(),
-        UiMode::Normal => {
-            if rui.show_providers {
-                format!(" c:close providers  {layout_status}  [/]:switch tab  ?:help  q:quit")
-            } else if let Some(q) = rui.active_search_query.as_deref() {
-                format!(" search: \"{q}\"  {layout_status}  /:new search  esc:clear  ?:help  q:quit")
-            } else if !rui.multi_selected.is_empty() {
-                format!(" enter:create branch  space:toggle  {layout_status}  esc:clear  ?:help  q:quit")
-            } else {
-                let mut s = " enter:open".to_string();
-                if let Some(item) = selected_work_item(model, ui) {
-                    let labels = model.active_labels();
-                    for &intent in Intent::all_in_menu_order() {
-                        if let Some(hint) = intent.shortcut_hint(labels) {
-                            if intent.is_available(item) {
-                                s.push_str("  ");
-                                s.push_str(&hint);
-                            }
-                        }
-                    }
-                }
-                s.push_str("  ");
-                s.push_str(layout_status);
-                s.push_str("  .:menu  /:search  n:new  r:refresh  space:select  ?:help  q:quit");
-                s
-            }
-        }
+        UiMode::Normal => unreachable!(),
     };
 
     let status = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(status, area);
+}
+
+fn render_normal_status_bar(model: &TuiModel, ui: &mut UiState, in_flight: &HashMap<u64, InFlightCommand>, frame: &mut Frame, area: Rect) {
+    let rui = active_rui(model, ui);
+    let visible_error = first_visible_status_item(model, ui);
+    let task = active_task(model, in_flight);
+    let status_text = if let Some(item) = &visible_error {
+        format!("{} ×", item.text)
+    } else if rui.show_providers {
+        "PROVIDERS".to_string()
+    } else if let Some(query) = rui.active_search_query.as_deref() {
+        format!("SEARCH \"{query}\"")
+    } else if !rui.multi_selected.is_empty() {
+        format!("{} SELECTED", rui.multi_selected.len())
+    } else {
+        layout_status_text(ui).to_string()
+    };
+
+    let status_model = StatusBarModel::build(StatusBarInput {
+        width: area.width as usize,
+        keys_visible: ui.status_bar.show_keys,
+        status: StatusSection::plain(&status_text),
+        task: task.as_ref().map(|(description, spinner_index)| TaskSection::new(description, *spinner_index)),
+        keys: normal_mode_key_chips(),
+    });
+
+    let mut spans = vec![];
+    let mut x = area.x;
+
+    if !status_model.status_text.is_empty() {
+        let status_width = status_model.status_text.width() as u16;
+        let status_style = if visible_error.is_some() {
+            Style::default().fg(Color::Indexed(203)).bg(Color::Black).bold()
+        } else {
+            Style::default().fg(Color::White).bg(Color::Black)
+        };
+        spans.push(Span::styled(status_model.status_text.clone(), status_style));
+        if let Some(item) = visible_error {
+            ui.layout.status_bar.dismiss_targets.push(StatusBarTarget::new(
+                Rect::new(x + status_width.saturating_sub(1), area.y, 1, 1),
+                StatusBarAction::ClearError(item.id),
+            ));
+        }
+        x += status_width;
+    }
+
+    if !status_model.visible_keys.is_empty() {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+            x += 1;
+        }
+
+        for chip in &status_model.visible_keys {
+            let ribbon_start = x;
+            let key_text = format!("<{}>", chip.key);
+            let label_text = format!(" {} ", chip.label);
+            let sep_width = "".width() as u16;
+            let key_width = key_text.width() as u16;
+            let label_width = label_text.width() as u16;
+            let ribbon_width = sep_width + key_width + label_width + sep_width;
+
+            spans.push(Span::styled("", Style::default().fg(Color::Black).bg(Color::DarkGray)));
+            spans.push(Span::styled(key_text, Style::default().fg(Color::Indexed(208)).bg(Color::DarkGray).bold()));
+            spans.push(Span::styled(label_text, Style::default().fg(Color::Black).bg(Color::DarkGray).bold()));
+            spans.push(Span::styled("", Style::default().fg(Color::DarkGray).bg(Color::Black)));
+
+            ui.layout
+                .status_bar
+                .key_targets
+                .push(StatusBarTarget::new(Rect::new(ribbon_start, area.y, ribbon_width, 1), chip.action.clone()));
+
+            x += ribbon_width;
+        }
+    }
+
+    if !status_model.task_text.is_empty() {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(status_model.task_text.clone(), Style::default().fg(Color::White).bg(Color::Black)));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn first_visible_status_item(model: &TuiModel, ui: &UiState) -> Option<VisibleStatusItem> {
+    if let Some(message) = &model.status_message {
+        if !ui.status_bar.dismissed_status_ids.contains(&0) {
+            return Some(VisibleStatusItem { id: 0, text: format!("ERROR {}", message) });
+        }
+    }
+
+    for (index, peer) in model.peer_hosts.iter().enumerate() {
+        if matches!(peer.status, PeerStatus::Connected) {
+            continue;
+        }
+        let id = index + 1;
+        if ui.status_bar.dismissed_status_ids.contains(&id) {
+            continue;
+        }
+        let label = match peer.status {
+            PeerStatus::Disconnected => "HOST DOWN",
+            PeerStatus::Connecting => "HOST CONNECTING",
+            PeerStatus::Reconnecting => "HOST RECONNECTING",
+            PeerStatus::Connected => continue,
+        };
+        return Some(VisibleStatusItem { id, text: format!("{label} {}", peer.name) });
+    }
+
+    None
+}
+
+fn active_task(model: &TuiModel, in_flight: &HashMap<u64, InFlightCommand>) -> Option<(String, usize)> {
+    let active_repo = &model.repo_order[model.active_repo];
+    let active_cmds: Vec<&str> = in_flight.values().filter(|cmd| &cmd.repo == active_repo).map(|cmd| cmd.description.as_str()).collect();
+
+    if active_cmds.is_empty() {
+        return None;
+    }
+
+    let description =
+        if active_cmds.len() == 1 { active_cmds[0].to_string() } else { format!("{} (+{})", active_cmds[0], active_cmds.len() - 1) };
+
+    Some((description, 0))
+}
+
+fn normal_mode_key_chips() -> Vec<KeyChip> {
+    vec![
+        KeyChip::new("↵", "OPEN", StatusBarAction::OpenSelected),
+        KeyChip::new(".", "MENU", StatusBarAction::OpenMenu),
+        KeyChip::new("/", "SEARCH", StatusBarAction::StartSearch),
+        KeyChip::new("n", "NEW", StatusBarAction::NewBranch),
+        KeyChip::new("K", "KEYS", StatusBarAction::ToggleKeys),
+        KeyChip::new("?", "HELP", StatusBarAction::OpenHelp),
+        KeyChip::new("q", "QUIT", StatusBarAction::Quit),
+    ]
 }
 
 fn render_content(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, area: Rect) {
@@ -870,6 +943,8 @@ fn render_help(model: &TuiModel, ui: &mut UiState, frame: &mut Frame) {
         Line::from(format!("  p                Show {} in browser", labels.code_review.abbr)),
         Line::from("  l                Cycle layout (auto/zoom/right/below)"),
         Line::from("  r                Refresh data"),
+        Line::from("  K                Toggle status bar key ribbons"),
+        Line::from("  Status bar       Click ribbons to trigger actions"),
         Line::from(""),
         Line::from(Span::styled("Multi-select (issues)", Style::default().bold())),
         Line::from("  Space            Toggle selection on current item"),
@@ -909,10 +984,10 @@ fn render_help(model: &TuiModel, ui: &mut UiState, frame: &mut Frame) {
 
 fn layout_status_text(ui: &UiState) -> &'static str {
     match ui.view_layout {
-        RepoViewLayout::Auto => "Layout(l): auto",
-        RepoViewLayout::Zoom => "Layout(l): zoom",
-        RepoViewLayout::Right => "Layout(l): right",
-        RepoViewLayout::Below => "Layout(l): below",
+        RepoViewLayout::Auto => "LAYOUT AUTO",
+        RepoViewLayout::Zoom => "LAYOUT ZOOM",
+        RepoViewLayout::Right => "LAYOUT RIGHT",
+        RepoViewLayout::Below => "LAYOUT BELOW",
     }
 }
 
