@@ -18,13 +18,15 @@ use flotilla_protocol::{
     AssociationKey, Command, DaemonEvent, DeltaEntry, HostName, Issue, PeerConnectionState, ProviderData, ProviderError, RepoInfo, Snapshot,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
     config::ConfigStore,
     convert::snapshot_to_proto,
     daemon::DaemonHandle,
-    delta, executor,
+    delta,
+    executor::{self, ExecutionPlan},
     issue_cache::IssueCache,
     model::{provider_names_from_registry, repo_name, RepoModel},
     providers::{
@@ -32,6 +34,7 @@ use crate::{
         CommandRunner,
     },
     refresh::RefreshSnapshot,
+    step::run_step_plan,
 };
 
 fn now_iso8601() -> String {
@@ -254,6 +257,12 @@ impl RepoState {
     }
 }
 
+/// Tracks a currently executing step-based command for cancellation.
+struct ActiveCommand {
+    command_id: u64,
+    token: CancellationToken,
+}
+
 pub struct InProcessDaemon {
     repos: RwLock<HashMap<PathBuf, RepoState>>,
     repo_order: RwLock<Vec<PathBuf>>,
@@ -284,6 +293,8 @@ pub struct InProcessDaemon {
     repo_detectors: Vec<Box<dyn RepoDetector>>,
     /// Provider factories, computed once at startup (follower vs full).
     factories: FactoryRegistry,
+    /// The currently active step-based command, if any — for cancellation.
+    active_command: Arc<Mutex<Option<ActiveCommand>>>,
 }
 
 impl InProcessDaemon {
@@ -367,6 +378,7 @@ impl InProcessDaemon {
             host_bag,
             repo_detectors,
             factories,
+            active_command: Arc::new(Mutex::new(None)),
         });
 
         // Spawn self-driving poll loop with a Weak reference.
@@ -1056,21 +1068,39 @@ impl DaemonHandle for InProcessDaemon {
         let config_base = self.config.base_path().to_path_buf();
         let _ = self.event_tx.send(DaemonEvent::CommandStarted { command_id: id, repo: repo_path.clone(), description });
 
-        tokio::spawn(async move {
-            let result = executor::execute(command, &repo_path, &registry, &providers_data, &*runner, &config_base).await;
+        let plan = executor::build_plan(command, repo_path.clone(), registry, providers_data, runner, config_base).await;
 
-            // Trigger a refresh after command execution
-            refresh_trigger.notify_one();
+        match plan {
+            ExecutionPlan::Immediate(result) => {
+                refresh_trigger.notify_one();
+                let _ = self.event_tx.send(DaemonEvent::CommandFinished { command_id: id, repo: repo_path, result });
+            }
+            ExecutionPlan::Steps(step_plan) => {
+                let token = CancellationToken::new();
+                *self.active_command.lock().await = Some(ActiveCommand { command_id: id, token: token.clone() });
 
-            let _ = event_tx.send(DaemonEvent::CommandFinished { command_id: id, repo: repo_path, result });
-        });
+                let active_ref = Arc::clone(&self.active_command);
+                tokio::spawn(async move {
+                    let result = run_step_plan(step_plan, id, repo_path.clone(), token, event_tx.clone()).await;
+                    refresh_trigger.notify_one();
+                    *active_ref.lock().await = None;
+                    let _ = event_tx.send(DaemonEvent::CommandFinished { command_id: id, repo: repo_path, result });
+                });
+            }
+        }
 
         Ok(id)
     }
 
-    async fn cancel(&self, _command_id: u64) -> Result<(), String> {
-        // TODO: implement cancellation with CancellationToken tracking
-        Err("cancel not yet implemented".into())
+    async fn cancel(&self, command_id: u64) -> Result<(), String> {
+        let guard = self.active_command.lock().await;
+        match &*guard {
+            Some(active) if active.command_id == command_id => {
+                active.token.cancel();
+                Ok(())
+            }
+            _ => Err("no matching active command".into()),
+        }
     }
 
     async fn refresh(&self, repo: &Path) -> Result<(), String> {
