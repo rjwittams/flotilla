@@ -768,21 +768,29 @@ async fn disconnect_peer_and_rebuild(
     peer_name: &HostName,
     generation: u64,
 ) -> crate::peer::DisconnectPlan {
-    // Snapshot identity mapping before acquiring PeerManager lock.
-    // This mapping is stable during disconnect — local repos aren't
-    // removed by peer disconnect.
-    let local_repo_paths = daemon.repo_identity_snapshot().await;
-
-    let plan = {
+    let mut plan = {
         let mut pm = peer_manager.lock().await;
-        pm.disconnect_peer(peer_name, generation, &local_repo_paths)
+        pm.disconnect_peer(peer_name, generation)
     };
 
     // Apply pre-computed overlay updates outside the PeerManager lock.
+    // Identity → path is resolved here at apply time (not at computation time)
+    // to avoid TOCTOU with concurrent add_repo/remove_repo.
     for update in &plan.overlay_updates {
         match update {
-            crate::peer::OverlayUpdate::SetProviders { path, peers } => {
-                daemon.set_peer_providers(path, peers.clone()).await;
+            crate::peer::OverlayUpdate::SetProviders { identity, peers } => {
+                // Resolve identity to current local path. For remote-only repos,
+                // the path comes from known_remote_repos (already resolved in the plan).
+                // For local repos that were removed concurrently, find_repo_by_identity
+                // returns None and we skip — the repo is gone, no overlay needed.
+                if let Some(local_path) = daemon.find_repo_by_identity(identity).await {
+                    daemon.set_peer_providers(&local_path, peers.clone()).await;
+                } else if let Some(synthetic_path) = {
+                    let pm = peer_manager.lock().await;
+                    pm.known_remote_repos().get(identity).cloned()
+                } {
+                    daemon.set_peer_providers(&synthetic_path, peers.clone()).await;
+                }
             }
             crate::peer::OverlayUpdate::RemoveRepo { identity, path } => {
                 info!(
@@ -801,7 +809,8 @@ async fn disconnect_peer_and_rebuild(
         }
     }
 
-    dispatch_resync_requests(peer_manager, plan.resync_requests.clone()).await;
+    let resync_requests = std::mem::take(&mut plan.resync_requests);
+    dispatch_resync_requests(peer_manager, resync_requests).await;
     plan
 }
 

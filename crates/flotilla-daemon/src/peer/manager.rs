@@ -110,10 +110,15 @@ pub struct PendingResyncRequest {
 }
 
 /// Pre-computed overlay update to apply to InProcessDaemon after releasing the PeerManager lock.
+///
+/// For `SetProviders`, the caller resolves `identity` → local path at apply time
+/// (not at computation time) so the path is always fresh, avoiding TOCTOU if a repo
+/// is added or removed concurrently with the disconnect.
 #[derive(Debug, Clone)]
 pub enum OverlayUpdate {
     /// Update peer_providers for a repo with remaining peer data.
-    SetProviders { path: PathBuf, peers: Vec<(HostName, ProviderData)> },
+    /// The caller resolves `identity` to the current local path at apply time.
+    SetProviders { identity: RepoIdentity, peers: Vec<(HostName, ProviderData)> },
     /// Remove a virtual repo — no peers remain.
     RemoveRepo { identity: RepoIdentity, path: PathBuf },
 }
@@ -886,12 +891,7 @@ impl PeerManager {
         Ok((generation, rx))
     }
 
-    pub fn disconnect_peer(
-        &mut self,
-        name: &HostName,
-        generation: u64,
-        local_repo_paths: &HashMap<RepoIdentity, PathBuf>,
-    ) -> DisconnectPlan {
+    pub fn disconnect_peer(&mut self, name: &HostName, generation: u64) -> DisconnectPlan {
         if !self.generation_is_current(name, generation) {
             return DisconnectPlan {
                 was_active: false,
@@ -985,26 +985,18 @@ impl PeerManager {
         self.last_seen_clocks.retain(|(host, _), _| host != name);
 
         // Compute overlay updates atomically while still holding &mut self.
+        // The caller resolves identity → path at apply time to avoid TOCTOU
+        // with concurrent add_repo/remove_repo.
         let mut overlay_updates = Vec::new();
         for repo_id in &affected_repos {
-            if let Some(local_path) = local_repo_paths.get(repo_id) {
-                // Local repo — collect remaining peer data
+            if self.has_peer_data_for(repo_id) {
+                // Repo still has data from other peers — collect remaining peer data
                 let peers: Vec<(HostName, ProviderData)> = self
                     .peer_data
                     .iter()
                     .filter_map(|(host, repos)| repos.get(repo_id).map(|state| (host.clone(), state.provider_data.clone())))
                     .collect();
-                overlay_updates.push(OverlayUpdate::SetProviders { path: local_path.clone(), peers });
-            } else if self.has_peer_data_for(repo_id) {
-                // Remote-only, still has data from other peers
-                if let Some(synthetic_path) = self.known_remote_repos.get(repo_id).cloned() {
-                    let peers: Vec<(HostName, ProviderData)> = self
-                        .peer_data
-                        .iter()
-                        .filter_map(|(host, repos)| repos.get(repo_id).map(|state| (host.clone(), state.provider_data.clone())))
-                        .collect();
-                    overlay_updates.push(OverlayUpdate::SetProviders { path: synthetic_path, peers });
-                }
+                overlay_updates.push(OverlayUpdate::SetProviders { identity: repo_id.clone(), peers });
             } else if let Some(synthetic_path) = self.unregister_remote_repo(repo_id) {
                 // Remote-only, no peers remain — remove the virtual tab
                 overlay_updates.push(OverlayUpdate::RemoveRepo { identity: repo_id.clone(), path: synthetic_path });
@@ -1767,7 +1759,7 @@ mod tests {
             learned_epoch: 10,
         });
 
-        let plan = mgr.disconnect_peer(&HostName::new("target"), direct_generation, &HashMap::new());
+        let plan = mgr.disconnect_peer(&HostName::new("target"), direct_generation);
 
         assert_eq!(plan.affected_repos, vec![test_repo()]);
         assert_eq!(plan.resync_requests.len(), 1);
@@ -1835,7 +1827,7 @@ mod tests {
         let kept_request_id = mgr.note_pending_resync_request(HostName::new("target"), test_repo());
         let dropped_request_id = mgr.note_pending_resync_request(HostName::new("other"), test_repo());
 
-        let _ = mgr.disconnect_peer(&HostName::new("other"), other_generation, &HashMap::new());
+        let _ = mgr.disconnect_peer(&HostName::new("other"), other_generation);
 
         let kept_key = ReversePathKey {
             request_id: kept_request_id,
@@ -1877,7 +1869,7 @@ mod tests {
             },
         ));
 
-        let plan = mgr.disconnect_peer(&HostName::new("peer"), stale_generation, &HashMap::new());
+        let plan = mgr.disconnect_peer(&HostName::new("peer"), stale_generation);
 
         assert!(!plan.was_active);
         assert!(mgr.current_generation(&HostName::new("peer")).is_some());
@@ -1915,7 +1907,7 @@ mod tests {
             learned_epoch: 10,
         });
 
-        let plan = mgr.disconnect_peer(&HostName::new("relay-a"), relay_a_generation, &HashMap::new());
+        let plan = mgr.disconnect_peer(&HostName::new("relay-a"), relay_a_generation);
         let request_id = match &plan.resync_requests[0] {
             RoutedPeerMessage::RequestResync { request_id, .. } => *request_id,
             other => panic!("expected request_resync, got {:?}", other),
@@ -1980,12 +1972,12 @@ mod tests {
                 learned_epoch: 20,
             }];
 
-        let first_plan = mgr.disconnect_peer(&HostName::new("relay-a"), relay_a_generation, &HashMap::new());
+        let first_plan = mgr.disconnect_peer(&HostName::new("relay-a"), relay_a_generation);
         assert_eq!(first_plan.resync_requests.len(), 1);
         let state = &mgr.get_peer_data()[&HostName::new("target")][&test_repo()];
         assert!(state.stale);
 
-        let second_plan = mgr.disconnect_peer(&HostName::new("relay-c"), relay_c_generation, &HashMap::new());
+        let second_plan = mgr.disconnect_peer(&HostName::new("relay-c"), relay_c_generation);
 
         assert_eq!(second_plan.resync_requests.len(), 1);
         match &second_plan.resync_requests[0] {
@@ -2029,7 +2021,7 @@ mod tests {
             learned_epoch: 10,
         });
 
-        let plan = mgr.disconnect_peer(&HostName::new("target"), direct_generation, &HashMap::new());
+        let plan = mgr.disconnect_peer(&HostName::new("target"), direct_generation);
         let request = match &plan.resync_requests[0] {
             RoutedPeerMessage::RequestResync { request_id, .. } => *request_id,
             other => panic!("expected request_resync, got {:?}", other),
@@ -2114,16 +2106,13 @@ mod tests {
 
         let desktop_generation = mgr.current_generation(&HostName::new("desktop")).expect("desktop connected");
 
-        let mut local_repo_paths = HashMap::new();
-        local_repo_paths.insert(test_repo(), PathBuf::from("/local/repo"));
-
-        let plan = mgr.disconnect_peer(&HostName::new("desktop"), desktop_generation, &local_repo_paths);
+        let plan = mgr.disconnect_peer(&HostName::new("desktop"), desktop_generation);
 
         assert!(plan.was_active);
         assert_eq!(plan.overlay_updates.len(), 1);
         match &plan.overlay_updates[0] {
-            OverlayUpdate::SetProviders { path, peers } => {
-                assert_eq!(path, &PathBuf::from("/local/repo"));
+            OverlayUpdate::SetProviders { identity, peers } => {
+                assert_eq!(identity, &test_repo());
                 assert_eq!(peers.len(), 1);
                 assert_eq!(peers[0].0, HostName::new("laptop"));
             }
@@ -2145,9 +2134,7 @@ mod tests {
         let synthetic_path = PathBuf::from("/virtual/github.com/owner/repo");
         mgr.register_remote_repo(test_repo(), synthetic_path.clone());
 
-        let local_repo_paths = HashMap::new();
-
-        let plan = mgr.disconnect_peer(&HostName::new("desktop"), desktop_generation, &local_repo_paths);
+        let plan = mgr.disconnect_peer(&HostName::new("desktop"), desktop_generation);
 
         assert!(plan.was_active);
         assert_eq!(plan.overlay_updates.len(), 1);
