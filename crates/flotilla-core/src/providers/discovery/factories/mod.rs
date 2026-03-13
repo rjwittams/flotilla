@@ -27,10 +27,12 @@ impl FactoryRegistry {
                 Box::new(codex::CodexCodingAgentFactory),
             ],
             ai_utilities: vec![Box::new(claude::ClaudeAiUtilityFactory)],
+            // Priority: inside-cmux > inside-zellij > inside-tmux > cmux-binary-fallback
             workspace_managers: vec![
-                Box::new(cmux::CmuxWorkspaceManagerFactory),
+                Box::new(cmux::CmuxInsideFactory),
                 Box::new(zellij::ZellijWorkspaceManagerFactory),
                 Box::new(tmux::TmuxWorkspaceManagerFactory),
+                Box::new(cmux::CmuxBinaryFallbackFactory),
             ],
             terminal_pools: vec![
                 Box::new(shpool::ShpoolTerminalPoolFactory),
@@ -51,9 +53,10 @@ impl FactoryRegistry {
             cloud_agents: vec![],
             ai_utilities: vec![],
             workspace_managers: vec![
-                Box::new(cmux::CmuxWorkspaceManagerFactory),
+                Box::new(cmux::CmuxInsideFactory),
                 Box::new(zellij::ZellijWorkspaceManagerFactory),
                 Box::new(tmux::TmuxWorkspaceManagerFactory),
+                Box::new(cmux::CmuxBinaryFallbackFactory),
             ],
             terminal_pools: vec![
                 Box::new(shpool::ShpoolTerminalPoolFactory),
