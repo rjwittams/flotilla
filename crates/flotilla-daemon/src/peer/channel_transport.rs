@@ -23,9 +23,9 @@ enum ChannelEnvelope {
 /// envelopes. Supports full connect/disconnect/reconnect lifecycle.
 ///
 /// Created in pairs via [`channel_transport_pair`]. A persistent backbone
-/// `mpsc<ChannelEnvelope>` carries `Connected`, `Packet`, and `Disconnected`
-/// envelopes. Each `connect()` creates a fresh session channel; the forwarding
-/// task is spawned lazily in `subscribe()`.
+/// `mpsc<ChannelEnvelope>` carries `Connected` and `Disconnected` control
+/// signals. Data flows directly via session channels. Each `connect()` creates
+/// a fresh session channel; the forwarding task is spawned lazily in `subscribe()`.
 ///
 /// When the remote side disconnects, the local forwarding task detects the
 /// `Disconnected` envelope, closes the session (subscriber gets `None`), and
