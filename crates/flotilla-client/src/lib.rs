@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_protocol::{Command, DaemonEvent, Message, RawResponse, RepoInfo, Snapshot};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, BufReader, BufWriter},
     net::UnixStream,
     sync::{broadcast, oneshot, Mutex},
 };
@@ -349,20 +349,9 @@ async fn send_request(
 
     let msg = Message::Request { id, method: method.to_string(), params };
 
-    let line = match serde_json::to_string(&msg) {
-        Ok(line) => line,
-        Err(e) => {
-            pending.lock().await.remove(&id);
-            return Err(format!("failed to serialize request: {e}"));
-        }
-    };
-
     let write_result = async {
         let mut w = writer.lock().await;
-        w.write_all(line.as_bytes()).await.map_err(|e| format!("failed to write to daemon socket: {e}"))?;
-        w.write_all(b"\n").await.map_err(|e| format!("failed to write newline to daemon socket: {e}"))?;
-        w.flush().await.map_err(|e| format!("failed to flush daemon socket: {e}"))?;
-        Ok::<(), String>(())
+        flotilla_protocol::framing::write_message_line(&mut *w, &msg).await
     }
     .await;
 
