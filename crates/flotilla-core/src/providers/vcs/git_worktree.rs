@@ -354,7 +354,7 @@ branch refs/heads/feature
     // ── Record/replay tests ──
 
     fn fixture(name: &str) -> String {
-        format!("{}/src/providers/vcs/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+        crate::providers::testing::fixture_path("vcs", name)
     }
 
     #[tokio::test]

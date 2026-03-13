@@ -512,7 +512,7 @@ mod tests {
     use crate::providers::{coding_agent::CloudAgentService, replay};
 
     fn fixture(name: &str) -> String {
-        format!("{}/src/providers/coding_agent/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+        crate::providers::testing::fixture_path("coding_agent", name)
     }
 
     // Auth parsing tests

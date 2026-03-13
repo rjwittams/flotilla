@@ -388,6 +388,13 @@ pub mod testing {
             true
         }
     }
+
+    /// Build the path to a provider fixture file.
+    ///
+    /// `provider_dir` is the subdirectory under `src/providers/` (e.g. `"vcs"`, `"code_review"`).
+    pub fn fixture_path(provider_dir: &str, name: &str) -> String {
+        format!("{}/src/providers/{}/fixtures/{}", env!("CARGO_MANIFEST_DIR"), provider_dir, name)
+    }
 }
 
 #[cfg(test)]

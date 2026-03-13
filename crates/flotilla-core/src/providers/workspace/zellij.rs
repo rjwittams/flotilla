@@ -383,7 +383,7 @@ mod tests {
     use crate::providers::{replay, workspace::WorkspaceManager};
 
     fn fixture(name: &str) -> String {
-        format!("{}/src/providers/workspace/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+        crate::providers::testing::fixture_path("workspace", name)
     }
 
     fn setup_zellij_ws_session() {

@@ -358,7 +358,7 @@ mod tests {
     static TEST_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 
     fn fixture(name: &str) -> String {
-        format!("{}/src/providers/coding_agent/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+        crate::providers::testing::fixture_path("coding_agent", name)
     }
 
     fn now_epoch_secs() -> i64 {

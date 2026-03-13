@@ -185,7 +185,7 @@ mod tests {
     };
 
     fn fixture(name: &str) -> String {
-        format!("{}/src/providers/issue_tracker/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+        crate::providers::testing::fixture_path("issue_tracker", name)
     }
 
     #[tokio::test]
