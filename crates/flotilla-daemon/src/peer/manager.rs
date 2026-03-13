@@ -2166,11 +2166,12 @@ mod tests {
         let mut mgr = PeerManager::new(HostName::new("local"));
         let sent = Arc::new(Mutex::new(Vec::new()));
         let sender: Arc<dyn PeerSender> = Arc::new(MockPeerSender { sent: Arc::clone(&sent) });
-        let generation = accepted_generation(mgr.activate_connection(
-            HostName::new("peer"),
-            sender,
-            ConnectionMeta { direction: ConnectionDirection::Inbound, config_label: None, expected_peer: None, config_backed: false },
-        ));
+        let generation = accepted_generation(mgr.activate_connection(HostName::new("peer"), sender, ConnectionMeta {
+            direction: ConnectionDirection::Inbound,
+            config_label: None,
+            expected_peer: None,
+            config_backed: false,
+        }));
 
         assert!(mgr.get_sender_if_current(&HostName::new("peer"), generation).is_some());
         assert!(mgr.get_sender_if_current(&HostName::new("peer"), generation + 1).is_none());
