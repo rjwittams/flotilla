@@ -28,7 +28,7 @@ pub(crate) mod test_helpers {
     }
 }
 
-pub use commands::{CheckoutStatus, Command, CommandResult};
+pub use commands::{CheckoutStatus, Command, CommandResult, StepStatus};
 pub use delta::{Branch, BranchStatus, Change, DeltaEntry, EntryOp};
 pub use provider_data::{
     AheadBehind, AssociationKey, ChangeRequest, ChangeRequestStatus, Checkout, CloudAgentSession, CommitInfo, CorrelationKey, Issue,

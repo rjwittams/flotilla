@@ -112,6 +112,16 @@ pub enum CommandResult {
     Error { message: String },
 }
 
+/// Status of an individual step within a multi-step command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "status")]
+pub enum StepStatus {
+    Skipped,
+    Started,
+    Succeeded,
+    Failed { message: String },
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CheckoutStatus {
     pub branch: String,
@@ -200,6 +210,18 @@ mod tests {
         let result = CommandResult::CheckoutCreated { branch: "x".into() };
         let json = serde_json::to_value(&result).expect("serialize");
         assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("checkout_created"));
+    }
+
+    #[test]
+    fn step_status_roundtrip() {
+        use crate::test_helpers::assert_roundtrip;
+
+        let cases = vec![StepStatus::Skipped, StepStatus::Started, StepStatus::Succeeded, StepStatus::Failed {
+            message: "workspace creation failed".into(),
+        }];
+        for case in cases {
+            assert_roundtrip(&case);
+        }
     }
 
     #[test]
