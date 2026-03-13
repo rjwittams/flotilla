@@ -352,7 +352,7 @@ impl InProcessDaemon {
                 registry,
                 repo_slug,
                 bag,
-                unmet: _,
+                unmet,
             } = discovery::discover_providers(
                 &host_bag,
                 &path,
@@ -363,6 +363,13 @@ impl InProcessDaemon {
                 &ProcessEnvVars,
             )
             .await;
+            if !unmet.is_empty() {
+                debug!(
+                    count = unmet.len(),
+                    ?unmet,
+                    "providers not activated: missing requirements"
+                );
+            }
 
             // RepoIdentity from the merged bag
             if let Some(identity) = bag.repo_identity() {
@@ -1252,7 +1259,7 @@ impl DaemonHandle for InProcessDaemon {
             registry,
             repo_slug,
             bag,
-            unmet: _,
+            unmet,
         } = crate::providers::discovery::discover_providers(
             &self.host_bag,
             &path,
@@ -1263,6 +1270,13 @@ impl DaemonHandle for InProcessDaemon {
             &crate::providers::discovery::ProcessEnvVars,
         )
         .await;
+        if !unmet.is_empty() {
+            debug!(
+                count = unmet.len(),
+                ?unmet,
+                "providers not activated: missing requirements"
+            );
+        }
         let mut model = RepoModel::new(path.clone(), registry, repo_slug);
         model.data.loading = true;
 

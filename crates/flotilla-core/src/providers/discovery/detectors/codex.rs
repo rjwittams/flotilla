@@ -12,13 +12,13 @@ use crate::providers::discovery::{EnvVars, EnvironmentAssertion, HostDetector};
 use crate::providers::CommandRunner;
 
 /// Returns the Codex home directory: `$CODEX_HOME` or `~/.codex`.
-fn codex_home(env: &dyn EnvVars) -> PathBuf {
+/// Returns `None` when no home directory can be determined (e.g. containerised
+/// environments without `$HOME`).
+fn codex_home(env: &dyn EnvVars) -> Option<PathBuf> {
     if let Some(val) = env.get("CODEX_HOME") {
-        PathBuf::from(val)
+        Some(PathBuf::from(val))
     } else {
-        dirs::home_dir()
-            .expect("could not determine home directory")
-            .join(".codex")
+        dirs::home_dir().map(|h| h.join(".codex"))
     }
 }
 
@@ -32,7 +32,10 @@ impl HostDetector for CodexAuthDetector {
         _runner: &dyn CommandRunner,
         env: &dyn EnvVars,
     ) -> Vec<EnvironmentAssertion> {
-        let auth_path = codex_home(env).join("auth.json");
+        let Some(home) = codex_home(env) else {
+            return vec![];
+        };
+        let auth_path = home.join("auth.json");
         if auth_path.exists() {
             vec![EnvironmentAssertion::auth_file("codex", auth_path)]
         } else {

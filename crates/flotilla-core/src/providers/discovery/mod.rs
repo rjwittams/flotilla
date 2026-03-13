@@ -38,7 +38,7 @@ pub enum VcsKind {
     Jujutsu,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HostPlatform {
     GitHub,
     GitLab,
@@ -252,26 +252,25 @@ impl EnvironmentBag {
         merged
     }
 
-    /// Derive a `RepoIdentity` from the first remote host assertion found.
+    /// Derive a `RepoIdentity` from the environment bag.
+    ///
+    /// Delegates to [`find_remote_host`] so the origin-preference logic is
+    /// shared with `repo_slug()`.
     pub fn repo_identity(&self) -> Option<flotilla_protocol::RepoIdentity> {
-        self.assertions.iter().find_map(|a| match a {
-            EnvironmentAssertion::RemoteHost {
-                platform,
-                owner,
-                repo,
-                ..
-            } => {
+        let platforms = [HostPlatform::GitHub, HostPlatform::GitLab];
+        for platform in platforms {
+            if let Some((owner, repo, _)) = self.find_remote_host(platform) {
                 let authority = match platform {
                     HostPlatform::GitHub => "github.com",
                     HostPlatform::GitLab => "gitlab.com",
                 };
-                Some(flotilla_protocol::RepoIdentity {
+                return Some(flotilla_protocol::RepoIdentity {
                     authority: authority.into(),
                     path: format!("{owner}/{repo}"),
-                })
+                });
             }
-            _ => None,
-        })
+        }
+        None
     }
 }
 
