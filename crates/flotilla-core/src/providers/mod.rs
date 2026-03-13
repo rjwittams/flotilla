@@ -352,7 +352,7 @@ pub async fn resolve_claude_path(runner: &dyn CommandRunner) -> Option<String> {
 pub mod replay;
 
 #[cfg(test)]
-pub mod testing {
+pub(crate) mod testing {
     use std::collections::VecDeque;
 
     use async_trait::async_trait;
@@ -387,6 +387,35 @@ pub mod testing {
         async fn exists(&self, _cmd: &str, _args: &[&str]) -> bool {
             true
         }
+    }
+
+    /// Build the path to a provider fixture file.
+    ///
+    /// `provider_dir` is the subdirectory under `src/providers/` (e.g. `"vcs"`, `"code_review"`).
+    pub fn fixture_path(provider_dir: &str, name: &str) -> String {
+        format!("{}/src/providers/{}/fixtures/{}", env!("CARGO_MANIFEST_DIR"), provider_dir, name)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod github_test_support {
+    use std::{path::PathBuf, sync::Arc};
+
+    use crate::providers::{github_api::GhApi, replay, CommandRunner};
+
+    pub fn repo_root_for_recording() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("CARGO_MANIFEST_DIR should have a parent")
+            .parent()
+            .expect("CARGO_MANIFEST_DIR should have a grandparent")
+            .to_path_buf()
+    }
+
+    pub fn build_api_and_runner(session: &replay::Session) -> (Arc<dyn GhApi>, Arc<dyn CommandRunner>) {
+        let runner = replay::test_runner(session);
+        let api = replay::test_gh_api(session);
+        (api, runner)
     }
 }
 
