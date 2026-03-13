@@ -36,7 +36,9 @@ pub(crate) fn format_status_json(repos: &[flotilla_protocol::snapshot::RepoInfo]
     struct StatusResponse<'a> {
         repos: &'a [flotilla_protocol::snapshot::RepoInfo],
     }
-    flotilla_protocol::output::json_pretty(&StatusResponse { repos })
+    let mut out = flotilla_protocol::output::json_pretty(&StatusResponse { repos });
+    out.push('\n');
+    out
 }
 
 /// Extract a short display name from a repo path (last path component).
@@ -204,6 +206,7 @@ mod tests {
         #[test]
         fn empty_repos_json() {
             let output = format_status_json(&[]);
+            assert!(output.ends_with('\n'), "JSON output should end with newline");
             let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
             assert_eq!(parsed["repos"], serde_json::json!([]));
         }

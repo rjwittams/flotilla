@@ -67,6 +67,7 @@ impl Cli {
 async fn main() -> Result<()> {
     // Reset SIGPIPE to default behavior so piped CLI commands (e.g. `watch | head`)
     // exit cleanly instead of panicking on broken pipe.
+    // SAFETY: libc::signal is safe to call before any I/O. Tokio does not configure SIGPIPE.
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
