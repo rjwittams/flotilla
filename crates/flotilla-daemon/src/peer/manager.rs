@@ -893,6 +893,24 @@ impl PeerManager {
         Ok((generation, rx))
     }
 
+    /// Clear all stored peer data originating from a specific host.
+    ///
+    /// Used when a remote daemon restart is detected (session_id changed).
+    /// Unlike `disconnect_peer`, this does NOT tear down the connection —
+    /// the fresh connection remains active and will receive new data.
+    /// Returns the repo identities whose overlays need rebuilding.
+    pub fn clear_peer_data_for_restart(&mut self, origin: &HostName) -> Vec<RepoIdentity> {
+        let Some(repos) = self.peer_data.remove(origin) else {
+            return Vec::new();
+        };
+        let affected: Vec<RepoIdentity> = repos.keys().cloned().collect();
+        // Clear last-seen clocks so fresh data from the restarted daemon
+        // is accepted even if its vector clock starts from zero.
+        self.last_seen_clocks.retain(|(host, _), _| host != origin);
+        info!(peer = %origin, repo_count = affected.len(), "cleared stale peer data after restart");
+        affected
+    }
+
     pub fn disconnect_peer(&mut self, name: &HostName, generation: u64) -> DisconnectPlan {
         if !self.generation_is_current(name, generation) {
             return DisconnectPlan {

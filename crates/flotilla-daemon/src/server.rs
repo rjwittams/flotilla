@@ -439,6 +439,15 @@ async fn handle_client(
                                 };
                                 match msg {
                                     Message::Peer(peer_msg) => {
+                                        // Handle keepalive Pings at this layer — respond
+                                        // with Pong directly via the outbound channel so the
+                                        // remote SSH transport's keepalive timer resets.
+                                        if let PeerWireMessage::Ping { timestamp } = *peer_msg {
+                                            let _ = outbound_tx
+                                                .send(Message::Peer(Box::new(PeerWireMessage::Pong { timestamp })))
+                                                .await;
+                                            continue;
+                                        }
                                         if let Err(e) = peer_data_tx.send(InboundPeerEnvelope {
                                             msg: *peer_msg,
                                             connection_generation: generation,

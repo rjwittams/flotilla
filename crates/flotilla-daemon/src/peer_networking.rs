@@ -252,7 +252,15 @@ impl PeerNetworkingTask {
                                                 peer = %peer_name,
                                                 "remote daemon restarted (session_id changed), clearing stale data"
                                             );
-                                            disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
+                                            // Clear stale peer data WITHOUT disconnecting —
+                                            // the fresh connection is already active.
+                                            let affected_repos = {
+                                                let mut pm_lock = pm.lock().await;
+                                                pm_lock.clear_peer_data_for_restart(&peer_name)
+                                            };
+                                            if !affected_repos.is_empty() {
+                                                rebuild_peer_overlays(&pm, &daemon_for_cleanup, affected_repos).await;
+                                            }
                                         }
                                     }
                                     last_known_session_id = current_session_id;
