@@ -193,11 +193,14 @@ async fn build_create_checkout_plan(
                 Box::pin(async move {
                     let checkout_path = slot.lock().await.clone().ok_or_else(|| "checkout path not available".to_string())?;
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let mut config = workspace_config(&repo_root, &branch, &checkout_path, "claude", &config_base);
-                        if let Some((_, tp)) = &registry.terminal_pool {
-                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await.unwrap_or(false);
+                        if !already_exists {
+                            let mut config = workspace_config(&repo_root, &branch, &checkout_path, "claude", &config_base);
+                            if let Some((_, tp)) = &registry.terminal_pool {
+                                resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                            }
+                            ws_mgr.create_workspace(&config).await.map_err(|e| format!("workspace creation failed after checkout: {e}"))?;
                         }
-                        ws_mgr.create_workspace(&config).await.map_err(|e| format!("workspace creation failed after checkout: {e}"))?;
                     }
                     Ok(StepOutcome::Completed)
                 })
@@ -307,13 +310,16 @@ async fn build_teleport_session_plan(
                     let teleport_cmd = teleport_slot.lock().await.clone().ok_or_else(|| "Attach command not resolved".to_string())?;
                     let name = branch.as_deref().unwrap_or("session");
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let mut config = workspace_config(&repo_root, name, &path, &teleport_cmd, &config_base);
-                        if let Some((_, tp)) = &registry.terminal_pool {
-                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &path).await.unwrap_or(false);
+                        if !already_exists {
+                            let mut config = workspace_config(&repo_root, name, &path, &teleport_cmd, &config_base);
+                            if let Some((_, tp)) = &registry.terminal_pool {
+                                resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                            }
+                            // Unlike CreateCheckout, teleport fails entirely if the workspace
+                            // can't be created — the checkout may already have existed.
+                            ws_mgr.create_workspace(&config).await?;
                         }
-                        // Unlike CreateCheckout, teleport fails entirely if the workspace
-                        // can't be created — the checkout may already have existed.
-                        ws_mgr.create_workspace(&config).await?;
                     }
                     Ok(StepOutcome::Completed)
                 })
@@ -386,6 +392,23 @@ fn build_remove_checkout_plan(
     ExecutionPlan::Steps(StepPlan::new(steps))
 }
 
+/// Check if a workspace already exists for `checkout_path` and select it.
+/// Returns `true` if an existing workspace was found and selected, `false` otherwise.
+async fn select_existing_workspace(
+    ws_mgr: &dyn crate::providers::workspace::WorkspaceManager,
+    checkout_path: &Path,
+) -> Result<bool, String> {
+    let existing = ws_mgr.list_workspaces().await?;
+    for (ws_ref, ws) in &existing {
+        if ws.directories.iter().any(|d| d == checkout_path) {
+            info!(%ws_ref, path = %checkout_path.display(), "workspace already exists, selecting");
+            ws_mgr.select_workspace(ws_ref).await?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Execute a `Command` against the given repo context.
 ///
 /// Commands that are handled at the daemon level (AddRepo, RemoveRepo, Refresh)
@@ -405,6 +428,13 @@ pub async fn execute(
             if let Some(co) = providers_data.checkouts.get(&host_key).cloned() {
                 info!(branch = %co.branch, "entering workspace");
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
+                    match select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await {
+                        Ok(true) => return CommandResult::Ok,
+                        Err(e) => {
+                            warn!(err = %e, "failed to check existing workspaces, creating new");
+                        }
+                        Ok(false) => {}
+                    }
                     let mut config = workspace_config(repo_root, &co.branch, &checkout_path, "claude", config_base);
                     if let Some((_, tp)) = &registry.terminal_pool {
                         resolve_terminal_pool(&mut config, tp.as_ref()).await;
@@ -452,14 +482,17 @@ pub async fn execute(
                     info!(checkout_path = %checkout_path.display(), "created checkout");
                     // Create workspace if manager available
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let mut config = workspace_config(repo_root, &branch, &checkout_path, "claude", config_base);
-                        if let Some((_, tp)) = &registry.terminal_pool {
-                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                        }
-                        if let Err(e) = ws_mgr.create_workspace(&config).await {
-                            // Checkout was created but workspace failed — report as error
-                            // but the checkout still exists
-                            error!(err = %e, "workspace creation failed after checkout");
+                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await.unwrap_or(false);
+                        if !already_exists {
+                            let mut config = workspace_config(repo_root, &branch, &checkout_path, "claude", config_base);
+                            if let Some((_, tp)) = &registry.terminal_pool {
+                                resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                            }
+                            if let Err(e) = ws_mgr.create_workspace(&config).await {
+                                // Checkout was created but workspace failed — report as error
+                                // but the checkout still exists
+                                error!(err = %e, "workspace creation failed after checkout");
+                            }
                         }
                     }
                     CommandResult::CheckoutCreated { branch: branch.clone(), path: checkout_path }
@@ -639,14 +672,17 @@ pub async fn execute(
             if let Some(path) = wt_path {
                 let name = branch.as_deref().unwrap_or("session");
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                    let mut config = workspace_config(repo_root, name, &path, &teleport_cmd, config_base);
-                    if let Some((_, tp)) = &registry.terminal_pool {
-                        resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                    }
-                    if let Err(e) = ws_mgr.create_workspace(&config).await {
-                        // Unlike CreateCheckout, teleport fails entirely if the workspace
-                        // can't be created — the checkout may already have existed.
-                        return CommandResult::Error { message: e };
+                    let already_exists = select_existing_workspace(ws_mgr.as_ref(), &path).await.unwrap_or(false);
+                    if !already_exists {
+                        let mut config = workspace_config(repo_root, name, &path, &teleport_cmd, config_base);
+                        if let Some((_, tp)) = &registry.terminal_pool {
+                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                        }
+                        if let Err(e) = ws_mgr.create_workspace(&config).await {
+                            // Unlike CreateCheckout, teleport fails entirely if the workspace
+                            // can't be created — the checkout may already have existed.
+                            return CommandResult::Error { message: e };
+                        }
                     }
                 }
                 CommandResult::Ok
@@ -892,19 +928,37 @@ mod tests {
 
     /// A mock WorkspaceManager that records calls and returns configurable results.
     struct MockWorkspaceManager {
+        existing: Vec<(String, Workspace)>,
         create_result: tokio::sync::Mutex<Result<(), String>>,
         select_result: tokio::sync::Mutex<Result<(), String>>,
+        calls: tokio::sync::Mutex<Vec<String>>,
     }
 
     impl MockWorkspaceManager {
         fn succeeding() -> Self {
-            Self { create_result: tokio::sync::Mutex::new(Ok(())), select_result: tokio::sync::Mutex::new(Ok(())) }
+            Self {
+                existing: vec![],
+                create_result: tokio::sync::Mutex::new(Ok(())),
+                select_result: tokio::sync::Mutex::new(Ok(())),
+                calls: tokio::sync::Mutex::new(vec![]),
+            }
         }
 
         fn failing(msg: &str) -> Self {
             Self {
+                existing: vec![],
                 create_result: tokio::sync::Mutex::new(Err(msg.to_string())),
                 select_result: tokio::sync::Mutex::new(Err(msg.to_string())),
+                calls: tokio::sync::Mutex::new(vec![]),
+            }
+        }
+
+        fn with_existing(existing: Vec<(String, Workspace)>) -> Self {
+            Self {
+                existing,
+                create_result: tokio::sync::Mutex::new(Ok(())),
+                select_result: tokio::sync::Mutex::new(Ok(())),
+                calls: tokio::sync::Mutex::new(vec![]),
             }
         }
     }
@@ -912,18 +966,21 @@ mod tests {
     #[async_trait]
     impl WorkspaceManager for MockWorkspaceManager {
         async fn list_workspaces(&self) -> Result<Vec<(String, Workspace)>, String> {
-            Ok(vec![])
+            self.calls.lock().await.push("list_workspaces".to_string());
+            Ok(self.existing.clone())
         }
-        async fn create_workspace(&self, _config: &WorkspaceConfig) -> Result<(String, Workspace), String> {
+        async fn create_workspace(&self, config: &WorkspaceConfig) -> Result<(String, Workspace), String> {
+            self.calls.lock().await.push(format!("create_workspace:{}", config.name));
             let result = self.create_result.lock().await;
             match &*result {
                 Ok(()) => {
-                    Ok(("mock-ref".to_string(), Workspace { name: "mock".to_string(), directories: vec![], correlation_keys: vec![] }))
+                    Ok(("mock-ref".to_string(), Workspace { name: config.name.clone(), directories: vec![], correlation_keys: vec![] }))
                 }
                 Err(e) => Err(e.clone()),
             }
         }
-        async fn select_workspace(&self, _ws_ref: &str) -> Result<(), String> {
+        async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {
+            self.calls.lock().await.push(format!("select_workspace:{ws_ref}"));
             let result = self.select_result.lock().await;
             result.clone()
         }
@@ -1239,6 +1296,81 @@ mod tests {
         let result = run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path: path }, &registry, &data, &runner).await;
 
         assert_error_eq(result, "ws creation failed");
+    }
+
+    #[tokio::test]
+    async fn create_workspace_for_checkout_selects_existing_workspace() {
+        let checkout_path = PathBuf::from("/repo/wt-feat");
+        let existing_workspace = Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
+        let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:42".to_string(), existing_workspace)]));
+
+        let mut registry = empty_registry();
+        registry.workspace_manager = Some((desc("cmux"), ws_mgr.clone()));
+        let mut data = empty_data();
+        data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
+        let runner = runner_ok();
+
+        let result = run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path }, &registry, &data, &runner).await;
+
+        assert_ok(result);
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.contains(&"list_workspaces".to_string()), "should call list_workspaces, got: {calls:?}");
+        assert!(calls.contains(&"select_workspace:workspace:42".to_string()), "should select existing workspace, got: {calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace, got: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn checkout_action_selects_existing_workspace() {
+        let checkout_path = PathBuf::from("/repo/wt-feat-x");
+        let existing_workspace =
+            Workspace { name: "feat-x".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
+        let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:99".to_string(), existing_workspace)]));
+
+        let mut registry = empty_registry();
+        registry
+            .checkout_managers
+            .insert("wt".to_string(), (desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x"))));
+        registry.workspace_manager = Some((desc("cmux"), ws_mgr.clone()));
+        let runner = MockRunner::new(vec![Err("missing".to_string()), Err("missing".to_string())]);
+
+        let result = run_execute(fresh_checkout_action("feat-x"), &registry, &empty_data(), &runner).await;
+
+        assert_checkout_created_branch(result, "feat-x");
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.contains(&"select_workspace:workspace:99".to_string()), "should select existing workspace, got: {calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace, got: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn teleport_session_selects_existing_workspace() {
+        let checkout_path = PathBuf::from("/repo/wt-feat");
+        let existing_workspace = Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
+        let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:77".to_string(), existing_workspace)]));
+
+        let mut registry = empty_registry();
+        registry.cloud_agents.insert("claude".to_string(), (desc("claude"), Arc::new(MockCloudAgent::succeeding())));
+        registry.workspace_manager = Some((desc("cmux"), ws_mgr.clone()));
+        let mut data = empty_data();
+        data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
+        data.sessions.insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
+        let runner = runner_ok();
+
+        let result = run_execute(
+            CommandAction::TeleportSession {
+                session_id: "sess-1".to_string(),
+                branch: Some("feat".to_string()),
+                checkout_key: Some(checkout_path),
+            },
+            &registry,
+            &data,
+            &runner,
+        )
+        .await;
+
+        assert_ok(result);
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.contains(&"select_workspace:workspace:77".to_string()), "should select existing workspace, got: {calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace, got: {calls:?}");
     }
 
     // -----------------------------------------------------------------------
