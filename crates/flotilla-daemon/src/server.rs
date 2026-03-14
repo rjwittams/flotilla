@@ -1,28 +1,25 @@
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use async_trait::async_trait;
 use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon};
-use flotilla_protocol::{
-    Command, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message, PeerConnectionState, PeerDataMessage, PeerWireMessage,
-    PROTOCOL_VERSION,
-};
+use flotilla_protocol::{Command, DaemonEvent, GoodbyeReason, HostName, Message, PeerConnectionState, PeerWireMessage, PROTOCOL_VERSION};
 use tokio::{
     io::{AsyncBufReadExt, BufReader, BufWriter},
     net::UnixListener,
     sync::{mpsc, watch, Mutex, Notify},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
-use crate::peer::{
-    ActivationResult, ConnectionDirection, ConnectionMeta, HandleResult, InboundPeerEnvelope, PeerManager, PeerSender, SshTransport,
+use crate::{
+    peer::{ActivationResult, ConnectionDirection, ConnectionMeta, InboundPeerEnvelope, PeerManager, PeerSender},
+    peer_networking::{disconnect_peer_and_rebuild, PeerConnectedNotice},
 };
 
 struct SocketPeerSender {
@@ -47,14 +44,6 @@ impl PeerSender for SocketPeerSender {
     }
 }
 
-/// Notification sent from connection sites to the outbound task when a
-/// peer connects or reconnects. The outbound task responds by sending
-/// current local state for all repos to the specific peer.
-struct PeerConnectedNotice {
-    peer: HostName,
-    generation: u64,
-}
-
 /// The daemon server that listens on a Unix socket and dispatches requests
 /// to an `InProcessDaemon`.
 pub struct DaemonServer {
@@ -68,9 +57,10 @@ pub struct DaemonServer {
     shutdown_rx: watch::Receiver<bool>,
     /// Channel for inbound peer wire messages tagged with connection authority.
     peer_data_tx: mpsc::Sender<InboundPeerEnvelope>,
-    peer_data_rx: Option<mpsc::Receiver<InboundPeerEnvelope>>,
     /// Manages connections to remote peer hosts and stores their provider data.
     peer_manager: Arc<Mutex<PeerManager>>,
+    /// Peer networking task, consumed by `run()`.
+    peer_networking: Option<crate::peer_networking::PeerNetworkingTask>,
 }
 
 impl DaemonServer {
@@ -87,40 +77,12 @@ impl DaemonServer {
     ) -> Result<Self, String> {
         let daemon_config = config.load_daemon_config();
         let host_name = daemon_config.host_name.map(HostName::new).unwrap_or_else(HostName::local);
-        let hosts_config = config.load_hosts()?;
 
-        let peer_count = hosts_config.hosts.len();
-        let mut peer_manager = PeerManager::new(host_name.clone());
-        for (name, host_config) in hosts_config.hosts {
-            let peer_host = HostName::new(&host_config.expected_host_name);
-            if peer_host == host_name {
-                warn!(
-                    host = %host_name,
-                    "peer config uses same name as local host — messages will be ignored"
-                );
-            }
-            match SshTransport::new(host_name.clone(), ConfigLabel(name.clone()), host_config) {
-                Ok(transport) => {
-                    peer_manager.add_peer(peer_host, Box::new(transport));
-                }
-                Err(e) => {
-                    warn!(host = %name, err = %e, "skipping peer with invalid host name");
-                }
-            }
-        }
+        let daemon = InProcessDaemon::new_with_options(repo_paths, config.clone(), daemon_config.follower, host_name).await;
 
-        info!(
-            host = %host_name,
-            %peer_count,
-            "initialized PeerManager"
-        );
+        let (peer_networking, peer_manager, peer_data_tx) = crate::peer_networking::PeerNetworkingTask::new(Arc::clone(&daemon), &config)?;
 
-        let daemon = InProcessDaemon::new_with_options(repo_paths, config, daemon_config.follower, host_name.clone()).await;
-        for peer_host in peer_manager.configured_peer_names() {
-            daemon.send_event(DaemonEvent::PeerStatusChanged { host: peer_host, status: PeerConnectionState::Disconnected });
-        }
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (peer_data_tx, peer_data_rx) = mpsc::channel(256);
 
         Ok(Self {
             daemon,
@@ -132,17 +94,9 @@ impl DaemonServer {
             shutdown_tx,
             shutdown_rx,
             peer_data_tx,
-            peer_data_rx: Some(peer_data_rx),
-            peer_manager: Arc::new(Mutex::new(peer_manager)),
+            peer_manager,
+            peer_networking: Some(peer_networking),
         })
-    }
-
-    /// Take the receiver for inbound peer data messages.
-    ///
-    /// Returns `Some` on the first call, `None` thereafter. The PeerManager
-    /// consumes this to process data arriving from peer daemons.
-    pub fn take_peer_data_rx(&mut self) -> Option<mpsc::Receiver<InboundPeerEnvelope>> {
-        self.peer_data_rx.take()
     }
 
     /// Run the server, accepting connections until idle timeout or shutdown signal.
@@ -161,9 +115,6 @@ impl DaemonServer {
 
         info!(path = %self.socket_path.display(), "daemon listening");
 
-        // Take peer_data_rx before destructuring self
-        let peer_data_rx = self.take_peer_data_rx();
-
         let daemon = self.daemon;
         let client_count = self.client_count;
         let shutdown_tx = self.shutdown_tx;
@@ -172,7 +123,13 @@ impl DaemonServer {
         let socket_path = self.socket_path.clone();
         let client_notify = self.client_notify;
         let peer_data_tx = self.peer_data_tx;
-        let (peer_connected_tx, peer_connected_rx) = mpsc::unbounded_channel::<PeerConnectedNotice>();
+        let peer_manager = self.peer_manager;
+
+        // Spawn peer networking task — returns a peer_connected_tx that
+        // handle_client uses to notify the outbound broadcaster when
+        // socket peers connect.
+        let peer_networking = self.peer_networking.take().expect("run() called twice");
+        let (_peer_handle, peer_connected_tx) = peer_networking.spawn();
 
         // Spawn idle timeout watcher (disabled for follower-mode daemons
         // which serve peer connections and should stay up indefinitely)
@@ -211,417 +168,6 @@ impl DaemonServer {
         } else {
             info!("follower mode: idle timeout disabled");
         }
-
-        // Spawn peer manager background task
-        let peer_manager = self.peer_manager;
-        let outbound_peer_manager = Arc::clone(&peer_manager);
-        let peer_manager_task = Arc::clone(&peer_manager);
-        let peer_data_tx_for_ssh = peer_data_tx.clone();
-        let peer_connected_tx_for_ssh = peer_connected_tx.clone();
-        let peer_daemon = Arc::clone(&daemon);
-        tokio::spawn(async move {
-            if let Some(mut rx) = peer_data_rx {
-                let mut resync_sweep = tokio::time::interval(Duration::from_secs(5));
-                // Connect all peers and collect initial receivers into a map
-                let mut initial_rx_map: HashMap<HostName, (u64, mpsc::Receiver<PeerWireMessage>)> = HashMap::new();
-                let peer_names = {
-                    let mut pm = peer_manager_task.lock().await;
-                    let names = pm.configured_peer_names();
-                    for (name, generation, rx) in pm.connect_all().await {
-                        initial_rx_map.insert(name, (generation, rx));
-                    }
-                    names
-                };
-
-                // Spawn resilient per-peer forwarding tasks with reconnect loop.
-                // On disconnect, stale peer data is cleared from the daemon overlay
-                // so the UI doesn't show checkouts from unreachable hosts.
-                // Emit initial connecting status for all peers
-                for name in &peer_names {
-                    peer_daemon.send_event(DaemonEvent::PeerStatusChanged { host: name.clone(), status: PeerConnectionState::Connecting });
-                }
-
-                // Emit connected/disconnected based on initial connect results
-                for name in &peer_names {
-                    let status =
-                        if initial_rx_map.contains_key(name) { PeerConnectionState::Connected } else { PeerConnectionState::Disconnected };
-                    peer_daemon.send_event(DaemonEvent::PeerStatusChanged { host: name.clone(), status });
-                }
-
-                for peer_name in peer_names {
-                    let tx = peer_data_tx_for_ssh.clone();
-                    let pm = Arc::clone(&peer_manager_task);
-                    let daemon_for_cleanup = Arc::clone(&peer_daemon);
-                    let initial_rx = initial_rx_map.remove(&peer_name);
-                    let peer_connected_tx_clone = peer_connected_tx_for_ssh.clone();
-
-                    tokio::spawn(async move {
-                        // Forward from initial connection if available
-                        if let Some((generation, mut inbound_rx)) = initial_rx {
-                            let _ = peer_connected_tx_clone.send(PeerConnectedNotice { peer: peer_name.clone(), generation });
-                            if !forward_until_closed(&tx, &mut inbound_rx, &peer_name, generation).await {
-                                return; // Main channel closed, stop entirely
-                            }
-                            info!(peer = %peer_name, "SSH connection dropped, will reconnect");
-                            let plan = disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
-                            if plan.was_active {
-                                daemon_for_cleanup.send_event(DaemonEvent::PeerStatusChanged {
-                                    host: peer_name.clone(),
-                                    status: PeerConnectionState::Disconnected,
-                                });
-                            }
-                        }
-
-                        // Reconnect loop with exponential backoff
-                        let mut attempt: u32 = 1;
-                        loop {
-                            if let Some(delay) = {
-                                let mut pm = pm.lock().await;
-                                pm.reconnect_suppressed_until(&peer_name).map(|deadline| deadline.saturating_duration_since(Instant::now()))
-                            } {
-                                info!(
-                                    peer = %peer_name,
-                                    delay_secs = delay.as_secs(),
-                                    "reconnect suppressed after peer retirement"
-                                );
-                                tokio::time::sleep(delay).await;
-                                attempt = 1;
-                                continue;
-                            }
-                            daemon_for_cleanup.send_event(DaemonEvent::PeerStatusChanged {
-                                host: peer_name.clone(),
-                                status: PeerConnectionState::Reconnecting,
-                            });
-                            let delay = SshTransport::backoff_delay(attempt);
-                            info!(
-                                peer = %peer_name,
-                                %attempt,
-                                delay_secs = delay.as_secs(),
-                                "reconnecting after backoff"
-                            );
-                            tokio::time::sleep(delay).await;
-
-                            let reconnect_result = {
-                                let mut pm = pm.lock().await;
-                                pm.reconnect_peer(&peer_name).await
-                            };
-
-                            match reconnect_result {
-                                Ok((generation, mut inbound_rx)) => {
-                                    info!(peer = %peer_name, "reconnected successfully");
-                                    daemon_for_cleanup.send_event(DaemonEvent::PeerStatusChanged {
-                                        host: peer_name.clone(),
-                                        status: PeerConnectionState::Connected,
-                                    });
-                                    let _ = peer_connected_tx_clone.send(PeerConnectedNotice { peer: peer_name.clone(), generation });
-                                    attempt = 1;
-                                    if !forward_until_closed(&tx, &mut inbound_rx, &peer_name, generation).await {
-                                        return;
-                                    }
-                                    info!(
-                                        peer = %peer_name,
-                                        "SSH connection dropped, will reconnect"
-                                    );
-                                    let plan = disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
-                                    if plan.was_active {
-                                        daemon_for_cleanup.send_event(DaemonEvent::PeerStatusChanged {
-                                            host: peer_name.clone(),
-                                            status: PeerConnectionState::Disconnected,
-                                        });
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        peer = %peer_name,
-                                        err = %e,
-                                        %attempt,
-                                        "reconnection failed"
-                                    );
-                                    attempt = attempt.saturating_add(1);
-                                }
-                            }
-                        }
-                    });
-                }
-
-                // Process inbound peer data.
-                // Persistent clock for reply messages (resync responses).
-                let mut reply_clock = flotilla_protocol::VectorClock::default();
-
-                loop {
-                    tokio::select! {
-                        maybe_env = rx.recv() => {
-                            let Some(env) = maybe_env else {
-                                break;
-                            };
-                    let (origin, repo_path) = match &env.msg {
-                        PeerWireMessage::Data(msg) => {
-                            (msg.origin_host.clone(), msg.repo_path.clone())
-                        }
-                        PeerWireMessage::Routed(
-                            flotilla_protocol::RoutedPeerMessage::ResyncSnapshot {
-                                responder_host,
-                                repo_path,
-                                ..
-                            },
-                        ) => (responder_host.clone(), repo_path.clone()),
-                        PeerWireMessage::Routed(_) => (env.connection_peer.clone(), PathBuf::new()),
-                        PeerWireMessage::Goodbye { .. } => {
-                            (env.connection_peer.clone(), PathBuf::new())
-                        }
-                    };
-
-                    let mut pm = peer_manager_task.lock().await;
-
-                    if let PeerWireMessage::Data(msg) = &env.msg {
-                        pm.relay(&origin, msg).await;
-                    }
-
-                    // Then handle locally
-                    let result = pm.handle_inbound(env).await;
-                    match result {
-                        HandleResult::Updated(ref updated_repo_id) => {
-                            // Collect all peer data for this repo identity
-                            let peers: Vec<(HostName, flotilla_protocol::ProviderData)> = pm
-                                .get_peer_data()
-                                .iter()
-                                .filter_map(|(host, repos)| {
-                                    repos
-                                        .get(updated_repo_id)
-                                        .map(|state| (host.clone(), state.provider_data.clone()))
-                                })
-                                .collect();
-
-                            // Drop the lock before async daemon calls
-                            drop(pm);
-
-                            // Find local repo or create virtual repo
-                            if let Some(local_path) =
-                                peer_daemon.find_repo_by_identity(updated_repo_id).await
-                            {
-                                debug!(
-                                    repo = %updated_repo_id,
-                                    path = %local_path.display(),
-                                    peer_count = peers.len(),
-                                    "updating local repo with peer data"
-                                );
-                                peer_daemon.set_peer_providers(&local_path, peers).await;
-                            } else {
-                                // Remote-only repo — create or update virtual repo
-                                let synthetic =
-                                    crate::peer::synthetic_repo_path(&origin, &repo_path);
-                                debug!(
-                                    repo = %updated_repo_id,
-                                    path = %synthetic.display(),
-                                    "creating/updating virtual repo for remote-only peer"
-                                );
-
-                                // Build merged provider data for virtual repo
-                                let merged = crate::peer::merge_provider_data(
-                                    &flotilla_protocol::ProviderData::default(),
-                                    peer_daemon.host_name(),
-                                    &peers
-                                        .iter()
-                                        .map(|(h, d)| (h.clone(), d))
-                                        .collect::<Vec<_>>(),
-                                );
-
-                                if let Err(e) = peer_daemon
-                                    .add_virtual_repo(synthetic.clone(), merged)
-                                    .await
-                                {
-                                    warn!(
-                                        repo = %updated_repo_id,
-                                        err = %e,
-                                        "failed to add virtual repo"
-                                    );
-                                } else {
-                                    // Also set peer providers on the virtual repo
-                                    // so future merges work correctly
-                                    peer_daemon.set_peer_providers(&synthetic, peers).await;
-
-                                    // Register in PeerManager
-                                    let mut pm2 = peer_manager_task.lock().await;
-                                    pm2.register_remote_repo(updated_repo_id.clone(), synthetic);
-                                }
-                            }
-                        }
-                        HandleResult::ResyncRequested {
-                            request_id,
-                            requester_host,
-                            reply_via,
-                            repo,
-                            since_seq: _, // Phase 1: always send full snapshot
-                        } => {
-                            let local_host = pm.local_host().clone();
-
-                            // Send local-only providers (not merged) back to requesting peer
-                            if let Some(local_path) = peer_daemon.find_repo_by_identity(&repo).await
-                            {
-                                if let Some((local_providers, seq)) =
-                                    peer_daemon.get_local_providers(&local_path).await
-                                {
-                                    reply_clock.tick(&local_host);
-                                    let response_clock = reply_clock.clone();
-                                    let response_repo = repo.clone();
-                                    let response_repo_path = local_path.clone();
-                                    let response_host = local_host.clone();
-                                    let response_data = local_providers.clone();
-                                    if let Err(e) = pm
-                                        .send_to(
-                                            &reply_via,
-                                            PeerWireMessage::Routed(
-                                                flotilla_protocol::RoutedPeerMessage::ResyncSnapshot {
-                                                    request_id,
-                                                    requester_host: requester_host.clone(),
-                                                    responder_host: response_host,
-                                                    remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
-                                                    repo_identity: response_repo,
-                                                    repo_path: response_repo_path,
-                                                    clock: response_clock,
-                                                    seq,
-                                                    data: Box::new(response_data),
-                                                },
-                                            ),
-                                        )
-                                        .await
-                                    {
-                                        warn!(
-                                            peer = %reply_via,
-                                            err = %e,
-                                            "failed to send resync response"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        HandleResult::NeedsResync { from, repo } => {
-                            let local_host = pm.local_host().clone();
-                            let request_id =
-                                pm.note_pending_resync_request(from.clone(), repo.clone());
-                            if let Err(e) = pm
-                                .send_to(
-                                    &from,
-                                    PeerWireMessage::Routed(
-                                        flotilla_protocol::RoutedPeerMessage::RequestResync {
-                                            request_id,
-                                            requester_host: local_host,
-                                            target_host: from.clone(),
-                                            remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
-                                            repo_identity: repo,
-                                            since_seq: 0,
-                                        },
-                                    ),
-                                )
-                                .await
-                            {
-                                warn!(
-                                    peer = %from,
-                                    err = %e,
-                                    "failed to send resync request"
-                                );
-                            }
-                        }
-                        HandleResult::ReconnectSuppressed { peer } => {
-                            info!(peer = %peer, "peer requested reconnect suppression");
-                        }
-                        HandleResult::Ignored => {}
-                    }
-                        }
-                        _ = resync_sweep.tick() => {
-                            let expired_repos = {
-                                let mut pm = peer_manager_task.lock().await;
-                                pm.sweep_expired_resyncs(Instant::now())
-                            };
-                            if !expired_repos.is_empty() {
-                                rebuild_peer_overlays(&peer_manager_task, &peer_daemon, expired_repos).await;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        // Spawn outbound task: forward local snapshots to peers as PeerDataMessages.
-        // Uses local-only providers (no peer overlay) to avoid echoing peer data back.
-        // Maintains a persistent vector clock so each message has a strictly increasing clock.
-        // Sends to both configured SSH transports (PeerManager) and inbound peer clients
-        // (peers that connected to us via socket).
-        //
-        // Also listens for PeerConnectedNotice to send current local state to
-        // newly connected peers that would otherwise receive nothing until the
-        // next local change.
-        let outbound_daemon = Arc::clone(&daemon);
-        let mut peer_connected_rx = peer_connected_rx;
-        tokio::spawn(async move {
-            let mut event_rx = outbound_daemon.subscribe();
-            let mut outbound_clock = flotilla_protocol::VectorClock::default();
-            let host_name = outbound_daemon.host_name().clone();
-            let mut last_sent_versions: std::collections::HashMap<std::path::PathBuf, u64> = std::collections::HashMap::new();
-
-            loop {
-                tokio::select! {
-                    notice = peer_connected_rx.recv() => {
-                        let Some(notice) = notice else { break };
-                        debug!(peer = %notice.peer, generation = notice.generation, "sending local state to newly connected peer");
-                        send_local_to_peer(
-                            &outbound_daemon,
-                            &outbound_peer_manager,
-                            &host_name,
-                            &mut outbound_clock,
-                            &notice.peer,
-                            notice.generation,
-                        )
-                        .await;
-                    }
-                    event = event_rx.recv() => {
-                        let repo_path = match event {
-                            Ok(DaemonEvent::SnapshotFull(snapshot)) => Some(snapshot.repo.clone()),
-                            Ok(DaemonEvent::SnapshotDelta(delta)) => Some(delta.repo.clone()),
-                            Ok(_) => None,
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                warn!(skipped = n, "outbound peer event subscriber lagged");
-                                None
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                break;
-                            }
-                        };
-                        if let Some(repo_path) = repo_path {
-                            // Only send to peers when local data has actually changed.
-                            // get_local_providers returns a local_data_version that only
-                            // increments on local changes (provider refreshes, issue
-                            // updates, searches), not peer data merges. This prevents a
-                            // feedback loop where peer data triggers re-sending unchanged
-                            // local data back to peers endlessly.
-                            let Some((local_providers, version)) = outbound_daemon.get_local_providers(&repo_path).await else {
-                                continue;
-                            };
-                            let last = last_sent_versions.get(&repo_path).copied().unwrap_or(0);
-                            if version <= last {
-                                continue;
-                            }
-                            let sent = send_local_to_peers(
-                                &outbound_daemon,
-                                &outbound_peer_manager,
-                                &host_name,
-                                &mut outbound_clock,
-                                &repo_path,
-                                local_providers,
-                                version,
-                            )
-                            .await;
-                            // Only record the version as sent if at least one peer
-                            // received it. Otherwise a version produced while no peers
-                            // are connected would be suppressed forever on reconnect.
-                            if sent {
-                                last_sent_versions.insert(repo_path, version);
-                            }
-                        }
-                    }
-                }
-            }
-        });
 
         // SIGTERM handler
         let mut sigterm =
@@ -685,273 +231,6 @@ impl DaemonServer {
         info!("daemon server stopped");
         Ok(())
     }
-}
-
-/// Rebuild daemon overlays for repo identities affected by peer disconnect or failover.
-async fn rebuild_peer_overlays(
-    peer_manager: &Arc<Mutex<PeerManager>>,
-    daemon: &Arc<InProcessDaemon>,
-    affected_repos: Vec<flotilla_protocol::RepoIdentity>,
-) {
-    for repo_id in affected_repos {
-        if let Some(local_path) = daemon.find_repo_by_identity(&repo_id).await {
-            // Local repo — rebuild its peer overlay from remaining peers
-            let peers: Vec<(HostName, flotilla_protocol::ProviderData)> = {
-                let pm = peer_manager.lock().await;
-                pm.get_peer_data()
-                    .iter()
-                    .filter_map(|(host, repos)| repos.get(&repo_id).map(|state| (host.clone(), state.provider_data.clone())))
-                    .collect()
-            };
-            daemon.set_peer_providers(&local_path, peers).await;
-        } else {
-            // Remote-only repo — rebuild or remove depending on remaining peers
-            let mut pm = peer_manager.lock().await;
-            if pm.has_peer_data_for(&repo_id) {
-                // Still has peer data — re-merge from remaining peers
-                let peers: Vec<(HostName, flotilla_protocol::ProviderData)> = pm
-                    .get_peer_data()
-                    .iter()
-                    .filter_map(|(host, repos)| repos.get(&repo_id).map(|state| (host.clone(), state.provider_data.clone())))
-                    .collect();
-
-                if let Some(synthetic_path) = pm.known_remote_repos().get(&repo_id).cloned() {
-                    drop(pm);
-                    daemon.set_peer_providers(&synthetic_path, peers).await;
-                }
-            } else if let Some(synthetic_path) = pm.unregister_remote_repo(&repo_id) {
-                // No peers remain — remove the virtual tab
-                drop(pm);
-                info!(
-                    repo = %repo_id,
-                    path = %synthetic_path.display(),
-                    "removing virtual repo — no peers remaining"
-                );
-                if let Err(e) = daemon.remove_repo(&synthetic_path).await {
-                    warn!(
-                        repo = %repo_id,
-                        err = %e,
-                        "failed to remove virtual repo"
-                    );
-                }
-            }
-        }
-    }
-}
-
-async fn dispatch_resync_requests(peer_manager: &Arc<Mutex<PeerManager>>, requests: Vec<flotilla_protocol::RoutedPeerMessage>) {
-    for request in requests {
-        let target = match &request {
-            flotilla_protocol::RoutedPeerMessage::RequestResync { target_host, .. } => target_host.clone(),
-            flotilla_protocol::RoutedPeerMessage::ResyncSnapshot { requester_host, .. } => requester_host.clone(),
-        };
-        let sender = {
-            let pm = peer_manager.lock().await;
-            pm.resolve_sender(&target)
-        };
-        let sender = match sender {
-            Ok(sender) => sender,
-            Err(e) => {
-                warn!(peer = %target, err = %e, "failed to resolve routed resync sender");
-                continue;
-            }
-        };
-        if let Err(e) = sender.send(PeerWireMessage::Routed(request)).await {
-            warn!(peer = %target, err = %e, "failed to dispatch routed resync request");
-        }
-    }
-}
-
-async fn disconnect_peer_and_rebuild(
-    peer_manager: &Arc<Mutex<PeerManager>>,
-    daemon: &Arc<InProcessDaemon>,
-    peer_name: &HostName,
-    generation: u64,
-) -> crate::peer::DisconnectPlan {
-    let mut plan = {
-        let mut pm = peer_manager.lock().await;
-        pm.disconnect_peer(peer_name, generation)
-    };
-
-    // Apply pre-computed overlay updates outside the PeerManager lock.
-    // Identity → path is resolved here at apply time (not at computation time)
-    // to avoid TOCTOU with concurrent add_repo/remove_repo.
-    //
-    // Note: a residual apply-ordering race exists here. Between releasing
-    // the PM lock above and calling set_peer_providers below, the central
-    // processor can accept fresh inbound data and call set_peer_providers
-    // via the HandleResult::Updated path. Because set_peer_providers is a
-    // blind replace, this apply could overwrite that newer data. This is
-    // the same read-then-apply pattern shared by ALL overlay write paths
-    // (including the central processor itself). The effect is transient:
-    // the next inbound message for the affected repo will re-apply the
-    // correct state. Fully fixing this requires versioned/conditional
-    // set_peer_providers, which is a broader change tracked separately.
-    for update in &plan.overlay_updates {
-        match update {
-            crate::peer::OverlayUpdate::SetProviders { identity, peers } => {
-                // Resolve identity to current local path. For remote-only repos,
-                // the path comes from known_remote_repos (already resolved in the plan).
-                // For local repos that were removed concurrently, find_repo_by_identity
-                // returns None and we skip — the repo is gone, no overlay needed.
-                if let Some(local_path) = daemon.find_repo_by_identity(identity).await {
-                    daemon.set_peer_providers(&local_path, peers.clone()).await;
-                } else if let Some(synthetic_path) = {
-                    let pm = peer_manager.lock().await;
-                    pm.known_remote_repos().get(identity).cloned()
-                } {
-                    daemon.set_peer_providers(&synthetic_path, peers.clone()).await;
-                }
-            }
-            crate::peer::OverlayUpdate::RemoveRepo { identity, path } => {
-                info!(
-                    repo = %identity,
-                    path = %path.display(),
-                    "removing virtual repo — no peers remaining"
-                );
-                if let Err(e) = daemon.remove_repo(path).await {
-                    warn!(
-                        repo = %identity,
-                        err = %e,
-                        "failed to remove virtual repo"
-                    );
-                }
-            }
-        }
-    }
-
-    let resync_requests = std::mem::take(&mut plan.resync_requests);
-    dispatch_resync_requests(peer_manager, resync_requests).await;
-    plan
-}
-
-/// Send local-only provider data to all peers for a given repo.
-///
-/// Called by the outbound task whenever any snapshot event (full or delta)
-/// indicates local data changed. Always sends a full snapshot to peers —
-/// peer replication doesn't use deltas.
-///
-/// Sends to both configured SSH transports (outbound peers we connected to)
-/// and inbound peer clients (peers that connected to our socket).
-/// Send local provider data to all connected peers.
-/// Returns `true` if at least one peer was successfully sent to.
-async fn send_local_to_peers(
-    daemon: &Arc<InProcessDaemon>,
-    peer_manager: &Arc<Mutex<PeerManager>>,
-    host_name: &HostName,
-    clock: &mut flotilla_protocol::VectorClock,
-    repo_path: &std::path::Path,
-    local_providers: flotilla_protocol::ProviderData,
-    local_data_version: u64,
-) -> bool {
-    let Some(identity) = daemon.find_identity_for_path(repo_path).await else {
-        return false;
-    };
-
-    clock.tick(host_name);
-    let msg = PeerDataMessage {
-        origin_host: host_name.clone(),
-        repo_identity: identity,
-        repo_path: repo_path.to_path_buf(),
-        clock: clock.clone(),
-        kind: flotilla_protocol::PeerDataKind::Snapshot { data: Box::new(local_providers), seq: local_data_version },
-    };
-
-    // Send to all active peers, including direct socket peers.
-    let peer_senders = {
-        let pm = peer_manager.lock().await;
-        pm.active_peer_senders()
-    };
-    let mut any_sent = false;
-    for (peer_name, sender) in peer_senders {
-        if let Err(e) = sender.send(PeerWireMessage::Data(msg.clone())).await {
-            debug!(peer = %peer_name, err = %e, "failed to send snapshot to peer");
-        } else {
-            any_sent = true;
-        }
-    }
-    any_sent
-}
-
-/// Send current local state for all repos to a specific newly-connected peer.
-///
-/// Unlike `send_local_to_peers` (which broadcasts), this targets a single peer
-/// that has just connected and has no state. Bypasses `last_sent_versions` since
-/// the peer needs everything regardless of what was previously sent to others.
-///
-/// The generation guard ensures this is a no-op if the connection has already
-/// been superseded between the notice being sent and this function running.
-async fn send_local_to_peer(
-    daemon: &Arc<InProcessDaemon>,
-    peer_manager: &Arc<Mutex<PeerManager>>,
-    host_name: &HostName,
-    clock: &mut flotilla_protocol::VectorClock,
-    peer: &HostName,
-    generation: u64,
-) -> bool {
-    let repo_paths = daemon.tracked_repo_paths().await;
-    let mut any_sent = false;
-
-    // Resolve the sender once before iterating repos. If the connection
-    // has already been superseded, skip the entire loop.
-    let sender = {
-        let pm = peer_manager.lock().await;
-        pm.get_sender_if_current(peer, generation)
-    };
-    let Some(sender) = sender else {
-        debug!(peer = %peer, "peer connection superseded, skipping local state send");
-        return false;
-    };
-
-    for repo_path in repo_paths {
-        let Some((local_providers, version)) = daemon.get_local_providers(&repo_path).await else {
-            continue;
-        };
-        // Skip uninitialized repos (version 0 = not yet refreshed). Sending
-        // empty data with a fresh vector clock would overwrite the peer's
-        // existing state. The peer will receive data on first local refresh.
-        if version == 0 {
-            continue;
-        }
-        let Some(identity) = daemon.find_identity_for_path(&repo_path).await else {
-            continue;
-        };
-
-        clock.tick(host_name);
-        let msg = PeerDataMessage {
-            origin_host: host_name.clone(),
-            repo_identity: identity,
-            repo_path: repo_path.clone(),
-            clock: clock.clone(),
-            kind: flotilla_protocol::PeerDataKind::Snapshot { data: Box::new(local_providers), seq: version },
-        };
-
-        if let Err(e) = sender.send(PeerWireMessage::Data(msg)).await {
-            debug!(peer = %peer, err = %e, "failed to send local state to peer");
-        } else {
-            any_sent = true;
-        }
-    }
-    any_sent
-}
-
-/// Forward messages from an inbound receiver to the shared peer_data channel.
-///
-/// Returns `true` if the inbound receiver was closed (connection dropped),
-/// `false` if the outbound channel was closed (daemon shutting down).
-async fn forward_until_closed(
-    tx: &mpsc::Sender<InboundPeerEnvelope>,
-    inbound_rx: &mut mpsc::Receiver<PeerWireMessage>,
-    peer_name: &HostName,
-    generation: u64,
-) -> bool {
-    while let Some(msg) = inbound_rx.recv().await {
-        if let Err(e) = tx.send(InboundPeerEnvelope { msg, connection_generation: generation, connection_peer: peer_name.clone() }).await {
-            warn!(peer = %peer_name, err = %e, "forwarding channel closed");
-            return false;
-        }
-    }
-    true
 }
 
 /// Write a JSON message followed by a newline to the writer.
@@ -1073,7 +352,7 @@ async fn handle_client(
             info!(%count, "client disconnected");
             client_notify.notify_one();
         }
-        Message::Hello { protocol_version, host_name } => {
+        Message::Hello { protocol_version, host_name, session_id } => {
             if protocol_version != PROTOCOL_VERSION {
                 warn!(
                     peer = %host_name,
@@ -1081,15 +360,27 @@ async fn handle_client(
                     got = protocol_version,
                     "peer protocol version mismatch"
                 );
+                daemon.send_event(DaemonEvent::PeerStatusChanged {
+                    host: host_name,
+                    status: PeerConnectionState::Rejected {
+                        reason: format!("protocol mismatch (local={}, remote={})", PROTOCOL_VERSION, protocol_version),
+                    },
+                });
                 return;
             }
 
-            if write_message(&writer, &Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: daemon.host_name().clone() })
-                .await
-                .is_err()
+            if write_message(&writer, &Message::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                host_name: daemon.host_name().clone(),
+                session_id: daemon.session_id(),
+            })
+            .await
+            .is_err()
             {
                 return;
             }
+
+            let remote_session_id = Some(session_id);
 
             let (outbound_tx, mut outbound_rx) = mpsc::channel::<Message>(64);
             let relay_writer = Arc::clone(&writer);
@@ -1112,6 +403,7 @@ async fn handle_client(
                         expected_peer: None,
                         config_backed: false,
                     },
+                    remote_session_id,
                 ) {
                     ActivationResult::Accepted { generation, displaced } => (generation, displaced),
                     ActivationResult::Rejected { reason } => {
@@ -1147,6 +439,15 @@ async fn handle_client(
                                 };
                                 match msg {
                                     Message::Peer(peer_msg) => {
+                                        // Handle keepalive Pings at this layer — respond
+                                        // with Pong directly via the outbound channel so the
+                                        // remote SSH transport's keepalive timer resets.
+                                        if let PeerWireMessage::Ping { timestamp } = *peer_msg {
+                                            let _ = outbound_tx
+                                                .send(Message::Peer(Box::new(PeerWireMessage::Pong { timestamp })))
+                                                .await;
+                                            continue;
+                                        }
                                         if let Err(e) = peer_data_tx.send(InboundPeerEnvelope {
                                             msg: *peer_msg,
                                             connection_generation: generation,
@@ -1343,7 +644,7 @@ fn extract_str_param(params: &serde_json::Value, field: &str) -> Result<String, 
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{collections::HashMap, path::Path};
 
     use flotilla_protocol::{
         Checkout, DaemonEvent, HostName, HostPath, PeerDataKind, PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RepoInfo,
@@ -1507,16 +808,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn take_peer_data_rx_returns_some_once() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-        let mut server = DaemonServer::new(vec![], config, tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
-
-        assert!(server.take_peer_data_rx().is_some(), "first call should return Some");
-        assert!(server.take_peer_data_rx().is_none(), "second call should return None");
-    }
-
-    #[tokio::test]
     async fn daemon_server_replays_configured_hosts_as_disconnected() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().join("config");
@@ -1583,13 +874,14 @@ mod tests {
         let mut reader = BufReader::new(read_half).lines();
         let mut writer = BufWriter::new(write_half);
 
-        let hello = Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: HostName::new("remote-host") };
+        let hello =
+            Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: HostName::new("remote-host"), session_id: uuid::Uuid::nil() };
         flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");
 
         let line = reader.next_line().await.expect("read hello response").expect("hello line");
         let hello_back: Message = serde_json::from_str(&line).expect("parse hello");
         match hello_back {
-            Message::Hello { protocol_version, host_name } => {
+            Message::Hello { protocol_version, host_name, .. } => {
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
                 assert_eq!(host_name, expected_local_host);
             }
@@ -1733,7 +1025,8 @@ mod tests {
         let mut reader = BufReader::new(read_half).lines();
         let mut writer = BufWriter::new(write_half);
 
-        let hello = Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: HostName::new("relay-target") };
+        let hello =
+            Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: HostName::new("relay-target"), session_id: uuid::Uuid::nil() };
         flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");
         let _ = reader.next_line().await.expect("read hello").expect("line");
 
@@ -1812,7 +1105,8 @@ mod tests {
             let (read_half, write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half).lines();
             let mut writer = BufWriter::new(write_half);
-            let hello = Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: HostName::new("peer") };
+            let hello =
+                Message::Hello { protocol_version: PROTOCOL_VERSION, host_name: HostName::new("peer"), session_id: uuid::Uuid::nil() };
             flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");
 
             let line = reader.next_line().await.expect("read hello response").expect("hello response line");
