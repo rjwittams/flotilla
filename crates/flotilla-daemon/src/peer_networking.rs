@@ -270,6 +270,7 @@ impl PeerNetworkingTask {
                                         status: PeerConnectionState::Connected,
                                     });
                                     let _ = peer_connected_tx_clone.send(PeerConnectedNotice { peer: peer_name.clone(), generation });
+                                    attempt = 1; // Reset backoff on any successful reconnect
                                     let sender = {
                                         let pm_lock = pm.lock().await;
                                         pm_lock.get_sender_if_current(&peer_name, generation)
@@ -286,7 +287,6 @@ impl PeerNetworkingTask {
                                         }
                                         ForwardResult::KeepaliveTimeout => {
                                             info!(peer = %peer_name, "keepalive timeout, forcing reconnect");
-                                            attempt = 1; // Fresh detection, not repeated failure
                                         }
                                     }
                                     let plan = disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
@@ -890,7 +890,7 @@ async fn forward_with_keepalive(
     generation: u64,
     sender: Arc<dyn PeerSender>,
 ) -> ForwardResult {
-    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+    let mut ping_interval = tokio::time::interval_at(tokio::time::Instant::now() + PING_INTERVAL, PING_INTERVAL);
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_message_at = Instant::now();
 
