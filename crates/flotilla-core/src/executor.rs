@@ -311,16 +311,14 @@ async fn build_teleport_session_plan(
                     let teleport_cmd = teleport_slot.lock().await.clone().ok_or_else(|| "Attach command not resolved".to_string())?;
                     let name = branch.as_deref().unwrap_or("session");
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &path).await;
-                        if !already_exists {
-                            let mut config = workspace_config(&repo_root, name, &path, &teleport_cmd, &config_base);
-                            if let Some((_, tp)) = &registry.terminal_pool {
-                                resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                            }
-                            // Unlike CreateCheckout, teleport fails entirely if the workspace
-                            // can't be created — the checkout may already have existed.
-                            ws_mgr.create_workspace(&config).await?;
+                        let mut config = workspace_config(&repo_root, name, &path, &teleport_cmd, &config_base);
+                        if let Some((_, tp)) = &registry.terminal_pool {
+                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
                         }
+                        // Teleport always creates a new workspace — the attach command is
+                        // session-specific, so reusing an existing workspace would attach
+                        // to the wrong session.
+                        ws_mgr.create_workspace(&config).await?;
                     }
                     Ok(StepOutcome::Completed)
                 })
@@ -676,17 +674,15 @@ pub async fn execute(
             if let Some(path) = wt_path {
                 let name = branch.as_deref().unwrap_or("session");
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                    let already_exists = select_existing_workspace(ws_mgr.as_ref(), &path).await;
-                    if !already_exists {
-                        let mut config = workspace_config(repo_root, name, &path, &teleport_cmd, config_base);
-                        if let Some((_, tp)) = &registry.terminal_pool {
-                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                        }
-                        if let Err(e) = ws_mgr.create_workspace(&config).await {
-                            // Unlike CreateCheckout, teleport fails entirely if the workspace
-                            // can't be created — the checkout may already have existed.
-                            return CommandResult::Error { message: e };
-                        }
+                    let mut config = workspace_config(repo_root, name, &path, &teleport_cmd, config_base);
+                    if let Some((_, tp)) = &registry.terminal_pool {
+                        resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                    }
+                    // Teleport always creates a new workspace — the attach command is
+                    // session-specific, so reusing an existing workspace would attach
+                    // to the wrong session.
+                    if let Err(e) = ws_mgr.create_workspace(&config).await {
+                        return CommandResult::Error { message: e };
                     }
                 }
                 CommandResult::Ok
@@ -1346,7 +1342,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn teleport_session_selects_existing_workspace() {
+    async fn teleport_session_creates_workspace_even_when_one_exists() {
+        // Teleport must always create a new workspace because the attach command
+        // is session-specific. Reusing an existing workspace would attach to
+        // whatever session was there before, not the requested one.
         let checkout_path = PathBuf::from("/repo/wt-feat");
         let existing_workspace = Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
         let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:77".to_string(), existing_workspace)]));
@@ -1373,8 +1372,8 @@ mod tests {
 
         assert_ok(result);
         let calls = ws_mgr.calls.lock().await;
-        assert!(calls.contains(&"select_workspace:workspace:77".to_string()), "should select existing workspace, got: {calls:?}");
-        assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace, got: {calls:?}");
+        assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "teleport should always create a new workspace, got: {calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("select_workspace")), "teleport should NOT select existing workspace, got: {calls:?}");
     }
 
     // -----------------------------------------------------------------------
