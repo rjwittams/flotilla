@@ -14,7 +14,9 @@ use futures::future::join_all;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
-use crate::peer::{merge_provider_data, synthetic_repo_path, HandleResult, InboundPeerEnvelope, OverlayUpdate, PeerManager, SshTransport};
+use crate::peer::{
+    merge_provider_data, synthetic_repo_path, HandleResult, InboundPeerEnvelope, OverlayUpdate, PeerManager, PeerSender, SshTransport,
+};
 
 /// Notification sent from connection sites to the outbound task when a
 /// peer connects or reconnects. The outbound task responds by sending
@@ -159,10 +161,24 @@ impl PeerNetworkingTask {
                         // Forward from initial connection if available
                         if let Some((generation, mut inbound_rx)) = initial_rx {
                             let _ = peer_connected_tx_clone.send(PeerConnectedNotice { peer: peer_name.clone(), generation });
-                            if !forward_until_closed(&tx, &mut inbound_rx, &peer_name, generation).await {
-                                return; // Main channel closed, stop entirely
+                            let sender = {
+                                let pm_lock = pm.lock().await;
+                                pm_lock.get_sender_if_current(&peer_name, generation)
+                            };
+                            let forward_result = if let Some(sender) = sender {
+                                forward_with_keepalive(&tx, &mut inbound_rx, &peer_name, generation, sender).await
+                            } else {
+                                ForwardResult::Disconnected
+                            };
+                            match forward_result {
+                                ForwardResult::Shutdown => return,
+                                ForwardResult::Disconnected => {
+                                    info!(peer = %peer_name, "SSH connection dropped, will reconnect");
+                                }
+                                ForwardResult::KeepaliveTimeout => {
+                                    info!(peer = %peer_name, "keepalive timeout, forcing reconnect");
+                                }
                             }
-                            info!(peer = %peer_name, "SSH connection dropped, will reconnect");
                             let plan = disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
                             if plan.was_active {
                                 daemon_for_cleanup.send_event(DaemonEvent::PeerStatusChanged {
@@ -214,14 +230,25 @@ impl PeerNetworkingTask {
                                         status: PeerConnectionState::Connected,
                                     });
                                     let _ = peer_connected_tx_clone.send(PeerConnectedNotice { peer: peer_name.clone(), generation });
-                                    attempt = 1;
-                                    if !forward_until_closed(&tx, &mut inbound_rx, &peer_name, generation).await {
-                                        return;
+                                    let sender = {
+                                        let pm_lock = pm.lock().await;
+                                        pm_lock.get_sender_if_current(&peer_name, generation)
+                                    };
+                                    let forward_result = if let Some(sender) = sender {
+                                        forward_with_keepalive(&tx, &mut inbound_rx, &peer_name, generation, sender).await
+                                    } else {
+                                        ForwardResult::Disconnected
+                                    };
+                                    match forward_result {
+                                        ForwardResult::Shutdown => return,
+                                        ForwardResult::Disconnected => {
+                                            info!(peer = %peer_name, "SSH connection dropped, will reconnect");
+                                        }
+                                        ForwardResult::KeepaliveTimeout => {
+                                            info!(peer = %peer_name, "keepalive timeout, forcing reconnect");
+                                            attempt = 1; // Fresh detection, not repeated failure
+                                        }
                                     }
-                                    info!(
-                                        peer = %peer_name,
-                                        "SSH connection dropped, will reconnect"
-                                    );
                                     let plan = disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
                                     if plan.was_active {
                                         daemon_for_cleanup.send_event(DaemonEvent::PeerStatusChanged {
@@ -796,21 +823,76 @@ pub(crate) async fn send_local_to_peer(
     any_sent
 }
 
-/// Forward messages from an inbound receiver to the shared peer_data channel.
+/// Result of the keepalive-aware forwarding loop.
+enum ForwardResult {
+    /// Peer connection dropped (EOF on inbound receiver).
+    Disconnected,
+    /// Main forwarding channel closed (daemon shutting down).
+    Shutdown,
+    /// No messages received within the keepalive timeout.
+    KeepaliveTimeout,
+}
+
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Forward messages from an inbound receiver to the shared peer_data channel,
+/// with periodic keepalive pings and liveness timeout detection.
 ///
-/// Returns `true` if the inbound receiver was closed (connection dropped),
-/// `false` if the outbound channel was closed (daemon shutting down).
-pub(crate) async fn forward_until_closed(
+/// Sends `Ping` messages every 30 seconds. If no message (including Pongs)
+/// is received within 90 seconds, returns `KeepaliveTimeout` to trigger
+/// reconnection. Pong messages update `last_message_at` but are not
+/// forwarded to the inbound processor.
+async fn forward_with_keepalive(
     tx: &mpsc::Sender<InboundPeerEnvelope>,
     inbound_rx: &mut mpsc::Receiver<PeerWireMessage>,
     peer_name: &HostName,
     generation: u64,
-) -> bool {
-    while let Some(msg) = inbound_rx.recv().await {
-        if let Err(e) = tx.send(InboundPeerEnvelope { msg, connection_generation: generation, connection_peer: peer_name.clone() }).await {
-            warn!(peer = %peer_name, err = %e, "forwarding channel closed");
-            return false;
+    sender: Arc<dyn PeerSender>,
+) -> ForwardResult {
+    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_message_at = Instant::now();
+
+    loop {
+        tokio::select! {
+            msg = inbound_rx.recv() => {
+                match msg {
+                    Some(peer_msg) => {
+                        last_message_at = Instant::now();
+                        // Skip forwarding Pong messages to the inbound processor
+                        if matches!(&peer_msg, PeerWireMessage::Pong { .. }) {
+                            continue;
+                        }
+                        if let Err(e) = tx.send(InboundPeerEnvelope {
+                            msg: peer_msg,
+                            connection_generation: generation,
+                            connection_peer: peer_name.clone(),
+                        }).await {
+                            warn!(peer = %peer_name, err = %e, "forwarding channel closed");
+                            return ForwardResult::Shutdown;
+                        }
+                    }
+                    None => return ForwardResult::Disconnected,
+                }
+            }
+            _ = ping_interval.tick() => {
+                if last_message_at.elapsed() > KEEPALIVE_TIMEOUT {
+                    warn!(
+                        peer = %peer_name,
+                        elapsed_secs = last_message_at.elapsed().as_secs(),
+                        "keepalive timeout — no messages received in 90s"
+                    );
+                    return ForwardResult::KeepaliveTimeout;
+                }
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if let Err(e) = sender.send(PeerWireMessage::Ping { timestamp }).await {
+                    debug!(peer = %peer_name, err = %e, "failed to send keepalive ping");
+                }
+            }
         }
     }
-    true
 }
