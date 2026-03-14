@@ -131,6 +131,19 @@ mod tests {
     }
 
     #[test]
+    fn merge_local_checkout_wins_for_same_local_host_path() {
+        let local_host = HostName::new("laptop");
+        let host_path = HostPath::new(local_host.clone(), "/repo");
+        let local = ProviderData { checkouts: IndexMap::from([(host_path.clone(), make_checkout("main"))]), ..Default::default() };
+        let remote = ProviderData { checkouts: IndexMap::from([(host_path.clone(), make_checkout("stale-peer-view"))]), ..Default::default() };
+
+        let merged = merge_provider_data(&local, &local_host, &[(HostName::new("desktop"), &remote)]);
+
+        assert_eq!(merged.checkouts.len(), 1);
+        assert_eq!(merged.checkouts[&host_path].branch, "main");
+    }
+
+    #[test]
     fn merge_peer_checkout_overwrites_same_host_path() {
         // If a peer sends updated checkout data for the same HostPath,
         // the peer's version should overwrite the local one.

@@ -12,14 +12,23 @@ use flotilla_protocol::{HostName, ProviderData};
 /// leader relaying its own data), we include it.
 pub fn merge_provider_data(
     local: &ProviderData,
-    _local_host: &HostName, // reserved: Phase 2 will use for conflict resolution
+    local_host: &HostName,
     peers: &[(HostName, &ProviderData)],
 ) -> ProviderData {
     let mut merged = local.clone();
 
     for (peer_host, peer_data) in peers {
-        // Merge checkouts — HostPath keys already carry the peer's host
+        // Merge checkouts by host ownership.
+        // - local host paths are authoritative locally, so peer data must not
+        //   overwrite them
+        // - peer-owned host paths are only accepted from that owning peer
         for (host_path, checkout) in &peer_data.checkouts {
+            if &host_path.host == local_host {
+                continue;
+            }
+            if &host_path.host != peer_host {
+                continue;
+            }
             merged.checkouts.insert(host_path.clone(), checkout.clone());
         }
 
