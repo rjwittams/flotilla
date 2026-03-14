@@ -84,6 +84,7 @@ fn normalize_correlation_keys(keys: Vec<CorrelationKey>, host_name: &HostName) -
 
 fn merge_local_provider_data(base: &mut ProviderData, other: &ProviderData) {
     for (host_path, checkout) in &other.checkouts {
+        // Preferred root data is merged first and remains authoritative on collisions.
         base.checkouts.entry(host_path.clone()).or_insert_with(|| checkout.clone());
     }
     for (name, terminal) in &other.managed_terminals {
@@ -275,6 +276,7 @@ struct RepoState {
     identity: flotilla_protocol::RepoIdentity,
     roots: Vec<RepoRootState>,
     seq: u64,
+    last_local_providers: ProviderData,
     last_snapshot: Arc<RefreshSnapshot>,
     issue_cache: IssueCache,
     search_results: Option<Vec<(String, Issue)>>,
@@ -299,6 +301,7 @@ impl RepoState {
             identity,
             roots: vec![root],
             seq: 0,
+            last_local_providers: ProviderData::default(),
             last_snapshot: Arc::new(RefreshSnapshot::default()),
             issue_cache: IssueCache::new(),
             search_results: None,
@@ -749,10 +752,11 @@ impl InProcessDaemon {
         if !state.preferred_root().is_local {
             return None;
         }
-        // last_snapshot stores the merged per-identity view; normalize back to
-        // this host's authoritative data before returning it for replication.
+        // last_local_providers excludes peer overlay data; normalize after
+        // injecting cached issues so outbound replication only sends this
+        // host's authoritative state.
         let providers = normalize_local_provider_hosts(
-            inject_issues(&state.last_snapshot.providers, &state.issue_cache, &state.search_results),
+            inject_issues(&state.last_local_providers, &state.issue_cache, &state.search_results),
             &self.host_name,
         );
         Some((providers, state.local_data_version))
@@ -844,6 +848,7 @@ impl InProcessDaemon {
                 merge_provider_errors(&mut errors, &snapshot.errors);
             }
 
+            let last_local_providers = local_providers.clone();
             // Merge peer provider data if any
             let providers = if let Some(peers) = peer_overlay.get(&identity) {
                 let peer_refs: Vec<(HostName, &ProviderData)> = peers.iter().map(|(h, d)| (h.clone(), d)).collect();
@@ -854,12 +859,12 @@ impl InProcessDaemon {
             let (work_items, correlation_groups) = crate::data::correlate(&providers);
 
             let re_snapshot = RefreshSnapshot { providers, work_items, correlation_groups, errors, provider_health };
-            updates.push((identity, re_snapshot, issue_total, issue_has_more, search_results));
+            updates.push((identity, last_local_providers, re_snapshot, issue_total, issue_has_more, search_results));
         }
 
         // Apply updates under write lock and broadcast
         let mut repos = self.repos.write().await;
-        for (identity, re_snapshot, issue_total, issue_has_more, search_results) in updates {
+        for (identity, last_local_providers, re_snapshot, issue_total, issue_has_more, search_results) in updates {
             let Some(state) = repos.get_mut(&identity) else {
                 continue;
             };
@@ -893,6 +898,7 @@ impl InProcessDaemon {
 
             state.seq += 1;
             state.local_data_version += 1;
+            state.last_local_providers = last_local_providers;
             // Persist the merged per-identity snapshot so follow-up reads and
             // delta generation see the same local+peer view that was emitted.
             state.last_snapshot = Arc::new(re_snapshot.clone());

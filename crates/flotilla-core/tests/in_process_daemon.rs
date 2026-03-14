@@ -26,7 +26,7 @@ use flotilla_core::{
 };
 use flotilla_protocol::{
     AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, CorrelationKey, DaemonEvent,
-    HostName, Issue, ProviderData, RepoIdentity, RepoSelector,
+    HostName, HostPath, Issue, ProviderData, RepoIdentity, RepoSelector,
 };
 use tokio::sync::Notify;
 
@@ -672,6 +672,38 @@ async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
     .expect("snapshot event");
 
     assert_eq!(event, repo_b, "surviving root should be broadcast immediately as the new preferred path");
+}
+
+#[tokio::test]
+async fn get_local_providers_excludes_peer_overlay_data() {
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+
+    daemon.refresh(&repo).await.expect("refresh local repo");
+
+    let peer_checkout = HostPath::new(HostName::new("follower"), "/srv/follower/repo");
+    let mut peer_data = ProviderData::default();
+    peer_data.checkouts.insert(peer_checkout.clone(), Checkout {
+        branch: "peer-branch".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+    });
+
+    daemon.set_peer_providers(&repo, vec![(HostName::new("follower"), peer_data)]).await;
+
+    let (providers, _) = daemon.get_local_providers(&repo).await.expect("local providers after peer overlay");
+    assert!(
+        !providers.checkouts.contains_key(&HostPath::new(HostName::local(), "/srv/follower/repo")),
+        "peer overlay checkout should not be restamped and re-broadcast as local data"
+    );
+    assert!(
+        !providers.checkouts.values().any(|checkout| checkout.branch == "peer-branch"),
+        "peer overlay checkout should be excluded from local replication"
+    );
 }
 
 #[tokio::test]
