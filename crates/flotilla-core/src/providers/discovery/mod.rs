@@ -351,7 +351,7 @@ impl DiscoveryRuntime {
 
     /// A runtime is considered follower-mode when no external-provider factory
     /// categories are registered. Update this check if new external-provider
-    /// factory categories are added to `ProviderFactories`.
+    /// factory categories are added to `FactoryRegistry`.
     pub fn is_follower(&self) -> bool {
         self.factories.code_review.is_empty()
             && self.factories.issue_trackers.is_empty()
