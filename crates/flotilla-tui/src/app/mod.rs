@@ -21,11 +21,12 @@ use flotilla_core::{
     data::{self, GroupEntry, SectionLabels},
 };
 use flotilla_protocol::{
-    Command, CommandAction, DaemonEvent, HostName, PeerConnectionState, ProviderData, ProviderError, RepoInfo, RepoLabels, RepoSelector,
-    Snapshot, SnapshotDelta, StepStatus, WorkItem,
+    Command, CommandAction, CommandResult, DaemonEvent, HostName, PeerConnectionState, ProviderData, ProviderError, RepoInfo, RepoLabels,
+    RepoSelector, Snapshot, SnapshotDelta, StepStatus, WorkItem, WorkItemIdentity,
 };
 pub use intent::Intent;
 use tui_input::Input;
+use ui_state::PendingStatus;
 pub use ui_state::{BranchInputKind, DirEntry, RepoUiState, RepoViewLayout, TabId, UiMode, UiState};
 
 /// Per-provider auth/health status from last refresh.
@@ -265,6 +266,9 @@ impl App {
         if !self.in_flight.is_empty() {
             return true;
         }
+        if self.ui.repo_ui.values().any(|rui| rui.pending_actions.values().any(|a| matches!(a.status, PendingStatus::InFlight))) {
+            return true;
+        }
         matches!(self.ui.mode, UiMode::BranchInput { kind: BranchInputKind::Generating, .. } | UiMode::DeleteConfirm { loading: true, .. })
     }
 
@@ -315,7 +319,27 @@ impl App {
             DaemonEvent::CommandFinished { command_id, result, .. } => {
                 if let Some(_cmd) = self.in_flight.remove(&command_id) {
                     tracing::info!(%command_id, "command finished");
+                    let error_message = match &result {
+                        CommandResult::Error { message } => Some(message.clone()),
+                        _ => None,
+                    };
                     executor::handle_result(result, self);
+
+                    // Find which repo+identity has this command_id
+                    let found: Option<(PathBuf, WorkItemIdentity)> = self.ui.repo_ui.iter().find_map(|(path, rui)| {
+                        rui.pending_actions.iter().find(|(_, a)| a.command_id == command_id).map(|(id, _)| (path.clone(), id.clone()))
+                    });
+
+                    if let Some((repo_path, identity)) = found {
+                        let rui = self.ui.repo_ui.get_mut(&repo_path).expect("repo exists");
+                        if let Some(message) = error_message {
+                            if let Some(entry) = rui.pending_actions.get_mut(&identity) {
+                                entry.status = PendingStatus::Failed(message);
+                            }
+                        } else {
+                            rui.pending_actions.remove(&identity);
+                        }
+                    }
                 }
             }
             DaemonEvent::CommandStepUpdate { command_id, description, step_index, step_count, status, .. } => {
@@ -1173,5 +1197,110 @@ mod tests {
         q.push(Command { host: None, context_repo: None, action: CommandAction::Refresh { repo: None } });
         let (_, ctx) = q.take_next().expect("should have one entry");
         assert!(ctx.is_none());
+    }
+
+    // -- Pending action lifecycle on CommandFinished --
+
+    #[test]
+    fn command_finished_ok_clears_pending_action() {
+        use crate::app::ui_state::{PendingAction, PendingStatus};
+
+        let mut app = stub_app();
+        let repo = app.model.repo_order[0].clone();
+        let identity = WorkItemIdentity::Session("s1".into());
+
+        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+            command_id: 42,
+            status: PendingStatus::InFlight,
+            description: "test".into(),
+        });
+        app.in_flight.insert(42, InFlightCommand { repo: repo.clone(), description: "test".into() });
+
+        app.handle_daemon_event(DaemonEvent::CommandFinished {
+            command_id: 42,
+            host: HostName::local(),
+            repo: repo.clone(),
+            result: CommandResult::Ok,
+        });
+
+        assert!(!app.ui.repo_ui[&repo].pending_actions.contains_key(&identity));
+    }
+
+    #[test]
+    fn command_finished_error_transitions_to_failed() {
+        use crate::app::ui_state::{PendingAction, PendingStatus};
+
+        let mut app = stub_app();
+        let repo = app.model.repo_order[0].clone();
+        let identity = WorkItemIdentity::Session("s1".into());
+
+        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+            command_id: 42,
+            status: PendingStatus::InFlight,
+            description: "test".into(),
+        });
+        app.in_flight.insert(42, InFlightCommand { repo: repo.clone(), description: "test".into() });
+
+        app.handle_daemon_event(DaemonEvent::CommandFinished {
+            command_id: 42,
+            host: HostName::local(),
+            repo: repo.clone(),
+            result: CommandResult::Error { message: "boom".into() },
+        });
+
+        let pending = &app.ui.repo_ui[&repo].pending_actions[&identity];
+        assert!(matches!(pending.status, PendingStatus::Failed(ref msg) if msg == "boom"));
+    }
+
+    #[test]
+    fn command_finished_cancelled_clears_pending_action() {
+        use crate::app::ui_state::{PendingAction, PendingStatus};
+
+        let mut app = stub_app();
+        let repo = app.model.repo_order[0].clone();
+        let identity = WorkItemIdentity::Session("s1".into());
+
+        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+            command_id: 42,
+            status: PendingStatus::InFlight,
+            description: "test".into(),
+        });
+        app.in_flight.insert(42, InFlightCommand { repo: repo.clone(), description: "test".into() });
+
+        app.handle_daemon_event(DaemonEvent::CommandFinished {
+            command_id: 42,
+            host: HostName::local(),
+            repo: repo.clone(),
+            result: CommandResult::Cancelled,
+        });
+
+        assert!(!app.ui.repo_ui[&repo].pending_actions.contains_key(&identity));
+    }
+
+    #[test]
+    fn orphaned_command_finished_harmlessly_ignored() {
+        use crate::app::ui_state::{PendingAction, PendingStatus};
+
+        let mut app = stub_app();
+        let repo = app.model.repo_order[0].clone();
+        let identity = WorkItemIdentity::Session("s1".into());
+
+        // Insert pending action with command_id 99 (different from finished event)
+        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+            command_id: 99,
+            status: PendingStatus::InFlight,
+            description: "test".into(),
+        });
+        app.in_flight.insert(42, InFlightCommand { repo: repo.clone(), description: "test".into() });
+
+        app.handle_daemon_event(DaemonEvent::CommandFinished {
+            command_id: 42,
+            host: HostName::local(),
+            repo: repo.clone(),
+            result: CommandResult::Ok,
+        });
+
+        // The pending action with command_id 99 should still be there
+        assert!(app.ui.repo_ui[&repo].pending_actions.contains_key(&identity));
     }
 }
