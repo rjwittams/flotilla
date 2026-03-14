@@ -650,27 +650,19 @@ mod tests {
 
         #[test]
         fn single_item_none_fields_show_dash() {
-            // When None/empty, format_work_items_table renders "-" as the cell content.
-            // Verify by checking with populated fields and confirming they replace dashes.
+            // format_work_items_table renders None/empty fields as "-".
+            // The data row contains: Kind | Branch | Description | PR | Session | Issues
+            // With all optional fields None/empty, the row should have "-" for each.
             let bare = make_work_item(WorkItemKind::Checkout, None, "my checkout");
             let bare_output = format_work_items_table(&[bare]).to_string();
+            let data_line = bare_output.lines().find(|l| l.contains("Checkout")).expect("should have a data row");
 
-            let mut populated = make_work_item(WorkItemKind::Checkout, Some("feat"), "my checkout");
-            populated.change_request_key = Some("#1".to_string());
-            populated.session_key = Some("s-1".to_string());
-            populated.issue_keys = vec!["I-1".to_string()];
-            let pop_output = format_work_items_table(&[populated]).to_string();
-
-            // The bare version should NOT contain "feat", "#1", "s-1", "I-1"
-            assert!(!bare_output.contains("feat"), "branch None should not show a branch name");
-            assert!(!bare_output.contains("#1"), "PR None should not show a PR key");
-            assert!(!bare_output.contains("s-1"), "session None should not show a session key");
-            assert!(!bare_output.contains("I-1"), "issues empty should not show issue keys");
-            // The populated version should contain them
-            assert!(pop_output.contains("feat"), "populated should show branch");
-            assert!(pop_output.contains("#1"), "populated should show PR");
-            assert!(pop_output.contains("s-1"), "populated should show session");
-            assert!(pop_output.contains("I-1"), "populated should show issues");
+            // Count occurrences of the placeholder "-" in the data row.
+            // Branch, PR, Session, and Issues are all None/empty → 4 dashes expected.
+            // We search for the dash bordered by non-alphanumeric chars so we don't
+            // match dashes inside table borders.
+            let dash_cells: Vec<&str> = data_line.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').filter(|s| *s == "-").collect();
+            assert_eq!(dash_cells.len(), 4, "expected 4 dash placeholders (branch, PR, session, issues), got: {dash_cells:?}");
         }
 
         #[test]
