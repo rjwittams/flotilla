@@ -739,7 +739,7 @@ mod tests {
         app.handle_key(key(KeyCode::Char('d')));
         // RemoveCheckout resolves to FetchCheckoutStatus, then sets DeleteConfirm mode
         assert!(matches!(app.ui.mode, UiMode::DeleteConfirm { loading: true, .. }));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::FetchCheckoutStatus { .. }, .. }));
     }
 
@@ -907,7 +907,7 @@ mod tests {
         app.ui.mode = UiMode::BranchInput { input: Input::from("my-branch"), kind: BranchInputKind::Manual, pending_issue_ids: vec![] };
         app.handle_key(key(KeyCode::Enter));
         assert!(matches!(app.ui.mode, UiMode::Normal));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::Checkout { target, issue_ids, .. }, .. } => {
                 assert_eq!(target, CheckoutTarget::FreshBranch("my-branch".into()));
@@ -926,7 +926,7 @@ mod tests {
             pending_issue_ids: vec![("github".into(), "42".into())],
         };
         app.handle_key(key(KeyCode::Enter));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::Checkout { issue_ids, .. }, .. } => {
                 assert_eq!(issue_ids, vec![("github".into(), "42".into())]);
@@ -966,7 +966,7 @@ mod tests {
         app.ui.mode = UiMode::IssueSearch { input: Input::from("some query") };
         app.handle_key(key(KeyCode::Esc));
         assert!(matches!(app.ui.mode, UiMode::Normal));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::ClearIssueSearch { repo }, .. } => {
                 assert_eq!(repo, PathBuf::from("/tmp/test-repo"));
@@ -981,7 +981,7 @@ mod tests {
         app.ui.mode = UiMode::IssueSearch { input: Input::from("bug fix") };
         app.handle_key(key(KeyCode::Enter));
         assert!(matches!(app.ui.mode, UiMode::Normal));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::SearchIssues { repo, query }, .. } => {
                 assert_eq!(repo, PathBuf::from("/tmp/test-repo"));
@@ -1008,7 +1008,7 @@ mod tests {
         app.ui.mode = delete_confirm_mode("feat/x");
         app.handle_key(key(KeyCode::Char('y')));
         assert!(matches!(app.ui.mode, UiMode::Normal));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::RemoveCheckout { checkout, .. }, .. } => {
                 assert_eq!(checkout, CheckoutSelector::Query("feat/x".into()));
@@ -1023,7 +1023,7 @@ mod tests {
         app.ui.mode = delete_confirm_mode("feat/y");
         app.handle_key(key(KeyCode::Enter));
         assert!(matches!(app.ui.mode, UiMode::Normal));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::RemoveCheckout { checkout, .. }, .. } => {
                 assert_eq!(checkout, CheckoutSelector::Query("feat/y".into()));
@@ -1103,7 +1103,7 @@ mod tests {
         let item = make_work_item("a");
         setup_table(&mut app, vec![item]);
         app.action_enter();
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::CreateWorkspaceForCheckout { checkout_path }, .. } => {
                 assert_eq!(checkout_path, PathBuf::from("/tmp/a"));
@@ -1127,7 +1127,7 @@ mod tests {
         item.workspace_refs = vec!["my-workspace".into()];
         setup_table(&mut app, vec![item]);
         app.action_enter();
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::SelectWorkspace { ws_ref }, .. } => {
                 assert_eq!(ws_ref, "my-workspace");
@@ -1145,7 +1145,7 @@ mod tests {
         setup_table(&mut app, vec![item]);
         // CreateWorkspace is available for a checkout item without workspace
         app.dispatch_if_available(Intent::CreateWorkspace);
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::CreateWorkspaceForCheckout { .. }, .. }));
     }
 
@@ -1175,7 +1175,7 @@ mod tests {
         let item = make_work_item("a");
         app.resolve_and_push(Intent::RemoveCheckout, &item);
         assert!(matches!(app.ui.mode, UiMode::DeleteConfirm { loading: true, .. }));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::FetchCheckoutStatus { .. }, .. }));
     }
 
@@ -1186,7 +1186,7 @@ mod tests {
         item.issue_keys = vec!["ISSUE-1".into()];
         app.resolve_and_push(Intent::GenerateBranchName, &item);
         assert!(matches!(app.ui.mode, UiMode::BranchInput { kind: BranchInputKind::Generating, .. }));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::GenerateBranchName { issue_keys }, .. } => {
                 assert_eq!(issue_keys, vec!["ISSUE-1".to_string()]);
@@ -1204,7 +1204,7 @@ mod tests {
         setup_table(&mut app, vec![item]);
         app.ui.mode = UiMode::ActionMenu { items: vec![Intent::CreateWorkspace, Intent::RemoveCheckout], index: 0 };
         app.execute_menu_action();
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::CreateWorkspaceForCheckout { .. }, .. }));
     }
 
@@ -1273,7 +1273,7 @@ mod tests {
 
         // Should set BranchInput with generating=true
         assert!(matches!(app.ui.mode, UiMode::BranchInput { kind: BranchInputKind::Generating, .. }));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::GenerateBranchName { issue_keys }, .. } => {
                 assert!(issue_keys.contains(&"ISSUE-1".to_string()));
@@ -1374,7 +1374,7 @@ mod tests {
         item.change_request_key = Some("PR#42".into());
         setup_table(&mut app, vec![item]);
         app.handle_key(key(KeyCode::Char('p')));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::OpenChangeRequest { id }, .. } => {
                 assert_eq!(id, "PR#42");

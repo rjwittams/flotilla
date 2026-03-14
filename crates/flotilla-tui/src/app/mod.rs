@@ -66,14 +66,17 @@ pub struct PeerHostStatus {
 
 #[derive(Default)]
 pub struct CommandQueue {
-    queue: VecDeque<Command>,
+    queue: VecDeque<(Command, Option<ui_state::PendingActionContext>)>,
 }
 
 impl CommandQueue {
     pub fn push(&mut self, cmd: Command) {
-        self.queue.push_back(cmd);
+        self.queue.push_back((cmd, None));
     }
-    pub fn take_next(&mut self) -> Option<Command> {
+    pub fn push_with_context(&mut self, cmd: Command, ctx: Option<ui_state::PendingActionContext>) {
+        self.queue.push_back((cmd, ctx));
+    }
+    pub fn take_next(&mut self) -> Option<(Command, Option<ui_state::PendingActionContext>)> {
         self.queue.pop_front()
     }
 }
@@ -595,6 +598,7 @@ pub enum ClearDispatch {
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyCode;
+    use flotilla_protocol::WorkItemIdentity;
     use tempfile::tempdir;
     use test_support::*;
 
@@ -611,8 +615,8 @@ mod tests {
             context_repo: Some(RepoSelector::Path(PathBuf::from("/repo"))),
             action: CommandAction::OpenChangeRequest { id: "1".into() },
         });
-        assert!(matches!(q.take_next(), Some(Command { action: CommandAction::Refresh { .. }, .. })));
-        assert!(matches!(q.take_next(), Some(Command { action: CommandAction::OpenChangeRequest { .. }, .. })));
+        assert!(matches!(q.take_next(), Some((Command { action: CommandAction::Refresh { .. }, .. }, _))));
+        assert!(matches!(q.take_next(), Some((Command { action: CommandAction::OpenChangeRequest { .. }, .. }, _))));
     }
 
     #[test]
@@ -851,7 +855,7 @@ mod tests {
         app.apply_snapshot(snap);
 
         let cmd = app.proto_commands.take_next();
-        assert!(matches!(cmd, Some(Command { action: CommandAction::SetIssueViewport { .. }, .. })));
+        assert!(matches!(cmd, Some((Command { action: CommandAction::SetIssueViewport { .. }, .. }, _))));
         // Second snapshot should NOT queue another
         let snap2 = snapshot(&repo);
         app.apply_snapshot(snap2);
@@ -1117,7 +1121,7 @@ mod tests {
         app.handle_key(key(KeyCode::Char('y')));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         let cmd = app.proto_commands.take_next();
-        assert!(matches!(cmd, Some(Command { action: CommandAction::CloseChangeRequest { id }, .. }) if id == "42"));
+        assert!(matches!(cmd, Some((Command { action: CommandAction::CloseChangeRequest { id }, .. }, _)) if id == "42"));
     }
 
     #[test]
@@ -1127,7 +1131,7 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         let cmd = app.proto_commands.take_next();
-        assert!(matches!(cmd, Some(Command { action: CommandAction::CloseChangeRequest { id }, .. }) if id == "42"));
+        assert!(matches!(cmd, Some((Command { action: CommandAction::CloseChangeRequest { id }, .. }, _)) if id == "42"));
     }
 
     #[test]
@@ -1146,5 +1150,28 @@ mod tests {
         app.handle_key(key(KeyCode::Char('n')));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         assert!(app.proto_commands.take_next().is_none());
+    }
+
+    // -- CommandQueue with PendingActionContext --
+
+    #[test]
+    fn command_queue_push_with_context() {
+        use crate::app::ui_state::PendingActionContext;
+
+        let mut q = CommandQueue::default();
+        let ctx = PendingActionContext { identity: WorkItemIdentity::Session("s1".into()), description: "Archive session".into() };
+        q.push_with_context(Command { host: None, context_repo: None, action: CommandAction::Refresh { repo: None } }, Some(ctx));
+        let (cmd, ctx) = q.take_next().expect("should have one entry");
+        assert!(matches!(cmd.action, CommandAction::Refresh { .. }));
+        assert!(ctx.is_some());
+        assert_eq!(ctx.unwrap().description, "Archive session");
+    }
+
+    #[test]
+    fn command_queue_push_without_context() {
+        let mut q = CommandQueue::default();
+        q.push(Command { host: None, context_repo: None, action: CommandAction::Refresh { repo: None } });
+        let (_, ctx) = q.take_next().expect("should have one entry");
+        assert!(ctx.is_none());
     }
 }
