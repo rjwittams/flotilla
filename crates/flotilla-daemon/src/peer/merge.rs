@@ -135,7 +135,8 @@ mod tests {
         let local_host = HostName::new("laptop");
         let host_path = HostPath::new(local_host.clone(), "/repo");
         let local = ProviderData { checkouts: IndexMap::from([(host_path.clone(), make_checkout("main"))]), ..Default::default() };
-        let remote = ProviderData { checkouts: IndexMap::from([(host_path.clone(), make_checkout("stale-peer-view"))]), ..Default::default() };
+        let remote =
+            ProviderData { checkouts: IndexMap::from([(host_path.clone(), make_checkout("stale-peer-view"))]), ..Default::default() };
 
         let merged = merge_provider_data(&local, &local_host, &[(HostName::new("desktop"), &remote)]);
 

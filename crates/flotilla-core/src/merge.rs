@@ -10,11 +10,7 @@ use flotilla_protocol::{HostName, ProviderData};
 /// from the leader — followers don't poll external APIs, so there are no
 /// duplicates to reconcile. If a peer does send service-level data (e.g. the
 /// leader relaying its own data), we include it.
-pub fn merge_provider_data(
-    local: &ProviderData,
-    local_host: &HostName,
-    peers: &[(HostName, &ProviderData)],
-) -> ProviderData {
+pub fn merge_provider_data(local: &ProviderData, local_host: &HostName, peers: &[(HostName, &ProviderData)]) -> ProviderData {
     let mut merged = local.clone();
 
     for (peer_host, peer_data) in peers {

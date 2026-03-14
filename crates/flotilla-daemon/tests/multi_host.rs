@@ -316,10 +316,7 @@ async fn daemon_snapshot_includes_follower_checkout_overlay() {
         snapshot.work_items
     );
 
-    let item = checkout_items
-        .iter()
-        .find_map(|(item, key)| (*key == &follower_checkout).then_some(*item))
-        .expect("follower checkout item");
+    let item = checkout_items.iter().find_map(|(item, key)| (*key == &follower_checkout).then_some(*item)).expect("follower checkout item");
     assert_eq!(item.host, follower_host);
 }
 
