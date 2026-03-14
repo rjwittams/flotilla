@@ -1,6 +1,6 @@
 use std::io::stdout;
 
-use crossterm::{execute, event::DisableMouseCapture};
+use crossterm::{event::DisableMouseCapture, execute};
 
 /// Restore the terminal to its original state.
 ///
@@ -8,7 +8,7 @@ use crossterm::{execute, event::DisableMouseCapture};
 /// `DisableMouseCapture` and `ratatui::restore()` are both no-ops in those cases.
 pub fn restore_terminal() {
     let _ = execute!(stdout(), DisableMouseCapture);
-    let _ = ratatui::restore();
+    ratatui::restore();
 }
 
 /// Install a panic hook that restores the terminal before printing the panic.
@@ -33,12 +33,14 @@ pub fn install_panic_hook() {
 /// their existing terminal binding with this value.
 #[cfg(unix)]
 pub fn suspend_and_resume() -> std::io::Result<ratatui::DefaultTerminal> {
-    use crossterm::{execute, event::EnableMouseCapture};
+    use crossterm::{event::EnableMouseCapture, execute};
 
     restore_terminal();
     // SAFETY: kill(0, SIGTSTP) sends the signal to the entire process group.
     // The process suspends at this point and resumes on SIGCONT.
-    unsafe { libc::kill(0, libc::SIGTSTP); }
+    unsafe {
+        libc::kill(0, libc::SIGTSTP);
+    }
     // Resumed — re-initialise terminal
     let terminal = ratatui::init();
     execute!(stdout(), EnableMouseCapture)?;

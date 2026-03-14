@@ -40,8 +40,8 @@ impl EventHandler {
 
             let mut interval = tokio::time::interval(tick_rate);
             #[cfg(unix)]
-            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("failed to register SIGTERM handler");
             loop {
                 let delay = interval.tick();
                 let event = reader.next().fuse();

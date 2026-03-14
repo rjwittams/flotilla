@@ -1140,6 +1140,7 @@ dependencies = [
  "futures",
  "image",
  "insta",
+ "libc",
  "ratatui",
  "ratatui-image",
  "serde",
