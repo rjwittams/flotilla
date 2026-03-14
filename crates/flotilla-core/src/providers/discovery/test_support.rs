@@ -11,10 +11,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use flotilla_protocol::{ChangeRequest, ChangeRequestStatus, Checkout, CorrelationKey, Issue, IssueChangeset, IssuePage};
 use tokio::sync::Mutex as TokioMutex;
 
-use flotilla_protocol::{ChangeRequest, ChangeRequestStatus, Checkout, CorrelationKey, Issue, IssueChangeset, IssuePage};
-
+use super::{DiscoveryRuntime, EnvironmentBag, Factory, FactoryRegistry, ProviderDescriptor, UnmetRequirement};
 use crate::{
     config::ConfigStore,
     providers::{
@@ -22,8 +22,6 @@ use crate::{
         CommandRunner,
     },
 };
-
-use super::{DiscoveryRuntime, EnvironmentBag, Factory, FactoryRegistry, ProviderDescriptor, UnmetRequirement};
 
 type ResponseMap = HashMap<(String, String), Vec<Result<String, String>>>;
 
@@ -160,10 +158,7 @@ impl Default for FakeIssueTracker {
 
 impl FakeIssueTracker {
     pub fn new() -> Self {
-        Self {
-            issues: Arc::new(TokioMutex::new(Vec::new())),
-            fetched_by_id: Arc::new(TokioMutex::new(Vec::new())),
-        }
+        Self { issues: Arc::new(TokioMutex::new(Vec::new())), fetched_by_id: Arc::new(TokioMutex::new(Vec::new())) }
     }
 
     /// Pre-seed the issue store.
@@ -188,11 +183,7 @@ impl IssueTracker for FakeIssueTracker {
         let start = (page.saturating_sub(1) as usize) * per_page;
         let issues: Vec<_> = store.iter().skip(start).take(per_page).cloned().collect();
         let has_more = start + per_page < store.len();
-        Ok(IssuePage {
-            issues,
-            total_count: Some(store.len() as u32),
-            has_more,
-        })
+        Ok(IssuePage { issues, total_count: Some(store.len() as u32), has_more })
     }
 
     async fn fetch_issues_by_id(&self, _repo_root: &Path, ids: &[String]) -> Result<Vec<(String, Issue)>, String> {
@@ -204,26 +195,12 @@ impl IssueTracker for FakeIssueTracker {
     async fn search_issues(&self, _repo_root: &Path, query: &str, limit: usize) -> Result<Vec<(String, Issue)>, String> {
         let store = self.issues.lock().await;
         let query_lower = query.to_lowercase();
-        Ok(store
-            .iter()
-            .filter(|(_, issue)| issue.title.to_lowercase().contains(&query_lower))
-            .take(limit)
-            .cloned()
-            .collect())
+        Ok(store.iter().filter(|(_, issue)| issue.title.to_lowercase().contains(&query_lower)).take(limit).cloned().collect())
     }
 
-    async fn list_issues_changed_since(
-        &self,
-        repo_root: &Path,
-        _since: &str,
-        per_page: usize,
-    ) -> Result<IssueChangeset, String> {
+    async fn list_issues_changed_since(&self, repo_root: &Path, _since: &str, per_page: usize) -> Result<IssueChangeset, String> {
         let page = self.list_issues_page(repo_root, 1, per_page).await?;
-        Ok(IssueChangeset {
-            updated: page.issues,
-            closed_ids: vec![],
-            has_more: page.has_more,
-        })
+        Ok(IssueChangeset { updated: page.issues, closed_ids: vec![], has_more: page.has_more })
     }
 }
 
@@ -243,9 +220,7 @@ impl Default for FakeCheckoutManager {
 
 impl FakeCheckoutManager {
     pub fn new() -> Self {
-        Self {
-            checkouts: Arc::new(TokioMutex::new(Vec::new())),
-        }
+        Self { checkouts: Arc::new(TokioMutex::new(Vec::new())) }
     }
 
     pub async fn add_checkouts(&self, checkouts: Vec<(PathBuf, Checkout)>) {
@@ -298,10 +273,7 @@ impl Default for FakeCodeReview {
 
 impl FakeCodeReview {
     pub fn new() -> Self {
-        Self {
-            change_requests: Arc::new(TokioMutex::new(Vec::new())),
-            merged_branches: Arc::new(TokioMutex::new(Vec::new())),
-        }
+        Self { change_requests: Arc::new(TokioMutex::new(Vec::new())), merged_branches: Arc::new(TokioMutex::new(Vec::new())) }
     }
 
     pub async fn add_change_requests(&self, crs: Vec<(String, ChangeRequest)>) {
@@ -318,11 +290,7 @@ impl CodeReview for FakeCodeReview {
 
     async fn get_change_request(&self, _repo_root: &Path, id: &str) -> Result<(String, ChangeRequest), String> {
         let store = self.change_requests.lock().await;
-        store
-            .iter()
-            .find(|(cr_id, _)| cr_id == id)
-            .cloned()
-            .ok_or_else(|| format!("change request {id} not found"))
+        store.iter().find(|(cr_id, _)| cr_id == id).cloned().ok_or_else(|| format!("change request {id} not found"))
     }
 
     async fn open_in_browser(&self, _repo_root: &Path, _id: &str) -> Result<(), String> {

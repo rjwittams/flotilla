@@ -5,10 +5,14 @@ use std::{
 };
 
 use flotilla_core::{
-    config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::test_support::fake_discovery,
+    config::ConfigStore,
+    daemon::DaemonHandle,
+    in_process::InProcessDaemon,
+    providers::discovery::test_support::{fake_discovery, fake_discovery_with_providers, FakeCheckoutManager, FakeIssueTracker},
 };
 use flotilla_protocol::{
-    CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, DaemonEvent, HostName, ProviderData, RepoSelector,
+    AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, CorrelationKey, DaemonEvent,
+    HostName, Issue, ProviderData, RepoSelector,
 };
 
 async fn daemon_for_cwd() -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>) {
@@ -544,4 +548,104 @@ async fn get_repo_work_returns_work_items() {
     let work = daemon.get_repo_work(repo_name).await.expect("get_repo_work failed");
     assert_eq!(work.path, repo);
     // Work items may or may not be present depending on repo state, but the call should succeed
+}
+
+#[tokio::test]
+async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
+    // --- Arrange ---
+
+    // Create a checkout that references issue #42
+    let checkout_manager = Arc::new(FakeCheckoutManager::new());
+    checkout_manager
+        .add_checkouts(vec![(PathBuf::from("/tmp/repo/feat-branch"), Checkout {
+            branch: "feat-branch".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![CorrelationKey::Branch("feat-branch".into())],
+            association_keys: vec![AssociationKey::IssueRef("fake-issues".into(), "42".into())],
+        })])
+        .await;
+
+    // Create an issue tracker that has issue #42 available
+    let issue_tracker = Arc::new(FakeIssueTracker::new());
+    issue_tracker
+        .add_issues(vec![("42".into(), Issue {
+            title: "Fix the widget".into(),
+            labels: vec!["bug".into()],
+            association_keys: vec![AssociationKey::IssueRef("fake-issues".into(), "42".into())],
+            provider_name: "fake-issues".into(),
+            provider_display_name: "Fake Issues".into(),
+        })])
+        .await;
+
+    let discovery = fake_discovery_with_providers(
+        Some(checkout_manager.clone() as Arc<dyn flotilla_core::providers::vcs::CheckoutManager>),
+        None,
+        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueTracker>),
+    );
+
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let config = Arc::new(flotilla_core::config::ConfigStore::with_base(temp.path().join("config")));
+    let daemon =
+        flotilla_core::in_process::InProcessDaemon::new(vec![repo.clone()], config, discovery, flotilla_protocol::HostName::local()).await;
+
+    let mut rx = daemon.subscribe();
+
+    // --- Act ---
+    // Trigger a refresh. The refresh loop will:
+    // 1. Call FakeCheckoutManager::list_checkouts → checkout with IssueRef("42")
+    // 2. Broadcast initial snapshot (no issues yet)
+    // 3. Call fetch_missing_linked_issues → finds "42" missing → calls fetch_issues_by_id
+    // 4. Broadcast updated snapshot with pinned issue
+    daemon.refresh(&repo).await.expect("refresh should succeed");
+
+    // --- Assert ---
+    // Collect snapshot events until we see one containing issue "42".
+    // The daemon may send a SnapshotFull or a SnapshotDelta depending on
+    // whether the delta is smaller than the full snapshot. We accept either.
+    let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::SnapshotFull(snap)) if snap.repo == repo => {
+                    if snap.providers.issues.contains_key("42") {
+                        return *snap;
+                    }
+                }
+                Ok(DaemonEvent::SnapshotDelta(ref delta)) if delta.repo == repo => {
+                    // Check if the delta contains an Issue change for "42"
+                    let has_issue_42 = delta.changes.iter().any(|c| matches!(c, Change::Issue { key, .. } if key == "42"));
+                    if has_issue_42 {
+                        // Use replay_since to get the full snapshot with the issue
+                        let events = daemon.replay_since(&HashMap::new()).await.expect("replay_since");
+                        for event in events {
+                            if let DaemonEvent::SnapshotFull(snap) = event {
+                                if snap.repo == repo && snap.providers.issues.contains_key("42") {
+                                    return *snap;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for snapshot with pinned issue");
+
+    // Verify the issue is present and correct
+    let issue = found.providers.issues.get("42").expect("issue 42 should be in snapshot");
+    assert_eq!(issue.title, "Fix the widget");
+    assert_eq!(issue.labels, vec!["bug".to_string()]);
+
+    // Verify fetch_issues_by_id was actually called (not just paginated)
+    let fetched: Vec<Vec<String>> = issue_tracker.fetched_by_id.lock().await.clone();
+    assert!(!fetched.is_empty(), "fetch_issues_by_id should have been called");
+    assert!(fetched.iter().any(|ids| ids.contains(&"42".to_string())), "fetch_issues_by_id should have been called with id '42'");
 }
