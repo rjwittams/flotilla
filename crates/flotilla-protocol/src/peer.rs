@@ -108,6 +108,13 @@ pub enum RoutedPeerMessage {
         remaining_hops: u8,
         command: Box<crate::Command>,
     },
+    CommandCancelRequest {
+        cancel_id: u64,
+        requester_host: HostName,
+        target_host: HostName,
+        remaining_hops: u8,
+        command_request_id: u64,
+    },
     CommandEvent {
         request_id: u64,
         requester_host: HostName,
@@ -121,6 +128,13 @@ pub enum RoutedPeerMessage {
         responder_host: HostName,
         remaining_hops: u8,
         result: Box<crate::CommandResult>,
+    },
+    CommandCancelResponse {
+        cancel_id: u64,
+        requester_host: HostName,
+        responder_host: HostName,
+        remaining_hops: u8,
+        error: Option<String>,
     },
 }
 
@@ -369,6 +383,29 @@ mod tests {
     }
 
     #[test]
+    fn routed_command_cancel_request_roundtrip() {
+        let msg = RoutedPeerMessage::CommandCancelRequest {
+            cancel_id: 7,
+            requester_host: HostName::new("workstation"),
+            target_host: HostName::new("feta"),
+            remaining_hops: 4,
+            command_request_id: 42,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let back: RoutedPeerMessage = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            RoutedPeerMessage::CommandCancelRequest { cancel_id, requester_host, target_host, remaining_hops, command_request_id } => {
+                assert_eq!(cancel_id, 7);
+                assert_eq!(requester_host, HostName::new("workstation"));
+                assert_eq!(target_host, HostName::new("feta"));
+                assert_eq!(remaining_hops, 4);
+                assert_eq!(command_request_id, 42);
+            }
+            other => panic!("expected CommandCancelRequest, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn routed_command_event_roundtrip() {
         let msg = RoutedPeerMessage::CommandEvent {
             request_id: 9,
@@ -402,6 +439,29 @@ mod tests {
                 });
             }
             other => panic!("expected CommandEvent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routed_command_cancel_response_roundtrip() {
+        let msg = RoutedPeerMessage::CommandCancelResponse {
+            cancel_id: 7,
+            requester_host: HostName::new("workstation"),
+            responder_host: HostName::new("feta"),
+            remaining_hops: 4,
+            error: Some("command not found".into()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let back: RoutedPeerMessage = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            RoutedPeerMessage::CommandCancelResponse { cancel_id, requester_host, responder_host, remaining_hops, error } => {
+                assert_eq!(cancel_id, 7);
+                assert_eq!(requester_host, HostName::new("workstation"));
+                assert_eq!(responder_host, HostName::new("feta"));
+                assert_eq!(remaining_hops, 4);
+                assert_eq!(error.as_deref(), Some("command not found"));
+            }
+            other => panic!("expected CommandCancelResponse, got {:?}", other),
         }
     }
 }

@@ -40,10 +40,14 @@ pub enum HandleResult {
     NeedsResync { from: HostName, repo: RepoIdentity },
     /// A routed command targeted this daemon and should be executed locally.
     CommandRequested { request_id: u64, requester_host: HostName, reply_via: HostName, command: Command },
+    /// A routed command cancel request targeted this daemon.
+    CommandCancelRequested { cancel_id: u64, requester_host: HostName, reply_via: HostName, command_request_id: u64 },
     /// A routed command lifecycle event reached the original requester.
     CommandEventReceived { request_id: u64, responder_host: HostName, event: CommandPeerEvent },
     /// A routed command completed and the final result reached the requester.
     CommandResponseReceived { request_id: u64, responder_host: HostName, result: CommandResult },
+    /// A routed command cancel response reached the original requester.
+    CommandCancelResponseReceived { cancel_id: u64, responder_host: HostName, error: Option<String> },
     /// Nothing to do (e.g. message from self).
     Ignored,
 }
@@ -673,6 +677,41 @@ impl PeerManager {
                 let _ = self.send_to(&target_host, PeerWireMessage::Routed(forwarded)).await;
                 HandleResult::Ignored
             }
+            RoutedPeerMessage::CommandCancelRequest { cancel_id, requester_host, target_host, remaining_hops, command_request_id } => {
+                if remaining_hops == 0 {
+                    return HandleResult::Ignored;
+                }
+                if target_host == self.local_host {
+                    return HandleResult::CommandCancelRequested {
+                        cancel_id,
+                        requester_host,
+                        reply_via: connection_peer,
+                        command_request_id,
+                    };
+                }
+
+                let key = CommandReversePathKey {
+                    request_id: cancel_id,
+                    requester_host: requester_host.clone(),
+                    target_host: target_host.clone(),
+                };
+                let learned_at = self.next_route_epoch();
+                self.command_reverse_paths.insert(key, ReversePathHop {
+                    next_hop: connection_peer,
+                    next_hop_generation: connection_generation,
+                    learned_at,
+                });
+
+                let forwarded = RoutedPeerMessage::CommandCancelRequest {
+                    cancel_id,
+                    requester_host,
+                    target_host: target_host.clone(),
+                    remaining_hops: remaining_hops.saturating_sub(1),
+                    command_request_id,
+                };
+                let _ = self.send_to(&target_host, PeerWireMessage::Routed(forwarded)).await;
+                HandleResult::Ignored
+            }
             RoutedPeerMessage::CommandEvent { request_id, requester_host, responder_host, remaining_hops, event } => {
                 let key = CommandReversePathKey { request_id, requester_host: requester_host.clone(), target_host: responder_host.clone() };
 
@@ -729,6 +768,42 @@ impl PeerManager {
                     responder_host,
                     remaining_hops: remaining_hops.saturating_sub(1),
                     result,
+                };
+                if let Some(sender) = self.senders.get(&reverse_hop.next_hop) {
+                    let _ = sender.send(PeerWireMessage::Routed(forwarded)).await;
+                }
+                self.command_reverse_paths.remove(&key);
+                HandleResult::Ignored
+            }
+            RoutedPeerMessage::CommandCancelResponse { cancel_id, requester_host, responder_host, remaining_hops, error } => {
+                let key = CommandReversePathKey {
+                    request_id: cancel_id,
+                    requester_host: requester_host.clone(),
+                    target_host: responder_host.clone(),
+                };
+
+                if requester_host == self.local_host {
+                    return HandleResult::CommandCancelResponseReceived { cancel_id, responder_host, error };
+                }
+
+                if remaining_hops == 0 {
+                    return HandleResult::Ignored;
+                }
+
+                let Some(reverse_hop) = self.command_reverse_paths.get(&key).cloned() else {
+                    return HandleResult::Ignored;
+                };
+                if !self.generation_is_current(&reverse_hop.next_hop, reverse_hop.next_hop_generation) {
+                    self.command_reverse_paths.remove(&key);
+                    return HandleResult::Ignored;
+                }
+
+                let forwarded = RoutedPeerMessage::CommandCancelResponse {
+                    cancel_id,
+                    requester_host,
+                    responder_host,
+                    remaining_hops: remaining_hops.saturating_sub(1),
+                    error,
                 };
                 if let Some(sender) = self.senders.get(&reverse_hop.next_hop) {
                     let _ = sender.send(PeerWireMessage::Routed(forwarded)).await;

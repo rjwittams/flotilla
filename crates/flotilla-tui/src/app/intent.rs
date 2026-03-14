@@ -7,7 +7,7 @@ pub enum Intent {
     SwitchToWorkspace,
     CreateWorkspace,
     RemoveCheckout,
-    CreateCheckoutAndWorkspace,
+    CreateCheckout,
     GenerateBranchName,
     OpenChangeRequest,
     OpenIssue,
@@ -23,9 +23,7 @@ impl Intent {
             Intent::SwitchToWorkspace => "Switch to workspace".into(),
             Intent::CreateWorkspace => "Create workspace".into(),
             Intent::RemoveCheckout => format!("Remove {}", labels.checkouts.noun),
-            Intent::CreateCheckoutAndWorkspace => {
-                format!("Create {} + workspace", labels.checkouts.noun)
-            }
+            Intent::CreateCheckout => format!("Create {}", labels.checkouts.noun),
             Intent::GenerateBranchName => "Generate branch name".into(),
             Intent::OpenChangeRequest => format!("Open {} in browser", labels.code_review.noun),
             Intent::OpenIssue => "Open issue in browser".into(),
@@ -43,7 +41,7 @@ impl Intent {
             Intent::SwitchToWorkspace => !item.workspace_refs.is_empty(),
             Intent::CreateWorkspace => item.checkout_key().is_some() && item.workspace_refs.is_empty(),
             Intent::RemoveCheckout => item.checkout_key().is_some() && !item.is_main_checkout,
-            Intent::CreateCheckoutAndWorkspace => item.checkout_key().is_none() && item.branch.is_some(),
+            Intent::CreateCheckout => item.checkout_key().is_none() && item.branch.is_some(),
             Intent::GenerateBranchName => item.branch.is_none() && !item.issue_keys.is_empty(),
             Intent::OpenChangeRequest => item.change_request_key.is_some(),
             Intent::OpenIssue => !item.issue_keys.is_empty(),
@@ -59,8 +57,8 @@ impl Intent {
     /// Whether this intent requires local filesystem access.
     ///
     /// Returns `true` for actions that operate on the local filesystem
-    /// (switch workspace, create workspace, remove checkout, create checkout,
-    /// teleport session). These should be hidden for work items from remote hosts.
+    /// (switch workspace, remove checkout, teleport session). These should be
+    /// hidden for work items from remote hosts.
     pub fn requires_local_host(&self) -> bool {
         matches!(self, Intent::SwitchToWorkspace | Intent::RemoveCheckout | Intent::TeleportSession)
     }
@@ -102,12 +100,9 @@ impl Intent {
                 item.workspace_refs.first().map(|ws_ref| app.repo_command(CommandAction::SelectWorkspace { ws_ref: ws_ref.clone() }))
             }
             Intent::CreateWorkspace => item.checkout_key().map(|p| {
-                if app
-                    .item_host_repo_command(CommandAction::PrepareTerminalForCheckout { checkout_path: p.path.clone() }, item)
-                    .host
-                    .is_some()
-                {
-                    app.item_host_repo_command(CommandAction::PrepareTerminalForCheckout { checkout_path: p.path.clone() }, item)
+                let command = app.item_host_repo_command(CommandAction::PrepareTerminalForCheckout { checkout_path: p.path.clone() }, item);
+                if command.host.is_some() {
+                    command
                 } else {
                     app.repo_command(CommandAction::CreateWorkspaceForCheckout { checkout_path: p.path.clone() })
                 }
@@ -121,7 +116,7 @@ impl Intent {
                 let change_request_id = item.change_request_key.clone();
                 Some(app.repo_command(CommandAction::FetchCheckoutStatus { branch, checkout_path, change_request_id }))
             }
-            Intent::CreateCheckoutAndWorkspace => item.branch.as_ref().map(|branch| {
+            Intent::CreateCheckout => item.branch.as_ref().map(|branch| {
                 let target = if item.kind == WorkItemKind::RemoteBranch || item.kind == WorkItemKind::ChangeRequest {
                     CheckoutTarget::Branch(branch.to_string())
                 } else {
@@ -208,7 +203,7 @@ impl Intent {
             Intent::SwitchToWorkspace,
             Intent::CreateWorkspace,
             Intent::RemoveCheckout,
-            Intent::CreateCheckoutAndWorkspace,
+            Intent::CreateCheckout,
             Intent::GenerateBranchName,
             Intent::OpenChangeRequest,
             Intent::OpenIssue,
@@ -220,13 +215,7 @@ impl Intent {
     }
 
     pub fn enter_priority() -> &'static [Intent] {
-        &[
-            Intent::SwitchToWorkspace,
-            Intent::TeleportSession,
-            Intent::CreateWorkspace,
-            Intent::CreateCheckoutAndWorkspace,
-            Intent::GenerateBranchName,
-        ]
+        &[Intent::SwitchToWorkspace, Intent::TeleportSession, Intent::CreateWorkspace, Intent::CreateCheckout, Intent::GenerateBranchName]
     }
 }
 
@@ -298,15 +287,15 @@ mod tests {
     fn create_worktree_and_workspace_needs_no_checkout_and_has_branch() {
         // Remote branch: no checkout, has branch -> available
         let item = remote_branch_item("feat/remote");
-        assert!(Intent::CreateCheckoutAndWorkspace.is_available(&item));
+        assert!(Intent::CreateCheckout.is_available(&item));
 
         // Has checkout -> not available
         let co_item = checkout_item("feat/x", "/tmp/feat-x", false);
-        assert!(!Intent::CreateCheckoutAndWorkspace.is_available(&co_item));
+        assert!(!Intent::CreateCheckout.is_available(&co_item));
 
         // No branch -> not available
         let no_branch = bare_item();
-        assert!(!Intent::CreateCheckoutAndWorkspace.is_available(&no_branch));
+        assert!(!Intent::CreateCheckout.is_available(&no_branch));
     }
 
     #[test]
@@ -413,7 +402,7 @@ mod tests {
         assert_eq!(Intent::SwitchToWorkspace.label(&labels), "Switch to workspace");
         assert_eq!(Intent::CreateWorkspace.label(&labels), "Create workspace");
         assert_eq!(Intent::RemoveCheckout.label(&labels), "Remove item");
-        assert_eq!(Intent::CreateCheckoutAndWorkspace.label(&labels), "Create item + workspace");
+        assert_eq!(Intent::CreateCheckout.label(&labels), "Create item");
         assert_eq!(Intent::GenerateBranchName.label(&labels), "Generate branch name");
         assert_eq!(Intent::OpenChangeRequest.label(&labels), "Open item in browser");
         assert_eq!(Intent::OpenIssue.label(&labels), "Open issue in browser");
@@ -427,7 +416,7 @@ mod tests {
     fn label_with_custom_labels() {
         let labels = custom_labels();
         assert_eq!(Intent::RemoveCheckout.label(&labels), "Remove worktree");
-        assert_eq!(Intent::CreateCheckoutAndWorkspace.label(&labels), "Create worktree + workspace");
+        assert_eq!(Intent::CreateCheckout.label(&labels), "Create worktree");
         assert_eq!(Intent::OpenChangeRequest.label(&labels), "Open PR in browser");
         assert_eq!(Intent::LinkIssuesToChangeRequest.label(&labels), "Link issues to PR");
         assert_eq!(Intent::CloseChangeRequest.label(&labels), "Close PR");
@@ -470,7 +459,7 @@ mod tests {
         let labels = default_labels();
         assert!(Intent::SwitchToWorkspace.shortcut_hint(&labels).is_none());
         assert!(Intent::CreateWorkspace.shortcut_hint(&labels).is_none());
-        assert!(Intent::CreateCheckoutAndWorkspace.shortcut_hint(&labels).is_none());
+        assert!(Intent::CreateCheckout.shortcut_hint(&labels).is_none());
         assert!(Intent::GenerateBranchName.shortcut_hint(&labels).is_none());
         assert!(Intent::OpenIssue.shortcut_hint(&labels).is_none());
         assert!(Intent::LinkIssuesToChangeRequest.shortcut_hint(&labels).is_none());
@@ -490,7 +479,7 @@ mod tests {
             Intent::SwitchToWorkspace,
             Intent::CreateWorkspace,
             Intent::RemoveCheckout,
-            Intent::CreateCheckoutAndWorkspace,
+            Intent::CreateCheckout,
             Intent::GenerateBranchName,
             Intent::OpenChangeRequest,
             Intent::OpenIssue,
@@ -504,7 +493,7 @@ mod tests {
             Intent::SwitchToWorkspace => v,
             Intent::CreateWorkspace => v,
             Intent::RemoveCheckout => v,
-            Intent::CreateCheckoutAndWorkspace => v,
+            Intent::CreateCheckout => v,
             Intent::GenerateBranchName => v,
             Intent::OpenChangeRequest => v,
             Intent::OpenIssue => v,
@@ -534,7 +523,7 @@ mod tests {
             Intent::SwitchToWorkspace,
             Intent::TeleportSession,
             Intent::CreateWorkspace,
-            Intent::CreateCheckoutAndWorkspace,
+            Intent::CreateCheckout,
             Intent::GenerateBranchName,
         ];
         assert_eq!(Intent::enter_priority(), &expected);
@@ -683,7 +672,7 @@ mod tests {
     fn resolve_create_worktree_and_workspace_remote_branch() {
         let app = stub_app();
         let item = remote_branch_item("feat/remote");
-        let cmd = Intent::CreateCheckoutAndWorkspace.resolve(&item, &app);
+        let cmd = Intent::CreateCheckout.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
             Command { action: CommandAction::Checkout { repo, target, issue_ids }, .. } => {
@@ -699,7 +688,7 @@ mod tests {
     fn resolve_create_worktree_and_workspace_pr_item() {
         let app = stub_app();
         let item = pr_item("42");
-        let cmd = Intent::CreateCheckoutAndWorkspace.resolve(&item, &app);
+        let cmd = Intent::CreateCheckout.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
             Command { action: CommandAction::Checkout { repo, target, .. }, .. } => {
@@ -716,7 +705,7 @@ mod tests {
         app.ui.target_host = Some(HostName::new("remote-a"));
         let item = remote_branch_item("feat/remote");
 
-        let cmd = Intent::CreateCheckoutAndWorkspace.resolve(&item, &app).unwrap();
+        let cmd = Intent::CreateCheckout.resolve(&item, &app).unwrap();
 
         assert_eq!(cmd.host, Some(HostName::new("remote-a")));
     }
@@ -725,7 +714,7 @@ mod tests {
     fn resolve_create_worktree_and_workspace_session_item() {
         let app = stub_app();
         let item = session_item("sess-1");
-        let cmd = Intent::CreateCheckoutAndWorkspace.resolve(&item, &app);
+        let cmd = Intent::CreateCheckout.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
             Command { action: CommandAction::Checkout { target, .. }, .. } => {
@@ -739,7 +728,7 @@ mod tests {
     fn resolve_create_worktree_and_workspace_none_without_branch() {
         let app = stub_app();
         let item = bare_item(); // no branch
-        assert!(Intent::CreateCheckoutAndWorkspace.resolve(&item, &app).is_none());
+        assert!(Intent::CreateCheckout.resolve(&item, &app).is_none());
     }
 
     #[test]
@@ -982,7 +971,7 @@ mod tests {
 
         // These should NOT be available
         assert!(!available.contains(&&Intent::CreateWorkspace)); // has workspace
-        assert!(!available.contains(&&Intent::CreateCheckoutAndWorkspace)); // has checkout
+        assert!(!available.contains(&&Intent::CreateCheckout)); // has checkout
         assert!(!available.contains(&&Intent::GenerateBranchName)); // has branch
     }
 
@@ -1005,7 +994,7 @@ mod tests {
     #[test]
     fn requires_local_host_false_for_non_filesystem_intents() {
         assert!(!Intent::CreateWorkspace.requires_local_host());
-        assert!(!Intent::CreateCheckoutAndWorkspace.requires_local_host());
+        assert!(!Intent::CreateCheckout.requires_local_host());
         assert!(!Intent::GenerateBranchName.requires_local_host());
         assert!(!Intent::OpenChangeRequest.requires_local_host());
         assert!(!Intent::OpenIssue.requires_local_host());
@@ -1039,7 +1028,7 @@ mod tests {
 
         // Remote-executable intents should remain allowed
         assert!(Intent::CreateWorkspace.is_allowed_for_host(&item, &my_host));
-        assert!(Intent::CreateCheckoutAndWorkspace.is_allowed_for_host(&item, &my_host));
+        assert!(Intent::CreateCheckout.is_allowed_for_host(&item, &my_host));
         assert!(Intent::OpenChangeRequest.is_allowed_for_host(&item, &my_host));
         assert!(Intent::OpenIssue.is_allowed_for_host(&item, &my_host));
         assert!(Intent::GenerateBranchName.is_allowed_for_host(&item, &my_host));
@@ -1078,7 +1067,7 @@ mod tests {
         // Local-only intents should be excluded
         assert!(!available.contains(&&Intent::SwitchToWorkspace));
         assert!(!available.contains(&&Intent::RemoveCheckout));
-        assert!(!available.contains(&&Intent::CreateCheckoutAndWorkspace));
+        assert!(!available.contains(&&Intent::CreateCheckout));
         assert!(!available.contains(&&Intent::TeleportSession));
 
         // Remote-executable intents should remain. CreateWorkspace is not

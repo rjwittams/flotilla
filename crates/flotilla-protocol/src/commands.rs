@@ -449,6 +449,21 @@ mod tests {
                 context_repo: None,
                 action: CommandAction::CreateWorkspaceForCheckout { checkout_path: PathBuf::from("/tmp") },
             },
+            Command {
+                host: Some(HostName::new("desktop")),
+                context_repo: Some(RepoSelector::Identity(repo_identity())),
+                action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x") },
+            },
+            Command {
+                host: None,
+                context_repo: Some(RepoSelector::Identity(repo_identity())),
+                action: CommandAction::CreateWorkspaceFromPreparedTerminal {
+                    target_host: HostName::new("desktop"),
+                    branch: "feat-x".into(),
+                    checkout_path: PathBuf::from("/remote/repo/feat-x"),
+                    commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }],
+                },
+            },
             Command { host: None, context_repo: None, action: CommandAction::SelectWorkspace { ws_ref: "x".into() } },
             Command {
                 host: None,

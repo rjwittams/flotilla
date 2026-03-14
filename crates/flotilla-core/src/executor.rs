@@ -73,19 +73,8 @@ pub async fn build_plan(
                 CheckoutTarget::Branch(branch) => (branch, false, CheckoutIntent::ExistingBranch),
                 CheckoutTarget::FreshBranch(branch) => (branch, true, CheckoutIntent::FreshBranch),
             };
-            build_create_checkout_plan(
-                branch,
-                create_branch,
-                intent,
-                issue_ids,
-                repo.root,
-                registry,
-                providers_data,
-                runner,
-                config_base,
-                local_host,
-            )
-            .await
+            build_create_checkout_plan(branch, create_branch, intent, issue_ids, repo.root, registry, providers_data, runner, local_host)
+                .await
         }
 
         CommandAction::TeleportSession { session_id, branch, checkout_key } => {
@@ -116,7 +105,6 @@ pub async fn build_plan(
 /// Steps:
 /// 1. Create the checkout (skipped if it already exists on the local host)
 /// 2. Link issues to the branch (skipped if no issue_ids)
-/// 3. Create workspace (reads checkout path from shared slot)
 #[allow(clippy::too_many_arguments)]
 async fn build_create_checkout_plan(
     branch: String,
@@ -127,7 +115,6 @@ async fn build_create_checkout_plan(
     registry: Arc<ProviderRegistry>,
     providers_data: Arc<ProviderData>,
     runner: Arc<dyn CommandRunner>,
-    config_base: PathBuf,
     local_host: flotilla_protocol::HostName,
 ) -> ExecutionPlan {
     // Shared slot for the checkout path — pre-populated if the checkout already exists.
@@ -188,34 +175,6 @@ async fn build_create_checkout_plan(
             action: Box::new(move || {
                 Box::pin(async move {
                     write_branch_issue_links(&repo_root, &branch, &issue_ids, &*runner).await;
-                    Ok(StepOutcome::Completed)
-                })
-            }),
-        });
-    }
-
-    // Step 3: Create workspace
-    {
-        let slot = Arc::clone(&checkout_path_slot);
-        let branch = branch.clone();
-        let repo_root = repo_root.clone();
-        let registry = Arc::clone(&registry);
-        let config_base = config_base.clone();
-        steps.push(Step {
-            description: "Create workspace".to_string(),
-            action: Box::new(move || {
-                Box::pin(async move {
-                    let checkout_path = slot.lock().await.clone().ok_or_else(|| "checkout path not available".to_string())?;
-                    if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await;
-                        if !already_exists {
-                            let mut config = workspace_config(&repo_root, &branch, &checkout_path, "claude", &config_base);
-                            if let Some((_, tp)) = &registry.terminal_pool {
-                                resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                            }
-                            ws_mgr.create_workspace(&config).await.map_err(|e| format!("workspace creation failed after checkout: {e}"))?;
-                        }
-                    }
                     Ok(StepOutcome::Completed)
                 })
             }),
@@ -521,9 +480,10 @@ pub async fn execute(
                     Err(message) => return CommandResult::Error { message },
                 };
                 // The workspace itself is local to the presentation host, so its
-                // working directory remains rooted at the tracked repo. The wrapped
-                // attach commands handle entering the remote checkout path.
-                let mut config = workspace_config(&repo.root, &branch, &repo.root, "claude", config_base);
+                // working directory only needs to be a valid local directory.
+                // The wrapped attach commands handle entering the remote checkout path.
+                let working_dir = local_workspace_directory(&repo.root, config_base);
+                let mut config = workspace_config(&repo.root, &branch, &working_dir, "claude", config_base);
                 config.resolved_commands = Some(wrapped.into_iter().map(|cmd| (cmd.role, cmd.command)).collect());
                 if let Err(e) = ws_mgr.create_workspace(&config).await {
                     return CommandResult::Error { message: e };
@@ -563,21 +523,6 @@ pub async fn execute(
                         write_branch_issue_links(&repo.root, &branch, &issue_ids, runner).await;
                     }
                     info!(checkout_path = %checkout_path.display(), "created checkout");
-                    // Create workspace if manager available
-                    if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await;
-                        if !already_exists {
-                            let mut config = workspace_config(&repo.root, &branch, &checkout_path, "claude", config_base);
-                            if let Some((_, tp)) = &registry.terminal_pool {
-                                resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                            }
-                            if let Err(e) = ws_mgr.create_workspace(&config).await {
-                                // Checkout was created but workspace failed — report as error
-                                // but the checkout still exists
-                                error!(err = %e, "workspace creation failed after checkout");
-                            }
-                        }
-                    }
                     CommandResult::CheckoutCreated { branch: branch.clone(), path: checkout_path }
                 }
                 Some(Err(e)) => {
@@ -1027,6 +972,19 @@ pub(crate) fn workspace_config(
         template_yaml,
         resolved_commands: None,
     }
+}
+
+fn local_workspace_directory(repo_root: &Path, config_base: &Path) -> PathBuf {
+    if repo_root.exists() {
+        return repo_root.to_path_buf();
+    }
+    if let Some(home) = dirs::home_dir() {
+        return home;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        return cwd;
+    }
+    config_base.to_path_buf()
 }
 
 /// Write branch-to-issue links into git config.
@@ -1527,6 +1485,8 @@ mod tests {
         registry.workspace_manager = Some((desc("cmux"), Arc::clone(&workspace_manager) as Arc<dyn WorkspaceManager>));
         let runner = runner_ok();
         let temp = tempfile::tempdir().expect("tempdir");
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
         std::fs::write(
             temp.path().join("hosts.toml"),
             "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
@@ -1535,7 +1495,7 @@ mod tests {
 
         let repo = RepoExecutionContext {
             identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
-            root: repo_root(),
+            root: repo_root.clone(),
         };
         let result = execute(
             CommandAction::CreateWorkspaceFromPreparedTerminal {
@@ -1556,7 +1516,7 @@ mod tests {
         assert_ok(result);
         let created = workspace_manager.created_configs.lock().await;
         assert_eq!(created.len(), 1);
-        assert_eq!(created[0].working_directory, repo_root());
+        assert_eq!(created[0].working_directory, repo_root);
         let resolved = created[0].resolved_commands.as_ref().expect("resolved commands");
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].0, "main");
@@ -1588,11 +1548,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkout_action_selects_existing_workspace() {
+    async fn checkout_action_does_not_create_workspace() {
         let checkout_path = PathBuf::from("/repo/wt-feat-x");
-        let existing_workspace =
-            Workspace { name: "feat-x".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
-        let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:99".to_string(), existing_workspace)]));
+        let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:99".to_string(), Workspace {
+            name: "feat-x".to_string(),
+            directories: vec![checkout_path.clone()],
+            correlation_keys: vec![],
+        })]));
 
         let mut registry = empty_registry();
         registry
@@ -1605,8 +1567,52 @@ mod tests {
 
         assert_checkout_created_branch(result, "feat-x");
         let calls = ws_mgr.calls.lock().await;
-        assert!(calls.contains(&"select_workspace:workspace:99".to_string()), "should select existing workspace, got: {calls:?}");
-        assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace, got: {calls:?}");
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("list_workspaces") || c.starts_with("select_workspace") || c.starts_with("create_workspace")),
+            "checkout should not touch workspaces, got: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_workspace_from_prepared_terminal_uses_local_fallback_for_remote_only_repo() {
+        let workspace_manager = Arc::new(MockWorkspaceManager::succeeding());
+        let mut registry = empty_registry();
+        registry.workspace_manager = Some((desc("cmux"), Arc::clone(&workspace_manager) as Arc<dyn WorkspaceManager>));
+        let runner = runner_ok();
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("hosts.toml"),
+            "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
+        )
+        .expect("write hosts config");
+
+        let repo = RepoExecutionContext {
+            identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            root: PathBuf::from("<remote>/desktop/home/dev/repo"),
+        };
+        let result = execute(
+            CommandAction::CreateWorkspaceFromPreparedTerminal {
+                target_host: HostName::new("desktop"),
+                branch: "feat".into(),
+                checkout_path: PathBuf::from("/remote/feat"),
+                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }],
+            },
+            &repo,
+            &registry,
+            &empty_data(),
+            &runner,
+            temp.path(),
+            &local_host(),
+        )
+        .await;
+
+        assert_ok(result);
+        let created = workspace_manager.created_configs.lock().await;
+        assert_eq!(created.len(), 1);
+        assert!(!created[0].working_directory.to_string_lossy().starts_with("<remote>/"));
+        assert!(created[0].working_directory.exists(), "fallback working directory should exist");
     }
 
     #[tokio::test]
@@ -2413,8 +2419,8 @@ mod tests {
 
         match plan {
             ExecutionPlan::Steps(step_plan) => {
-                // At least 2 steps: checkout + workspace
-                assert!(step_plan.steps.len() >= 2, "expected at least 2 steps, got {}", step_plan.steps.len());
+                assert_eq!(step_plan.steps.len(), 1, "checkout plans should only create the checkout in this batch");
+                assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
         }
@@ -2436,10 +2442,8 @@ mod tests {
 
         match plan {
             ExecutionPlan::Steps(step_plan) => {
-                // Still has steps (checkout step is present but will skip at runtime,
-                // workspace step is present). The plan is structurally the same;
-                // the skip happens when the step action runs.
-                assert!(step_plan.steps.len() >= 2, "expected at least 2 steps, got {}", step_plan.steps.len());
+                assert_eq!(step_plan.steps.len(), 1, "checkout plans should remain single-step even when the branch already exists");
+                assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
         }
