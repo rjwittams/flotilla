@@ -19,6 +19,7 @@ use crate::{
         run,
         terminal::TerminalPool,
         types::{CloudAgentSession, CorrelationKey, WorkspaceConfig},
+        workspace::WorkspaceManager,
         CommandRunner,
     },
     step::{Step, StepOutcome, StepPlan},
@@ -43,9 +44,10 @@ enum CheckoutIntent {
 
 /// Build an execution plan for a command.
 ///
-/// Multi-step commands (CreateCheckout, TeleportSession, RemoveCheckout) return
-/// `ExecutionPlan::Steps` with cancellation points between steps. All other
-/// commands delegate to `execute()` and return `ExecutionPlan::Immediate`.
+/// Multi-step commands (CreateCheckout, TeleportSession, RemoveCheckout,
+/// ArchiveSession, GenerateBranchName) return `ExecutionPlan::Steps` with
+/// cancellation points between steps. All other commands delegate to
+/// `execute()` and return `ExecutionPlan::Immediate`.
 pub async fn build_plan(
     cmd: Command,
     repo_root: PathBuf,
@@ -89,6 +91,10 @@ pub async fn build_plan(
                 Err(message) => ExecutionPlan::Immediate(CommandResult::Error { message }),
             }
         }
+
+        CommandAction::ArchiveSession { session_id } => build_archive_session_plan(session_id, registry, providers_data).await,
+
+        CommandAction::GenerateBranchName { issue_keys } => build_generate_branch_name_plan(issue_keys, registry, providers_data).await,
 
         action => {
             let result = execute(action, &repo_root, &registry, &providers_data, &*runner, &config_base).await;
@@ -193,11 +199,14 @@ async fn build_create_checkout_plan(
                 Box::pin(async move {
                     let checkout_path = slot.lock().await.clone().ok_or_else(|| "checkout path not available".to_string())?;
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let mut config = workspace_config(&repo_root, &branch, &checkout_path, "claude", &config_base);
-                        if let Some((_, tp)) = &registry.terminal_pool {
-                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await;
+                        if !already_exists {
+                            let mut config = workspace_config(&repo_root, &branch, &checkout_path, "claude", &config_base);
+                            if let Some((_, tp)) = &registry.terminal_pool {
+                                resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                            }
+                            ws_mgr.create_workspace(&config).await.map_err(|e| format!("workspace creation failed after checkout: {e}"))?;
                         }
-                        ws_mgr.create_workspace(&config).await.map_err(|e| format!("workspace creation failed after checkout: {e}"))?;
                     }
                     Ok(StepOutcome::Completed)
                 })
@@ -311,8 +320,9 @@ async fn build_teleport_session_plan(
                         if let Some((_, tp)) = &registry.terminal_pool {
                             resolve_terminal_pool(&mut config, tp.as_ref()).await;
                         }
-                        // Unlike CreateCheckout, teleport fails entirely if the workspace
-                        // can't be created — the checkout may already have existed.
+                        // Teleport always creates a new workspace — the attach command is
+                        // session-specific, so reusing an existing workspace would attach
+                        // to the wrong session.
                         ws_mgr.create_workspace(&config).await?;
                     }
                     Ok(StepOutcome::Completed)
@@ -386,6 +396,80 @@ fn build_remove_checkout_plan(
     ExecutionPlan::Steps(StepPlan::new(steps))
 }
 
+/// Check if a workspace already exists for `checkout_path` and select it.
+/// Returns `true` if an existing workspace was found and selected, `false` otherwise.
+/// Logs warnings on errors and returns `false` so callers always fall through to create.
+async fn select_existing_workspace(ws_mgr: &dyn WorkspaceManager, checkout_path: &Path) -> bool {
+    let existing = match ws_mgr.list_workspaces().await {
+        Ok(ws) => ws,
+        Err(e) => {
+            warn!(err = %e, "failed to check existing workspaces, will create new");
+            return false;
+        }
+    };
+    for (ws_ref, ws) in &existing {
+        if ws.directories.iter().any(|d| d == checkout_path) {
+            info!(%ws_ref, path = %checkout_path.display(), "workspace already exists, selecting");
+            if let Err(e) = ws_mgr.select_workspace(ws_ref).await {
+                warn!(err = %e, %ws_ref, "failed to select existing workspace, will create new");
+                return false;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+async fn build_archive_session_plan(
+    session_id: String,
+    registry: Arc<ProviderRegistry>,
+    providers_data: Arc<ProviderData>,
+) -> ExecutionPlan {
+    let should_run_as_step = providers_data
+        .sessions
+        .get(session_id.as_str())
+        .and_then(|session| session_provider_key(session, &session_id))
+        .and_then(|provider_key| registry.cloud_agents.get(provider_key))
+        .is_some();
+
+    if !should_run_as_step {
+        return ExecutionPlan::Immediate(archive_session_result(&session_id, &registry, &providers_data).await);
+    }
+
+    ExecutionPlan::Steps(StepPlan::new(vec![Step {
+        description: format!("Archive session {session_id}"),
+        action: Box::new(move || {
+            Box::pin(async move {
+                match archive_session_result(&session_id, &registry, &providers_data).await {
+                    CommandResult::Error { message } => Err(message),
+                    result => Ok(StepOutcome::CompletedWith(result)),
+                }
+            })
+        }),
+    }]))
+}
+
+async fn build_generate_branch_name_plan(
+    issue_keys: Vec<String>,
+    registry: Arc<ProviderRegistry>,
+    providers_data: Arc<ProviderData>,
+) -> ExecutionPlan {
+    if registry.ai_utilities.is_empty() {
+        return ExecutionPlan::Immediate(generate_branch_name_result(&issue_keys, &registry, &providers_data).await);
+    }
+
+    ExecutionPlan::Steps(StepPlan::new(vec![Step {
+        description: "Generate branch name".to_string(),
+        action: Box::new(move || {
+            Box::pin(async move {
+                match generate_branch_name_result(&issue_keys, &registry, &providers_data).await {
+                    CommandResult::Error { message } => Err(message),
+                    result => Ok(StepOutcome::CompletedWith(result)),
+                }
+            })
+        }),
+    }]))
+}
 /// Execute a `Command` against the given repo context.
 ///
 /// Commands that are handled at the daemon level (AddRepo, RemoveRepo, Refresh)
@@ -405,6 +489,9 @@ pub async fn execute(
             if let Some(co) = providers_data.checkouts.get(&host_key).cloned() {
                 info!(branch = %co.branch, "entering workspace");
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
+                    if select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await {
+                        return CommandResult::Ok;
+                    }
                     let mut config = workspace_config(repo_root, &co.branch, &checkout_path, "claude", config_base);
                     if let Some((_, tp)) = &registry.terminal_pool {
                         resolve_terminal_pool(&mut config, tp.as_ref()).await;
@@ -452,14 +539,17 @@ pub async fn execute(
                     info!(checkout_path = %checkout_path.display(), "created checkout");
                     // Create workspace if manager available
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let mut config = workspace_config(repo_root, &branch, &checkout_path, "claude", config_base);
-                        if let Some((_, tp)) = &registry.terminal_pool {
-                            resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                        }
-                        if let Err(e) = ws_mgr.create_workspace(&config).await {
-                            // Checkout was created but workspace failed — report as error
-                            // but the checkout still exists
-                            error!(err = %e, "workspace creation failed after checkout");
+                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await;
+                        if !already_exists {
+                            let mut config = workspace_config(repo_root, &branch, &checkout_path, "claude", config_base);
+                            if let Some((_, tp)) = &registry.terminal_pool {
+                                resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                            }
+                            if let Err(e) = ws_mgr.create_workspace(&config).await {
+                                // Checkout was created but workspace failed — report as error
+                                // but the checkout still exists
+                                error!(err = %e, "workspace creation failed after checkout");
+                            }
                         }
                     }
                     CommandResult::CheckoutCreated { branch: branch.clone(), path: checkout_path }
@@ -564,58 +654,9 @@ pub async fn execute(
             }
         }
 
-        CommandAction::ArchiveSession { session_id } => {
-            if let Some(session) = providers_data.sessions.get(session_id.as_str()) {
-                info!(%session_id, "archiving session");
-                if let Some(key) = session_provider_key(session, &session_id) {
-                    if let Some((_, ca)) = registry.cloud_agents.get(key) {
-                        match ca.archive_session(&session_id).await {
-                            Ok(()) => CommandResult::Ok,
-                            Err(e) => CommandResult::Error { message: e },
-                        }
-                    } else {
-                        CommandResult::Error { message: format!("No coding agent provider: {key}") }
-                    }
-                } else {
-                    CommandResult::Error { message: format!("Cannot determine provider for session {session_id}") }
-                }
-            } else {
-                CommandResult::Error { message: format!("session not found: {session_id}") }
-            }
-        }
+        CommandAction::ArchiveSession { session_id } => archive_session_result(&session_id, registry, providers_data).await,
 
-        CommandAction::GenerateBranchName { issue_keys } => {
-            let issues: Vec<(String, String)> = issue_keys
-                .iter()
-                .filter_map(|k| providers_data.issues.get(k.as_str()).map(|issue| (k.clone(), issue.title.clone())))
-                .collect();
-
-            // Collect (provider_name, issue_id) pairs for the created branch
-            let issue_id_pairs: Vec<(String, String)> = {
-                let provider = registry.issue_trackers.keys().next().cloned().unwrap_or_else(|| "issues".to_string());
-                issues.iter().map(|(id, _title)| (provider.clone(), id.clone())).collect()
-            };
-
-            info!("generating branch name");
-            let branch_result = if let Some((_, ai)) = registry.ai_utilities.values().next() {
-                let context: Vec<String> = issues.iter().map(|(id, title)| format!("{} #{}", title, id)).collect();
-                let prompt_text = if context.len() == 1 { context[0].clone() } else { context.join("; ") };
-                Some(ai.generate_branch_name(&prompt_text).await)
-            } else {
-                None
-            };
-            match branch_result {
-                Some(Ok(name)) => {
-                    info!(%name, "AI suggested");
-                    CommandResult::BranchNameGenerated { name, issue_ids: issue_id_pairs }
-                }
-                _ => {
-                    let fallback: Vec<String> = issues.iter().map(|(id, _)| format!("issue-{}", id)).collect();
-                    let name = fallback.join("-");
-                    CommandResult::BranchNameGenerated { name, issue_ids: issue_id_pairs }
-                }
-            }
-        }
+        CommandAction::GenerateBranchName { issue_keys } => generate_branch_name_result(&issue_keys, registry, providers_data).await,
 
         CommandAction::TeleportSession { session_id, branch, checkout_key } => {
             info!(%session_id, "teleporting to session");
@@ -643,9 +684,10 @@ pub async fn execute(
                     if let Some((_, tp)) = &registry.terminal_pool {
                         resolve_terminal_pool(&mut config, tp.as_ref()).await;
                     }
+                    // Teleport always creates a new workspace — the attach command is
+                    // session-specific, so reusing an existing workspace would attach
+                    // to the wrong session.
                     if let Err(e) = ws_mgr.create_workspace(&config).await {
-                        // Unlike CreateCheckout, teleport fails entirely if the workspace
-                        // can't be created — the checkout may already have existed.
                         return CommandResult::Error { message: e };
                     }
                 }
@@ -665,6 +707,64 @@ pub async fn execute(
         | CommandAction::SearchIssues { .. }
         | CommandAction::ClearIssueSearch { .. } => {
             CommandResult::Error { message: "bug: daemon-level command reached per-repo executor".to_string() }
+        }
+    }
+}
+
+async fn archive_session_result(session_id: &str, registry: &ProviderRegistry, providers_data: &ProviderData) -> CommandResult {
+    if let Some(session) = providers_data.sessions.get(session_id) {
+        info!(%session_id, "archiving session");
+        if let Some(key) = session_provider_key(session, session_id) {
+            if let Some((_, ca)) = registry.cloud_agents.get(key) {
+                match ca.archive_session(session_id).await {
+                    Ok(()) => CommandResult::Ok,
+                    Err(e) => CommandResult::Error { message: e },
+                }
+            } else {
+                CommandResult::Error { message: format!("No coding agent provider: {key}") }
+            }
+        } else {
+            CommandResult::Error { message: format!("Cannot determine provider for session {session_id}") }
+        }
+    } else {
+        CommandResult::Error { message: format!("session not found: {session_id}") }
+    }
+}
+
+async fn generate_branch_name_result(issue_keys: &[String], registry: &ProviderRegistry, providers_data: &ProviderData) -> CommandResult {
+    let issues: Vec<(String, String)> =
+        issue_keys.iter().filter_map(|k| providers_data.issues.get(k.as_str()).map(|issue| (k.clone(), issue.title.clone()))).collect();
+
+    let issue_id_pairs: Vec<(String, String)> = {
+        let provider = registry.issue_trackers.keys().next().cloned().unwrap_or_else(|| "issues".to_string());
+        issues.iter().map(|(id, _title)| (provider.clone(), id.clone())).collect()
+    };
+
+    info!(issue_count = issue_keys.len(), "generating branch name");
+    let branch_result = if let Some((_, ai)) = registry.ai_utilities.values().next() {
+        let context: Vec<String> = issues.iter().map(|(id, title)| format!("{} #{}", title, id)).collect();
+        let prompt_text = if context.len() == 1 { context[0].clone() } else { context.join("; ") };
+        Some(ai.generate_branch_name(&prompt_text).await)
+    } else {
+        None
+    };
+
+    match branch_result {
+        Some(Ok(name)) => {
+            info!(%name, "AI suggested");
+            CommandResult::BranchNameGenerated { name, issue_ids: issue_id_pairs }
+        }
+        Some(Err(error)) => {
+            warn!(%error, "using fallback branch name after AI failure");
+            let fallback: Vec<String> = issues.iter().map(|(id, _)| format!("issue-{}", id)).collect();
+            let name = fallback.join("-");
+            CommandResult::BranchNameGenerated { name, issue_ids: issue_id_pairs }
+        }
+        None => {
+            warn!("using fallback branch name without AI provider");
+            let fallback: Vec<String> = issues.iter().map(|(id, _)| format!("issue-{}", id)).collect();
+            let name = fallback.join("-");
+            CommandResult::BranchNameGenerated { name, issue_ids: issue_id_pairs }
         }
     }
 }
@@ -892,19 +992,37 @@ mod tests {
 
     /// A mock WorkspaceManager that records calls and returns configurable results.
     struct MockWorkspaceManager {
+        existing: Vec<(String, Workspace)>,
         create_result: tokio::sync::Mutex<Result<(), String>>,
         select_result: tokio::sync::Mutex<Result<(), String>>,
+        calls: tokio::sync::Mutex<Vec<String>>,
     }
 
     impl MockWorkspaceManager {
         fn succeeding() -> Self {
-            Self { create_result: tokio::sync::Mutex::new(Ok(())), select_result: tokio::sync::Mutex::new(Ok(())) }
+            Self {
+                existing: vec![],
+                create_result: tokio::sync::Mutex::new(Ok(())),
+                select_result: tokio::sync::Mutex::new(Ok(())),
+                calls: tokio::sync::Mutex::new(vec![]),
+            }
         }
 
         fn failing(msg: &str) -> Self {
             Self {
+                existing: vec![],
                 create_result: tokio::sync::Mutex::new(Err(msg.to_string())),
                 select_result: tokio::sync::Mutex::new(Err(msg.to_string())),
+                calls: tokio::sync::Mutex::new(vec![]),
+            }
+        }
+
+        fn with_existing(existing: Vec<(String, Workspace)>) -> Self {
+            Self {
+                existing,
+                create_result: tokio::sync::Mutex::new(Ok(())),
+                select_result: tokio::sync::Mutex::new(Ok(())),
+                calls: tokio::sync::Mutex::new(vec![]),
             }
         }
     }
@@ -912,18 +1030,21 @@ mod tests {
     #[async_trait]
     impl WorkspaceManager for MockWorkspaceManager {
         async fn list_workspaces(&self) -> Result<Vec<(String, Workspace)>, String> {
-            Ok(vec![])
+            self.calls.lock().await.push("list_workspaces".to_string());
+            Ok(self.existing.clone())
         }
-        async fn create_workspace(&self, _config: &WorkspaceConfig) -> Result<(String, Workspace), String> {
+        async fn create_workspace(&self, config: &WorkspaceConfig) -> Result<(String, Workspace), String> {
+            self.calls.lock().await.push(format!("create_workspace:{}", config.name));
             let result = self.create_result.lock().await;
             match &*result {
                 Ok(()) => {
-                    Ok(("mock-ref".to_string(), Workspace { name: "mock".to_string(), directories: vec![], correlation_keys: vec![] }))
+                    Ok(("mock-ref".to_string(), Workspace { name: config.name.clone(), directories: vec![], correlation_keys: vec![] }))
                 }
                 Err(e) => Err(e.clone()),
             }
         }
-        async fn select_workspace(&self, _ws_ref: &str) -> Result<(), String> {
+        async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {
+            self.calls.lock().await.push(format!("select_workspace:{ws_ref}"));
             let result = self.select_result.lock().await;
             result.clone()
         }
@@ -1239,6 +1360,84 @@ mod tests {
         let result = run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path: path }, &registry, &data, &runner).await;
 
         assert_error_eq(result, "ws creation failed");
+    }
+
+    #[tokio::test]
+    async fn create_workspace_for_checkout_selects_existing_workspace() {
+        let checkout_path = PathBuf::from("/repo/wt-feat");
+        let existing_workspace = Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
+        let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:42".to_string(), existing_workspace)]));
+
+        let mut registry = empty_registry();
+        registry.workspace_manager = Some((desc("cmux"), ws_mgr.clone()));
+        let mut data = empty_data();
+        data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
+        let runner = runner_ok();
+
+        let result = run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path }, &registry, &data, &runner).await;
+
+        assert_ok(result);
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.contains(&"list_workspaces".to_string()), "should call list_workspaces, got: {calls:?}");
+        assert!(calls.contains(&"select_workspace:workspace:42".to_string()), "should select existing workspace, got: {calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace, got: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn checkout_action_selects_existing_workspace() {
+        let checkout_path = PathBuf::from("/repo/wt-feat-x");
+        let existing_workspace =
+            Workspace { name: "feat-x".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
+        let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:99".to_string(), existing_workspace)]));
+
+        let mut registry = empty_registry();
+        registry
+            .checkout_managers
+            .insert("wt".to_string(), (desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x"))));
+        registry.workspace_manager = Some((desc("cmux"), ws_mgr.clone()));
+        let runner = MockRunner::new(vec![Err("missing".to_string()), Err("missing".to_string())]);
+
+        let result = run_execute(fresh_checkout_action("feat-x"), &registry, &empty_data(), &runner).await;
+
+        assert_checkout_created_branch(result, "feat-x");
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.contains(&"select_workspace:workspace:99".to_string()), "should select existing workspace, got: {calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace, got: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn teleport_session_creates_workspace_even_when_one_exists() {
+        // Teleport must always create a new workspace because the attach command
+        // is session-specific. Reusing an existing workspace would attach to
+        // whatever session was there before, not the requested one.
+        let checkout_path = PathBuf::from("/repo/wt-feat");
+        let existing_workspace = Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
+        let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:77".to_string(), existing_workspace)]));
+
+        let mut registry = empty_registry();
+        registry.cloud_agents.insert("claude".to_string(), (desc("claude"), Arc::new(MockCloudAgent::succeeding())));
+        registry.workspace_manager = Some((desc("cmux"), ws_mgr.clone()));
+        let mut data = empty_data();
+        data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
+        data.sessions.insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
+        let runner = runner_ok();
+
+        let result = run_execute(
+            CommandAction::TeleportSession {
+                session_id: "sess-1".to_string(),
+                branch: Some("feat".to_string()),
+                checkout_key: Some(checkout_path),
+            },
+            &registry,
+            &data,
+            &runner,
+        )
+        .await;
+
+        assert_ok(result);
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "teleport should always create a new workspace, got: {calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("select_workspace")), "teleport should NOT select existing workspace, got: {calls:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -2075,6 +2274,80 @@ mod tests {
                 assert!(!step_plan.steps.is_empty(), "expected at least 1 step");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_plan_archive_session_returns_steps() {
+        let mut registry = empty_registry();
+        registry.cloud_agents.insert("claude".to_string(), (desc("claude"), Arc::new(MockCloudAgent::succeeding())));
+        let mut data = empty_data();
+        data.sessions.insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
+        let runner = runner_ok();
+
+        let plan = run_build_plan(CommandAction::ArchiveSession { session_id: "sess-1".to_string() }, registry, data, runner).await;
+
+        match plan {
+            ExecutionPlan::Steps(step_plan) => {
+                assert_eq!(step_plan.steps.len(), 1, "expected a single archive step");
+                assert_eq!(step_plan.steps[0].description, "Archive session sess-1");
+            }
+            ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_plan_generate_branch_name_returns_steps() {
+        let mut registry = empty_registry();
+        registry.ai_utilities.insert("claude".to_string(), (desc("claude"), Arc::new(MockAiUtility::succeeding("feat/add-login"))));
+        let mut data = empty_data();
+        data.issues.insert("42".to_string(), make_issue("42", "Add login feature"));
+        let runner = runner_ok();
+
+        let plan = run_build_plan(CommandAction::GenerateBranchName { issue_keys: vec!["42".to_string()] }, registry, data, runner).await;
+
+        match plan {
+            ExecutionPlan::Steps(step_plan) => {
+                assert_eq!(step_plan.steps.len(), 1, "expected a single branch-name step");
+                assert_eq!(step_plan.steps[0].description, "Generate branch name");
+            }
+            ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_plan_archive_session_missing_session_returns_immediate_error() {
+        let registry = empty_registry();
+        let runner = runner_ok();
+
+        let plan =
+            run_build_plan(CommandAction::ArchiveSession { session_id: "missing".to_string() }, registry, empty_data(), runner).await;
+
+        match plan {
+            ExecutionPlan::Immediate(CommandResult::Error { message }) => {
+                assert!(message.contains("session not found"), "unexpected message: {message}");
+            }
+            ExecutionPlan::Immediate(other) => panic!("expected Error result, got {other:?}"),
+            ExecutionPlan::Steps(_) => panic!("expected Immediate, got Steps"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_plan_generate_branch_name_without_ai_returns_immediate_fallback() {
+        let mut data = empty_data();
+        data.issues.insert("42".to_string(), make_issue("42", "Add login feature"));
+        let runner = runner_ok();
+
+        let plan =
+            run_build_plan(CommandAction::GenerateBranchName { issue_keys: vec!["42".to_string()] }, empty_registry(), data, runner).await;
+
+        match plan {
+            ExecutionPlan::Immediate(CommandResult::BranchNameGenerated { name, issue_ids }) => {
+                assert_eq!(name, "issue-42");
+                assert_eq!(issue_ids, vec![("issues".to_string(), "42".to_string())]);
+            }
+            ExecutionPlan::Immediate(other) => panic!("expected BranchNameGenerated, got {other:?}"),
+            ExecutionPlan::Steps(_) => panic!("expected Immediate, got Steps"),
         }
     }
 
