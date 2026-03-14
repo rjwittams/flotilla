@@ -137,6 +137,79 @@ impl App {
                 | super::ui_state::FocusTarget::DeleteConfirmDialog
                 | super::ui_state::FocusTarget::CloseConfirmDialog => {}
             },
+            Action::Confirm => match self.ui.mode.focus_target() {
+                super::ui_state::FocusTarget::WorkItemTable => self.action_enter(),
+                super::ui_state::FocusTarget::ActionMenu => {
+                    self.execute_menu_action();
+                    if matches!(self.ui.mode, UiMode::ActionMenu { .. }) {
+                        self.ui.mode = UiMode::Normal;
+                    }
+                }
+                super::ui_state::FocusTarget::BranchInput => {
+                    if !matches!(self.ui.mode, UiMode::BranchInput { kind: BranchInputKind::Generating, .. }) {
+                        let (branch, issue_ids) =
+                            if let UiMode::BranchInput { ref input, ref mut pending_issue_ids, .. } = self.ui.mode {
+                                (input.value().to_string(), std::mem::take(pending_issue_ids))
+                            } else {
+                                return;
+                            };
+                        if !branch.is_empty() {
+                            self.proto_commands.push(self.targeted_command(CommandAction::Checkout {
+                                repo: flotilla_protocol::RepoSelector::Identity(self.model.active_repo_identity().clone()),
+                                target: CheckoutTarget::FreshBranch(branch),
+                                issue_ids,
+                            }));
+                        }
+                        self.ui.mode = UiMode::Normal;
+                    }
+                }
+                super::ui_state::FocusTarget::IssueSearchInput => {
+                    let query = if let UiMode::IssueSearch { ref input } = self.ui.mode {
+                        input.value().to_string()
+                    } else {
+                        return;
+                    };
+                    if !query.is_empty() {
+                        let repo = self.model.active_repo_root().clone();
+                        self.proto_commands.push(self.command(CommandAction::SearchIssues { repo, query: query.clone() }));
+                        self.active_ui_mut().active_search_query = Some(query);
+                    }
+                    self.ui.mode = UiMode::Normal;
+                }
+                super::ui_state::FocusTarget::FilePickerList => self.activate_dir_entry(),
+                super::ui_state::FocusTarget::DeleteConfirmDialog => {
+                    let loading = matches!(self.ui.mode, UiMode::DeleteConfirm { loading: true, .. });
+                    if !loading {
+                        if let UiMode::DeleteConfirm { info: Some(ref info), ref terminal_keys, ref identity, .. } = self.ui.mode {
+                            let ctx = PendingActionContext {
+                                identity: identity.clone(),
+                                description: format!("Remove {}", info.branch),
+                                repo_path: self.model.active_repo_root().clone(),
+                            };
+                            self.proto_commands.push_with_context(
+                                self.command(CommandAction::RemoveCheckout {
+                                    checkout: CheckoutSelector::Query(info.branch.clone()),
+                                    terminal_keys: terminal_keys.clone(),
+                                }),
+                                Some(ctx),
+                            );
+                        }
+                        self.ui.mode = UiMode::Normal;
+                    }
+                }
+                super::ui_state::FocusTarget::CloseConfirmDialog => {
+                    if let UiMode::CloseConfirm { ref id, ref identity, ref command, .. } = self.ui.mode {
+                        let ctx = PendingActionContext {
+                            identity: identity.clone(),
+                            description: format!("Close {}", id),
+                            repo_path: self.model.active_repo_root().clone(),
+                        };
+                        self.proto_commands.push_with_context(command.clone(), Some(ctx));
+                    }
+                    self.ui.mode = UiMode::Normal;
+                }
+                super::ui_state::FocusTarget::HelpText | super::ui_state::FocusTarget::EventLog => {}
+            },
             Action::ToggleHelp => match self.ui.mode {
                 UiMode::Normal => self.ui.mode = UiMode::Help,
                 UiMode::Help => {
@@ -724,7 +797,7 @@ mod tests {
     use flotilla_protocol::{CheckoutStatus, Command, HostName, HostPath, WorkItemIdentity};
     use ratatui::layout::Rect;
 
-    use super::{super::RepoViewLayout, *};
+    use super::{super::{DirEntry, RepoViewLayout}, *};
     use crate::{
         app::{
             test_support::{checkout_item, dir_entry, enter_file_picker, key, setup_selectable_table as setup_table, stub_app},
@@ -820,6 +893,98 @@ mod tests {
         match app.ui.mode {
             UiMode::FilePicker { selected, .. } => assert_eq!(selected, 1),
             _ => panic!("expected FilePicker"),
+        }
+    }
+
+    #[test]
+    fn dispatch_action_confirm_executes_action_menu_selection() {
+        let mut app = stub_app();
+        setup_table(&mut app, vec![make_work_item("a")]);
+        app.ui.mode = UiMode::ActionMenu { items: vec![Intent::RemoveCheckout], index: 0 };
+
+        app.dispatch_action(Action::Confirm);
+
+        assert!(matches!(app.ui.mode, UiMode::DeleteConfirm { loading: true, .. }));
+    }
+
+    #[test]
+    fn dispatch_action_confirm_submits_delete_confirm() {
+        let mut app = stub_app();
+        app.ui.mode = delete_confirm_mode("feat/delete");
+
+        app.dispatch_action(Action::Confirm);
+
+        assert!(matches!(app.ui.mode, UiMode::Normal));
+        let (cmd, _) = app.proto_commands.take_next().expect("expected remove checkout command");
+        match cmd {
+            Command { action: CommandAction::RemoveCheckout { checkout, .. }, .. } => {
+                assert_eq!(checkout, CheckoutSelector::Query("feat/delete".into()));
+            }
+            other => panic!("expected RemoveCheckout, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_action_confirm_submits_branch_input() {
+        let mut app = stub_app();
+        app.ui.mode = UiMode::BranchInput {
+            input: Input::from("feature/test"),
+            kind: BranchInputKind::Manual,
+            pending_issue_ids: vec![],
+        };
+
+        app.dispatch_action(Action::Confirm);
+
+        assert!(matches!(app.ui.mode, UiMode::Normal));
+        let (cmd, _) = app.proto_commands.take_next().expect("expected checkout command");
+        match cmd {
+            Command { action: CommandAction::Checkout { target, .. }, .. } => {
+                assert_eq!(target, CheckoutTarget::FreshBranch("feature/test".into()));
+            }
+            other => panic!("expected Checkout, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_action_confirm_submits_issue_search() {
+        let mut app = stub_app();
+        app.ui.mode = UiMode::IssueSearch { input: Input::from("bug fix") };
+
+        app.dispatch_action(Action::Confirm);
+
+        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert_eq!(app.active_ui().active_search_query.as_deref(), Some("bug fix"));
+        let (cmd, _) = app.proto_commands.take_next().expect("expected search command");
+        match cmd {
+            Command { action: CommandAction::SearchIssues { query, .. }, .. } => {
+                assert_eq!(query, "bug fix");
+            }
+            other => panic!("expected SearchIssues, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_action_confirm_activates_file_picker_selection() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let repo_dir = tmp.path().join("my-repo");
+        std::fs::create_dir(&repo_dir).unwrap();
+        std::fs::create_dir(repo_dir.join(".git")).unwrap();
+
+        let mut app = stub_app();
+        let parent_path = format!("{}/", tmp.path().to_string_lossy());
+        let entries = vec![DirEntry { name: "my-repo".to_string(), is_dir: true, is_git_repo: true, is_added: false }];
+        enter_file_picker(&mut app, &parent_path, entries);
+
+        app.dispatch_action(Action::Confirm);
+
+        assert!(matches!(app.ui.mode, UiMode::Normal));
+        let (cmd, _) = app.proto_commands.take_next().expect("expected add repo command");
+        match cmd {
+            Command { action: CommandAction::AddRepo { path }, .. } => {
+                let canonical = std::fs::canonicalize(&repo_dir).unwrap();
+                assert_eq!(path, canonical);
+            }
+            other => panic!("expected AddRepo, got {:?}", other),
         }
     }
 

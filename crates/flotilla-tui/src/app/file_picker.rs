@@ -73,7 +73,7 @@ impl App {
         }
     }
 
-    fn activate_dir_entry(&mut self) {
+    pub(super) fn activate_dir_entry(&mut self) {
         let (entry, base) = {
             let UiMode::FilePicker { ref input, ref dir_entries, selected } = self.ui.mode else {
                 return;
