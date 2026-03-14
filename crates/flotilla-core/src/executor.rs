@@ -19,6 +19,7 @@ use crate::{
         run,
         terminal::TerminalPool,
         types::{CloudAgentSession, CorrelationKey, WorkspaceConfig},
+        workspace::WorkspaceManager,
         CommandRunner,
     },
     step::{Step, StepOutcome, StepPlan},
@@ -193,7 +194,7 @@ async fn build_create_checkout_plan(
                 Box::pin(async move {
                     let checkout_path = slot.lock().await.clone().ok_or_else(|| "checkout path not available".to_string())?;
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await.unwrap_or(false);
+                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await;
                         if !already_exists {
                             let mut config = workspace_config(&repo_root, &branch, &checkout_path, "claude", &config_base);
                             if let Some((_, tp)) = &registry.terminal_pool {
@@ -310,7 +311,7 @@ async fn build_teleport_session_plan(
                     let teleport_cmd = teleport_slot.lock().await.clone().ok_or_else(|| "Attach command not resolved".to_string())?;
                     let name = branch.as_deref().unwrap_or("session");
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &path).await.unwrap_or(false);
+                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &path).await;
                         if !already_exists {
                             let mut config = workspace_config(&repo_root, name, &path, &teleport_cmd, &config_base);
                             if let Some((_, tp)) = &registry.terminal_pool {
@@ -394,19 +395,26 @@ fn build_remove_checkout_plan(
 
 /// Check if a workspace already exists for `checkout_path` and select it.
 /// Returns `true` if an existing workspace was found and selected, `false` otherwise.
-async fn select_existing_workspace(
-    ws_mgr: &dyn crate::providers::workspace::WorkspaceManager,
-    checkout_path: &Path,
-) -> Result<bool, String> {
-    let existing = ws_mgr.list_workspaces().await?;
+/// Logs warnings on errors and returns `false` so callers always fall through to create.
+async fn select_existing_workspace(ws_mgr: &dyn WorkspaceManager, checkout_path: &Path) -> bool {
+    let existing = match ws_mgr.list_workspaces().await {
+        Ok(ws) => ws,
+        Err(e) => {
+            warn!(err = %e, "failed to check existing workspaces, will create new");
+            return false;
+        }
+    };
     for (ws_ref, ws) in &existing {
         if ws.directories.iter().any(|d| d == checkout_path) {
             info!(%ws_ref, path = %checkout_path.display(), "workspace already exists, selecting");
-            ws_mgr.select_workspace(ws_ref).await?;
-            return Ok(true);
+            if let Err(e) = ws_mgr.select_workspace(ws_ref).await {
+                warn!(err = %e, %ws_ref, "failed to select existing workspace, will create new");
+                return false;
+            }
+            return true;
         }
     }
-    Ok(false)
+    false
 }
 
 /// Execute a `Command` against the given repo context.
@@ -428,12 +436,8 @@ pub async fn execute(
             if let Some(co) = providers_data.checkouts.get(&host_key).cloned() {
                 info!(branch = %co.branch, "entering workspace");
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                    match select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await {
-                        Ok(true) => return CommandResult::Ok,
-                        Err(e) => {
-                            warn!(err = %e, "failed to check existing workspaces, creating new");
-                        }
-                        Ok(false) => {}
+                    if select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await {
+                        return CommandResult::Ok;
                     }
                     let mut config = workspace_config(repo_root, &co.branch, &checkout_path, "claude", config_base);
                     if let Some((_, tp)) = &registry.terminal_pool {
@@ -482,7 +486,7 @@ pub async fn execute(
                     info!(checkout_path = %checkout_path.display(), "created checkout");
                     // Create workspace if manager available
                     if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await.unwrap_or(false);
+                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await;
                         if !already_exists {
                             let mut config = workspace_config(repo_root, &branch, &checkout_path, "claude", config_base);
                             if let Some((_, tp)) = &registry.terminal_pool {
@@ -672,7 +676,7 @@ pub async fn execute(
             if let Some(path) = wt_path {
                 let name = branch.as_deref().unwrap_or("session");
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                    let already_exists = select_existing_workspace(ws_mgr.as_ref(), &path).await.unwrap_or(false);
+                    let already_exists = select_existing_workspace(ws_mgr.as_ref(), &path).await;
                     if !already_exists {
                         let mut config = workspace_config(repo_root, name, &path, &teleport_cmd, config_base);
                         if let Some((_, tp)) = &registry.terminal_pool {
