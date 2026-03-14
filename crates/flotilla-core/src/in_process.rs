@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use flotilla_protocol::{
     AssociationKey, Command, CorrelationKey, DaemonEvent, DeltaEntry, HostName, HostPath, HostSummary, Issue, PeerConnectionState,
     ProviderData, ProviderError, ProviderInfo, RepoDetailResponse, RepoInfo, RepoProvidersResponse, RepoSummary, RepoWorkResponse,
-    Snapshot, StatusResponse, UnmetRequirementInfo,
+    Snapshot, StatusResponse,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -1786,7 +1786,7 @@ impl DaemonHandle for InProcessDaemon {
         let unmet_requirements = state
             .unmet
             .iter()
-            .map(|(factory, req)| UnmetRequirementInfo { factory: factory.clone(), requirement: format!("{req:?}") })
+            .map(|(factory, req)| crate::convert::unmet_requirement_to_proto(factory, req))
             .collect();
 
         Ok(RepoProvidersResponse {
