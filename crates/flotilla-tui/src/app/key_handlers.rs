@@ -5,7 +5,7 @@ use flotilla_core::data::GroupEntry;
 use flotilla_protocol::{CheckoutSelector, CheckoutTarget, Command, CommandAction, WorkItem};
 use tui_input::{backend::crossterm::EventHandler as InputEventHandler, Input};
 
-use super::{App, BranchInputKind, ClearDispatch, Intent, UiMode};
+use super::{ui_state::PendingActionContext, App, BranchInputKind, ClearDispatch, Intent, UiMode};
 use crate::status_bar::StatusBarAction;
 
 impl App {
@@ -343,25 +343,37 @@ impl App {
         if let Some(cmd) = intent.resolve(item, self) {
             match intent {
                 Intent::RemoveCheckout => {
-                    self.ui.mode = UiMode::DeleteConfirm { info: None, loading: true, terminal_keys: item.terminal_keys.clone() };
+                    self.ui.mode = UiMode::DeleteConfirm {
+                        info: None,
+                        loading: true,
+                        terminal_keys: item.terminal_keys.clone(),
+                        identity: item.identity.clone(),
+                    };
                 }
                 Intent::GenerateBranchName => {
                     self.enter_branch_input(BranchInputKind::Generating);
                 }
                 Intent::CloseChangeRequest => {
+                    // CloseChangeRequest doesn't push now — the confirm handler
+                    // creates its own PendingActionContext when the user confirms.
                     self.ui.mode = UiMode::CloseConfirm {
                         id: match &cmd {
                             Command { action: CommandAction::CloseChangeRequest { id }, .. } => id.clone(),
                             _ => return,
                         },
                         title: item.description.clone(),
-                        host: cmd.host.clone(),
+                        identity: item.identity.clone(),
                     };
-                    return; // Don't push command — confirm handler will
+                    return;
                 }
                 _ => {}
             }
-            self.proto_commands.push(cmd);
+            let pending_ctx = PendingActionContext {
+                identity: item.identity.clone(),
+                description: intent.label(self.model.active_labels()),
+                repo_path: self.model.active_repo_root().clone(),
+            };
+            self.proto_commands.push_with_context(cmd, Some(pending_ctx));
         }
     }
 
@@ -478,11 +490,19 @@ impl App {
             KeyCode::Char('y') | KeyCode::Enter => {
                 if !loading {
                     // Extract branch from CheckoutStatus and send RemoveCheckout
-                    if let UiMode::DeleteConfirm { info: Some(ref info), ref terminal_keys, .. } = self.ui.mode {
-                        self.proto_commands.push(self.command(CommandAction::RemoveCheckout {
-                            checkout: CheckoutSelector::Query(info.branch.clone()),
-                            terminal_keys: terminal_keys.clone(),
-                        }));
+                    if let UiMode::DeleteConfirm { info: Some(ref info), ref terminal_keys, ref identity, .. } = self.ui.mode {
+                        let ctx = PendingActionContext {
+                            identity: identity.clone(),
+                            description: format!("Remove {}", info.branch),
+                            repo_path: self.model.active_repo_root().clone(),
+                        };
+                        self.proto_commands.push_with_context(
+                            self.command(CommandAction::RemoveCheckout {
+                                checkout: CheckoutSelector::Query(info.branch.clone()),
+                                terminal_keys: terminal_keys.clone(),
+                            }),
+                            Some(ctx),
+                        );
                     }
                     self.ui.mode = UiMode::Normal;
                 }
@@ -497,12 +517,14 @@ impl App {
     fn handle_close_confirm_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
-                if let UiMode::CloseConfirm { ref id, ref host, .. } = self.ui.mode {
-                    self.proto_commands.push(Command {
-                        host: host.clone(),
-                        context_repo: Some(flotilla_protocol::RepoSelector::Path(self.model.active_repo_root().clone())),
-                        action: CommandAction::CloseChangeRequest { id: id.clone() },
-                    });
+                if let UiMode::CloseConfirm { ref id, ref identity, .. } = self.ui.mode {
+                    let ctx = PendingActionContext {
+                        identity: identity.clone(),
+                        description: format!("Close {}", id),
+                        repo_path: self.model.active_repo_root().clone(),
+                    };
+                    self.proto_commands
+                        .push_with_context(self.repo_command(CommandAction::CloseChangeRequest { id: id.clone() }), Some(ctx));
                 }
                 self.ui.mode = UiMode::Normal;
             }
@@ -569,6 +591,7 @@ mod tests {
             }),
             loading: false,
             terminal_keys: vec![],
+            identity: WorkItemIdentity::Session("test".into()),
         }
     }
 
@@ -751,7 +774,7 @@ mod tests {
         app.handle_key(key(KeyCode::Char('d')));
         // RemoveCheckout resolves to FetchCheckoutStatus, then sets DeleteConfirm mode
         assert!(matches!(app.ui.mode, UiMode::DeleteConfirm { loading: true, .. }));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::FetchCheckoutStatus { .. }, .. }));
     }
 
@@ -958,7 +981,7 @@ mod tests {
         app.ui.mode = UiMode::BranchInput { input: Input::from("my-branch"), kind: BranchInputKind::Manual, pending_issue_ids: vec![] };
         app.handle_key(key(KeyCode::Enter));
         assert!(matches!(app.ui.mode, UiMode::Normal));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::Checkout { target, issue_ids, .. }, .. } => {
                 assert_eq!(target, CheckoutTarget::FreshBranch("my-branch".into()));
@@ -977,7 +1000,7 @@ mod tests {
             pending_issue_ids: vec![("github".into(), "42".into())],
         };
         app.handle_key(key(KeyCode::Enter));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::Checkout { issue_ids, .. }, .. } => {
                 assert_eq!(issue_ids, vec![("github".into(), "42".into())]);
@@ -1017,7 +1040,7 @@ mod tests {
         app.ui.mode = UiMode::IssueSearch { input: Input::from("some query") };
         app.handle_key(key(KeyCode::Esc));
         assert!(matches!(app.ui.mode, UiMode::Normal));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::ClearIssueSearch { repo }, .. } => {
                 assert_eq!(repo, PathBuf::from("/tmp/test-repo"));
@@ -1032,7 +1055,7 @@ mod tests {
         app.ui.mode = UiMode::IssueSearch { input: Input::from("bug fix") };
         app.handle_key(key(KeyCode::Enter));
         assert!(matches!(app.ui.mode, UiMode::Normal));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::SearchIssues { repo, query }, .. } => {
                 assert_eq!(repo, PathBuf::from("/tmp/test-repo"));
@@ -1059,7 +1082,7 @@ mod tests {
         app.ui.mode = delete_confirm_mode("feat/x");
         app.handle_key(key(KeyCode::Char('y')));
         assert!(matches!(app.ui.mode, UiMode::Normal));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::RemoveCheckout { checkout, .. }, .. } => {
                 assert_eq!(checkout, CheckoutSelector::Query("feat/x".into()));
@@ -1074,7 +1097,7 @@ mod tests {
         app.ui.mode = delete_confirm_mode("feat/y");
         app.handle_key(key(KeyCode::Enter));
         assert!(matches!(app.ui.mode, UiMode::Normal));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::RemoveCheckout { checkout, .. }, .. } => {
                 assert_eq!(checkout, CheckoutSelector::Query("feat/y".into()));
@@ -1084,9 +1107,34 @@ mod tests {
     }
 
     #[test]
+    fn delete_confirm_attaches_pending_context() {
+        let mut app = stub_app();
+        let item = make_work_item("a");
+        app.ui.mode = UiMode::DeleteConfirm {
+            info: Some(CheckoutStatus {
+                branch: "feat/a".into(),
+                change_request_status: None,
+                merge_commit_sha: None,
+                unpushed_commits: vec![],
+                has_uncommitted: false,
+                uncommitted_files: vec![],
+                base_detection_warning: None,
+            }),
+            loading: false,
+            terminal_keys: vec![],
+            identity: item.identity.clone(),
+        };
+        app.handle_key(key(KeyCode::Char('y')));
+        let (_, ctx) = app.proto_commands.take_next().expect("should have command");
+        let ctx = ctx.expect("should have pending context");
+        assert_eq!(ctx.identity, item.identity);
+    }
+
+    #[test]
     fn delete_confirm_ignores_while_loading() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::DeleteConfirm { info: None, loading: true, terminal_keys: vec![] };
+        app.ui.mode =
+            UiMode::DeleteConfirm { info: None, loading: true, terminal_keys: vec![], identity: WorkItemIdentity::Session("test".into()) };
         app.handle_key(key(KeyCode::Char('y')));
         // Should still be in DeleteConfirm mode
         assert!(matches!(app.ui.mode, UiMode::DeleteConfirm { loading: true, .. }));
@@ -1154,7 +1202,7 @@ mod tests {
         let item = make_work_item("a");
         setup_table(&mut app, vec![item]);
         app.action_enter();
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::CreateWorkspaceForCheckout { checkout_path }, .. } => {
                 assert_eq!(checkout_path, PathBuf::from("/tmp/a"));
@@ -1178,7 +1226,7 @@ mod tests {
         item.workspace_refs = vec!["my-workspace".into()];
         setup_table(&mut app, vec![item]);
         app.action_enter();
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::SelectWorkspace { ws_ref }, .. } => {
                 assert_eq!(ws_ref, "my-workspace");
@@ -1196,7 +1244,7 @@ mod tests {
         setup_table(&mut app, vec![item]);
         // CreateWorkspace is available for a checkout item without workspace
         app.dispatch_if_available(Intent::CreateWorkspace);
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::CreateWorkspaceForCheckout { .. }, .. }));
     }
 
@@ -1226,7 +1274,7 @@ mod tests {
         let item = make_work_item("a");
         app.resolve_and_push(Intent::RemoveCheckout, &item);
         assert!(matches!(app.ui.mode, UiMode::DeleteConfirm { loading: true, .. }));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::FetchCheckoutStatus { .. }, .. }));
     }
 
@@ -1237,7 +1285,7 @@ mod tests {
         item.issue_keys = vec!["ISSUE-1".into()];
         app.resolve_and_push(Intent::GenerateBranchName, &item);
         assert!(matches!(app.ui.mode, UiMode::BranchInput { kind: BranchInputKind::Generating, .. }));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::GenerateBranchName { issue_keys }, .. } => {
                 assert_eq!(issue_keys, vec!["ISSUE-1".to_string()]);
@@ -1255,7 +1303,7 @@ mod tests {
         setup_table(&mut app, vec![item]);
         app.ui.mode = UiMode::ActionMenu { items: vec![Intent::CreateWorkspace, Intent::RemoveCheckout], index: 0 };
         app.execute_menu_action();
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::CreateWorkspaceForCheckout { .. }, .. }));
     }
 
@@ -1324,7 +1372,7 @@ mod tests {
 
         // Should set BranchInput with generating=true
         assert!(matches!(app.ui.mode, UiMode::BranchInput { kind: BranchInputKind::Generating, .. }));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::GenerateBranchName { issue_keys }, .. } => {
                 assert!(issue_keys.contains(&"ISSUE-1".to_string()));
@@ -1357,7 +1405,8 @@ mod tests {
     #[test]
     fn delete_confirm_y_with_no_info_does_not_push_command() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::DeleteConfirm { info: None, loading: false, terminal_keys: vec![] };
+        app.ui.mode =
+            UiMode::DeleteConfirm { info: None, loading: false, terminal_keys: vec![], identity: WorkItemIdentity::Session("test".into()) };
         app.handle_key(key(KeyCode::Char('y')));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         // No info means no branch to extract, so no command pushed
@@ -1425,7 +1474,7 @@ mod tests {
         item.change_request_key = Some("PR#42".into());
         setup_table(&mut app, vec![item]);
         app.handle_key(key(KeyCode::Char('p')));
-        let cmd = app.proto_commands.take_next().unwrap();
+        let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::OpenChangeRequest { id }, .. } => {
                 assert_eq!(id, "PR#42");
@@ -1441,5 +1490,30 @@ mod tests {
         setup_table(&mut app, vec![item]);
         app.handle_key(key(KeyCode::Char('p')));
         assert!(app.proto_commands.take_next().is_none());
+    }
+
+    // ── pending context attachment ─────────────────────────────────────
+
+    #[test]
+    fn resolve_and_push_attaches_pending_context() {
+        let mut app = stub_app();
+        let item = make_work_item("a");
+        app.resolve_and_push(Intent::CreateWorkspace, &item);
+        let (_, ctx) = app.proto_commands.take_next().expect("should have command");
+        let ctx = ctx.expect("should have pending context");
+        assert_eq!(ctx.identity, item.identity);
+    }
+
+    #[test]
+    fn close_confirm_attaches_pending_context() {
+        let mut app = stub_app();
+        let item = make_work_item("a");
+        // Set up CloseConfirm mode with the item's identity
+        app.ui.mode = UiMode::CloseConfirm { id: "PR-1".into(), title: "test".into(), identity: item.identity.clone() };
+        // Simulate pressing 'y' to confirm
+        app.handle_key(key(KeyCode::Char('y')));
+        let (_, ctx) = app.proto_commands.take_next().expect("should have command");
+        let ctx = ctx.expect("should have pending context");
+        assert_eq!(ctx.identity, item.identity);
     }
 }

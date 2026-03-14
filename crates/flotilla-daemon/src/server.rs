@@ -381,6 +381,8 @@ impl DaemonServer {
                         PeerWireMessage::Data(msg) => {
                             (msg.origin_host.clone(), msg.repo_path.clone())
                         }
+                        // repo_path is unused for host summaries; handle_inbound always returns Ignored.
+                        PeerWireMessage::HostSummary(_) => (env.connection_peer.clone(), PathBuf::new()),
                         PeerWireMessage::Routed(
                             flotilla_protocol::RoutedPeerMessage::ResyncSnapshot {
                                 responder_host,
@@ -1119,7 +1121,6 @@ async fn send_local_to_peer(
     generation: u64,
 ) -> bool {
     let repo_paths = daemon.tracked_repo_paths().await;
-    let mut any_sent = false;
 
     // Resolve the sender once before iterating repos. If the connection
     // has already been superseded, skip the entire loop.
@@ -1131,6 +1132,13 @@ async fn send_local_to_peer(
         debug!(peer = %peer, "peer connection superseded, skipping local state send");
         return false;
     };
+
+    let mut any_sent = false;
+    if let Err(e) = sender.send(PeerWireMessage::HostSummary(daemon.local_host_summary().clone())).await {
+        debug!(peer = %peer, err = %e, "failed to send host summary to peer");
+    } else {
+        any_sent = true;
+    }
 
     for repo_path in repo_paths {
         let Some((local_providers, version)) = daemon.get_local_providers(&repo_path).await else {
@@ -1683,7 +1691,9 @@ mod tests {
         (tmp, daemon)
     }
 
-    fn empty_routing_state() -> (Arc<Mutex<PeerManager>>, Arc<Mutex<HashMap<u64, PendingRemoteCommand>>>, Arc<AtomicU64>) {
+    type RoutingState = (Arc<Mutex<PeerManager>>, Arc<Mutex<HashMap<u64, PendingRemoteCommand>>>, Arc<AtomicU64>);
+
+    fn empty_routing_state() -> RoutingState {
         (
             Arc::new(Mutex::new(PeerManager::new(HostName::new("local")))),
             Arc::new(Mutex::new(HashMap::new())),
@@ -2338,6 +2348,27 @@ mod tests {
 
         let pm = peer_manager.lock().await;
         assert!(pm.current_generation(&HostName::new("remote-host")).is_none(), "peer should be disconnected after socket close");
+    }
+
+    #[tokio::test]
+    async fn send_local_to_peer_sends_host_summary_for_empty_daemon() {
+        let (_tmp, daemon) = empty_daemon().await;
+        let peer = HostName::new("remote-host");
+        let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
+        let sent = Arc::new(StdMutex::new(Vec::new()));
+        let sender: Arc<dyn PeerSender> = Arc::new(CapturePeerSender { sent: Arc::clone(&sent) });
+        let generation = {
+            let mut pm = peer_manager.lock().await;
+            ensure_test_connection_generation(&mut pm, &peer, || Arc::clone(&sender))
+        };
+        let mut clock = VectorClock::default();
+        let host_name = daemon.host_name().clone();
+
+        let sent_any = send_local_to_peer(&daemon, &peer_manager, &host_name, &mut clock, &peer, generation).await;
+
+        assert!(sent_any, "host summary should count as initial peer sync");
+        let sent = sent.lock().expect("lock");
+        assert!(matches!(&sent[0], PeerWireMessage::HostSummary(summary) if summary.host_name == host_name));
     }
 
     #[tokio::test]

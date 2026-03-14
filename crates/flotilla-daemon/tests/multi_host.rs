@@ -21,8 +21,8 @@ use flotilla_core::{
     providers::discovery::test_support::{fake_discovery, git_process_discovery},
 };
 use flotilla_daemon::peer::{
-    merge::merge_provider_data, test_support::handle_test_peer_data, HandleResult, PeerConnectionStatus, PeerManager, PeerSender,
-    PeerTransport,
+    channel_transport_pair, merge::merge_provider_data, test_support::handle_test_peer_data, HandleResult, PeerConnectionStatus,
+    PeerManager, PeerSender, PeerTransport,
 };
 use flotilla_protocol::{
     Checkout, CheckoutTarget, Command, CommandAction, CommandResult, DaemonEvent, GoodbyeReason, HostName, HostPath, PeerDataKind,
@@ -186,7 +186,10 @@ async fn wait_for_local_checkout(daemon: &Arc<InProcessDaemon>, repo: &std::path
     .await
     .expect("timeout waiting for local checkout providers")
 }
-
+async fn empty_daemon_with_host(temp: &tempfile::TempDir, host: &str) -> Arc<InProcessDaemon> {
+    let config = Arc::new(ConfigStore::with_base(temp.path().join(format!("config-{host}"))));
+    InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::new(host)).await
+}
 // ---------------------------------------------------------------------------
 // Test 1: PeerManager stores snapshot data and returns Updated
 // ---------------------------------------------------------------------------
@@ -409,8 +412,105 @@ async fn remote_checkout_replication_attributes_checkout_to_follower_host() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 4b: Leader snapshot rebuild includes follower checkout overlay
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn daemon_snapshot_includes_follower_checkout_overlay() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().to_path_buf();
+    std::fs::create_dir_all(repo.join(".git")).expect("create .git dir");
+
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(false), HostName::local()).await;
+
+    let follower_host = HostName::new("follower");
+    let follower_checkout = HostPath::new(follower_host.clone(), "/remote/repo");
+
+    daemon.refresh(&repo).await.expect("refresh");
+    let baseline = daemon.get_state(&repo).await.expect("baseline get_state");
+    assert!(
+        baseline.work_items.iter().all(|item| item.checkout_key() != Some(&follower_checkout)),
+        "baseline snapshot should not already contain follower overlay data"
+    );
+
+    let mut follower_data = ProviderData::default();
+    follower_data.checkouts.insert(follower_checkout.clone(), make_checkout("feature-x"));
+
+    // `set_peer_providers` updates the overlay and rebuilds the snapshot synchronously,
+    // so `get_state` can assert on the merged view immediately.
+    daemon.set_peer_providers(&repo, vec![(follower_host.clone(), follower_data)]).await;
+
+    let snapshot = daemon.get_state(&repo).await.expect("get_state");
+
+    assert!(
+        snapshot.providers.checkouts.contains_key(&follower_checkout),
+        "rebuilt snapshot should include the follower checkout in provider data"
+    );
+
+    let checkout_items: Vec<_> = snapshot.work_items.iter().filter_map(|item| item.checkout_key().map(|key| (item, key))).collect();
+    assert!(
+        checkout_items.iter().any(|(_, key)| *key == &follower_checkout),
+        "expected follower checkout work item in snapshot: {:?}",
+        snapshot.work_items
+    );
+
+    let item = checkout_items.iter().find_map(|(item, key)| (*key == &follower_checkout).then_some(*item)).expect("follower checkout item");
+    assert_eq!(item.host, follower_host);
+}
+
+// ---------------------------------------------------------------------------
 // Test 5: Peer data relay excludes origin
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn host_summary_round_trip_between_connected_peers() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let leader_daemon = empty_daemon_with_host(&temp, "leader").await;
+    let follower_daemon = empty_daemon_with_host(&temp, "follower").await;
+
+    let (leader_transport, follower_transport) = channel_transport_pair(HostName::new("leader"), HostName::new("follower"));
+    let mut leader_mgr = PeerManager::new(HostName::new("leader"));
+    let mut follower_mgr = PeerManager::new(HostName::new("follower"));
+    leader_mgr.add_peer(HostName::new("follower"), Box::new(leader_transport));
+    follower_mgr.add_peer(HostName::new("leader"), Box::new(follower_transport));
+
+    let mut leader_receivers = leader_mgr.connect_all().await;
+    let _follower_receivers = follower_mgr.connect_all().await;
+    let (_peer, generation, mut leader_rx) = leader_receivers.pop().expect("leader receiver");
+
+    follower_mgr
+        .send_to(&HostName::new("leader"), PeerWireMessage::HostSummary(follower_daemon.local_host_summary().clone()))
+        .await
+        .expect("send host summary");
+
+    let inbound = tokio::time::timeout(std::time::Duration::from_secs(2), leader_rx.recv())
+        .await
+        .expect("timeout waiting for host summary")
+        .expect("host summary message");
+
+    let result = leader_mgr
+        .handle_inbound(flotilla_daemon::peer::InboundPeerEnvelope {
+            msg: inbound,
+            connection_generation: generation,
+            connection_peer: HostName::new("follower"),
+        })
+        .await;
+
+    assert_eq!(result, HandleResult::Ignored);
+    let stored = leader_mgr.get_peer_host_summaries().get(&HostName::new("follower")).expect("leader stored follower summary");
+    assert_eq!(stored.host_name, HostName::new("follower"));
+    assert_eq!(stored, follower_daemon.local_host_summary());
+
+    let plan = leader_mgr.disconnect_peer(&HostName::new("follower"), generation);
+    assert!(plan.was_active, "disconnect should clear active peer state");
+    assert!(
+        !leader_mgr.get_peer_host_summaries().contains_key(&HostName::new("follower")),
+        "disconnect should clear the stored host summary"
+    );
+
+    let _ = leader_daemon;
+}
 
 #[tokio::test]
 async fn relay_excludes_origin_and_sends_to_other_peers() {

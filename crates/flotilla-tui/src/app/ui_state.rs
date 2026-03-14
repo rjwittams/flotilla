@@ -54,11 +54,12 @@ pub enum UiMode {
         info: Option<CheckoutStatus>,
         loading: bool,
         terminal_keys: Vec<flotilla_protocol::ManagedTerminalId>,
+        identity: WorkItemIdentity,
     },
     CloseConfirm {
         id: String,
         title: String,
-        host: Option<HostName>,
+        identity: WorkItemIdentity,
     },
     IssueSearch {
         input: Input,
@@ -80,6 +81,26 @@ pub enum RepoViewLayout {
     Below,
 }
 
+#[derive(Clone, Debug)]
+pub enum PendingStatus {
+    InFlight,
+    Failed(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingAction {
+    pub command_id: u64,
+    pub status: PendingStatus,
+    pub description: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingActionContext {
+    pub identity: WorkItemIdentity,
+    pub description: String,
+    pub repo_path: std::path::PathBuf,
+}
+
 /// Per-repo UI state (selection, table widget state, visual flags).
 #[derive(Default)]
 pub struct RepoUiState {
@@ -88,6 +109,7 @@ pub struct RepoUiState {
     pub selected_selectable_idx: Option<usize>,
     pub has_unseen_changes: bool,
     pub multi_selected: HashSet<WorkItemIdentity>,
+    pub pending_actions: HashMap<WorkItemIdentity, PendingAction>,
     pub show_providers: bool,
     pub active_search_query: Option<String>,
 }
@@ -138,6 +160,7 @@ impl RepoUiState {
             })
             .collect();
         self.multi_selected.retain(|id| current_identities.contains(id));
+        self.pending_actions.retain(|id, _| current_identities.contains(id));
     }
 }
 
@@ -285,8 +308,16 @@ mod tests {
             (UiMode::ActionMenu { items: vec![], index: 0 }, false),
             (UiMode::BranchInput { input: Input::default(), kind: BranchInputKind::Manual, pending_issue_ids: vec![] }, false),
             (UiMode::FilePicker { input: Input::default(), dir_entries: vec![], selected: 0 }, false),
-            (UiMode::DeleteConfirm { info: None, loading: false, terminal_keys: vec![] }, false),
-            (UiMode::CloseConfirm { id: "42".into(), title: "test".into(), host: None }, false),
+            (
+                UiMode::DeleteConfirm {
+                    info: None,
+                    loading: false,
+                    terminal_keys: vec![],
+                    identity: WorkItemIdentity::Session("test".into()),
+                },
+                false,
+            ),
+            (UiMode::CloseConfirm { id: "42".into(), title: "test".into(), identity: WorkItemIdentity::Session("test".into()) }, false),
             (UiMode::IssueSearch { input: Input::default() }, false),
         ];
         for (mode, expected) in &cases {
@@ -432,5 +463,60 @@ mod tests {
         assert!(state.selected.is_none());
         assert_eq!(state.count, 0);
         assert_eq!(state.filter, tracing::Level::INFO);
+    }
+
+    // ── PendingAction tests ──────────────────────────────────────────
+
+    #[test]
+    fn pending_actions_default_is_empty() {
+        let state = RepoUiState::default();
+        assert!(state.pending_actions.is_empty());
+    }
+
+    #[test]
+    fn pending_actions_cleaned_on_table_view_update() {
+        use flotilla_protocol::{HostName, HostPath};
+
+        let mut state = RepoUiState::default();
+
+        let identity_a = WorkItemIdentity::Checkout(HostPath { host: HostName::new("local"), path: "/tmp/a".into() });
+        let identity_b = WorkItemIdentity::Checkout(HostPath { host: HostName::new("local"), path: "/tmp/b".into() });
+
+        state.pending_actions.insert(identity_a.clone(), PendingAction {
+            command_id: 1,
+            status: PendingStatus::InFlight,
+            description: "test".into(),
+        });
+        state.pending_actions.insert(identity_b.clone(), PendingAction {
+            command_id: 2,
+            status: PendingStatus::InFlight,
+            description: "test".into(),
+        });
+
+        // Build a table view that only contains identity_a
+        let mut table_view = GroupedWorkItems::default();
+        let item_a = flotilla_protocol::WorkItem {
+            kind: flotilla_protocol::WorkItemKind::Checkout,
+            identity: identity_a.clone(),
+            host: HostName::new("local"),
+            branch: None,
+            description: String::new(),
+            checkout: None,
+            change_request_key: None,
+            session_key: None,
+            issue_keys: Vec::new(),
+            workspace_refs: Vec::new(),
+            is_main_checkout: false,
+            debug_group: Vec::new(),
+            source: None,
+            terminal_keys: Vec::new(),
+        };
+        table_view.table_entries.push(GroupEntry::Item(Box::new(item_a)));
+        table_view.selectable_indices.push(0);
+
+        state.update_table_view(table_view);
+
+        assert!(state.pending_actions.contains_key(&identity_a));
+        assert!(!state.pending_actions.contains_key(&identity_b));
     }
 }

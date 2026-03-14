@@ -5,7 +5,7 @@ use flotilla_core::data::{GroupEntry, SectionHeader};
 use flotilla_protocol::{ProviderData, WorkItem};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Cell, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Table, Wrap},
     Frame,
@@ -14,14 +14,15 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
-        collect_visible_status_items, BranchInputKind, InFlightCommand, PeerHostStatus, PeerStatus, ProviderStatus, RepoViewLayout, TabId,
-        TuiModel, UiMode, UiState,
+        collect_visible_status_items,
+        ui_state::{PendingAction, PendingStatus},
+        BranchInputKind, InFlightCommand, PeerHostStatus, PeerStatus, ProviderStatus, RepoViewLayout, TabId, TuiModel, UiMode, UiState,
     },
     event_log::{self, LevelExt},
-    shimmer::shimmer_spans,
+    segment_bar::{self, BarStyle},
+    shimmer::{shimmer_spans, Shimmer},
     status_bar::{
-        KeyChip, StatusBarAction, StatusBarInput, StatusBarModel, StatusBarTarget, StatusSection, TaskSection, CHEVRON_SEPARATOR,
-        DEFAULT_STATUS_WIDTH_BUDGET,
+        KeyChip, StatusBarAction, StatusBarInput, StatusBarModel, StatusBarTarget, StatusSection, TaskSection, DEFAULT_STATUS_WIDTH_BUDGET,
     },
     ui_helpers,
 };
@@ -104,19 +105,25 @@ pub fn render(model: &TuiModel, ui: &mut UiState, in_flight: &HashMap<u64, InFli
 }
 
 fn render_tab_bar(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, area: Rect) {
-    let flotilla_label = TabId::FLOTILLA_LABEL;
+    let mut items = Vec::new();
+    let mut tab_ids = Vec::new();
+
+    // Flotilla logo tab
     let flotilla_style = if ui.mode.is_config() {
         Style::default().bold().fg(Color::Black).bg(Color::White)
     } else {
         Style::default().bold().fg(Color::Black).bg(Color::Cyan)
     };
-    let mut spans: Vec<Span> = vec![Span::styled(flotilla_label, flotilla_style)];
+    items.push(segment_bar::SegmentItem {
+        label: TabId::FLOTILLA_LABEL.to_string(),
+        key_hint: None,
+        active: ui.mode.is_config(),
+        dragging: false,
+        style_override: Some(flotilla_style),
+    });
+    tab_ids.push(TabId::Flotilla);
 
-    ui.layout.tab_areas.clear();
-    let flotilla_width = TabId::FLOTILLA_LABEL_WIDTH;
-    ui.layout.tab_areas.insert(TabId::Flotilla, Rect::new(area.x, area.y, flotilla_width, 1));
-    let mut x_offset: u16 = flotilla_width;
-
+    // Repo tabs
     for (i, path) in model.repo_order.iter().enumerate() {
         let rm = &model.repos[path];
         let rui = &ui.repo_ui[path];
@@ -124,37 +131,38 @@ fn render_tab_bar(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, area: R
         let is_active = !ui.mode.is_config() && i == model.active_repo;
         let loading = if rm.loading { " ⟳" } else { "" };
         let changed = if rui.has_unseen_changes { "*" } else { "" };
-
-        let sep = Span::styled(" | ", Style::default().fg(Color::DarkGray));
-        spans.push(sep);
-        x_offset += 3;
-
         let label = format!("{name}{changed}{loading}");
-        let label_len = label.width() as u16;
-        let style = if is_active && ui.drag.active {
-            Style::default().bold().fg(Color::Cyan).underlined()
-        } else if is_active {
-            Style::default().bold().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        spans.push(Span::styled(label, style));
 
-        ui.layout.tab_areas.insert(TabId::Repo(i), Rect::new(area.x + x_offset, area.y, label_len, 1));
-        x_offset += label_len;
+        items.push(segment_bar::SegmentItem {
+            label,
+            key_hint: None,
+            active: is_active,
+            dragging: is_active && ui.drag.active,
+            style_override: None,
+        });
+        tab_ids.push(TabId::Repo(i));
     }
 
     // [+] button
-    let add_sep = Span::styled(" | ", Style::default().fg(Color::DarkGray));
-    spans.push(add_sep);
-    x_offset += 3;
-    let add_label = Span::styled("[+]", Style::default().fg(Color::Green));
-    spans.push(add_label);
-    ui.layout.tab_areas.insert(TabId::Add, Rect::new(area.x + x_offset, area.y, 3, 1));
+    items.push(segment_bar::SegmentItem {
+        label: "[+]".to_string(),
+        key_hint: None,
+        active: false,
+        dragging: false,
+        style_override: Some(Style::default().fg(Color::Green)),
+    });
+    tab_ids.push(TabId::Add);
 
-    let line = Line::from(spans);
-    let title = Paragraph::new(line);
-    frame.render_widget(title, area);
+    // Render
+    let hits = segment_bar::render(&items, &segment_bar::TabBarStyle, area, frame.buffer_mut());
+
+    // Map hit regions to tab areas
+    ui.layout.tab_areas.clear();
+    for hit in hits {
+        if let Some(tab_id) = tab_ids.get(hit.index) {
+            ui.layout.tab_areas.insert(tab_id.clone(), hit.area);
+        }
+    }
 }
 
 fn active_rui<'a>(model: &TuiModel, ui: &'a UiState) -> &'a crate::app::RepoUiState {
@@ -256,19 +264,23 @@ fn render_status_bar(model: &TuiModel, ui: &mut UiState, in_flight: &HashMap<u64
 
     for chip in &status_model.visible_keys {
         let ribbon_start = x;
-        spans.push(Span::styled(CHEVRON_SEPARATOR, Style::default().fg(Color::Black).bg(Color::DarkGray)));
-        spans.push(Span::styled(" ", Style::default().fg(Color::Black).bg(Color::DarkGray)));
-        spans.push(Span::styled("<", Style::default().fg(Color::Black).bg(Color::DarkGray).bold()));
-        spans.push(Span::styled(chip.key.clone(), Style::default().fg(Color::Indexed(208)).bg(Color::DarkGray).bold()));
-        spans.push(Span::styled(">", Style::default().fg(Color::Black).bg(Color::DarkGray).bold()));
-        spans.push(Span::styled(format!(" {} ", chip.label), Style::default().fg(Color::Black).bg(Color::DarkGray).bold()));
-        spans.push(Span::styled(CHEVRON_SEPARATOR, Style::default().fg(Color::DarkGray).bg(Color::Black)));
+        let item = segment_bar::SegmentItem {
+            label: chip.label.clone(),
+            key_hint: Some(chip.key.clone()),
+            active: false,
+            dragging: false,
+            style_override: None,
+        };
+        let rendered = segment_bar::RibbonStyle.render_item(&item);
+        for span in rendered.spans {
+            spans.push(span);
+        }
 
-        ui.layout.status_bar.key_targets.push(StatusBarTarget::new(
-            Rect::new(area.x + ribbon_start as u16, area.y, chip.ribbon_width() as u16, 1),
-            chip.action.clone(),
-        ));
-        x += chip.ribbon_width();
+        ui.layout
+            .status_bar
+            .key_targets
+            .push(StatusBarTarget::new(Rect::new(area.x + ribbon_start as u16, area.y, rendered.width as u16, 1), chip.action.clone()));
+        x += rendered.width;
     }
 
     if x < status_model.task_start {
@@ -539,7 +551,9 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, a
                     build_header_row(header)
                 }
                 GroupEntry::Item(item) => {
-                    let mut row = build_item_row(item, &rm.providers, &col_widths, model.active_repo_root(), prev_source.as_deref());
+                    let pending = rui.pending_actions.get(&item.identity);
+                    let mut row =
+                        build_item_row(item, &rm.providers, &col_widths, model.active_repo_root(), prev_source.as_deref(), pending);
                     prev_source = item.source.clone();
                     if is_multi_selected {
                         row = row.style(Style::default().bg(Color::Indexed(236)));
@@ -611,6 +625,7 @@ fn build_item_row<'a>(
     col_widths: &[u16],
     repo_root: &Path,
     prev_source: Option<&str>,
+    pending: Option<&PendingAction>,
 ) -> Row<'a> {
     let session_status = item.session_key.as_deref().and_then(|k| providers.sessions.get(k)).map(|s| &s.status);
     let (icon, icon_color) = ui_helpers::work_item_icon(&item.kind, !item.workspace_refs.is_empty(), session_status);
@@ -675,6 +690,59 @@ fn build_item_row<'a>(
     } else {
         String::new()
     };
+
+    // Pending action rendering — column order must mirror the Row::new path below.
+    if let Some(pending) = pending {
+        match &pending.status {
+            PendingStatus::InFlight => {
+                let total_width: usize = col_widths.iter().map(|w| *w as usize).sum();
+                let shimmer = Shimmer::new(total_width);
+                let spinner = ui_helpers::spinner_char();
+
+                let mut offset: usize = 0;
+                let cells = vec![
+                    (format!(" {spinner}"), col_widths.first().copied().unwrap_or(3) as usize),
+                    (source_display.clone(), col_widths.get(1).copied().unwrap_or(8) as usize),
+                    (path_display.clone(), col_widths.get(2).copied().unwrap_or(14) as usize),
+                    (description.clone(), col_widths.get(3).copied().unwrap_or(15) as usize),
+                    (branch_display.clone(), col_widths.get(4).copied().unwrap_or(25) as usize),
+                    (wt_indicator.to_string(), col_widths.get(5).copied().unwrap_or(3) as usize),
+                    (ws_indicator.clone(), col_widths.get(6).copied().unwrap_or(3) as usize),
+                    (pr_display.clone(), col_widths.get(7).copied().unwrap_or(8) as usize),
+                    (session_display.clone(), col_widths.get(8).copied().unwrap_or(8) as usize),
+                    (issues_display.clone(), col_widths.get(9).copied().unwrap_or(8) as usize),
+                    (git_display.clone(), col_widths.get(10).copied().unwrap_or(5) as usize),
+                ];
+
+                let shimmer_cells: Vec<Cell> = cells
+                    .into_iter()
+                    .map(|(text, width)| {
+                        let spans = shimmer.spans(&text, offset);
+                        offset += width;
+                        Cell::from(Line::from(spans))
+                    })
+                    .collect();
+
+                return Row::new(shimmer_cells);
+            }
+            PendingStatus::Failed(_) => {
+                let error_style = Style::default().fg(Color::Red).add_modifier(Modifier::DIM);
+                return Row::new(vec![
+                    Cell::from(Span::styled(" \u{2717}", Style::default().fg(Color::Red))),
+                    Cell::from(Span::styled(source_display, error_style)),
+                    Cell::from(Span::styled(path_display, error_style)),
+                    Cell::from(Span::styled(description, error_style)),
+                    Cell::from(Span::styled(branch_display, error_style)),
+                    Cell::from(Span::styled(wt_indicator.to_string(), error_style)),
+                    Cell::from(Span::styled(ws_indicator, error_style)),
+                    Cell::from(Span::styled(pr_display, error_style)),
+                    Cell::from(Span::styled(session_display, error_style)),
+                    Cell::from(Span::styled(issues_display, error_style)),
+                    Cell::from(Span::styled(git_display, error_style)),
+                ]);
+            }
+        }
+    }
 
     Row::new(vec![
         Cell::from(Span::styled(format!(" {icon}"), Style::default().fg(icon_color))),

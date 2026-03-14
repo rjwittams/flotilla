@@ -330,12 +330,36 @@ pub async fn run_command(daemon: &dyn DaemonHandle, command: Command, format: Ou
 mod tests {
     use std::{collections::HashMap, path::PathBuf};
 
+    use flotilla_protocol::{
+        snapshot::{WorkItem, WorkItemIdentity, WorkItemKind},
+        HostName, HostPath,
+    };
+
     fn health(entries: &[(&str, &str, bool)]) -> HashMap<String, HashMap<String, bool>> {
         let mut map: HashMap<String, HashMap<String, bool>> = HashMap::new();
         for (cat, name, ok) in entries {
             map.entry(cat.to_string()).or_default().insert(name.to_string(), *ok);
         }
         map
+    }
+
+    fn make_work_item(kind: WorkItemKind, branch: Option<&str>, description: &str) -> WorkItem {
+        WorkItem {
+            kind,
+            identity: WorkItemIdentity::Checkout(HostPath::new(HostName::new("test"), PathBuf::from("/tmp/wt"))),
+            host: HostName::new("test"),
+            branch: branch.map(String::from),
+            description: description.to_string(),
+            checkout: None,
+            change_request_key: None,
+            session_key: None,
+            issue_keys: vec![],
+            workspace_refs: vec![],
+            is_main_checkout: false,
+            debug_group: vec![],
+            source: None,
+            terminal_keys: vec![],
+        }
     }
 
     mod status_human {
@@ -529,6 +553,375 @@ mod tests {
                 assert!(line.contains("host-2"), "should show host name for {expected}");
                 assert!(line.contains(expected), "should contain '{expected}'");
             }
+        }
+    }
+
+    mod command_result_human {
+        use std::path::PathBuf;
+
+        use flotilla_protocol::commands::{CheckoutStatus, CommandResult};
+
+        use crate::cli::format_command_result;
+
+        #[test]
+        fn ok() {
+            assert_eq!(format_command_result(&CommandResult::Ok), "ok");
+        }
+
+        #[test]
+        fn repo_added() {
+            let result = CommandResult::RepoAdded { path: PathBuf::from("/tmp/my-repo") };
+            let output = format_command_result(&result);
+            assert!(output.contains("repo added"), "should say repo added");
+            assert!(output.contains("/tmp/my-repo"), "should include path");
+        }
+
+        #[test]
+        fn repo_removed() {
+            let result = CommandResult::RepoRemoved { path: PathBuf::from("/tmp/old-repo") };
+            let output = format_command_result(&result);
+            assert!(output.contains("repo removed"), "should say repo removed");
+            assert!(output.contains("/tmp/old-repo"), "should include path");
+        }
+
+        #[test]
+        fn refreshed() {
+            let result = CommandResult::Refreshed { repos: vec![PathBuf::from("/a"), PathBuf::from("/b"), PathBuf::from("/c")] };
+            let output = format_command_result(&result);
+            assert!(output.contains("refreshed 3 repo(s)"), "should show count of repos");
+        }
+
+        #[test]
+        fn refreshed_empty() {
+            let result = CommandResult::Refreshed { repos: vec![] };
+            let output = format_command_result(&result);
+            assert!(output.contains("refreshed 0 repo(s)"), "should handle zero repos");
+        }
+
+        #[test]
+        fn checkout_created() {
+            let result = CommandResult::CheckoutCreated { branch: "feat-new".into(), path: PathBuf::from("/tmp/wt") };
+            let output = format_command_result(&result);
+            assert!(output.contains("checkout created"), "should say checkout created");
+            assert!(output.contains("feat-new"), "should include branch name");
+        }
+
+        #[test]
+        fn checkout_removed() {
+            let result = CommandResult::CheckoutRemoved { branch: "feat-old".into() };
+            let output = format_command_result(&result);
+            assert!(output.contains("checkout removed"), "should say checkout removed");
+            assert!(output.contains("feat-old"), "should include branch name");
+        }
+
+        #[test]
+        fn branch_name_generated() {
+            let result =
+                CommandResult::BranchNameGenerated { name: "feat/cool-thing".into(), issue_ids: vec![("github".into(), "42".into())] };
+            let output = format_command_result(&result);
+            assert!(output.contains("branch name"), "should say branch name");
+            assert!(output.contains("feat/cool-thing"), "should include generated name");
+        }
+
+        #[test]
+        fn checkout_status() {
+            let result = CommandResult::CheckoutStatus(CheckoutStatus { branch: "main".into(), ..Default::default() });
+            let output = format_command_result(&result);
+            assert_eq!(output, "checkout status received");
+        }
+
+        #[test]
+        fn error() {
+            let result = CommandResult::Error { message: "something broke".into() };
+            let output = format_command_result(&result);
+            assert_eq!(output, "error: something broke");
+        }
+
+        #[test]
+        fn cancelled() {
+            assert_eq!(format_command_result(&CommandResult::Cancelled), "cancelled");
+        }
+    }
+
+    mod work_items_table {
+        use flotilla_protocol::snapshot::WorkItemKind;
+
+        use super::make_work_item;
+        use crate::cli::format_work_items_table;
+
+        #[test]
+        fn empty_items() {
+            let table = format_work_items_table(&[]);
+            let output = table.to_string();
+            assert!(output.contains("Kind"), "should have header");
+            assert!(output.contains("Branch"), "should have Branch header");
+            assert!(output.contains("Description"), "should have Description header");
+        }
+
+        #[test]
+        fn single_item_none_fields_show_dash() {
+            // format_work_items_table renders None/empty fields as "-".
+            // The data row contains: Kind | Branch | Description | PR | Session | Issues
+            // With all optional fields None/empty, the row should have "-" for each.
+            let bare = make_work_item(WorkItemKind::Checkout, None, "my checkout");
+            let bare_output = format_work_items_table(&[bare]).to_string();
+            let data_line = bare_output.lines().find(|l| l.contains("Checkout")).expect("should have a data row");
+
+            // Count occurrences of the placeholder "-" in the data row.
+            // Branch, PR, Session, and Issues are all None/empty → 4 dashes expected.
+            // We search for the dash bordered by non-alphanumeric chars so we don't
+            // match dashes inside table borders.
+            let dash_cells: Vec<&str> = data_line.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').filter(|s| *s == "-").collect();
+            assert_eq!(dash_cells.len(), 4, "expected 4 dash placeholders (branch, PR, session, issues), got: {dash_cells:?}");
+        }
+
+        #[test]
+        fn item_with_all_fields_populated() {
+            let mut item = make_work_item(WorkItemKind::ChangeRequest, Some("feat-x"), "Feature X");
+            item.change_request_key = Some("PR#10".to_string());
+            item.session_key = Some("sess-1".to_string());
+            item.issue_keys = vec!["I-1".to_string(), "I-2".to_string()];
+            let table = format_work_items_table(&[item]);
+            let output = table.to_string();
+            assert!(output.contains("ChangeRequest"), "should show kind");
+            assert!(output.contains("feat-x"), "should show branch");
+            assert!(output.contains("Feature X"), "should show description");
+            assert!(output.contains("PR#10"), "should show PR key");
+            assert!(output.contains("sess-1"), "should show session key");
+            assert!(output.contains("I-1, I-2"), "should join issue keys with comma");
+        }
+
+        #[test]
+        fn multiple_items() {
+            let items = vec![
+                make_work_item(WorkItemKind::Checkout, Some("main"), "Main branch"),
+                make_work_item(WorkItemKind::Session, None, "Agent session"),
+            ];
+            let table = format_work_items_table(&items);
+            let output = table.to_string();
+            assert!(output.contains("Checkout"), "should contain first item kind");
+            assert!(output.contains("Session"), "should contain second item kind");
+            assert!(output.contains("Main branch"), "should contain first description");
+            assert!(output.contains("Agent session"), "should contain second description");
+        }
+    }
+
+    mod repo_detail_human {
+        use std::{collections::HashMap, path::PathBuf};
+
+        use flotilla_protocol::{snapshot::ProviderError, RepoDetailResponse};
+
+        use super::make_work_item;
+        use crate::cli::format_repo_detail_human;
+
+        #[test]
+        fn minimal_no_slug_no_items_no_errors() {
+            let detail = RepoDetailResponse {
+                path: PathBuf::from("/tmp/my-repo"),
+                slug: None,
+                provider_health: HashMap::new(),
+                work_items: vec![],
+                errors: vec![],
+            };
+            let output = format_repo_detail_human(&detail);
+            assert!(output.contains("Repo: /tmp/my-repo"), "should show repo path");
+            assert!(!output.contains("Slug:"), "should not show slug when None");
+            assert!(!output.contains("Kind"), "should not show table when no items");
+            assert!(!output.contains("Errors"), "should not show errors when empty");
+        }
+
+        #[test]
+        fn with_slug() {
+            let detail = RepoDetailResponse {
+                path: PathBuf::from("/tmp/my-repo"),
+                slug: Some("org/my-repo".into()),
+                provider_health: HashMap::new(),
+                work_items: vec![],
+                errors: vec![],
+            };
+            let output = format_repo_detail_human(&detail);
+            assert!(output.contains("Slug: org/my-repo"), "should show slug");
+        }
+
+        #[test]
+        fn with_work_items() {
+            let detail = RepoDetailResponse {
+                path: PathBuf::from("/tmp/my-repo"),
+                slug: None,
+                provider_health: HashMap::new(),
+                work_items: vec![make_work_item(flotilla_protocol::snapshot::WorkItemKind::Checkout, Some("feat"), "My feature")],
+                errors: vec![],
+            };
+            let output = format_repo_detail_human(&detail);
+            assert!(output.contains("My feature"), "should render work items table");
+            assert!(output.contains("Kind"), "should have table header");
+        }
+
+        #[test]
+        fn with_errors() {
+            let detail = RepoDetailResponse {
+                path: PathBuf::from("/tmp/my-repo"),
+                slug: None,
+                provider_health: HashMap::new(),
+                work_items: vec![],
+                errors: vec![ProviderError { category: "code_review".into(), provider: "GitHub".into(), message: "rate limited".into() }],
+            };
+            let output = format_repo_detail_human(&detail);
+            assert!(output.contains("Errors:"), "should have errors header");
+            assert!(output.contains("[code_review/GitHub]"), "should show category/provider");
+            assert!(output.contains("rate limited"), "should show error message");
+        }
+    }
+
+    mod repo_providers_human {
+        use std::{collections::HashMap, path::PathBuf};
+
+        use flotilla_protocol::{DiscoveryEntry, ProviderInfo, RepoProvidersResponse, UnmetRequirementInfo};
+
+        use crate::cli::format_repo_providers_human;
+
+        fn empty_response() -> RepoProvidersResponse {
+            RepoProvidersResponse {
+                path: PathBuf::from("/tmp/my-repo"),
+                slug: None,
+                host_discovery: vec![],
+                repo_discovery: vec![],
+                providers: vec![],
+                unmet_requirements: vec![],
+            }
+        }
+
+        #[test]
+        fn empty_response_shows_repo_only() {
+            let resp = empty_response();
+            let output = format_repo_providers_human(&resp);
+            assert!(output.contains("Repo: /tmp/my-repo"), "should show repo path");
+            assert!(!output.contains("Host Discovery"), "should not show host discovery when empty");
+            assert!(!output.contains("Repo Discovery"), "should not show repo discovery when empty");
+            assert!(!output.contains("Providers:"), "should not show providers when empty");
+            assert!(!output.contains("Unmet Requirements"), "should not show unmet reqs when empty");
+        }
+
+        #[test]
+        fn with_host_discovery() {
+            let mut resp = empty_response();
+            resp.host_discovery =
+                vec![DiscoveryEntry { kind: "ssh_config".into(), detail: HashMap::from([("host".into(), "github.com".into())]) }];
+            let output = format_repo_providers_human(&resp);
+            assert!(output.contains("Host Discovery:"), "should show host discovery header");
+            assert!(output.contains("ssh_config"), "should show discovery kind");
+            assert!(output.contains("host=github.com"), "should show detail key=value");
+        }
+
+        #[test]
+        fn with_repo_discovery() {
+            let mut resp = empty_response();
+            resp.repo_discovery = vec![DiscoveryEntry {
+                kind: "git_remote".into(),
+                detail: HashMap::from([("url".into(), "git@github.com:org/repo.git".into())]),
+            }];
+            let output = format_repo_providers_human(&resp);
+            assert!(output.contains("Repo Discovery:"), "should show repo discovery header");
+            assert!(output.contains("git_remote"), "should show discovery kind");
+            assert!(output.contains("git@github.com:org/repo.git"), "should show detail value");
+        }
+
+        #[test]
+        fn with_providers_table() {
+            let mut resp = empty_response();
+            resp.providers = vec![ProviderInfo { category: "vcs".into(), name: "Git".into(), healthy: true }, ProviderInfo {
+                category: "code_review".into(),
+                name: "GitHub".into(),
+                healthy: false,
+            }];
+            let output = format_repo_providers_human(&resp);
+            assert!(output.contains("Providers:"), "should show providers header");
+            assert!(output.contains("vcs"), "should show category");
+            assert!(output.contains("Git"), "should show name");
+            assert!(output.contains("ok"), "should show healthy as ok");
+            assert!(output.contains("error"), "should show unhealthy as error");
+        }
+
+        #[test]
+        fn with_unmet_requirements() {
+            let mut resp = empty_response();
+            resp.unmet_requirements =
+                vec![UnmetRequirementInfo { factory: "GitHubCodeReview".into(), requirement: "gh CLI not found".into() }];
+            let output = format_repo_providers_human(&resp);
+            assert!(output.contains("Unmet Requirements:"), "should show unmet requirements header");
+            assert!(output.contains("GitHubCodeReview"), "should show factory name");
+            assert!(output.contains("gh CLI not found"), "should show requirement description");
+        }
+
+        #[test]
+        fn with_slug() {
+            let mut resp = empty_response();
+            resp.slug = Some("org/my-repo".into());
+            let output = format_repo_providers_human(&resp);
+            assert!(output.contains("Slug: org/my-repo"), "should show slug");
+        }
+    }
+
+    mod repo_work_human {
+        use std::path::PathBuf;
+
+        use flotilla_protocol::{snapshot::WorkItemKind, RepoWorkResponse};
+
+        use super::make_work_item;
+        use crate::cli::format_repo_work_human;
+
+        #[test]
+        fn empty_work_items() {
+            let resp = RepoWorkResponse { path: PathBuf::from("/tmp/my-repo"), slug: None, work_items: vec![] };
+            let output = format_repo_work_human(&resp);
+            assert!(output.contains("Repo: /tmp/my-repo"), "should show repo path");
+            assert!(output.contains("No work items."), "should say no work items");
+        }
+
+        #[test]
+        fn with_slug() {
+            let resp = RepoWorkResponse { path: PathBuf::from("/tmp/my-repo"), slug: Some("org/my-repo".into()), work_items: vec![] };
+            let output = format_repo_work_human(&resp);
+            assert!(output.contains("Slug: org/my-repo"), "should show slug");
+        }
+
+        #[test]
+        fn with_work_items() {
+            let resp = RepoWorkResponse {
+                path: PathBuf::from("/tmp/my-repo"),
+                slug: None,
+                work_items: vec![
+                    make_work_item(WorkItemKind::Checkout, Some("feat-x"), "Feature X"),
+                    make_work_item(WorkItemKind::Checkout, Some("feat-y"), "Feature Y"),
+                ],
+            };
+            let output = format_repo_work_human(&resp);
+            assert!(!output.contains("No work items."), "should not say no work items");
+            assert!(output.contains("Feature X"), "should render first work item");
+            assert!(output.contains("Feature Y"), "should render second work item");
+            assert!(output.contains("Kind"), "should have table header");
+        }
+    }
+
+    mod repo_name_fn {
+        use std::path::Path;
+
+        use crate::cli::repo_name;
+
+        #[test]
+        fn normal_path() {
+            assert_eq!(repo_name(Path::new("/tmp/my-repo")), "my-repo");
+        }
+
+        #[test]
+        fn root_path_fallback() {
+            let name = repo_name(Path::new("/"));
+            assert_eq!(name, "/", "root path should fall back to full path display");
+        }
+
+        #[test]
+        fn nested_path() {
+            assert_eq!(repo_name(Path::new("/home/user/projects/flotilla")), "flotilla");
         }
     }
 }

@@ -15,9 +15,9 @@ use std::{
 
 use async_trait::async_trait;
 use flotilla_protocol::{
-    AssociationKey, Command, CorrelationKey, DaemonEvent, DeltaEntry, HostName, HostPath, Issue, PeerConnectionState, ProviderData,
-    ProviderError, ProviderInfo, RepoDetailResponse, RepoInfo, RepoProvidersResponse, RepoSummary, RepoWorkResponse, Snapshot,
-    StatusResponse, UnmetRequirementInfo,
+    AssociationKey, Command, CorrelationKey, DaemonEvent, DeltaEntry, HostName, HostPath, HostSummary, Issue, PeerConnectionState,
+    ProviderData, ProviderError, ProviderInfo, RepoDetailResponse, RepoInfo, RepoProvidersResponse, RepoSummary, RepoWorkResponse,
+    Snapshot, StatusResponse, UnmetRequirementInfo,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -338,6 +338,8 @@ pub struct InProcessDaemon {
     /// Unique identity for this daemon instance, generated at startup.
     /// Used in peer Hello handshake to detect remote daemon restarts.
     session_id: uuid::Uuid,
+    /// Static local host summary published to peers.
+    local_host_summary: HostSummary,
 }
 
 impl InProcessDaemon {
@@ -406,6 +408,13 @@ impl InProcessDaemon {
             order.push(path);
         }
 
+        let local_host_summary = crate::host_summary::build_local_host_summary(
+            &host_name,
+            &host_bag,
+            crate::host_summary::provider_statuses_from_registries(repos.values().map(|state| state.model.registry.as_ref())),
+            &*discovery.env,
+        );
+
         let daemon = Arc::new(Self {
             repos: RwLock::new(repos),
             repo_order: RwLock::new(order),
@@ -421,6 +430,7 @@ impl InProcessDaemon {
             discovery,
             active_command: Arc::new(Mutex::new(None)),
             session_id: uuid::Uuid::new_v4(),
+            local_host_summary,
         });
 
         // Spawn self-driving poll loop with a Weak reference.
@@ -452,6 +462,10 @@ impl InProcessDaemon {
     /// handshake so peers can detect daemon restarts.
     pub fn session_id(&self) -> uuid::Uuid {
         self.session_id
+    }
+
+    pub fn local_host_summary(&self) -> &HostSummary {
+        &self.local_host_summary
     }
 
     /// Returns whether this daemon is running in follower mode.
@@ -532,15 +546,7 @@ impl InProcessDaemon {
             CommandAction::Checkout { repo, .. } => self.resolve_repo_selector(repo).await,
             CommandAction::RemoveCheckout { checkout, .. } => self.resolve_checkout_selector(checkout).await.map(|(repo, _)| repo),
             CommandAction::Refresh { repo: Some(selector) } => self.resolve_repo_selector(selector).await,
-            CommandAction::FetchCheckoutStatus { checkout_path: Some(path), .. } => {
-                let repos = self.repos.read().await;
-                repos
-                    .keys()
-                    .find(|repo_root| path.starts_with(repo_root))
-                    .cloned()
-                    .ok_or_else(|| format!("repo not tracked: {}", path.display()))
-            }
-            CommandAction::FetchCheckoutStatus { checkout_path: None, .. }
+            CommandAction::FetchCheckoutStatus { .. }
             | CommandAction::OpenChangeRequest { .. }
             | CommandAction::CloseChangeRequest { .. }
             | CommandAction::OpenIssue { .. }
@@ -1969,5 +1975,281 @@ mod tests {
         assert_eq!(snap.issue_total, Some(5));
         assert!(snap.issue_has_more);
         assert!(snap.providers.issues.contains_key("9"));
+    }
+
+    // --- now_iso8601 ---
+
+    #[test]
+    fn now_iso8601_returns_parseable_timestamp() {
+        let ts = now_iso8601();
+        assert!(ts.ends_with('Z'), "should be UTC: {ts}");
+        assert!(ts.len() >= 20, "should be a full ISO 8601 timestamp: {ts}");
+        // Verify it parses as a valid RFC 3339 timestamp
+        chrono::DateTime::parse_from_rfc3339(&ts).expect("should parse as RFC 3339");
+    }
+
+    // --- choose_event edge case: empty changes with prev_seq > 0 ---
+
+    #[test]
+    fn choose_event_sends_full_when_delta_has_empty_changes() {
+        let snapshot = Snapshot {
+            seq: 2,
+            repo_identity: fallback_repo_identity(Path::new("/tmp/repo")),
+            repo: PathBuf::from("/tmp/repo"),
+            host_name: HostName::local(),
+            work_items: vec![],
+            providers: ProviderData::default(),
+            provider_health: HashMap::new(),
+            errors: vec![],
+            issue_total: None,
+            issue_has_more: false,
+            issue_search_results: None,
+        };
+
+        // prev_seq > 0 but changes is empty — should still send full
+        let delta = DeltaEntry { seq: 2, prev_seq: 1, changes: vec![], work_items: vec![] };
+        assert!(matches!(choose_event(snapshot, delta), DaemonEvent::SnapshotFull(_)));
+    }
+
+    // --- build_repo_snapshot_with_peers ---
+
+    #[test]
+    fn build_repo_snapshot_with_peers_merges_peer_data() {
+        let cache = IssueCache::new();
+        let host_a = HostName::new("host-a");
+        let host_b = HostName::new("host-b");
+
+        // Create peer provider data with a checkout owned by host_b
+        let mut peer_data = ProviderData::default();
+        peer_data.checkouts.insert(flotilla_protocol::HostPath::new(host_b.clone(), PathBuf::from("/remote/repo")), Checkout {
+            branch: "remote-feat".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![],
+            association_keys: vec![],
+        });
+
+        let peers = vec![(host_b, peer_data)];
+        let snap = build_repo_snapshot_with_peers(
+            SnapshotBuildContext {
+                repo_identity: fallback_repo_identity(Path::new("/tmp/repo")),
+                path: Path::new("/tmp/repo"),
+                seq: 1,
+                base: &RefreshSnapshot::default(),
+                cache: &cache,
+                search_results: &None,
+                host_name: &host_a,
+            },
+            Some(&peers),
+        );
+
+        // The snapshot should contain the merged peer checkout
+        assert!(!snap.providers.checkouts.is_empty(), "peer checkout should be merged");
+        assert_eq!(snap.providers.checkouts.len(), 1);
+    }
+
+    // --- RepoState::record_delta ---
+
+    /// Helper to create a minimal RepoState for delta testing.
+    fn make_repo_state() -> RepoState {
+        RepoState {
+            identity: fallback_repo_identity(Path::new("/virtual")),
+            model: crate::model::RepoModel::new_virtual(),
+            slug: None,
+            repo_bag: crate::providers::discovery::EnvironmentBag::new(),
+            unmet: Vec::new(),
+            seq: 0,
+            last_snapshot: Arc::new(RefreshSnapshot::default()),
+            issue_cache: IssueCache::new(),
+            search_results: None,
+            issue_fetch_mutex: Arc::new(Mutex::new(())),
+            last_broadcast_providers: ProviderData::default(),
+            last_broadcast_health: HashMap::new(),
+            last_broadcast_errors: Vec::new(),
+            delta_log: VecDeque::new(),
+            local_data_version: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn record_delta_detects_added_checkout() {
+        let mut state = make_repo_state();
+
+        let mut new_providers = ProviderData::default();
+        new_providers.checkouts.insert(flotilla_protocol::HostPath::new(HostName::new("host"), PathBuf::from("/tmp/co")), Checkout {
+            branch: "feat".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![],
+            association_keys: vec![],
+        });
+
+        let entry = state.record_delta(&new_providers, &HashMap::new(), &[], vec![]);
+
+        assert_eq!(entry.prev_seq, 0);
+        assert_eq!(entry.seq, 1);
+        assert!(
+            entry.changes.iter().any(|c| matches!(c, flotilla_protocol::Change::Checkout { op: flotilla_protocol::EntryOp::Added(_), .. })),
+            "should have an Added checkout change"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_delta_detects_provider_health_update() {
+        let mut state = make_repo_state();
+        state.last_broadcast_health = HashMap::from([("vcs".into(), HashMap::from([("git".into(), true)]))]);
+
+        // Change the health value from true to false
+        let new_health = HashMap::from([("vcs".into(), HashMap::from([("git".into(), false)]))]);
+        let entry = state.record_delta(&ProviderData::default(), &new_health, &[], vec![]);
+
+        assert!(
+            entry.changes.iter().any(|c| matches!(
+                c,
+                flotilla_protocol::Change::ProviderHealth {
+                    category,
+                    provider,
+                    op: flotilla_protocol::EntryOp::Updated(false),
+                } if category == "vcs" && provider == "git"
+            )),
+            "should have an Updated health change: {:?}",
+            entry.changes
+        );
+    }
+
+    #[tokio::test]
+    async fn record_delta_detects_provider_health_added() {
+        let mut state = make_repo_state();
+
+        // New health entry with no prior state
+        let new_health = HashMap::from([("code_review".into(), HashMap::from([("github".into(), true)]))]);
+        let entry = state.record_delta(&ProviderData::default(), &new_health, &[], vec![]);
+
+        assert!(
+            entry.changes.iter().any(|c| matches!(
+                c,
+                flotilla_protocol::Change::ProviderHealth {
+                    category,
+                    provider,
+                    op: flotilla_protocol::EntryOp::Added(true),
+                } if category == "code_review" && provider == "github"
+            )),
+            "should have an Added health change: {:?}",
+            entry.changes
+        );
+    }
+
+    #[tokio::test]
+    async fn record_delta_detects_provider_health_removed() {
+        let mut state = make_repo_state();
+        state.last_broadcast_health = HashMap::from([("vcs".into(), HashMap::from([("git".into(), true)]))]);
+
+        // Empty health means the old entry was removed
+        let entry = state.record_delta(&ProviderData::default(), &HashMap::new(), &[], vec![]);
+
+        assert!(
+            entry.changes.iter().any(|c| matches!(
+                c,
+                flotilla_protocol::Change::ProviderHealth {
+                    category,
+                    provider,
+                    op: flotilla_protocol::EntryOp::Removed,
+                } if category == "vcs" && provider == "git"
+            )),
+            "should have a Removed health change: {:?}",
+            entry.changes
+        );
+    }
+
+    #[tokio::test]
+    async fn record_delta_detects_error_change() {
+        let mut state = make_repo_state();
+
+        let new_errors = vec![ProviderError { category: "vcs".into(), provider: "git".into(), message: "failed".into() }];
+        let entry = state.record_delta(&ProviderData::default(), &HashMap::new(), &new_errors, vec![]);
+
+        assert!(
+            entry.changes.iter().any(|c| matches!(c, flotilla_protocol::Change::ErrorsChanged(_))),
+            "should have an ErrorsChanged entry: {:?}",
+            entry.changes
+        );
+    }
+
+    #[tokio::test]
+    async fn record_delta_log_bounded_at_capacity() {
+        let mut state = make_repo_state();
+
+        // Record more deltas than DELTA_LOG_CAPACITY
+        for i in 0..(DELTA_LOG_CAPACITY + 5) {
+            let mut providers = ProviderData::default();
+            // Change something each iteration so a delta is produced
+            providers.checkouts.insert(
+                flotilla_protocol::HostPath::new(HostName::new("host"), PathBuf::from(format!("/tmp/co-{i}"))),
+                Checkout {
+                    branch: format!("feat-{i}"),
+                    is_main: false,
+                    trunk_ahead_behind: None,
+                    remote_ahead_behind: None,
+                    working_tree: None,
+                    last_commit: None,
+                    correlation_keys: vec![],
+                    association_keys: vec![],
+                },
+            );
+            state.record_delta(&providers, &HashMap::new(), &[], vec![]);
+            // Update seq to match what record_delta expects
+            state.seq = state.delta_log.back().expect("delta log non-empty").seq;
+        }
+
+        assert_eq!(state.delta_log.len(), DELTA_LOG_CAPACITY, "delta log should be bounded at {DELTA_LOG_CAPACITY}");
+    }
+
+    #[tokio::test]
+    async fn record_delta_seq_increments_correctly() {
+        let mut state = make_repo_state();
+
+        let entry1 = state.record_delta(&ProviderData::default(), &HashMap::new(), &[], vec![]);
+        assert_eq!(entry1.prev_seq, 0, "first delta prev_seq should be 0");
+        assert_eq!(entry1.seq, 1, "first delta seq should be 1");
+
+        // Advance state.seq to match
+        state.seq = entry1.seq;
+
+        let entry2 = state.record_delta(&ProviderData::default(), &HashMap::new(), &[], vec![]);
+        assert_eq!(entry2.prev_seq, 1, "second delta prev_seq should be 1");
+        assert_eq!(entry2.seq, 2, "second delta seq should be 2");
+    }
+
+    #[tokio::test]
+    async fn record_delta_updates_tracking_state() {
+        let mut state = make_repo_state();
+
+        let new_health = HashMap::from([("vcs".into(), HashMap::from([("git".into(), true)]))]);
+        let new_errors = vec![ProviderError { category: "vcs".into(), provider: "git".into(), message: "oops".into() }];
+        let mut new_providers = ProviderData::default();
+        new_providers.checkouts.insert(flotilla_protocol::HostPath::new(HostName::new("host"), PathBuf::from("/tmp/co")), Checkout {
+            branch: "feat".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![],
+            association_keys: vec![],
+        });
+
+        state.record_delta(&new_providers, &new_health, &new_errors, vec![]);
+
+        // After record_delta, the tracking state should be updated to the new values
+        assert_eq!(state.last_broadcast_providers, new_providers);
+        assert_eq!(state.last_broadcast_health, new_health);
+        assert_eq!(state.last_broadcast_errors, new_errors);
+        assert_eq!(state.delta_log.len(), 1);
     }
 }

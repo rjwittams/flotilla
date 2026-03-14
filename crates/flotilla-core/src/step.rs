@@ -63,7 +63,14 @@ pub async fn run_step_plan(
             status: StepStatus::Started,
         });
 
-        match (step.action)().await {
+        let outcome = (step.action)().await;
+        // Cancellation wins over a successful in-flight step, but provider
+        // errors still surface so we don't hide the underlying failure.
+        if cancel.is_cancelled() && outcome.is_ok() {
+            return CommandResult::Cancelled;
+        }
+
+        match outcome {
             Ok(StepOutcome::Completed) => {
                 let _ = event_tx.send(DaemonEvent::CommandStepUpdate {
                     command_id,
@@ -123,6 +130,8 @@ pub async fn run_step_plan(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -206,6 +215,43 @@ mod tests {
             tx,
         )
         .await;
+        assert_eq!(result, CommandResult::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_running_step_returns_cancelled() {
+        let (cancel, tx) = setup();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let plan = StepPlan::new(vec![Step {
+            description: "step-a".to_string(),
+            action: Box::new({
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                move || {
+                    Box::pin(async move {
+                        started.notify_waiters();
+                        release.notified().await;
+                        Ok(StepOutcome::Completed)
+                    })
+                }
+            }),
+        }]);
+
+        let task = tokio::spawn(run_step_plan(
+            plan,
+            1,
+            HostName::local(),
+            flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            PathBuf::from("/repo"),
+            cancel.clone(),
+            tx,
+        ));
+        started.notified().await;
+        cancel.cancel();
+        release.notify_waiters();
+
+        let result = task.await.expect("task should join");
         assert_eq!(result, CommandResult::Cancelled);
     }
 

@@ -3,27 +3,29 @@ use std::{
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::Arc,
+    time::Duration,
 };
 
+use async_trait::async_trait;
 use flotilla_core::{
     config::ConfigStore,
     daemon::DaemonHandle,
     in_process::InProcessDaemon,
-    providers::discovery::test_support::{fake_discovery, git_process_discovery},
+    providers::{
+        ai_utility::AiUtility,
+        coding_agent::CloudAgentService,
+        discovery::{
+            test_support::{fake_discovery, fake_discovery_with_providers, git_process_discovery, FakeCheckoutManager, FakeIssueTracker},
+            DiscoveryRuntime, EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement,
+        },
+        types::{CloudAgentSession, RepoCriteria, SessionStatus},
+    },
 };
 use flotilla_protocol::{
-    CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, DaemonEvent, HostName, ProviderData, RepoIdentity,
-    RepoSelector,
+    AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, CorrelationKey, DaemonEvent,
+    HostName, Issue, ProviderData, RepoIdentity, RepoSelector,
 };
-
-async fn daemon_for_cwd() -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>) {
-    let temp = tempfile::tempdir().expect("create tempdir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir_all(repo.join(".git")).expect("create .git dir");
-    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(false), HostName::local()).await;
-    (temp, repo, daemon)
-}
+use tokio::sync::Notify;
 
 fn init_git_repo_with_remote(path: &Path, remote: &str) {
     std::fs::create_dir_all(path).expect("create repo dir");
@@ -45,6 +47,146 @@ fn init_git_repo_with_remote(path: &Path, remote: &str) {
     let status =
         ProcessCommand::new("git").args(["-C", path_str, "remote", "add", "origin", remote]).status().expect("git remote add origin");
     assert!(status.success(), "git remote add origin should succeed");
+}
+
+struct SlowCloudAgent {
+    archive_started: Notify,
+    archive_release: Notify,
+}
+
+impl SlowCloudAgent {
+    fn new() -> Self {
+        Self { archive_started: Notify::new(), archive_release: Notify::new() }
+    }
+
+    async fn wait_for_archive_start(&self) {
+        tokio::time::timeout(Duration::from_secs(5), self.archive_started.notified()).await.expect("archive should start");
+    }
+
+    fn release_archive(&self) {
+        self.archive_release.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl CloudAgentService for SlowCloudAgent {
+    async fn list_sessions(&self, _: &RepoCriteria) -> Result<Vec<(String, CloudAgentSession)>, String> {
+        Ok(vec![("sess-1".into(), CloudAgentSession {
+            title: "Slow Session".into(),
+            status: SessionStatus::Running,
+            model: None,
+            updated_at: None,
+            correlation_keys: vec![CorrelationKey::SessionRef("slow-agent".into(), "sess-1".into())],
+            provider_name: String::new(),
+            provider_display_name: String::new(),
+            item_noun: String::new(),
+        })])
+    }
+
+    async fn archive_session(&self, _: &str) -> Result<(), String> {
+        self.archive_started.notify_waiters();
+        self.archive_release.notified().await;
+        Ok(())
+    }
+
+    async fn attach_command(&self, _: &str) -> Result<String, String> {
+        Ok("attach slow-session".into())
+    }
+}
+
+struct SlowCloudAgentFactory {
+    agent: Arc<SlowCloudAgent>,
+}
+
+#[async_trait]
+impl Factory for SlowCloudAgentFactory {
+    type Output = dyn CloudAgentService;
+
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor::labeled("slow-agent", "Slow Agent", "AG", "Sessions", "session")
+    }
+
+    async fn probe(
+        &self,
+        _: &EnvironmentBag,
+        _: &ConfigStore,
+        _: &Path,
+        _: Arc<dyn flotilla_core::providers::CommandRunner>,
+    ) -> Result<Arc<Self::Output>, Vec<UnmetRequirement>> {
+        Ok(Arc::clone(&self.agent) as Arc<dyn CloudAgentService>)
+    }
+}
+
+fn slow_cloud_agent_discovery(agent: Arc<SlowCloudAgent>) -> DiscoveryRuntime {
+    let mut runtime = fake_discovery(false);
+    runtime.factories.cloud_agents.push(Box::new(SlowCloudAgentFactory { agent }));
+    runtime
+}
+
+struct SlowAiUtility {
+    generation_started: Notify,
+    generation_release: Notify,
+}
+
+impl SlowAiUtility {
+    fn new() -> Self {
+        Self { generation_started: Notify::new(), generation_release: Notify::new() }
+    }
+
+    async fn wait_for_generation_start(&self) {
+        tokio::time::timeout(Duration::from_secs(5), self.generation_started.notified()).await.expect("generation should start");
+    }
+
+    fn release_generation(&self) {
+        self.generation_release.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl AiUtility for SlowAiUtility {
+    async fn generate_branch_name(&self, _: &str) -> Result<String, String> {
+        self.generation_started.notify_waiters();
+        self.generation_release.notified().await;
+        Ok("feat/slow-branch".into())
+    }
+}
+
+struct SlowAiUtilityFactory {
+    utility: Arc<SlowAiUtility>,
+}
+
+#[async_trait]
+impl Factory for SlowAiUtilityFactory {
+    type Output = dyn AiUtility;
+
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor::named("slow-ai")
+    }
+
+    async fn probe(
+        &self,
+        _: &EnvironmentBag,
+        _: &ConfigStore,
+        _: &Path,
+        _: Arc<dyn flotilla_core::providers::CommandRunner>,
+    ) -> Result<Arc<Self::Output>, Vec<UnmetRequirement>> {
+        Ok(Arc::clone(&self.utility) as Arc<dyn AiUtility>)
+    }
+}
+
+fn slow_ai_discovery(utility: Arc<SlowAiUtility>) -> DiscoveryRuntime {
+    let mut runtime = fake_discovery(false);
+    runtime.factories.ai_utilities.push(Box::new(SlowAiUtilityFactory { utility }));
+    runtime
+}
+
+async fn daemon_for_cwd() -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>) {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).expect("create .git dir");
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(false), HostName::local()).await;
+    (temp, repo, daemon)
 }
 
 async fn daemon_for_git_repo(remote: &str) -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>, RepoIdentity) {
@@ -182,6 +324,113 @@ async fn fetch_checkout_status_accepts_identity_context_repo() {
 }
 
 #[tokio::test]
+async fn archive_session_can_be_cancelled_while_provider_call_is_in_flight() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).expect("create .git dir");
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let agent = Arc::new(SlowCloudAgent::new());
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, slow_cloud_agent_discovery(Arc::clone(&agent)), HostName::local()).await;
+    let mut rx = daemon.subscribe();
+
+    let refresh_event = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+    match refresh_event {
+        DaemonEvent::SnapshotFull(snap) => assert!(snap.providers.sessions.contains_key("sess-1"), "refresh should expose sess-1"),
+        DaemonEvent::SnapshotDelta(delta) => {
+            assert!(delta.work_items.iter().any(|item| item.session_key.as_deref() == Some("sess-1")), "refresh should expose sess-1")
+        }
+        other => panic!("expected snapshot event, got {other:?}"),
+    }
+
+    let command = Command {
+        host: None,
+        context_repo: Some(RepoSelector::Path(repo.clone())),
+        action: CommandAction::ArchiveSession { session_id: "sess-1".into() },
+    };
+    let command_id = daemon.execute(command).await.expect("execute should return a command id");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::CommandStarted { command_id: id, .. }) if id == command_id => break,
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for command start");
+
+    agent.wait_for_archive_start().await;
+    daemon.cancel(command_id).await.expect("cancel should succeed while archive is in flight");
+    agent.release_archive();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::CommandFinished { command_id: id, result, .. }) if id == command_id => break result,
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for command finish");
+
+    assert_eq!(result, CommandResult::Cancelled);
+}
+
+#[tokio::test]
+async fn generate_branch_name_can_be_cancelled_while_provider_call_is_in_flight() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).expect("create .git dir");
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let utility = Arc::new(SlowAiUtility::new());
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, slow_ai_discovery(Arc::clone(&utility)), HostName::local()).await;
+    let mut rx = daemon.subscribe();
+
+    daemon.refresh(&repo).await.expect("refresh should succeed");
+
+    let command = Command {
+        host: None,
+        context_repo: Some(RepoSelector::Path(repo.clone())),
+        action: CommandAction::GenerateBranchName { issue_keys: vec!["42".into()] },
+    };
+    let command_id = daemon.execute(command).await.expect("execute should return a command id");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::CommandStarted { command_id: id, .. }) if id == command_id => break,
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for command start");
+
+    utility.wait_for_generation_start().await;
+    daemon.cancel(command_id).await.expect("cancel should succeed while generation is in flight");
+    utility.release_generation();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::CommandFinished { command_id: id, result, .. }) if id == command_id => break result,
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for command finish");
+
+    assert_eq!(result, CommandResult::Cancelled);
+}
+
+#[tokio::test]
 async fn replay_since_returns_full_snapshot_for_unknown_seq() {
     let (_temp, repo, daemon) = daemon_for_cwd().await;
 
@@ -268,8 +517,8 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
                 Ok(_) => {}
                 Err(e) => panic!("unexpected recv error: {e:?}"),
             }
-            if finished.is_some() && added.is_some() {
-                break (finished.expect("finished set"), added.expect("added set"));
+            if let (Some(_), Some(_)) = (&finished, &added) {
+                break (finished.take().expect("finished set"), added.take().expect("added set"));
             }
         }
     })
@@ -300,8 +549,8 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
                 Ok(_) => {}
                 Err(e) => panic!("unexpected recv error: {e:?}"),
             }
-            if finished.is_some() && removed.is_some() {
-                break (finished.expect("finished set"), removed.expect("removed set"));
+            if let (Some(_), Some(_)) = (&finished, &removed) {
+                break (finished.take().expect("finished set"), removed.take().expect("removed set"));
             }
         }
     })
@@ -626,4 +875,112 @@ async fn get_repo_work_returns_work_items() {
     let work = daemon.get_repo_work(repo_name).await.expect("get_repo_work failed");
     assert_eq!(work.path, repo);
     // Work items may or may not be present depending on repo state, but the call should succeed
+}
+
+#[tokio::test]
+async fn cancel_nonexistent_command_returns_error() {
+    let (_temp, _repo, daemon) = daemon_for_cwd().await;
+    let result = daemon.cancel(999).await;
+    assert!(result.is_err(), "cancelling a non-existent command should fail");
+    assert!(result.unwrap_err().contains("no matching active command"), "error should mention no matching active command");
+}
+
+#[tokio::test]
+async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
+    // --- Arrange ---
+
+    // Create a checkout that references issue #42
+    let checkout_manager = Arc::new(FakeCheckoutManager::new());
+    checkout_manager
+        .add_checkouts(vec![(PathBuf::from("/tmp/repo/feat-branch"), Checkout {
+            branch: "feat-branch".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![CorrelationKey::Branch("feat-branch".into())],
+            association_keys: vec![AssociationKey::IssueRef("fake-issues".into(), "42".into())],
+        })])
+        .await;
+
+    // Create an issue tracker that has issue #42 available
+    let issue_tracker = Arc::new(FakeIssueTracker::new());
+    issue_tracker
+        .add_issues(vec![("42".into(), Issue {
+            title: "Fix the widget".into(),
+            labels: vec!["bug".into()],
+            association_keys: vec![AssociationKey::IssueRef("fake-issues".into(), "42".into())],
+            provider_name: "fake-issues".into(),
+            provider_display_name: "Fake Issues".into(),
+        })])
+        .await;
+
+    let discovery = fake_discovery_with_providers(
+        Some(checkout_manager.clone() as Arc<dyn flotilla_core::providers::vcs::CheckoutManager>),
+        None,
+        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueTracker>),
+    );
+
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let config = Arc::new(flotilla_core::config::ConfigStore::with_base(temp.path().join("config")));
+    let daemon =
+        flotilla_core::in_process::InProcessDaemon::new(vec![repo.clone()], config, discovery, flotilla_protocol::HostName::local()).await;
+
+    let mut rx = daemon.subscribe();
+
+    // --- Act ---
+    // Trigger a refresh. The refresh loop will:
+    // 1. Call FakeCheckoutManager::list_checkouts → checkout with IssueRef("42")
+    // 2. Broadcast initial snapshot (no issues yet)
+    // 3. Call fetch_missing_linked_issues → finds "42" missing → calls fetch_issues_by_id
+    // 4. Broadcast updated snapshot with pinned issue
+    daemon.refresh(&repo).await.expect("refresh should succeed");
+
+    // --- Assert ---
+    // Collect snapshot events until we see one containing issue "42".
+    // The daemon may send a SnapshotFull or a SnapshotDelta depending on
+    // whether the delta is smaller than the full snapshot. We accept either.
+    let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::SnapshotFull(snap)) if snap.repo == repo => {
+                    if snap.providers.issues.contains_key("42") {
+                        return *snap;
+                    }
+                }
+                Ok(DaemonEvent::SnapshotDelta(ref delta)) if delta.repo == repo => {
+                    // Check if the delta contains an Issue change for "42"
+                    let has_issue_42 = delta.changes.iter().any(|c| matches!(c, Change::Issue { key, .. } if key == "42"));
+                    if has_issue_42 {
+                        // Use replay_since to get the full snapshot with the issue
+                        let events = daemon.replay_since(&HashMap::new()).await.expect("replay_since");
+                        for event in events {
+                            if let DaemonEvent::SnapshotFull(snap) = event {
+                                if snap.repo == repo && snap.providers.issues.contains_key("42") {
+                                    return *snap;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for snapshot with pinned issue");
+
+    // Verify the issue is present and correct
+    let issue = found.providers.issues.get("42").expect("issue 42 should be in snapshot");
+    assert_eq!(issue.title, "Fix the widget");
+    assert_eq!(issue.labels, vec!["bug".to_string()]);
+
+    // Verify fetch_issues_by_id was actually called (not just paginated)
+    let fetched: Vec<Vec<String>> = issue_tracker.fetched_by_id.lock().await.clone();
+    assert!(!fetched.is_empty(), "fetch_issues_by_id should have been called");
+    assert!(fetched.iter().any(|ids| ids.contains(&"42".to_string())), "fetch_issues_by_id should have been called with id '42'");
 }
