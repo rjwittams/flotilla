@@ -266,7 +266,9 @@ impl PeerNetworkingTask {
                             },
                         ) => (responder_host.clone(), repo_path.clone()),
                         PeerWireMessage::Routed(_) => (env.connection_peer.clone(), PathBuf::new()),
-                        PeerWireMessage::Goodbye { .. } => {
+                        PeerWireMessage::Goodbye { .. }
+                        | PeerWireMessage::Ping { .. }
+                        | PeerWireMessage::Pong { .. } => {
                             (env.connection_peer.clone(), PathBuf::new())
                         }
                     };

@@ -516,6 +516,7 @@ impl PeerManager {
                     HandleResult::ReconnectSuppressed { peer: env.connection_peer }
                 }
             },
+            PeerWireMessage::Ping { .. } | PeerWireMessage::Pong { .. } => HandleResult::Ignored,
         }
     }
 
