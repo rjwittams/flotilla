@@ -162,6 +162,8 @@ impl SlowAiUtility {
 #[async_trait]
 impl AiUtility for SlowAiUtility {
     async fn generate_branch_name(&self, _: &str) -> Result<String, String> {
+        // The test waits for this notification before cancelling, so this must
+        // fire after the provider future is actively running.
         self.generation_started.notify_waiters();
         self.generation_release.notified().await;
         Ok("feat/slow-branch".into())
