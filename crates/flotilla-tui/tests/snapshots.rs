@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use flotilla_protocol::{ProviderData, SessionStatus};
 use flotilla_tui::app::{BranchInputKind, InFlightCommand, Intent, ProviderStatus, RepoViewLayout, UiMode};
+use ratatui::style::Color;
 use support::*;
 use tui_input::Input;
 
@@ -85,6 +86,7 @@ fn action_menu() {
         index: 0,
     });
     let output = harness.render_to_string();
+    assert!(output.contains(""));
     insta::assert_snapshot!(output);
 }
 
@@ -104,7 +106,62 @@ fn config_screen() {
         )
         .with_provider_status("my-project", "cloud_agent", "Claude", ProviderStatus::Ok);
     let output = harness.render_to_string();
+    assert!(output.contains(""));
     insta::assert_snapshot!(output);
+}
+
+#[test]
+fn status_bar_key_brackets_use_black_foreground() {
+    let mut harness = TestHarness::single_repo("my-project");
+    let buffer = harness.render_to_buffer();
+    let y = buffer.area.height.saturating_sub(1);
+    let bottom_row = (0..buffer.area.width).map(|x| &buffer[(x, y)]).collect::<Vec<_>>();
+    let left_bracket = bottom_row.iter().find(|cell| cell.symbol() == "<").expect("expected key left bracket");
+    let right_bracket = bottom_row.iter().find(|cell| cell.symbol() == ">").expect("expected key right bracket");
+
+    assert_eq!(left_bracket.fg, Color::Black);
+    assert_eq!(right_bracket.fg, Color::Black);
+    assert_eq!(left_bracket.bg, Color::DarkGray);
+    assert_eq!(right_bracket.bg, Color::DarkGray);
+}
+
+#[test]
+fn status_bar_fills_unused_cells_with_black_background() {
+    let mut harness = TestHarness::single_repo("my-project");
+    let buffer = harness.render_to_buffer();
+    let y = buffer.area.height.saturating_sub(1);
+    let row_width = buffer.area.width;
+    let status_gap_cell = &buffer[(11, y)];
+    let last_cell = &buffer[(row_width.saturating_sub(1), y)];
+
+    assert_eq!(status_gap_cell.bg, Color::Black);
+    assert_eq!(last_cell.bg, Color::Black);
+}
+
+#[test]
+fn status_bar_reserves_space_before_keys() {
+    let mut harness = TestHarness::single_repo("my-project");
+    let buffer = harness.render_to_buffer();
+    let y = buffer.area.height.saturating_sub(1);
+    let first_chevron_x = (0..buffer.area.width).find(|&x| buffer[(x, y)].symbol() == "").expect("expected first ribbon chevron");
+
+    assert!(first_chevron_x >= 24, "expected first ribbon to start after reserved status space, got {first_chevron_x}");
+}
+
+#[test]
+fn status_bar_ribbons_include_space_before_key_token() {
+    let mut harness = TestHarness::single_repo("my-project");
+    let output = harness.render_to_string();
+
+    assert!(output.contains(" <ENT> OPEN"));
+}
+
+#[test]
+fn status_bar_does_not_show_keys_toggle_ribbon() {
+    let mut harness = TestHarness::single_repo("my-project");
+    let output = harness.render_to_string();
+
+    assert!(!output.contains("KEYS"));
 }
 
 #[test]

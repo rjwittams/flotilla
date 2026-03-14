@@ -1,5 +1,6 @@
 ---
 source: crates/flotilla-tui/tests/snapshots.rs
+assertion_line: 410
 expression: output
 ---
  ⚓  flotilla  | my-project | [+]
@@ -31,4 +32,4 @@ expression: output
 │                                                                      ││                                              │
 │                                                                      ││                                              │
 └──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘
-PROVIDERS <↵> OPEN <.> MENU </> SEARCH <n> NEW <K> KEYS <?> HELP <q> QUIT 
+PROVIDERS                    <ENT> OPEN  <.> MENU  </> SEARCH  <n> NEW  <?> HELP  <q> QUIT 

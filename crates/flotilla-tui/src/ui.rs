@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
+use crossterm::event::KeyCode;
 use flotilla_core::data::{GroupEntry, SectionHeader};
 use flotilla_protocol::{ProviderData, WorkItem};
 use ratatui::{
@@ -17,7 +18,9 @@ use crate::{
         VisibleStatusItem,
     },
     event_log::{self, LevelExt},
-    status_bar::{KeyChip, StatusBarAction, StatusBarInput, StatusBarModel, StatusBarTarget, StatusSection, TaskSection},
+    status_bar::{
+        KeyChip, StatusBarAction, StatusBarInput, StatusBarModel, StatusBarTarget, StatusSection, TaskSection, DEFAULT_STATUS_WIDTH_BUDGET,
+    },
     ui_helpers,
 };
 
@@ -40,6 +43,7 @@ const PROVIDER_CATEGORIES: [(&str, &str); 8] = [
     ("Workspace mgr", "workspace_manager"),
     ("Terminal pool", "terminal_pool"),
 ];
+const ENTER_KEY_GLYPH: &str = "ENT";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResolvedPreviewPosition {
@@ -207,108 +211,172 @@ fn render_status_bar(model: &TuiModel, ui: &mut UiState, in_flight: &HashMap<u64
     ui.layout.status_bar.key_targets.clear();
     ui.layout.status_bar.dismiss_targets.clear();
 
-    if matches!(ui.mode, UiMode::Normal) {
-        render_normal_status_bar(model, ui, in_flight, frame, area);
-        return;
-    }
-
-    let text: String = match &ui.mode {
-        UiMode::Config => " j/k:scroll log  [/]:switch tab  ?:help  q:quit".into(),
-        UiMode::BranchInput { kind: BranchInputKind::Generating, .. } => " Generating branch name...".into(),
-        UiMode::BranchInput { kind: BranchInputKind::Manual, .. } => " type branch name  enter:create  esc:cancel".into(),
-        UiMode::ActionMenu { .. } => " j/k:navigate  enter:select  esc:close".into(),
-        UiMode::IssueSearch { ref input } => format!(" / search: {}▏  enter:search  esc:cancel", input.value()),
-        UiMode::FilePicker { .. } => " j/k:navigate  tab:complete  enter:select  esc:cancel".into(),
-        UiMode::DeleteConfirm { .. } | UiMode::CloseConfirm { .. } => " y/enter:confirm  n/esc:cancel".into(),
-        UiMode::Help => " ?:close help  esc:close help".into(),
-        UiMode::Normal => unreachable!(),
-    };
-
-    let status = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(status, area);
-}
-
-fn render_normal_status_bar(model: &TuiModel, ui: &mut UiState, in_flight: &HashMap<u64, InFlightCommand>, frame: &mut Frame, area: Rect) {
-    let rui = active_rui(model, ui);
-    let visible_error = first_visible_status_item(model, ui);
-    let task = active_task(model, in_flight);
-    let status_text = if let Some(item) = &visible_error {
-        format!("{} ×", item.text)
-    } else if rui.show_providers {
-        "PROVIDERS".to_string()
-    } else if let Some(query) = rui.active_search_query.as_deref() {
-        format!("SEARCH \"{query}\"")
-    } else if !rui.multi_selected.is_empty() {
-        format!("{} SELECTED", rui.multi_selected.len())
-    } else {
-        layout_status_text(ui).to_string()
-    };
-
+    let (status_section, keys, task_section) = status_bar_content(model, ui, in_flight);
     let status_model = StatusBarModel::build(StatusBarInput {
         width: area.width as usize,
+        preferred_status_width: DEFAULT_STATUS_WIDTH_BUDGET.min(area.width as usize),
         keys_visible: ui.status_bar.show_keys,
-        status: StatusSection::plain(&status_text),
-        task: task.as_ref().map(|(description, spinner_index)| TaskSection::new(description, *spinner_index)),
-        keys: normal_mode_key_chips(),
+        status: status_section.clone(),
+        task: task_section,
+        keys,
     });
 
-    let mut spans = vec![];
-    let mut x = area.x;
+    frame.render_widget(Block::default().style(Style::default().bg(Color::Black)), area);
+
+    let mut spans = Vec::new();
+    let mut x = 0usize;
+    let status_style = match status_section {
+        StatusSection::Error { .. } => Style::default().fg(Color::Indexed(203)).bg(Color::Black).bold(),
+        StatusSection::Plain(_) => Style::default().fg(Color::White).bg(Color::Black),
+    };
 
     if !status_model.status_text.is_empty() {
-        let status_width = status_model.status_text.width() as u16;
-        let status_style = if visible_error.is_some() {
-            Style::default().fg(Color::Indexed(203)).bg(Color::Black).bold()
-        } else {
-            Style::default().fg(Color::White).bg(Color::Black)
-        };
+        let status_width = status_model.status_text.width();
         spans.push(Span::styled(status_model.status_text.clone(), status_style));
-        if let Some(item) = visible_error {
+        if let Some(id) = status_section.dismiss_id() {
             ui.layout.status_bar.dismiss_targets.push(StatusBarTarget::new(
-                Rect::new(x + status_width.saturating_sub(1), area.y, 1, 1),
-                StatusBarAction::ClearError(item.id),
+                Rect::new(area.x + status_width.saturating_sub(1) as u16, area.y, 1, 1),
+                StatusBarAction::ClearError(id),
             ));
+        } else if matches!(ui.mode, UiMode::Normal) && status_model.status_text == layout_status_text(ui) {
+            ui.layout
+                .status_bar
+                .key_targets
+                .push(StatusBarTarget::new(Rect::new(area.x, area.y, status_width as u16, 1), StatusBarAction::key(KeyCode::Char('l'))));
         }
         x += status_width;
     }
 
-    if !status_model.visible_keys.is_empty() {
-        if !spans.is_empty() {
-            spans.push(Span::raw(" "));
-            x += 1;
-        }
+    if x < status_model.keys_start {
+        spans.push(Span::styled(" ".repeat(status_model.keys_start - x), Style::default().fg(Color::White).bg(Color::Black)));
+        x = status_model.keys_start;
+    }
 
-        for chip in &status_model.visible_keys {
-            let ribbon_start = x;
-            let key_text = format!("<{}>", chip.key);
-            let label_text = format!(" {} ", chip.label);
-            let sep_width = "".width() as u16;
-            let key_width = key_text.width() as u16;
-            let label_width = label_text.width() as u16;
-            let ribbon_width = sep_width + key_width + label_width + sep_width;
+    for chip in &status_model.visible_keys {
+        let ribbon_start = x;
+        spans.push(Span::styled("", Style::default().fg(Color::Black).bg(Color::DarkGray)));
+        spans.push(Span::styled(" ", Style::default().fg(Color::Black).bg(Color::DarkGray)));
+        spans.push(Span::styled("<", Style::default().fg(Color::Black).bg(Color::DarkGray).bold()));
+        spans.push(Span::styled(chip.key.clone(), Style::default().fg(Color::Indexed(208)).bg(Color::DarkGray).bold()));
+        spans.push(Span::styled(">", Style::default().fg(Color::Black).bg(Color::DarkGray).bold()));
+        spans.push(Span::styled(format!(" {} ", chip.label), Style::default().fg(Color::Black).bg(Color::DarkGray).bold()));
+        spans.push(Span::styled("", Style::default().fg(Color::DarkGray).bg(Color::Black)));
 
-            spans.push(Span::styled("", Style::default().fg(Color::Black).bg(Color::DarkGray)));
-            spans.push(Span::styled(key_text, Style::default().fg(Color::Indexed(208)).bg(Color::DarkGray).bold()));
-            spans.push(Span::styled(label_text, Style::default().fg(Color::Black).bg(Color::DarkGray).bold()));
-            spans.push(Span::styled("", Style::default().fg(Color::DarkGray).bg(Color::Black)));
+        ui.layout.status_bar.key_targets.push(StatusBarTarget::new(
+            Rect::new(area.x + ribbon_start as u16, area.y, chip.ribbon_width() as u16, 1),
+            chip.action.clone(),
+        ));
+        x += chip.ribbon_width();
+    }
 
-            ui.layout
-                .status_bar
-                .key_targets
-                .push(StatusBarTarget::new(Rect::new(ribbon_start, area.y, ribbon_width, 1), chip.action.clone()));
-
-            x += ribbon_width;
-        }
+    if x < status_model.task_start {
+        spans.push(Span::styled(" ".repeat(status_model.task_start - x), Style::default().fg(Color::White).bg(Color::Black)));
+        x = status_model.task_start;
     }
 
     if !status_model.task_text.is_empty() {
-        if !spans.is_empty() {
-            spans.push(Span::raw(" "));
-        }
         spans.push(Span::styled(status_model.task_text.clone(), Style::default().fg(Color::White).bg(Color::Black)));
+        x += status_model.task_text.width();
+    }
+
+    if x < area.width as usize {
+        spans.push(Span::styled(" ".repeat(area.width as usize - x), Style::default().fg(Color::White).bg(Color::Black)));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn status_bar_content(
+    model: &TuiModel,
+    ui: &UiState,
+    in_flight: &HashMap<u64, InFlightCommand>,
+) -> (StatusSection, Vec<KeyChip>, Option<TaskSection>) {
+    let visible_error = first_visible_status_item(model, ui);
+
+    match &ui.mode {
+        UiMode::Normal => {
+            let rui = active_rui(model, ui);
+            let status = if let Some(item) = visible_error {
+                StatusSection::error(item.id, &item.text)
+            } else if rui.show_providers {
+                StatusSection::plain("PROVIDERS")
+            } else if let Some(query) = rui.active_search_query.as_deref() {
+                StatusSection::plain(&format!("SEARCH \"{query}\""))
+            } else if !rui.multi_selected.is_empty() {
+                StatusSection::plain(&format!("{} SELECTED", rui.multi_selected.len()))
+            } else {
+                StatusSection::plain(layout_status_text(ui))
+            };
+
+            let task = active_task(model, in_flight).map(|(description, spinner_index)| TaskSection::new(&description, spinner_index));
+            (status, normal_mode_key_chips(), task)
+        }
+        UiMode::Config => (
+            StatusSection::plain("FLOTILLA"),
+            vec![
+                key_chip("j", "DOWN", KeyCode::Char('j')),
+                key_chip("k", "UP", KeyCode::Char('k')),
+                key_chip("[", "PREV", KeyCode::Char('[')),
+                key_chip("]", "NEXT", KeyCode::Char(']')),
+                key_chip("q", "QUIT", KeyCode::Char('q')),
+            ],
+            None,
+        ),
+        UiMode::BranchInput { kind: BranchInputKind::Generating, .. } => {
+            (StatusSection::plain("NEW BRANCH"), vec![], Some(TaskSection::new("Generating branch name...", 0)))
+        }
+        UiMode::BranchInput { kind: BranchInputKind::Manual, .. } => (
+            StatusSection::plain("NEW BRANCH"),
+            vec![key_chip(ENTER_KEY_GLYPH, "CREATE", KeyCode::Enter), key_chip("esc", "CANCEL", KeyCode::Esc)],
+            None,
+        ),
+        UiMode::ActionMenu { .. } => (
+            StatusSection::plain("ACTIONS"),
+            vec![
+                key_chip("j", "DOWN", KeyCode::Char('j')),
+                key_chip("k", "UP", KeyCode::Char('k')),
+                key_chip(ENTER_KEY_GLYPH, "SELECT", KeyCode::Enter),
+                key_chip("esc", "CLOSE", KeyCode::Esc),
+            ],
+            None,
+        ),
+        UiMode::IssueSearch { input } => (
+            StatusSection::plain(&format!("SEARCH {}", input.value())),
+            vec![key_chip(ENTER_KEY_GLYPH, "APPLY", KeyCode::Enter), key_chip("esc", "CANCEL", KeyCode::Esc)],
+            None,
+        ),
+        UiMode::FilePicker { .. } => (
+            StatusSection::plain("ADD REPO"),
+            vec![
+                key_chip("j", "DOWN", KeyCode::Char('j')),
+                key_chip("k", "UP", KeyCode::Char('k')),
+                key_chip("tab", "COMPLETE", KeyCode::Tab),
+                key_chip(ENTER_KEY_GLYPH, "SELECT", KeyCode::Enter),
+                key_chip("esc", "CANCEL", KeyCode::Esc),
+            ],
+            None,
+        ),
+        UiMode::DeleteConfirm { .. } => (
+            StatusSection::plain("CONFIRM DELETE"),
+            vec![key_chip("y", "YES", KeyCode::Char('y')), key_chip("n", "NO", KeyCode::Char('n'))],
+            None,
+        ),
+        UiMode::CloseConfirm { .. } => (
+            StatusSection::plain("CONFIRM CLOSE"),
+            vec![key_chip("y", "YES", KeyCode::Char('y')), key_chip("n", "NO", KeyCode::Char('n'))],
+            None,
+        ),
+        UiMode::Help => (
+            StatusSection::plain("HELP"),
+            vec![
+                key_chip("j", "DOWN", KeyCode::Char('j')),
+                key_chip("k", "UP", KeyCode::Char('k')),
+                key_chip("esc", "CLOSE", KeyCode::Esc),
+                key_chip("?", "CLOSE", KeyCode::Char('?')),
+            ],
+            None,
+        ),
+    }
 }
 
 fn first_visible_status_item(model: &TuiModel, ui: &UiState) -> Option<VisibleStatusItem> {
@@ -354,14 +422,17 @@ fn active_task(model: &TuiModel, in_flight: &HashMap<u64, InFlightCommand>) -> O
 
 fn normal_mode_key_chips() -> Vec<KeyChip> {
     vec![
-        KeyChip::new("↵", "OPEN", StatusBarAction::OpenSelected),
-        KeyChip::new(".", "MENU", StatusBarAction::OpenMenu),
-        KeyChip::new("/", "SEARCH", StatusBarAction::StartSearch),
-        KeyChip::new("n", "NEW", StatusBarAction::NewBranch),
-        KeyChip::new("K", "KEYS", StatusBarAction::ToggleKeys),
-        KeyChip::new("?", "HELP", StatusBarAction::OpenHelp),
-        KeyChip::new("q", "QUIT", StatusBarAction::Quit),
+        key_chip(ENTER_KEY_GLYPH, "OPEN", KeyCode::Enter),
+        key_chip(".", "MENU", KeyCode::Char('.')),
+        key_chip("/", "SEARCH", KeyCode::Char('/')),
+        key_chip("n", "NEW", KeyCode::Char('n')),
+        key_chip("?", "HELP", KeyCode::Char('?')),
+        key_chip("q", "QUIT", KeyCode::Char('q')),
     ]
+}
+
+fn key_chip(key: &str, label: &str, code: KeyCode) -> KeyChip {
+    KeyChip::new(key, label, StatusBarAction::key(code))
 }
 
 fn render_content(model: &TuiModel, ui: &mut UiState, frame: &mut Frame, area: Rect) {

@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use flotilla_core::data::GroupEntry;
 use flotilla_protocol::{Command, WorkItem};
 use tui_input::{backend::crossterm::EventHandler as InputEventHandler, Input};
@@ -13,6 +13,17 @@ impl App {
     // ── Key handling ──
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('K')
+            && key.modifiers.contains(KeyModifiers::SHIFT)
+            && !matches!(
+                self.ui.mode,
+                UiMode::BranchInput { kind: BranchInputKind::Manual, .. } | UiMode::IssueSearch { .. } | UiMode::FilePicker { .. }
+            )
+        {
+            self.ui.status_bar.show_keys = !self.ui.status_bar.show_keys;
+            return;
+        }
+
         // Toggle help from Normal or Help modes
         if key.code == KeyCode::Char('?') {
             match self.ui.mode {
@@ -100,9 +111,6 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
             KeyCode::Char('r') => {} // refresh handled in main loop
             KeyCode::Char(' ') => self.toggle_multi_select(),
-            KeyCode::Char('K') => {
-                self.ui.status_bar.show_keys = !self.ui.status_bar.show_keys;
-            }
             KeyCode::Char('l') => {
                 self.ui.cycle_layout();
                 self.persist_layout();
@@ -140,6 +148,10 @@ impl App {
     // ── Mouse handling ──
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.handle_status_bar_mouse(mouse) {
+            return;
+        }
+
         match self.ui.mode {
             UiMode::ActionMenu { .. } => {
                 self.handle_menu_mouse(mouse);
@@ -161,9 +173,6 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.handle_status_bar_mouse(mouse) {
-                    return;
-                }
                 if let Some(si) = self.row_at_mouse(mouse.column, mouse.row) {
                     let now = Instant::now();
                     let is_double_click = self.ui.double_click.last_time.map(|t| now.duration_since(t).as_millis() < 400).unwrap_or(false)
@@ -225,20 +234,7 @@ impl App {
 
     fn dispatch_status_bar_action(&mut self, action: StatusBarAction) {
         match action {
-            StatusBarAction::OpenSelected => self.action_enter(),
-            StatusBarAction::StartSearch => {
-                self.ui.mode = UiMode::IssueSearch { input: Input::default() };
-            }
-            StatusBarAction::Quit => self.should_quit = true,
-            StatusBarAction::NewBranch => self.enter_branch_input(BranchInputKind::Manual),
-            StatusBarAction::ToggleKeys => {
-                self.ui.status_bar.show_keys = !self.ui.status_bar.show_keys;
-            }
-            StatusBarAction::OpenHelp => {
-                self.ui.mode = UiMode::Help;
-            }
-            StatusBarAction::Refresh => {}
-            StatusBarAction::OpenMenu => self.open_action_menu(),
+            StatusBarAction::KeyPress { code, modifiers } => self.handle_key(KeyEvent::new(code, modifiers)),
             StatusBarAction::ClearError(id) => self.dismiss_status_item(id),
         }
     }
@@ -803,11 +799,24 @@ mod tests {
     #[test]
     fn clicking_search_status_target_enters_issue_search_mode() {
         let mut app = stub_app();
-        app.ui.layout.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::StartSearch)];
+        app.ui.layout.status_bar.key_targets =
+            vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
 
         app.handle_mouse(left_click(12, 29));
 
         assert!(matches!(app.ui.mode, UiMode::IssueSearch { .. }));
+    }
+
+    #[test]
+    fn clicking_layout_status_cycles_layout() {
+        let mut app = stub_app();
+        assert_eq!(app.ui.view_layout, RepoViewLayout::Auto);
+        app.ui.layout.status_bar.key_targets =
+            vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
+
+        app.handle_mouse(left_click(4, 29));
+
+        assert_eq!(app.ui.view_layout, RepoViewLayout::Zoom);
     }
 
     #[test]
