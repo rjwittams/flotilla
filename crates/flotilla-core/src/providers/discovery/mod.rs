@@ -349,6 +349,9 @@ impl DiscoveryRuntime {
         }
     }
 
+    /// A runtime is considered follower-mode when no external-provider factory
+    /// categories are registered. Update this check if new external-provider
+    /// factory categories are added to `ProviderFactories`.
     pub fn is_follower(&self) -> bool {
         self.factories.code_review.is_empty()
             && self.factories.issue_trackers.is_empty()
@@ -661,6 +664,12 @@ mod tests {
             });
         assert_eq!(bag.assertions().len(), 2);
         assert!(matches!(bag.assertions()[0], EnvironmentAssertion::BinaryAvailable { ref name, .. } if name == "git"));
+    }
+
+    #[test]
+    fn discovery_runtime_is_follower_checks_factories() {
+        assert!(!DiscoveryRuntime::for_process(false).is_follower());
+        assert!(DiscoveryRuntime::for_process(true).is_follower());
     }
 }
 
