@@ -91,9 +91,9 @@ pub async fn build_plan(
             }
         }
 
-        CommandAction::ArchiveSession { session_id } => build_archive_session_plan(session_id, registry, providers_data),
+        CommandAction::ArchiveSession { session_id } => build_archive_session_plan(session_id, registry, providers_data).await,
 
-        CommandAction::GenerateBranchName { issue_keys } => build_generate_branch_name_plan(issue_keys, registry, providers_data),
+        CommandAction::GenerateBranchName { issue_keys } => build_generate_branch_name_plan(issue_keys, registry, providers_data).await,
 
         action => {
             let result = execute(action, &repo_root, &registry, &providers_data, &*runner, &config_base).await;
@@ -391,7 +391,22 @@ fn build_remove_checkout_plan(
     ExecutionPlan::Steps(StepPlan::new(steps))
 }
 
-fn build_archive_session_plan(session_id: String, registry: Arc<ProviderRegistry>, providers_data: Arc<ProviderData>) -> ExecutionPlan {
+async fn build_archive_session_plan(
+    session_id: String,
+    registry: Arc<ProviderRegistry>,
+    providers_data: Arc<ProviderData>,
+) -> ExecutionPlan {
+    let should_run_as_step = providers_data
+        .sessions
+        .get(session_id.as_str())
+        .and_then(|session| session_provider_key(session, &session_id))
+        .and_then(|provider_key| registry.cloud_agents.get(provider_key))
+        .is_some();
+
+    if !should_run_as_step {
+        return ExecutionPlan::Immediate(archive_session_result(&session_id, &registry, &providers_data).await);
+    }
+
     ExecutionPlan::Steps(StepPlan::new(vec![Step {
         description: format!("Archive session {session_id}"),
         action: Box::new(move || {
@@ -405,11 +420,15 @@ fn build_archive_session_plan(session_id: String, registry: Arc<ProviderRegistry
     }]))
 }
 
-fn build_generate_branch_name_plan(
+async fn build_generate_branch_name_plan(
     issue_keys: Vec<String>,
     registry: Arc<ProviderRegistry>,
     providers_data: Arc<ProviderData>,
 ) -> ExecutionPlan {
+    if registry.ai_utilities.is_empty() {
+        return ExecutionPlan::Immediate(generate_branch_name_result(&issue_keys, &registry, &providers_data).await);
+    }
+
     ExecutionPlan::Steps(StepPlan::new(vec![Step {
         description: "Generate branch name".to_string(),
         action: Box::new(move || {
@@ -2159,6 +2178,42 @@ mod tests {
                 assert_eq!(step_plan.steps[0].description, "Generate branch name");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_plan_archive_session_missing_session_returns_immediate_error() {
+        let registry = empty_registry();
+        let runner = runner_ok();
+
+        let plan =
+            run_build_plan(CommandAction::ArchiveSession { session_id: "missing".to_string() }, registry, empty_data(), runner).await;
+
+        match plan {
+            ExecutionPlan::Immediate(CommandResult::Error { message }) => {
+                assert!(message.contains("session not found"), "unexpected message: {message}");
+            }
+            ExecutionPlan::Immediate(other) => panic!("expected Error result, got {other:?}"),
+            ExecutionPlan::Steps(_) => panic!("expected Immediate, got Steps"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_plan_generate_branch_name_without_ai_returns_immediate_fallback() {
+        let mut data = empty_data();
+        data.issues.insert("42".to_string(), make_issue("42", "Add login feature"));
+        let runner = runner_ok();
+
+        let plan =
+            run_build_plan(CommandAction::GenerateBranchName { issue_keys: vec!["42".to_string()] }, empty_registry(), data, runner).await;
+
+        match plan {
+            ExecutionPlan::Immediate(CommandResult::BranchNameGenerated { name, issue_ids }) => {
+                assert_eq!(name, "issue-42");
+                assert_eq!(issue_ids, vec![("issues".to_string(), "42".to_string())]);
+            }
+            ExecutionPlan::Immediate(other) => panic!("expected BranchNameGenerated, got {other:?}"),
+            ExecutionPlan::Steps(_) => panic!("expected Immediate, got Steps"),
         }
     }
 
