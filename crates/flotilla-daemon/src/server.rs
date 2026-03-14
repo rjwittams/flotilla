@@ -21,8 +21,11 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
-use crate::peer::{
-    ActivationResult, ConnectionDirection, ConnectionMeta, HandleResult, InboundPeerEnvelope, PeerManager, PeerSender, SshTransport,
+use crate::{
+    peer::{
+        ActivationResult, ConnectionDirection, ConnectionMeta, HandleResult, InboundPeerEnvelope, PeerManager, PeerSender, SshTransport,
+    },
+    peer_networking::PeerConnectedNotice,
 };
 
 struct SocketPeerSender {
@@ -45,14 +48,6 @@ impl PeerSender for SocketPeerSender {
         }
         Ok(())
     }
-}
-
-/// Notification sent from connection sites to the outbound task when a
-/// peer connects or reconnects. The outbound task responds by sending
-/// current local state for all repos to the specific peer.
-struct PeerConnectedNotice {
-    peer: HostName,
-    generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +91,8 @@ impl DaemonServer {
     ) -> Result<Self, String> {
         let daemon_config = config.load_daemon_config();
         let host_name = daemon_config.host_name.map(HostName::new).unwrap_or_else(HostName::local);
-        let daemon = InProcessDaemon::new_with_options(repo_paths, Arc::clone(&config), daemon_config.follower, host_name.clone()).await;
+        let discovery = flotilla_core::providers::discovery::DiscoveryRuntime::for_process(daemon_config.follower);
+        let daemon = InProcessDaemon::new(repo_paths, Arc::clone(&config), discovery, host_name.clone()).await;
         let hosts_config = config.load_hosts()?;
 
         let peer_count = hosts_config.hosts.len();
@@ -1598,6 +1594,7 @@ mod tests {
     use std::{path::Path, sync::Mutex as StdMutex};
 
     use async_trait::async_trait;
+    use flotilla_core::providers::discovery::test_support::fake_discovery;
     use flotilla_protocol::{
         Checkout, Command, CommandAction, CommandPeerEvent, CommandResult, DaemonEvent, HostName, HostPath, PeerDataKind, PeerDataMessage,
         PeerWireMessage, ProviderData, RepoIdentity, RepoInfo, RoutedPeerMessage, VectorClock,
@@ -1642,7 +1639,7 @@ mod tests {
     async fn empty_daemon() -> (tempfile::TempDir, Arc<InProcessDaemon>) {
         let tmp = tempfile::tempdir().unwrap();
         let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-        let daemon = InProcessDaemon::new(vec![], config).await;
+        let daemon = InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::local()).await;
         (tmp, daemon)
     }
 
@@ -1852,7 +1849,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).expect("create .git");
         let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-        let daemon = InProcessDaemon::new(vec![repo.clone()], config).await;
+        let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(false), HostName::new("local")).await;
         let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
         let sent = Arc::new(StdMutex::new(Vec::new()));
         peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));

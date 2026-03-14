@@ -187,7 +187,8 @@ async fn run_tui(cli: Cli) -> Result<()> {
         let daemon: Result<Arc<dyn DaemonHandle>, String> = if embedded {
             let daemon_config = config_clone.load_daemon_config();
             let host_name = daemon_config.host_name.map(HostName::new).unwrap_or_else(HostName::local);
-            let d = InProcessDaemon::new_with_options(repo_roots, Arc::clone(&config_clone), daemon_config.follower, host_name).await;
+            let discovery = flotilla_core::providers::discovery::DiscoveryRuntime::for_process(daemon_config.follower);
+            let d = InProcessDaemon::new(repo_roots, Arc::clone(&config_clone), discovery, host_name).await;
 
             match flotilla_daemon::peer_networking::PeerNetworkingTask::new(Arc::clone(&d), &config_clone) {
                 Ok((peer_networking, _peer_manager, _peer_data_tx)) => {

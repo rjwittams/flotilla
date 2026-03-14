@@ -13,7 +13,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon};
+use flotilla_core::{
+    config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::test_support::fake_discovery,
+};
 use flotilla_daemon::peer::{
     merge::merge_provider_data, test_support::handle_test_peer_data, HandleResult, PeerConnectionStatus, PeerManager, PeerSender,
     PeerTransport,
@@ -241,10 +243,11 @@ async fn daemon_snapshot_has_correct_host_attribution() {
     std::fs::create_dir_all(repo.join(".git")).expect("create .git dir");
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config).await;
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(false), HostName::local()).await;
 
-    // Wait for the first snapshot via the event stream
+    // Subscribe first, then trigger a refresh so the snapshot cannot race ahead.
     let mut rx = daemon.subscribe();
+    daemon.refresh(&repo).await.expect("refresh");
     let snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             match rx.recv().await {
@@ -483,7 +486,7 @@ async fn follower_mode_has_only_local_providers() {
     std::fs::create_dir_all(repo.join(".git")).expect("create .git dir");
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new_with_options(vec![repo], config, true, HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![repo], config, fake_discovery(true), HostName::local()).await;
 
     assert!(daemon.is_follower(), "daemon should be in follower mode");
 

@@ -9,8 +9,8 @@ use futures::StreamExt;
 pub mod detectors;
 pub mod factories;
 
-#[cfg(test)]
-pub(crate) mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 use std::{
     path::{Path, PathBuf},
@@ -329,6 +329,37 @@ pub struct FactoryRegistry {
     pub terminal_pools: Vec<Box<TerminalPoolFactory>>,
 }
 
+pub struct DiscoveryRuntime {
+    pub runner: Arc<dyn CommandRunner>,
+    pub env: Arc<dyn EnvVars>,
+    pub host_detectors: Vec<Box<dyn HostDetector>>,
+    pub repo_detectors: Vec<Box<dyn RepoDetector>>,
+    pub factories: FactoryRegistry,
+}
+
+impl DiscoveryRuntime {
+    pub fn for_process(follower: bool) -> Self {
+        let factories = if follower { FactoryRegistry::for_follower() } else { FactoryRegistry::default_all() };
+        Self {
+            runner: Arc::new(crate::providers::ProcessCommandRunner),
+            env: Arc::new(ProcessEnvVars),
+            host_detectors: detectors::default_host_detectors(),
+            repo_detectors: detectors::default_repo_detectors(),
+            factories,
+        }
+    }
+
+    /// A runtime is considered follower-mode when no external-provider factory
+    /// categories are registered. Update this check if new external-provider
+    /// factory categories are added to `FactoryRegistry`.
+    pub fn is_follower(&self) -> bool {
+        self.factories.code_review.is_empty()
+            && self.factories.issue_trackers.is_empty()
+            && self.factories.cloud_agents.is_empty()
+            && self.factories.ai_utilities.is_empty()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Discovery result and orchestrator functions
 // ---------------------------------------------------------------------------
@@ -633,6 +664,12 @@ mod tests {
             });
         assert_eq!(bag.assertions().len(), 2);
         assert!(matches!(bag.assertions()[0], EnvironmentAssertion::BinaryAvailable { ref name, .. } if name == "git"));
+    }
+
+    #[test]
+    fn discovery_runtime_is_follower_checks_factories() {
+        assert!(!DiscoveryRuntime::for_process(false).is_follower());
+        assert!(DiscoveryRuntime::for_process(true).is_follower());
     }
 }
 
