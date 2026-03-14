@@ -113,6 +113,7 @@ Extend `CommandQueue` to store an optional `PendingActionContext` alongside each
 pub struct PendingActionContext {
     pub identity: WorkItemIdentity,
     pub description: String,  // from Intent::label()
+    pub repo_path: PathBuf,   // captured at push time, not drain time
 }
 
 pub struct CommandQueue {
