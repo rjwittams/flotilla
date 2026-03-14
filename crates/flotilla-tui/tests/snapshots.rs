@@ -2,7 +2,7 @@ mod support;
 
 use std::path::PathBuf;
 
-use flotilla_protocol::{ProviderData, SessionStatus};
+use flotilla_protocol::{ProviderData, RepoIdentity, SessionStatus};
 use flotilla_tui::app::{BranchInputKind, InFlightCommand, Intent, ProviderStatus, RepoViewLayout, UiMode};
 use ratatui::style::Color;
 use support::*;
@@ -289,13 +289,21 @@ fn preview_session() {
 #[test]
 fn status_bar_with_multiple_in_flight_commands() {
     let mut harness = TestHarness::single_repo("my-project");
-    harness
-        .in_flight
-        .insert(1, InFlightCommand { repo: PathBuf::from("/test/my-project"), description: "Refreshing repository...".into() });
-    harness
-        .in_flight
-        .insert(2, InFlightCommand { repo: PathBuf::from("/test/my-project"), description: "Refreshing repository...".into() });
-    harness.in_flight.insert(3, InFlightCommand { repo: PathBuf::from("/test/other-project"), description: "Should not render".into() });
+    harness.in_flight.insert(1, InFlightCommand {
+        repo_identity: RepoIdentity { authority: "local".into(), path: "/test/my-project".into() },
+        repo: PathBuf::from("/test/my-project"),
+        description: "Refreshing repository...".into(),
+    });
+    harness.in_flight.insert(2, InFlightCommand {
+        repo_identity: RepoIdentity { authority: "local".into(), path: "/test/my-project".into() },
+        repo: PathBuf::from("/test/my-project"),
+        description: "Refreshing repository...".into(),
+    });
+    harness.in_flight.insert(3, InFlightCommand {
+        repo_identity: RepoIdentity { authority: "local".into(), path: "/test/other-project".into() },
+        repo: PathBuf::from("/test/other-project"),
+        description: "Should not render".into(),
+    });
 
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);

@@ -97,7 +97,7 @@ pub(crate) fn format_event_human(event: &flotilla_protocol::DaemonEvent) -> Stri
         DaemonEvent::RepoAdded(info) => {
             format!("[repo]     {}: added", info.name)
         }
-        DaemonEvent::RepoRemoved { path } => {
+        DaemonEvent::RepoRemoved { path, .. } => {
             format!("[repo]     {}: removed", repo_name(path))
         }
         DaemonEvent::CommandStarted { repo, description, .. } => {
@@ -381,6 +381,7 @@ mod tests {
 
             Snapshot {
                 seq,
+                repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: repo.into() },
                 repo: PathBuf::from(repo),
                 host_name: HostName::new("test"),
                 work_items: (0..work_item_count)
@@ -428,6 +429,7 @@ mod tests {
             let event = DaemonEvent::SnapshotDelta(Box::new(SnapshotDelta {
                 seq: 42,
                 prev_seq: 41,
+                repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/my-repo".into() },
                 repo: PathBuf::from("/tmp/my-repo"),
                 changes: vec![],
                 work_items: vec![],
@@ -443,6 +445,7 @@ mod tests {
         #[test]
         fn repo_added() {
             let event = DaemonEvent::RepoAdded(Box::new(flotilla_protocol::snapshot::RepoInfo {
+                identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/added-repo".into() },
                 name: "added-repo".into(),
                 path: PathBuf::from("/tmp/added-repo"),
                 labels: Default::default(),
@@ -458,7 +461,10 @@ mod tests {
 
         #[test]
         fn repo_removed() {
-            let event = DaemonEvent::RepoRemoved { path: PathBuf::from("/tmp/old-repo") };
+            let event = DaemonEvent::RepoRemoved {
+                repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/old-repo".into() },
+                path: PathBuf::from("/tmp/old-repo"),
+            };
             let line = format_event_human(&event);
             assert!(line.contains("[repo]"), "should have repo tag");
             assert!(line.contains("old-repo"), "should extract name");
@@ -470,6 +476,7 @@ mod tests {
             let event = DaemonEvent::CommandStarted {
                 command_id: 1,
                 host: HostName::local(),
+                repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/my-repo".into() },
                 repo: PathBuf::from("/tmp/my-repo"),
                 description: "Refreshing...".into(),
             };
@@ -484,6 +491,7 @@ mod tests {
             let event = DaemonEvent::CommandFinished {
                 command_id: 1,
                 host: HostName::local(),
+                repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/my-repo".into() },
                 repo: PathBuf::from("/tmp/my-repo"),
                 result: CommandResult::Ok,
             };
@@ -498,6 +506,7 @@ mod tests {
             let event = DaemonEvent::CommandFinished {
                 command_id: 1,
                 host: HostName::local(),
+                repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/my-repo".into() },
                 repo: PathBuf::from("/tmp/my-repo"),
                 result: CommandResult::Error { message: "boom".into() },
             };

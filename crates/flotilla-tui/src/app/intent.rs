@@ -128,7 +128,7 @@ impl Intent {
                     CheckoutTarget::FreshBranch(branch.to_string())
                 };
                 app.targeted_command(CommandAction::Checkout {
-                    repo: flotilla_protocol::RepoSelector::Path(app.model.active_repo_root().clone()),
+                    repo: flotilla_protocol::RepoSelector::Identity(app.model.active_repo_identity().clone()),
                     target,
                     issue_ids: Vec::new(),
                 })
@@ -140,13 +140,10 @@ impl Intent {
                     None
                 }
             }
-            Intent::OpenChangeRequest => item
-                .change_request_key
-                .as_ref()
-                .map(|k| app.item_host_repo_command(CommandAction::OpenChangeRequest { id: k.clone() }, item)),
-            Intent::OpenIssue => {
-                item.issue_keys.first().map(|k| app.item_host_repo_command(CommandAction::OpenIssue { id: k.clone() }, item))
+            Intent::OpenChangeRequest => {
+                item.change_request_key.as_ref().map(|k| app.repo_command(CommandAction::OpenChangeRequest { id: k.clone() }))
             }
+            Intent::OpenIssue => item.issue_keys.first().map(|k| app.repo_command(CommandAction::OpenIssue { id: k.clone() })),
             Intent::LinkIssuesToChangeRequest => {
                 let change_request_key = item.change_request_key.as_ref()?;
                 let co_key = item.checkout_key()?;
@@ -179,10 +176,10 @@ impl Intent {
                 if missing.is_empty() {
                     return None;
                 }
-                Some(app.item_host_repo_command(
-                    CommandAction::LinkIssuesToChangeRequest { change_request_id: change_request_key.clone(), issue_ids: missing },
-                    item,
-                ))
+                Some(app.repo_command(CommandAction::LinkIssuesToChangeRequest {
+                    change_request_id: change_request_key.clone(),
+                    issue_ids: missing,
+                }))
             }
             Intent::TeleportSession => item.session_key.as_ref().map(|k| {
                 app.repo_command(CommandAction::TeleportSession {
@@ -192,7 +189,7 @@ impl Intent {
                 })
             }),
             Intent::ArchiveSession => {
-                item.session_key.as_ref().map(|k| app.item_host_repo_command(CommandAction::ArchiveSession { session_id: k.clone() }, item))
+                item.session_key.as_ref().map(|k| app.repo_command(CommandAction::ArchiveSession { session_id: k.clone() }))
             }
             Intent::CloseChangeRequest => {
                 let cr_key = item.change_request_key.as_ref()?;
@@ -201,7 +198,7 @@ impl Intent {
                 if cr.status != flotilla_protocol::ChangeRequestStatus::Open {
                     return None;
                 }
-                Some(app.item_host_repo_command(CommandAction::CloseChangeRequest { id: cr_key.clone() }, item))
+                Some(app.repo_command(CommandAction::CloseChangeRequest { id: cr_key.clone() }))
             }
         }
     }
@@ -689,7 +686,8 @@ mod tests {
         let cmd = Intent::CreateCheckoutAndWorkspace.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::Checkout { target, issue_ids, .. }, .. } => {
+            Command { action: CommandAction::Checkout { repo, target, issue_ids }, .. } => {
+                assert_eq!(repo, flotilla_protocol::RepoSelector::Identity(app.model.active_repo_identity().clone()));
                 assert_eq!(target, CheckoutTarget::Branch("feat/remote".into()));
                 assert!(issue_ids.is_empty());
             }
@@ -704,7 +702,8 @@ mod tests {
         let cmd = Intent::CreateCheckoutAndWorkspace.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::Checkout { target, .. }, .. } => {
+            Command { action: CommandAction::Checkout { repo, target, .. }, .. } => {
+                assert_eq!(repo, flotilla_protocol::RepoSelector::Identity(app.model.active_repo_identity().clone()));
                 assert_eq!(target, CheckoutTarget::Branch("feat/pr-branch".into()));
             }
             other => panic!("expected CreateCheckout, got {other:?}"),
@@ -751,7 +750,8 @@ mod tests {
         let cmd = Intent::GenerateBranchName.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::GenerateBranchName { issue_keys }, .. } => {
+            Command { context_repo, action: CommandAction::GenerateBranchName { issue_keys }, .. } => {
+                assert_eq!(context_repo, Some(flotilla_protocol::RepoSelector::Identity(app.model.active_repo_identity().clone())));
                 assert_eq!(issue_keys, vec!["42".to_string(), "43".to_string()]);
             }
             other => panic!("expected GenerateBranchName, got {other:?}"),
@@ -776,7 +776,7 @@ mod tests {
         assert!(cmd.is_some());
         match cmd.unwrap() {
             Command { host, action: CommandAction::OpenChangeRequest { id }, .. } => {
-                assert_eq!(host, Some(HostName::new("remote-b")));
+                assert_eq!(host, None);
                 assert_eq!(id, "123");
             }
             other => panic!("expected OpenChangeRequest, got {other:?}"),
@@ -858,7 +858,10 @@ mod tests {
         let cmd = Intent::ArchiveSession.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::ArchiveSession { session_id }, .. } => assert_eq!(session_id, "sess-99"),
+            Command { host, action: CommandAction::ArchiveSession { session_id }, .. } => {
+                assert_eq!(host, None);
+                assert_eq!(session_id, "sess-99");
+            }
             other => panic!("expected ArchiveSession, got {other:?}"),
         }
     }

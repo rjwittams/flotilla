@@ -112,6 +112,7 @@ pub(crate) fn provider_error(category: &str, provider: &str, message: &str) -> P
 pub(crate) fn snapshot(repo: &Path) -> Snapshot {
     Snapshot {
         seq: 1,
+        repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: repo.display().to_string() },
         repo: repo.to_path_buf(),
         host_name: flotilla_protocol::HostName::local(),
         work_items: vec![],
@@ -128,6 +129,7 @@ pub(crate) fn delta(repo: &Path, changes: Vec<Change>) -> SnapshotDelta {
     SnapshotDelta {
         seq: 2,
         prev_seq: 1,
+        repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: repo.display().to_string() },
         repo: repo.to_path_buf(),
         changes,
         work_items: vec![],
@@ -139,6 +141,7 @@ pub(crate) fn delta(repo: &Path, changes: Vec<Change>) -> SnapshotDelta {
 
 pub(crate) fn default_repo_model(labels: RepoLabels) -> TuiRepoModel {
     TuiRepoModel {
+        identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/test-repo".into() },
         providers: Arc::new(flotilla_protocol::ProviderData::default()),
         labels,
         provider_names: HashMap::new(),

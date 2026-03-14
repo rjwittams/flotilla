@@ -1,249 +1,233 @@
-# Repo Identity And Command Affinity Design
+# Remote Repo Identity And Command Affinity Design
 
 ## Summary
 
-This design updates the open remote checkout / terminal prep branch so it is correct across hosts with different local repo roots, and so command routing stays aligned with actual provider ownership.
+PR `#334` exposed three linked problems in the first remote checkout / terminal-prep implementation:
 
-The previous branch work proved the basic remote-command path, but it still assumes repo paths are globally meaningful. That is false in a multi-host setup. The correct boundary is:
+1. routed commands still identify repos by host-local absolute path
+2. some provider-backed item actions are incorrectly routed to `item.host`
+3. `TerminalPrepared` follow-up workspace creation loses repo affinity if the user switches tabs mid-flight
 
-- repo identity is the stable cross-host key
-- host-local filesystem paths remain metadata owned by each host
-- command routing uses execution-host semantics only where the target daemon can actually service the command
+These are not three independent bugs. They come from the same boundary problem: the daemon, protocol, client, and TUI still treat `PathBuf` as the stable repo identifier, even though multi-host routing already uses `RepoIdentity` as the cross-host concept.
 
-This design folds issue `#298` into PR `#334` and fixes the two review regressions discovered afterward.
-
-## Problems To Fix
-
-### 1. Remote commands still use host-local paths as cross-host selectors
-
-The TUI currently forwards repo references using the active local repo path. The remote daemon still resolves commands by its own tracked filesystem paths. That means remote checkout creation, branch-name generation, and terminal preparation only work when both hosts happen to use the same absolute repo root.
-
-This is the core architectural bug behind review item 1. The robust fix is to move routed command selection onto `RepoIdentity`.
-
-### 2. Some item actions are routed to the wrong host
-
-The current branch began routing several item-backed actions to `item.host`. That host is derived from checkout correlation, not from the host that owns the provider implementation for browser/API actions like open PR, open issue, link issues, close PR, or archive session.
-
-On follower hosts those providers are intentionally absent. So those actions must not be routed to follower daemons just because the selected work item is anchored to a follower checkout.
-
-### 3. Terminal prep follow-up loses originating repo affinity
-
-`TerminalPrepared` currently triggers a follow-up workspace command using the TUI's current active repo when the async result arrives. If the user changes repos while the command is in flight, the workspace can be created against the wrong repo.
-
-The fix is to preserve originating repo identity through the result path and queue the follow-up against that explicit repo, not the current tab.
+This design fixes that boundary honestly by implementing the essence of `#298` now: use `RepoIdentity` as the stable repo key across daemon state, replay bookkeeping, command routing, and TUI tab state, while retaining per-host paths as metadata for display and local execution.
 
 ## Scope
 
 ### In scope
 
-- Add repo-identity-based command selection for cross-host routing
-- Re-key daemon and client state where repo identity must be the stable key
-- Preserve host-local paths as metadata for local actions and display
-- Fix item-action routing so only true execution-host actions are remote-routed
-- Preserve repo affinity through terminal-prep follow-up
-- Repair tests so the routed multi-host cases cover different local and remote repo roots
+- Add `RepoIdentity` to the wire model anywhere repos need stable cross-host identity
+- Re-key `InProcessDaemon` repo state, peer overlays, and replay bookkeeping by `RepoIdentity`
+- Re-key TUI repo state, tab ordering, UI state, and client replay bookkeeping by `RepoIdentity`
+- Add `RepoSelector::Identity` and use it for remote-targeted command routing
+- Fix provider-backed item actions so they execute on the presentation host unless the command is truly target-host-owned
+- Preserve repo affinity across async `TerminalPrepared` result handling
+- Add tests that cover different local/remote repo roots and tab switches during terminal preparation
 
 ### Out of scope
 
 - Session handoff / migration (`#275`)
-- New host-picker UI beyond the already-added target host status selector
-- Full provider-ownership modeling for every work-item type
-- Removal of path-based local-only APIs that are not involved in routed execution yet
+- Host/provider ownership modeling beyond the immediate routing fix
+- Full remote attach over the multiplexed peer socket
+- Any further terminal pool work beyond preserving the current passthrough design
 
-## Design Principles
+## Core Decision
 
-### Repo identity is the cross-host key
+### Stable identity is `RepoIdentity`, not path
 
-`RepoIdentity` is the only selector that is stable across hosts. Paths are host-local implementation details. Protocol objects and routed commands that need to refer to "the same repo" across machines must carry identity.
+Local paths are host-relative facts. The same repo can exist at:
 
-### Paths remain first-class local metadata
+- `/Users/robert/dev/flotilla` on the presentation host
+- `/srv/dev/flotilla` on a remote Linux host
+- a synthetic path for remote-only tabs
 
-The daemon, TUI, and workspace managers still need host-local paths for:
+Those are not safe cross-host selectors. `RepoIdentity` already is.
 
-- display
-- local file actions
-- workspace creation
-- provider execution on the owning host
+So the system should work like this:
 
-So the fix is not "delete paths." It is "stop using paths as the cross-host identity key."
-
-### Execution host and presentation host are different concerns
-
-The selected target host continues to determine where execution-host actions run. But browser/API actions remain presentation-host concerns unless there is explicit evidence that the provider is owned remotely.
-
-### Preserve affinity through async boundaries
-
-Any async result that triggers follow-up commands must carry enough identity to reconstruct the exact originating repo and host context without consulting mutable UI state.
-
-## Approach
-
-Use `RepoIdentity` as the canonical repo key through protocol, daemon state, and TUI state, while keeping each repo's current host-local `PathBuf` in repo metadata.
-
-Concretely:
-
-- add `RepoSelector::Identity(RepoIdentity)`
-- add repo identity to wire snapshot and repo event types that currently only carry `PathBuf`
-- re-key daemon tracked repos, replay state, and TUI repo/tab/UI maps by `RepoIdentity`
-- keep current path in `RepoInfo`, `Snapshot`, repo model state, and command results where local follow-up still needs it
-- add originating repo identity to `CommandResult::TerminalPrepared`
-
-This is the broadest of the three options considered during review, but it is the only one that fixes routed execution honestly rather than papering over one command path at a time.
+- `RepoIdentity` identifies a repo across hosts
+- each daemon stores its own local or synthetic path inside per-repo state
+- commands that need local filesystem access resolve from identity to the local path inside the executing daemon
+- the TUI tracks tabs and in-flight commands by identity, not by current path
 
 ## Protocol Changes
 
-### Repo selectors
+### Repo-bearing protocol types carry identity
 
-`RepoSelector` gains:
-
-- `Identity(RepoIdentity)`
-
-Existing path and query selectors remain for local-only flows and backwards-compatible command construction inside the same process. Routed commands should prefer identity.
-
-### Repo-bearing daemon events
-
-The following protocol types should carry repo identity as the stable key:
+Add `identity: RepoIdentity` to:
 
 - `RepoInfo`
 - `Snapshot`
 - `SnapshotDelta`
-- `DaemonEvent::RepoRemoved`
-- `DaemonEvent::CommandStarted`
-- `DaemonEvent::CommandFinished`
-- `DaemonEvent::CommandStepUpdate`
 
-Each should keep the host-local path as metadata where consumers still need it. The rule is:
+Change repo-bearing daemon events to use identity as the stable key:
 
-- identity = key
-- path = local detail
+- `RepoRemoved` should identify the removed repo by `RepoIdentity`
+- `CommandStarted`
+- `CommandFinished`
+- `CommandStepUpdate`
 
-### Terminal prep result
+Paths can still remain present where useful for human-facing output, but identity must be the field that consumers use for indexing and correlation.
 
-`CommandResult::TerminalPrepared` should include the originating `RepoIdentity`.
+### Routed commands use `RepoSelector::Identity`
 
-That makes the follow-up workspace command deterministic even if the user changes tabs before the result arrives.
+Extend `RepoSelector` with:
 
-## Core Daemon Design
+- `Identity(RepoIdentity)`
 
-### InProcessDaemon repo state
+Remote-targeted commands should use this selector instead of sending a presentation-host path to the remote daemon.
 
-`InProcessDaemon` already has an identity map bridge. This change makes identity the primary key instead of an auxiliary lookup.
-
-Re-key the relevant daemon maps by `RepoIdentity`, including:
-
-- tracked repos
-- repo order
-- replay sequence tracking
-- command lifecycle repo association
-
-Each repo state still stores:
-
-- current host-local path
-- labels
-- provider health
-- provider data and snapshots
-
-Local APIs that still accept paths can resolve them through identity/path lookup helpers internally.
-
-### Command resolution
-
-For routed commands:
-
-- resolve `RepoSelector::Identity` directly
-- reject routed path selectors where no matching local path exists on the target host
-
-For locally initiated commands:
-
-- existing path/query selectors can continue to resolve as before
-- identity selectors should be preferred when available
-
-## TUI / Client Design
-
-### Repo model keys
-
-The TUI currently keys repos, UI tab state, and replay bookkeeping by `PathBuf`. That breaks as soon as a repo must be identified consistently across hosts while its local path differs.
-
-Re-key these structures by `RepoIdentity`, including:
-
-- `TuiModel.repos`
-- `repo_order`
-- `UiState.repo_ui`
-- daemon replay sequence tracking
-- in-flight command repo association
-
-Each `TuiRepoModel` continues to store the local path for display and local filesystem actions.
-
-### Command construction
-
-Repo-scoped commands should use the active repo's identity, not its path, when the command may be routed or when the result must be matched back to a repo across async boundaries.
-
-That includes:
+That applies to:
 
 - remote checkout creation
-- branch-name generation
-- terminal preparation
-- follow-up workspace creation after remote terminal prep
+- remote branch-name generation
+- remote terminal preparation
 
-### Item action routing
+Local-only commands may continue using path selectors where appropriate.
 
-Split item-backed actions into two categories:
+### Terminal preparation result carries originating repo identity
 
-1. Execution-host actions
-   - checkout or terminal actions that must run on the host owning the filesystem/process
-   - these may route to a remote target host or item-inherent host
+`CommandResult::TerminalPrepared` needs the originating repo identity, not just branch / checkout path.
 
-2. Presentation/provider actions
-   - open PR
-   - close PR
-   - open issue
-   - link issues
-   - archive session
-   - similar browser/API actions backed by local providers
-   - these stay on the presentation host for now
+That lets the TUI queue the follow-up workspace command against the initiating repo even if the active tab changes before the async result arrives.
 
-This removes the regression where follower checkout items hijack provider-backed actions to a daemon that cannot service them.
+## Daemon Design
 
-### Terminal prep follow-up
+### InProcessDaemon re-keying
+
+`InProcessDaemon` should move from:
+
+- `repos: HashMap<PathBuf, RepoState>`
+- `repo_order: Vec<PathBuf>`
+- `peer_providers: HashMap<PathBuf, ...>`
+
+to identity-keyed structures:
+
+- `repos: HashMap<RepoIdentity, RepoState>`
+- `repo_order: Vec<RepoIdentity>`
+- `peer_providers: HashMap<RepoIdentity, ...>`
+
+`RepoState` should store the daemon-local path:
+
+- local tracked repo path for normal repos
+- synthetic path for remote-only tabs
+
+This removes the current identity-to-path bridge awkwardness and makes routed command resolution match peer replication semantics.
+
+### Repo resolution rules
+
+When a command executes on a daemon:
+
+- `RepoSelector::Identity` resolves directly to repo state by identity
+- `RepoSelector::Path` remains valid for local commands and compatibility paths
+- local filesystem execution always uses the path stored inside that daemon’s `RepoState`
+
+This is what fixes the “same repo must exist at the same absolute path on both hosts” bug.
+
+### Replay and event affinity
+
+Replay tracking should also key by identity.
+
+That means:
+
+- `replay_since()` takes last-seen seqs keyed by `RepoIdentity`
+- snapshot replay and delta replay use repo identity as the stable index
+- add/remove and command lifecycle events identify repos by identity
+
+The client and TUI can then survive path changes or differing roots without losing continuity.
+
+## TUI And Client Design
+
+### TUI repo state is identity-keyed
+
+The TUI should move from path-keyed repo maps and tab ordering to identity-keyed structures:
+
+- `repos: HashMap<RepoIdentity, TuiRepoModel>`
+- `repo_order: Vec<RepoIdentity>`
+- `UiState.repo_ui: HashMap<RepoIdentity, RepoUiState>`
+- provider status maps keyed by repo identity
+- in-flight command tracking keyed by repo identity
+
+`TuiRepoModel` should store both:
+
+- stable `RepoIdentity`
+- current display / local path for that tab
+
+This preserves the existing tab/UI behavior while making async and multi-host logic stable.
+
+### Client replay bookkeeping is identity-keyed
+
+`SocketDaemon` currently tracks seqs by `PathBuf`. That must switch to `RepoIdentity`.
+
+Otherwise replay recovery will remain tied to host-local paths and can drift when the daemon becomes identity-keyed.
+
+### Fixing provider-backed item actions
+
+The current `item.host` routing is wrong for actions whose implementation lives on the presentation host, not on the checkout anchor host.
+
+Immediate routing rule:
+
+- execution-host actions stay target-host or item-host routed
+  - checkout creation
+  - terminal preparation
+- provider-backed browser/API actions stay on the presentation host by default
+  - open/close PR
+  - open issue
+  - link issues
+  - archive session
+
+This is intentionally conservative. It matches the current provider registration model, where follower daemons omit those providers.
+
+If we later want true per-item provider ownership routing, that should be modeled explicitly instead of inferred from checkout host.
+
+### Fixing async terminal-prep follow-up
 
 When `TerminalPrepared` arrives:
 
-- read the repo identity from the result payload
-- resolve the corresponding repo model directly
-- queue `CreateWorkspaceFromPreparedTerminal` against that explicit repo identity/path
+- the TUI must preserve the originating repo identity from the command result or in-flight record
+- it must not rebuild the next command from the active tab
 
-Do not rebuild the next command from the currently active repo tab.
+The follow-up local workspace creation command should therefore be queued against the repo identity that initiated preparation, even if the user has switched to another tab.
 
 ## Testing Strategy
 
-### Protocol and daemon
+### Protocol
 
-- serialization roundtrips for `RepoSelector::Identity`
-- daemon-event roundtrips for repo-identity-bearing events
-- daemon/unit tests for resolving identity selectors and preserving path metadata
+- roundtrip tests for `RepoSelector::Identity`
+- roundtrip tests for repo-bearing structs/events with identity fields
+- roundtrip tests for `TerminalPrepared` preserving repo identity
 
-### Multi-host integration
+### Core daemon
 
-Add or update multi-host tests so leader and follower use different absolute repo roots. The routed test must prove:
+- tests that `RepoSelector::Identity` resolves correctly
+- replay tests keyed by identity instead of path
+- `InProcessDaemon` tests for add/remove/get-state/list/replay after the re-key
 
-- remote checkout creation works despite differing local/remote roots
-- remote branch-name generation works with identity-based repo selection
-- remote terminal preparation works with identity-based repo selection
+### Multi-host / server
 
-### TUI
+- routed remote checkout test with different local and remote repo roots
+- routed branch-name / terminal-prep repo resolution tests using identity selectors
+- remote terminal-prep response test preserving originating repo identity
 
-- repo/tab state remains stable when snapshots use differing host-local paths
-- provider-backed item actions stay local
-- execution-host item actions still route correctly
-- terminal-prep follow-up uses originating repo identity, not active-tab state
+### TUI / client
 
-## Migration / Compatibility Notes
+- target-host checkout intent stamps identity-based repo selector for remote execution
+- provider-backed item actions remain local despite remote checkout anchors
+- terminal-prep result queues follow-up workspace creation for the initiating repo identity even after tab switch
+- snapshot/golden updates for any status-bar or tab-label differences that remain intentional
 
-This is an internal protocol used by the same workspace's daemon/client code, so there is no long-term compatibility requirement with older builds in this branch. The change can therefore be a clean same-branch migration rather than a backwards-compat shim.
+## Migration Notes
 
-## Outcome
+This is a refactor of the current branch, not a follow-up feature branch.
 
-After this change:
+So the implementation should:
 
-- remote repo-executed commands no longer depend on path coincidence across hosts
-- provider-backed browser/API actions stop routing to follower daemons that cannot service them
-- terminal prep follow-up is stable under repo switching
-- PR `#334` becomes honest about cross-host execution semantics instead of relying on same-path assumptions
+- update existing remote checkout / terminal-prep code to the new identity model
+- keep public behavior aligned with the current feature intent
+- preserve deterministic test-support behavior introduced earlier
+
+The PR should not be merged until:
+
+- the remote routed commands work with different repo roots across hosts
+- provider-backed item actions are no longer misrouted to follower-only hosts
+- async terminal-prep follow-up is identity-stable across tab switches

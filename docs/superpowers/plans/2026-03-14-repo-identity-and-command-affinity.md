@@ -1,292 +1,337 @@
-# Repo Identity And Command Affinity Implementation Plan
+# Remote Repo Identity And Command Affinity Implementation Plan
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Re-key routed repo execution around `RepoIdentity`, fix provider-backed action routing, and preserve repo affinity through remote terminal-prep follow-up.
+**Goal:** Re-key remote repo handling around `RepoIdentity`, fix cross-host routed repo resolution, and restore correct command affinity for provider-backed actions and async terminal preparation.
 
-**Architecture:** Carry `RepoIdentity` through protocol selectors and daemon events, make daemon and TUI repo state identity-keyed while retaining host-local paths as metadata, restrict remote routing to true execution-host actions, and include originating repo identity in terminal-prep results so async follow-up commands stay bound to the right repo.
+**Architecture:** Introduce repo identity as the stable key across protocol, daemon state, client replay, and TUI tabs. Keep per-host paths as metadata for local execution and display, and tighten command routing so only genuinely execution-host-owned actions are sent remotely.
 
-**Tech Stack:** Rust, Tokio, serde protocol types, existing daemon/client split, ratatui TUI model state, multi-host daemon integration tests.
+**Tech Stack:** Rust, Tokio, serde protocol types, existing `DaemonHandle` / socket client / in-process daemon, ratatui TUI state, multi-host daemon tests.
 
 ---
 
 ## File Structure
 
 - Modify: `crates/flotilla-protocol/src/commands.rs`
-  - Add `RepoSelector::Identity` and repo-identity-bearing `CommandResult::TerminalPrepared`.
-- Modify: `crates/flotilla-protocol/src/lib.rs`
-  - Add repo identity to daemon event variants and snapshot/delta/repo metadata as needed.
+  - Add `RepoSelector::Identity` and extend terminal-prep result metadata.
 - Modify: `crates/flotilla-protocol/src/snapshot.rs`
-  - Re-key snapshot payloads around repo identity while retaining path metadata.
+  - Add `RepoIdentity` to repo-bearing snapshot/list types.
+- Modify: `crates/flotilla-protocol/src/lib.rs`
+  - Add repo identity to daemon events and snapshot delta types.
 - Modify: `crates/flotilla-core/src/daemon.rs`
-  - Re-key replay API to use `RepoIdentity`.
+  - Change replay bookkeeping trait signatures from path-keyed to identity-keyed.
 - Modify: `crates/flotilla-core/src/in_process.rs`
-  - Make tracked repo state and command resolution identity-first.
+  - Re-key daemon repo state, peer overlays, replay handling, and command resolution by `RepoIdentity`.
 - Modify: `crates/flotilla-core/src/executor.rs`
-  - Emit terminal-prep results with originating repo identity.
+  - Preserve repo identity through terminal-prep results and local workspace follow-up.
 - Modify: `crates/flotilla-daemon/src/server.rs`
-  - Preserve repo identity through routed command lifecycle and remote responses.
+  - Ensure routed execution / lifecycle events carry and preserve repo identity.
 - Modify: `crates/flotilla-daemon/tests/multi_host.rs`
-  - Add differing-root routed integration coverage.
-- Modify: `crates/flotilla-daemon/tests/socket_roundtrip.rs`
-  - Update event assertions for repo identity payloads.
+  - Add different-root multi-host coverage for remote checkout replication.
+- Modify: `crates/flotilla-client/src/lib.rs`
+  - Re-key replay seq tracking by repo identity.
 - Modify: `crates/flotilla-tui/src/app/mod.rs`
-  - Re-key repo/tab/in-flight state and restrict item-host routing.
-- Modify: `crates/flotilla-tui/src/app/executor.rs`
-  - Consume identity-based terminal-prep results and queue correct follow-up commands.
-- Modify: `crates/flotilla-tui/src/app/intent.rs`
-  - Build routed repo commands with repo identity, not active local path.
+  - Re-key TUI repo state and in-flight tracking by repo identity.
 - Modify: `crates/flotilla-tui/src/app/ui_state.rs`
-  - Re-key per-repo UI state by repo identity.
+  - Re-key per-tab UI state by repo identity.
+- Modify: `crates/flotilla-tui/src/app/intent.rs`
+  - Use identity-based selectors for remote execution and restore local routing for provider-backed item actions.
+- Modify: `crates/flotilla-tui/src/app/executor.rs`
+  - Preserve originating repo identity when handling `TerminalPrepared`.
+- Modify: `crates/flotilla-tui/src/app/key_handlers.rs`
+  - Update any direct repo/path command construction to the new selector model.
 - Modify: `crates/flotilla-tui/src/cli.rs`
-  - Update command-event rendering for repo identity-bearing lifecycle events.
-- Modify: `crates/flotilla-daemon/src/client.rs`
-  - Re-key replay sequence tracking by repo identity.
-- Modify: affected tests under `crates/flotilla-core/tests`, `crates/flotilla-protocol/src`, and `crates/flotilla-tui/tests`
-  - Cover identity selection, routing semantics, and repo-affinity preservation.
+  - Render updated event/result shapes if needed.
+- Modify: `crates/flotilla-tui/src/ui.rs`
+  - Update repo-order access and any snapshot output assumptions.
+- Modify: `crates/flotilla-tui/tests/snapshots/*.snap`
+  - Refresh only if intentional UI output changes remain.
+- Modify: `crates/flotilla-core/tests/in_process_daemon.rs`
+  - Update replay / event tests for identity-keyed behavior.
+- Modify: `crates/flotilla-daemon/tests/socket_roundtrip.rs`
+  - Update socket/replay tests for identity-keyed events.
+- Modify: `crates/flotilla-tui/src/app/test_support.rs`
+  - Update stub repo/event builders to include repo identity.
 
 ## Chunk 1: Protocol Identity Plumbing
 
-### Task 1: Add failing protocol tests for identity selectors and lifecycle events
+### Task 1: Add failing protocol tests for identity-bearing repo types
 
 **Files:**
 - Modify: `crates/flotilla-protocol/src/commands.rs`
-- Modify: `crates/flotilla-protocol/src/lib.rs`
 - Modify: `crates/flotilla-protocol/src/snapshot.rs`
+- Modify: `crates/flotilla-protocol/src/lib.rs`
+- Test: `crates/flotilla-protocol/src/commands.rs`
+- Test: `crates/flotilla-protocol/src/snapshot.rs`
+- Test: `crates/flotilla-protocol/src/lib.rs`
 
-- [ ] **Step 1: Write failing protocol roundtrip tests**
+- [ ] **Step 1: Write failing tests for `RepoSelector::Identity` and identity-bearing event/snapshot roundtrips**
 
 Cover:
-- `RepoSelector::Identity(RepoIdentity)` serde roundtrip
-- `CommandResult::TerminalPrepared` carrying repo identity
-- daemon events roundtripping repo identity alongside path metadata
-- repo snapshots and deltas retaining both identity and path
+- `RepoSelector::Identity(RepoIdentity)` JSON roundtrip
+- `RepoInfo`, `Snapshot`, and `SnapshotDelta` roundtrip with identity present
+- `DaemonEvent::{RepoRemoved, CommandStarted, CommandFinished, CommandStepUpdate}` roundtrip with repo identity
+- `CommandResult::TerminalPrepared` roundtrip with originating repo identity
 
 - [ ] **Step 2: Run targeted tests to verify failure**
 
-Run: `cargo test -p flotilla-protocol --locked repo_identity -- --nocapture`
-Expected: FAIL because the selector and event payloads do not carry identity yet.
+Run: `cargo test -p flotilla-protocol --locked identity -- --nocapture`
+Expected: FAIL because identity-bearing variants/fields do not exist yet.
 
 - [ ] **Step 3: Implement minimal protocol changes**
 
 Add:
 - `RepoSelector::Identity`
-- repo identity fields on repo-bearing protocol types
-- terminal-prep result repo identity
+- `identity: RepoIdentity` fields on repo-bearing structs
+- repo identity fields on daemon lifecycle events
+- repo identity on `TerminalPrepared`
 
 - [ ] **Step 4: Run targeted tests to verify pass**
 
-Run: `cargo test -p flotilla-protocol --locked repo_identity -- --nocapture`
+Run: `cargo test -p flotilla-protocol --locked commands::tests:: snapshot::tests:: tests:: -- --nocapture`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/flotilla-protocol/src/commands.rs crates/flotilla-protocol/src/lib.rs crates/flotilla-protocol/src/snapshot.rs
-git commit -m "feat: carry repo identity through protocol"
+git add crates/flotilla-protocol/src/commands.rs crates/flotilla-protocol/src/snapshot.rs crates/flotilla-protocol/src/lib.rs
+git commit -m "feat: add repo identity to protocol events and selectors"
 ```
 
-## Chunk 2: Daemon Identity-First Resolution
+## Chunk 2: Daemon Re-Keying To RepoIdentity
 
-### Task 2: Add failing daemon tests for identity-based repo resolution
+### Task 2: Add failing core tests for identity-keyed repo resolution and replay
 
 **Files:**
 - Modify: `crates/flotilla-core/tests/in_process_daemon.rs`
 - Modify: `crates/flotilla-core/src/in_process.rs`
 - Modify: `crates/flotilla-core/src/daemon.rs`
 
-- [ ] **Step 1: Write failing daemon tests**
+- [ ] **Step 1: Write failing tests for identity-based repo resolution**
 
 Cover:
-- `execute()` accepts `RepoSelector::Identity`
-- command lifecycle events emit repo identity with path metadata
-- replay bookkeeping keys off repo identity rather than path
-- local path/query selectors continue to resolve for local-only flows
+- `list_repos()` includes repo identity
+- `replay_since()` uses identity-keyed last-seen maps
+- `resolve_repo_for_command()` accepts `RepoSelector::Identity`
+- command lifecycle events report repo identity consistently
 
 - [ ] **Step 2: Run targeted tests to verify failure**
 
-Run: `cargo test -p flotilla-core --locked --features test-support --test in_process_daemon repo_identity -- --nocapture`
-Expected: FAIL because repo tracking and lifecycle events are still path-keyed.
+Run: `cargo test -p flotilla-core --locked --features test-support in_process_daemon -- --nocapture`
+Expected: FAIL because daemon/client traits and repo state are still path-keyed.
 
-- [ ] **Step 3: Implement minimal daemon re-keying**
+- [ ] **Step 3: Re-key `InProcessDaemon`**
 
-Update:
-- tracked repo maps
-- repo order
-- replay-since API / bookkeeping
-- command resolution helpers
-- repo removal / refresh / lifecycle emission
+Change:
+- `repos`, `repo_order`, and `peer_providers` to `RepoIdentity` keys
+- store daemon-local path inside `RepoState`
+- make replay bookkeeping and event emission identity-based
+- keep path accessors for local execution and display
 
 - [ ] **Step 4: Run targeted tests to verify pass**
 
-Run: `cargo test -p flotilla-core --locked --features test-support --test in_process_daemon repo_identity -- --nocapture`
+Run: `cargo test -p flotilla-core --locked --features test-support --test in_process_daemon`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/flotilla-core/src/daemon.rs crates/flotilla-core/src/in_process.rs crates/flotilla-core/tests/in_process_daemon.rs
-git commit -m "refactor: key daemon repo state by identity"
+git commit -m "refactor: key in-process daemon repos by identity"
 ```
 
-### Task 3: Add failing multi-host tests for differing repo roots
+### Task 3: Add failing daemon routing tests for different local/remote repo roots
 
 **Files:**
-- Modify: `crates/flotilla-daemon/tests/multi_host.rs`
 - Modify: `crates/flotilla-daemon/src/server.rs`
+- Modify: `crates/flotilla-daemon/tests/multi_host.rs`
+- Possibly modify: `crates/flotilla-daemon/tests/socket_roundtrip.rs`
 
-- [ ] **Step 1: Write failing multi-host routed tests**
+- [ ] **Step 1: Write failing tests for routed repo resolution across different roots**
 
 Cover:
-- leader and follower track the same repo identity at different absolute roots
-- remote checkout creation still succeeds
-- remote branch-name generation still succeeds
-- remote terminal preparation still succeeds
+- remote checkout command addressed by repo identity works when local and remote repo roots differ
+- remote terminal prepare addressed by repo identity works with different roots
+- routed lifecycle events preserve repo identity on the way back
 
 - [ ] **Step 2: Run targeted tests to verify failure**
 
-Run: `cargo test -p flotilla-daemon --locked differing_repo_roots -- --nocapture`
-Expected: FAIL because routed commands still rely on matching paths.
+Run: `cargo test -p flotilla-daemon --locked remote_checkout execute_forwarded_prepare_terminal -- --nocapture`
+Expected: FAIL because routed commands still depend on path-based repo lookup.
 
-- [ ] **Step 3: Implement minimal routed identity support**
+- [ ] **Step 3: Update server routing and daemon interactions**
 
-Update routed command handling so:
-- remote commands preserve `RepoSelector::Identity`
-- responder lifecycle events include identity and local responder path metadata
-- requester-side result forwarding preserves identity
+Ensure:
+- routed commands use `RepoSelector::Identity`
+- pending remote command bookkeeping preserves repo identity
+- lifecycle events and responses surface the correct repo identity to clients
 
 - [ ] **Step 4: Run targeted tests to verify pass**
 
-Run: `cargo test -p flotilla-daemon --locked differing_repo_roots -- --nocapture`
+Run: `cargo test -p flotilla-daemon --locked --test multi_host -- --nocapture`
+Run: `cargo test -p flotilla-daemon --locked server::tests:: -- --nocapture`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/flotilla-daemon/src/server.rs crates/flotilla-daemon/tests/multi_host.rs
-git commit -m "feat: route multi-host repo commands by identity"
+git add crates/flotilla-daemon/src/server.rs crates/flotilla-daemon/tests/multi_host.rs crates/flotilla-daemon/tests/socket_roundtrip.rs
+git commit -m "fix: route remote repo commands by identity"
 ```
 
-## Chunk 3: TUI Re-Keying And Command Affinity
+## Chunk 3: Client And TUI Identity Re-Keying
 
-### Task 4: Add failing TUI tests for identity-keyed repo state
+### Task 4: Add failing client tests for identity-keyed replay bookkeeping
+
+**Files:**
+- Modify: `crates/flotilla-client/src/lib.rs`
+
+- [ ] **Step 1: Write failing tests for identity-keyed local seq tracking**
+
+Cover:
+- full snapshots seed seq by repo identity
+- matching deltas advance seq by repo identity
+- gap recovery sends identity-keyed `last_seen`
+
+- [ ] **Step 2: Run targeted tests to verify failure**
+
+Run: `cargo test -p flotilla-client --locked replay_since handle_event -- --nocapture`
+Expected: FAIL because seq maps are still keyed by `PathBuf`.
+
+- [ ] **Step 3: Implement identity-keyed client replay tracking**
+
+Update:
+- `SeqMap`
+- recovery bookkeeping
+- any helper/test builders that fabricate repo-bearing events
+
+- [ ] **Step 4: Run targeted tests to verify pass**
+
+Run: `cargo test -p flotilla-client --locked -- --nocapture`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/flotilla-client/src/lib.rs
+git commit -m "refactor: key client replay state by repo identity"
+```
+
+### Task 5: Add failing TUI tests for identity-keyed tabs and terminal-prep affinity
 
 **Files:**
 - Modify: `crates/flotilla-tui/src/app/mod.rs`
 - Modify: `crates/flotilla-tui/src/app/ui_state.rs`
-- Modify: `crates/flotilla-tui/src/cli.rs`
+- Modify: `crates/flotilla-tui/src/app/executor.rs`
+- Modify: `crates/flotilla-tui/src/app/test_support.rs`
+- Test: `crates/flotilla-tui/src/app/mod.rs`
+- Test: `crates/flotilla-tui/src/app/executor.rs`
 
-- [ ] **Step 1: Write failing TUI model tests**
+- [ ] **Step 1: Write failing tests for identity-stable repo/tab behavior**
 
 Cover:
-- snapshots for the same repo identity but different local paths update one repo model
-- repo tabs and per-repo UI state remain keyed by identity
-- command lifecycle display uses event identity/path payloads correctly
+- repo collections and tab ordering keyed by repo identity
+- daemon events update the correct tab even if path differs
+- `TerminalPrepared` queues follow-up workspace creation for the initiating repo after tab switch
 
 - [ ] **Step 2: Run targeted tests to verify failure**
 
-Run: `cargo test -p flotilla-tui --locked repo_identity -- --nocapture`
-Expected: FAIL because repo and UI maps are still keyed by `PathBuf`.
+Run: `cargo test -p flotilla-tui --locked terminal_prepared repo_added repo_removed handle_daemon_event -- --nocapture`
+Expected: FAIL because TUI state and in-flight tracking are still path-keyed.
 
-- [ ] **Step 3: Implement minimal TUI re-keying**
+- [ ] **Step 3: Re-key TUI model and async result handling**
 
 Update:
-- `TuiModel.repos`
-- `repo_order`
-- `UiState.repo_ui`
-- active repo helpers
-- client replay tracking
-- repo add/remove/snapshot/delta handlers
+- `TuiModel.repos`, `repo_order`, provider status maps, and `UiState.repo_ui` to use `RepoIdentity`
+- `InFlightCommand` to store repo identity (and path only if still needed for display)
+- `handle_result()` to queue `CreateWorkspaceFromPreparedTerminal` against the originating identity
 
 - [ ] **Step 4: Run targeted tests to verify pass**
 
-Run: `cargo test -p flotilla-tui --locked repo_identity -- --nocapture`
+Run: `cargo test -p flotilla-tui --locked app::tests:: app::executor::tests:: app::ui_state::tests:: -- --nocapture`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/flotilla-tui/src/app/mod.rs crates/flotilla-tui/src/app/ui_state.rs crates/flotilla-tui/src/cli.rs crates/flotilla-daemon/src/client.rs
+git add crates/flotilla-tui/src/app/mod.rs crates/flotilla-tui/src/app/ui_state.rs crates/flotilla-tui/src/app/executor.rs crates/flotilla-tui/src/app/test_support.rs
 git commit -m "refactor: key tui repo state by identity"
 ```
 
-### Task 5: Add failing TUI tests for command-affinity fixes
+## Chunk 4: Command Affinity Fixes
+
+### Task 6: Add failing TUI intent tests for provider-backed action routing
 
 **Files:**
 - Modify: `crates/flotilla-tui/src/app/intent.rs`
-- Modify: `crates/flotilla-tui/src/app/executor.rs`
 - Modify: `crates/flotilla-tui/src/app/mod.rs`
+- Modify: `crates/flotilla-tui/src/app/key_handlers.rs`
 
-- [ ] **Step 1: Write failing tests for routing semantics**
+- [ ] **Step 1: Write failing tests for provider-backed actions staying local**
 
 Cover:
-- routed checkout / branch-name / terminal-prep commands use repo identity selectors
-- provider-backed item actions stay on the presentation host
-- execution-host item actions still route remotely when appropriate
-- terminal-prep follow-up uses originating repo identity, not current active repo
+- open/close PR stays local when selected item is anchored to a remote checkout
+- open issue stays local
+- link issues stays local
+- archive session stays local
+- checkout creation and terminal preparation remain remotely targeted where appropriate
 
 - [ ] **Step 2: Run targeted tests to verify failure**
 
-Run: `cargo test -p flotilla-tui --locked command_affinity -- --nocapture`
-Expected: FAIL because current item routing and terminal follow-up still use the wrong host/repo source.
+Run: `cargo test -p flotilla-tui --locked intent::tests::resolve_open intent::tests::resolve_link intent::tests::resolve_archive -- --nocapture`
+Expected: FAIL because these actions are currently routed to `item.host`.
 
-- [ ] **Step 3: Implement minimal routing fixes**
+- [ ] **Step 3: Implement command affinity split**
 
-Update:
-- intent builders to use identity selectors
-- item-host helpers to only remote-route true execution-host actions
-- in-flight command tracking / result handling so `TerminalPrepared` queues follow-up for the original repo
+Make:
+- provider-backed browser/API actions use presentation-host repo commands
+- only execution-host-owned actions use target host or item host routing
 
 - [ ] **Step 4: Run targeted tests to verify pass**
 
-Run: `cargo test -p flotilla-tui --locked command_affinity -- --nocapture`
+Run: `cargo test -p flotilla-tui --locked intent::tests:: -- --nocapture`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/flotilla-tui/src/app/intent.rs crates/flotilla-tui/src/app/executor.rs crates/flotilla-tui/src/app/mod.rs
-git commit -m "fix: preserve repo and host affinity for routed commands"
+git add crates/flotilla-tui/src/app/intent.rs crates/flotilla-tui/src/app/mod.rs crates/flotilla-tui/src/app/key_handlers.rs
+git commit -m "fix: keep provider-backed item actions on presentation host"
 ```
 
-## Chunk 4: Branch Verification And PR Update
+## Chunk 5: Final Verification And Snapshot Updates
 
-### Task 6: Run focused verification for the corrected branch
+### Task 7: Update snapshot/test fixtures and run full verification
 
 **Files:**
-- No code changes expected
+- Modify: `crates/flotilla-tui/tests/snapshots/*.snap`
+- Modify: any repo/event test fixtures affected by identity-bearing protocol changes
 
-- [ ] **Step 1: Run focused crate tests**
+- [ ] **Step 1: Refresh snapshots only after logic is stable**
 
-Run:
-- `cargo test -p flotilla-protocol --locked`
-- `cargo test -p flotilla-core --locked --features test-support --test in_process_daemon`
-- `cargo test -p flotilla-daemon --locked --test multi_host`
-- `cargo test -p flotilla-tui --locked`
+Run: `INSTA_UPDATE=always cargo test -p flotilla-tui --locked --test snapshots`
+Expected: PASS with intentional snapshot updates if output changed.
 
+- [ ] **Step 2: Run focused changed-crate verification**
+
+Run: `cargo test -p flotilla-protocol --locked -- --nocapture`
+Run: `cargo test -p flotilla-core --locked --features test-support --test in_process_daemon`
+Run: `cargo test -p flotilla-daemon --locked --test multi_host -- --nocapture`
+Run: `cargo test -p flotilla-client --locked -- --nocapture`
+Run: `cargo test -p flotilla-tui --locked -- --nocapture`
 Expected: PASS.
 
-- [ ] **Step 2: Run repo-wide verification**
+- [ ] **Step 3: Run repository-wide verification**
 
-Run:
-- `cargo +nightly fmt --check`
-- `cargo clippy --all-targets --locked -- -D warnings`
-- `cargo test --workspace --locked`
-- `git diff --check`
-
+Run: `cargo +nightly fmt --check`
+Run: `cargo clippy --all-targets --locked -- -D warnings`
+Run: `cargo test --workspace --locked`
+Run: `git diff --check`
 Expected: PASS.
 
-- [ ] **Step 3: Commit final cleanup if needed**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add -A
-git commit -m "chore: finalize repo identity routing fixes"
+git add crates/flotilla-tui/tests/snapshots docs/superpowers/specs/2026-03-14-remote-repo-identity-and-command-affinity-design.md docs/superpowers/plans/2026-03-14-remote-repo-identity-and-command-affinity.md
+git commit -m "docs: capture repo identity routing refactor plan"
 ```
-
-- [ ] **Step 4: Update PR #334**
-
-Push the branch and update the PR description to call out:
-- `#298` folded into the branch
-- cross-host repo-root mismatch fixed
-- provider-backed item routing corrected
-- terminal-prep repo-affinity corrected

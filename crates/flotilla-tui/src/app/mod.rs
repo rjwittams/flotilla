@@ -21,8 +21,8 @@ use flotilla_core::{
     data::{self, GroupEntry, SectionLabels},
 };
 use flotilla_protocol::{
-    Command, CommandAction, DaemonEvent, HostName, PeerConnectionState, ProviderData, ProviderError, RepoInfo, RepoLabels, RepoSelector,
-    Snapshot, SnapshotDelta, StepStatus, WorkItem,
+    Command, CommandAction, DaemonEvent, HostName, PeerConnectionState, ProviderData, ProviderError, RepoIdentity, RepoInfo, RepoLabels,
+    RepoSelector, Snapshot, SnapshotDelta, StepStatus, WorkItem,
 };
 pub use intent::Intent;
 use tui_input::Input;
@@ -81,6 +81,7 @@ impl CommandQueue {
 /// Per-repo view-model state for the TUI. Contains only what the UI needs
 /// to render — no provider registry, no refresh handle.
 pub struct TuiRepoModel {
+    pub identity: RepoIdentity,
     pub providers: Arc<ProviderData>,
     pub labels: RepoLabels,
     pub provider_names: HashMap<String, Vec<String>>,
@@ -117,6 +118,7 @@ impl TuiModel {
         let mut order = Vec::new();
         for info in repos_info {
             repos.insert(info.path.clone(), TuiRepoModel {
+                identity: info.identity,
                 providers: Arc::new(ProviderData::default()),
                 labels: info.labels,
                 provider_names: info.provider_names,
@@ -149,6 +151,10 @@ impl TuiModel {
         &self.repo_order[self.active_repo]
     }
 
+    pub fn active_repo_identity(&self) -> &RepoIdentity {
+        &self.active().identity
+    }
+
     pub fn active_labels(&self) -> &RepoLabels {
         &self.active().labels
     }
@@ -160,6 +166,7 @@ impl TuiModel {
 
 /// A command that has been dispatched to the daemon and is awaiting completion.
 pub struct InFlightCommand {
+    pub repo_identity: RepoIdentity,
     pub repo: PathBuf,
     pub description: String,
 }
@@ -283,12 +290,20 @@ impl App {
         Command { host: None, context_repo: Some(RepoSelector::Path(self.model.active_repo_root().clone())), action }
     }
 
+    pub fn repo_command_for_path(&self, repo: PathBuf, action: CommandAction) -> Command {
+        Command { host: None, context_repo: Some(RepoSelector::Path(repo)), action }
+    }
+
     pub fn targeted_command(&self, action: CommandAction) -> Command {
         Command { host: self.ui.target_host.clone(), context_repo: None, action }
     }
 
     pub fn targeted_repo_command(&self, action: CommandAction) -> Command {
-        Command { host: self.ui.target_host.clone(), context_repo: Some(RepoSelector::Path(self.model.active_repo_root().clone())), action }
+        Command {
+            host: self.ui.target_host.clone(),
+            context_repo: Some(RepoSelector::Identity(self.model.active_repo_identity().clone())),
+            action,
+        }
     }
 
     pub fn item_host_command(&self, action: CommandAction, item: &WorkItem) -> Command {
@@ -298,9 +313,13 @@ impl App {
     pub fn item_host_repo_command(&self, action: CommandAction, item: &WorkItem) -> Command {
         Command {
             host: self.item_execution_host(item),
-            context_repo: Some(RepoSelector::Path(self.model.active_repo_root().clone())),
+            context_repo: Some(RepoSelector::Identity(self.model.active_repo_identity().clone())),
             action,
         }
+    }
+
+    pub fn repo_path_for_identity(&self, identity: &RepoIdentity) -> Option<PathBuf> {
+        self.model.repos.iter().find(|(_, repo)| &repo.identity == identity).map(|(path, _)| path.clone())
     }
 
     fn item_execution_host(&self, item: &WorkItem) -> Option<HostName> {
@@ -331,10 +350,10 @@ impl App {
             DaemonEvent::SnapshotFull(snap) => self.apply_snapshot(*snap),
             DaemonEvent::SnapshotDelta(delta) => self.apply_delta(*delta),
             DaemonEvent::RepoAdded(info) => self.handle_repo_added(*info),
-            DaemonEvent::RepoRemoved { path } => self.handle_repo_removed(&path),
-            DaemonEvent::CommandStarted { command_id, repo, description, .. } => {
+            DaemonEvent::RepoRemoved { path, .. } => self.handle_repo_removed(&path),
+            DaemonEvent::CommandStarted { command_id, repo_identity, repo, description, .. } => {
                 tracing::info!(%command_id, %description, "command started");
-                self.in_flight.insert(command_id, InFlightCommand { repo, description });
+                self.in_flight.insert(command_id, InFlightCommand { repo_identity, repo, description });
             }
             DaemonEvent::CommandFinished { command_id, result, .. } => {
                 if let Some(_cmd) = self.in_flight.remove(&command_id) {
@@ -536,6 +555,7 @@ impl App {
             return;
         }
         self.model.repos.insert(path.clone(), TuiRepoModel {
+            identity: info.identity,
             providers: Arc::new(ProviderData::default()),
             labels: info.labels,
             provider_names: info.provider_names,
@@ -1096,6 +1116,7 @@ mod tests {
         app.handle_daemon_event(DaemonEvent::CommandStarted {
             command_id: 99,
             host: HostName::local(),
+            repo_identity: app.model.active_repo_identity().clone(),
             repo: repo.clone(),
             description: "test cmd".into(),
         });

@@ -432,7 +432,7 @@ impl App {
             };
             if !branch.is_empty() {
                 self.proto_commands.push(self.targeted_command(CommandAction::Checkout {
-                    repo: flotilla_protocol::RepoSelector::Path(self.model.active_repo_root().clone()),
+                    repo: flotilla_protocol::RepoSelector::Identity(self.model.active_repo_identity().clone()),
                     target: CheckoutTarget::FreshBranch(branch),
                     issue_ids,
                 }));

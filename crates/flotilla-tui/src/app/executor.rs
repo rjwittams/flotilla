@@ -54,13 +54,17 @@ pub fn handle_result(result: CommandResult, app: &mut App) {
         CommandResult::CheckoutRemoved { branch } => {
             info!(%branch, "removed checkout");
         }
-        CommandResult::TerminalPrepared { target_host, branch, checkout_path, commands } => {
-            app.proto_commands.push(app.repo_command(CommandAction::CreateWorkspaceFromPreparedTerminal {
-                target_host,
-                branch,
-                checkout_path,
-                commands,
-            }));
+        CommandResult::TerminalPrepared { repo_identity, target_host, branch, checkout_path, commands } => {
+            if let Some(repo_path) = app.repo_path_for_identity(&repo_identity) {
+                app.proto_commands.push(app.repo_command_for_path(repo_path, CommandAction::CreateWorkspaceFromPreparedTerminal {
+                    target_host,
+                    branch,
+                    checkout_path,
+                    commands,
+                }));
+            } else {
+                app.model.status_message = Some(format!("repo not found for terminal result: {repo_identity}"));
+            }
         }
         CommandResult::BranchNameGenerated { name, issue_ids } => {
             app.prefill_branch_input(&name, issue_ids);
@@ -85,7 +89,7 @@ pub fn handle_result(result: CommandResult, app: &mut App) {
 mod tests {
     use std::path::PathBuf;
 
-    use flotilla_protocol::{CommandAction, HostName, PreparedTerminalCommand};
+    use flotilla_protocol::{CommandAction, HostName, PreparedTerminalCommand, RepoIdentity};
 
     use super::*;
     use crate::app::test_support::stub_app;
@@ -96,6 +100,7 @@ mod tests {
 
         handle_result(
             CommandResult::TerminalPrepared {
+                repo_identity: RepoIdentity { authority: "local".into(), path: "/tmp/test-repo".into() },
                 target_host: HostName::new("remote-a"),
                 branch: "feat-x".into(),
                 checkout_path: PathBuf::from("/remote/feat-x"),
@@ -115,5 +120,25 @@ mod tests {
             }
             other => panic!("expected CreateWorkspaceFromPreparedTerminal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn terminal_prepared_uses_originating_repo_not_active_repo() {
+        let mut app = crate::app::test_support::stub_app_with_repos(2);
+        app.model.active_repo = 1;
+
+        handle_result(
+            CommandResult::TerminalPrepared {
+                repo_identity: RepoIdentity { authority: "local".into(), path: "/tmp/repo-0".into() },
+                target_host: HostName::new("remote-a"),
+                branch: "feat-x".into(),
+                checkout_path: PathBuf::from("/remote/feat-x"),
+                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }],
+            },
+            &mut app,
+        );
+
+        let cmd = app.proto_commands.take_next().expect("queued workspace creation");
+        assert_eq!(cmd.context_repo, Some(flotilla_protocol::RepoSelector::Path(PathBuf::from("/tmp/repo-0"))));
     }
 }

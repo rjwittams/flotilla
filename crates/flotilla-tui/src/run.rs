@@ -83,7 +83,7 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
         for evt in other_events {
             match evt {
                 Event::Daemon(daemon_evt) => {
-                    app.handle_daemon_event(daemon_evt);
+                    app.handle_daemon_event(*daemon_evt);
                 }
                 Event::Key(k) => {
                     let is_normal = matches!(app.ui.mode, UiMode::Normal);
