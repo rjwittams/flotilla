@@ -4,67 +4,20 @@ use std::{
     sync::Arc,
 };
 
-use async_trait::async_trait;
 use flotilla_core::{
-    config::ConfigStore,
-    daemon::DaemonHandle,
-    in_process::InProcessDaemon,
-    providers::{
-        discovery::{DiscoveryRuntime, EnvVars},
-        ChannelLabel, CommandOutput, CommandRunner,
-    },
+    config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::test_support::fake_discovery,
 };
 use flotilla_protocol::{
     CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, DaemonEvent, HostName, ProviderData, RepoSelector,
 };
-
-#[derive(Default)]
-struct StaticEnvVars;
-
-impl EnvVars for StaticEnvVars {
-    fn get(&self, _key: &str) -> Option<String> {
-        None
-    }
-}
-
-struct FakeRunner;
-
-#[async_trait]
-impl CommandRunner for FakeRunner {
-    async fn run(&self, cmd: &str, args: &[&str], _cwd: &Path, _label: &ChannelLabel) -> Result<String, String> {
-        if cmd == "git" && args == ["--version"] {
-            return Ok("git version 2.43.0\n".into());
-        }
-        Err(format!("fake runner: no response for {cmd} {}", args.join(" ")))
-    }
-
-    async fn run_output(&self, cmd: &str, args: &[&str], cwd: &Path, label: &ChannelLabel) -> Result<CommandOutput, String> {
-        match self.run(cmd, args, cwd, label).await {
-            Ok(stdout) => Ok(CommandOutput { stdout, stderr: String::new(), success: true }),
-            Err(stderr) => Ok(CommandOutput { stdout: String::new(), stderr, success: false }),
-        }
-    }
-
-    async fn exists(&self, _cmd: &str, _args: &[&str]) -> bool {
-        false
-    }
-}
 
 async fn daemon_for_cwd() -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>) {
     let temp = tempfile::tempdir().expect("create tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir_all(repo.join(".git")).expect("create .git dir");
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let discovery = process_discovery(false);
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config, discovery, HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(false), HostName::local()).await;
     (temp, repo, daemon)
-}
-
-fn process_discovery(follower: bool) -> DiscoveryRuntime {
-    let mut runtime = DiscoveryRuntime::for_process(follower);
-    runtime.runner = Arc::new(FakeRunner);
-    runtime.env = Arc::new(StaticEnvVars);
-    runtime
 }
 
 async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>) -> DaemonEvent {
@@ -224,7 +177,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     std::fs::create_dir_all(&repo).unwrap();
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![], config, process_discovery(false), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::local()).await;
     let mut rx = daemon.subscribe();
 
     let add_id = daemon
@@ -321,7 +274,7 @@ async fn inline_issue_command_returns_zero_and_skips_lifecycle_events() {
 #[tokio::test]
 async fn execute_on_untracked_repo_returns_error_without_started_event() {
     let config = Arc::new(ConfigStore::new());
-    let daemon = InProcessDaemon::new(vec![], config, process_discovery(false), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::local()).await;
     let mut rx = daemon.subscribe();
     let repo = std::path::PathBuf::from("/tmp/does-not-exist-for-daemon-test");
 
@@ -357,7 +310,7 @@ async fn refresh_all_command_refreshes_every_tracked_repo() {
     std::fs::create_dir_all(&repo_b).unwrap();
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo_a.clone(), repo_b.clone()], config, process_discovery(false), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![repo_a.clone(), repo_b.clone()], config, fake_discovery(false), HostName::local()).await;
     let mut rx = daemon.subscribe();
 
     let refresh_id = daemon
@@ -483,10 +436,10 @@ async fn checkout_target_branch_and_fresh_branch_are_distinct_errors() {
 #[tokio::test]
 async fn follower_mode_flag_is_stored() {
     let config = Arc::new(ConfigStore::new());
-    let leader = InProcessDaemon::new(vec![], config.clone(), process_discovery(false), HostName::local()).await;
+    let leader = InProcessDaemon::new(vec![], config.clone(), fake_discovery(false), HostName::local()).await;
     assert!(!leader.is_follower(), "default daemon should not be follower");
 
-    let follower = InProcessDaemon::new(vec![], config, process_discovery(true), HostName::local()).await;
+    let follower = InProcessDaemon::new(vec![], config, fake_discovery(true), HostName::local()).await;
     assert!(follower.is_follower(), "follower daemon should report follower=true");
 }
 
@@ -498,7 +451,7 @@ async fn follower_mode_skips_external_providers() {
     std::fs::create_dir_all(repo.join(".git")).unwrap();
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config, process_discovery(true), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(true), HostName::local()).await;
 
     assert!(daemon.is_follower());
 
@@ -525,7 +478,7 @@ async fn follower_mode_skips_external_providers() {
 #[tokio::test]
 async fn add_virtual_repo_emits_repo_added_and_appears_in_list() {
     let config = Arc::new(ConfigStore::new());
-    let daemon = InProcessDaemon::new(vec![], config, process_discovery(false), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::local()).await;
     let mut rx = daemon.subscribe();
 
     let synthetic_path = PathBuf::from("<remote>/desktop/home/dev/repo");
@@ -556,7 +509,7 @@ async fn add_virtual_repo_emits_repo_added_and_appears_in_list() {
 #[tokio::test]
 async fn add_virtual_repo_is_idempotent() {
     let config = Arc::new(ConfigStore::new());
-    let daemon = InProcessDaemon::new(vec![], config, process_discovery(false), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::local()).await;
 
     let synthetic_path = PathBuf::from("<remote>/desktop/home/dev/repo");
     daemon.add_virtual_repo(synthetic_path.clone(), ProviderData::default()).await.expect("first add should succeed");

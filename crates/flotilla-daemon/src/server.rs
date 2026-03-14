@@ -1594,6 +1594,7 @@ mod tests {
     use std::{path::Path, sync::Mutex as StdMutex};
 
     use async_trait::async_trait;
+    use flotilla_core::providers::discovery::test_support::fake_discovery;
     use flotilla_protocol::{
         Checkout, Command, CommandAction, CommandPeerEvent, CommandResult, DaemonEvent, HostName, HostPath, PeerDataKind, PeerDataMessage,
         PeerWireMessage, ProviderData, RepoIdentity, RepoInfo, RoutedPeerMessage, VectorClock,
@@ -1638,13 +1639,7 @@ mod tests {
     async fn empty_daemon() -> (tempfile::TempDir, Arc<InProcessDaemon>) {
         let tmp = tempfile::tempdir().unwrap();
         let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-        let daemon = InProcessDaemon::new(
-            vec![],
-            config,
-            flotilla_core::providers::discovery::DiscoveryRuntime::for_process(false),
-            HostName::local(),
-        )
-        .await;
+        let daemon = InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::local()).await;
         (tmp, daemon)
     }
 
@@ -1854,13 +1849,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).expect("create .git");
         let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-        let daemon = InProcessDaemon::new(
-            vec![repo.clone()],
-            config,
-            flotilla_core::providers::discovery::DiscoveryRuntime::for_process(false),
-            HostName::new("local"),
-        )
-        .await;
+        let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(false), HostName::new("local")).await;
         let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
         let sent = Arc::new(StdMutex::new(Vec::new()));
         peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));

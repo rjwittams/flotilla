@@ -9,8 +9,7 @@ use futures::StreamExt;
 pub mod detectors;
 pub mod factories;
 
-#[cfg(test)]
-pub(crate) mod test_support;
+pub mod test_support;
 
 use std::{
     path::{Path, PathBuf},

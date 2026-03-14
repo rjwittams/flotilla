@@ -16,12 +16,12 @@ use crate::providers::{discovery::EnvVars, ChannelLabel, CommandOutput, CommandR
 
 type ResponseMap = HashMap<(String, String), Vec<Result<String, String>>>;
 
-pub(crate) struct DiscoveryMockRunnerBuilder {
+pub struct DiscoveryMockRunnerBuilder {
     responses: ResponseMap,
     tool_exists: HashMap<String, bool>,
 }
 
-pub(crate) struct DiscoveryMockRunner {
+pub struct DiscoveryMockRunner {
     responses: Mutex<ResponseMap>,
     tool_exists: HashMap<String, bool>,
     seen_cwds: Mutex<Vec<PathBuf>>,
@@ -29,39 +29,39 @@ pub(crate) struct DiscoveryMockRunner {
 }
 
 #[derive(Default)]
-pub(crate) struct TestEnvVars {
+pub struct TestEnvVars {
     vars: HashMap<String, String>,
 }
 
 impl DiscoveryMockRunner {
-    pub(crate) fn builder() -> DiscoveryMockRunnerBuilder {
+    pub fn builder() -> DiscoveryMockRunnerBuilder {
         DiscoveryMockRunnerBuilder { responses: HashMap::new(), tool_exists: HashMap::new() }
     }
 
     #[allow(dead_code)]
-    pub(crate) fn saw_cwd(&self, cwd: &Path) -> bool {
+    pub fn saw_cwd(&self, cwd: &Path) -> bool {
         self.seen_cwds.lock().expect("lock poisoned").iter().any(|p| p == cwd)
     }
 
     #[allow(dead_code)]
-    pub(crate) fn exists_call_count(&self, cmd: &str) -> usize {
+    pub fn exists_call_count(&self, cmd: &str) -> usize {
         self.exists_calls.lock().expect("lock poisoned").iter().filter(|(called, _)| called == cmd).count()
     }
 }
 
 impl DiscoveryMockRunnerBuilder {
-    pub(crate) fn on_run(mut self, cmd: &str, args: &[&str], response: Result<String, String>) -> Self {
+    pub fn on_run(mut self, cmd: &str, args: &[&str], response: Result<String, String>) -> Self {
         let key = (cmd.to_string(), args.join(" "));
         self.responses.entry(key).or_default().push(response);
         self
     }
 
-    pub(crate) fn tool_exists(mut self, cmd: &str, exists: bool) -> Self {
+    pub fn tool_exists(mut self, cmd: &str, exists: bool) -> Self {
         self.tool_exists.insert(cmd.to_string(), exists);
         self
     }
 
-    pub(crate) fn build(self) -> DiscoveryMockRunner {
+    pub fn build(self) -> DiscoveryMockRunner {
         DiscoveryMockRunner {
             responses: Mutex::new(self.responses),
             tool_exists: self.tool_exists,
@@ -72,7 +72,7 @@ impl DiscoveryMockRunnerBuilder {
 }
 
 impl TestEnvVars {
-    pub(crate) fn new<K, V, I>(vars: I) -> Self
+    pub fn new<K, V, I>(vars: I) -> Self
     where
         K: Into<String>,
         V: Into<String>,
@@ -113,4 +113,14 @@ impl CommandRunner for DiscoveryMockRunner {
         self.exists_calls.lock().expect("lock poisoned").push((cmd.to_string(), args.join(" ")));
         self.tool_exists.get(cmd).copied().unwrap_or(false)
     }
+}
+
+/// Build a `DiscoveryRuntime` that uses no-op env and a minimal fake runner
+/// (only responds to `git --version`). Avoids probing ambient host tools.
+pub fn fake_discovery(follower: bool) -> super::DiscoveryRuntime {
+    let mut runtime = super::DiscoveryRuntime::for_process(follower);
+    runtime.runner =
+        std::sync::Arc::new(DiscoveryMockRunner::builder().on_run("git", &["--version"], Ok("git version 2.43.0".into())).build());
+    runtime.env = std::sync::Arc::new(TestEnvVars::default());
+    runtime
 }
