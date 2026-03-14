@@ -299,7 +299,7 @@ pub async fn run_command(daemon: &dyn DaemonHandle, command: Command, format: Ou
             Ok(ref event @ DaemonEvent::CommandFinished { command_id: id, ref result, .. }) if id == command_id => {
                 match format {
                     OutputFormat::Human => {
-                        println!("{}", format_event_human(&event));
+                        println!("{}", format_event_human(event));
                     }
                     OutputFormat::Json => {
                         println!("{}", flotilla_protocol::output::json_pretty(&result));
