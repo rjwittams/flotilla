@@ -9,12 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use flotilla_core::{
-    config::ConfigStore,
-    daemon::DaemonHandle,
-    in_process::InProcessDaemon,
-    providers::discovery::DiscoveryRuntime,
-};
+use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::DiscoveryRuntime};
 use flotilla_protocol::{
     Command, CommandAction, CommandPeerEvent, CommandResult, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message,
     PeerConnectionState, PeerDataMessage, PeerWireMessage, RepoIdentity, RepoSelector, RoutedPeerMessage, PROTOCOL_VERSION,
@@ -126,6 +121,8 @@ impl DaemonServer {
     /// Create a new daemon server.
     ///
     /// `repo_paths` — initial repos to track.
+    /// `config` — daemon configuration store, used for hostname and peer config.
+    /// `discovery` — discovery runtime used to initialize tracked repos.
     /// `socket_path` — path to the Unix domain socket.
     /// `idle_timeout` — how long to wait after the last client disconnects before shutting down.
     pub async fn new(
@@ -2485,9 +2482,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
         let mut server =
-            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60))
-                .await
-                .unwrap();
+            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
 
         assert!(server.take_peer_data_rx().is_some(), "first call should return Some");
         assert!(server.take_peer_data_rx().is_none(), "second call should return None");
@@ -2506,9 +2501,7 @@ mod tests {
 
         let config = Arc::new(ConfigStore::with_base(&base));
         let server =
-            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60))
-                .await
-                .unwrap();
+            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
 
         let events = server.daemon.replay_since(&HashMap::new()).await.unwrap();
         let mut statuses: Vec<(HostName, PeerConnectionState)> = events
@@ -2689,9 +2682,7 @@ mod tests {
 
         let config = Arc::new(ConfigStore::with_base(&base));
         let server =
-            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60))
-                .await
-                .unwrap();
+            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
 
         // PeerManager should be initialized and accessible
         let pm = server.peer_manager.lock().await;
@@ -2704,9 +2695,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
         let server =
-            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60))
-                .await
-                .unwrap();
+            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
 
         // Should still have a PeerManager with no peers
         let pm = server.peer_manager.lock().await;
@@ -2725,8 +2714,7 @@ mod tests {
         .unwrap();
 
         let config = Arc::new(ConfigStore::with_base(&base));
-        let result =
-            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await;
+        let result = DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await;
 
         match result {
             Ok(_) => panic!("invalid hosts config should return startup error"),
