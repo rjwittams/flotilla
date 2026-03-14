@@ -8,5 +8,6 @@ pub mod segment_bar;
 mod shimmer;
 pub mod splash;
 pub mod status_bar;
+pub mod terminal;
 pub mod ui;
 pub mod ui_helpers;
