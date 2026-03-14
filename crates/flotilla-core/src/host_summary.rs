@@ -29,6 +29,7 @@ pub fn provider_statuses_from_registries<'a>(registries: impl IntoIterator<Item 
         for (category, names) in provider_names_from_registry(registry) {
             for name in names {
                 if seen.insert((category.clone(), name.clone())) {
+                    // Static batch: `healthy` means the provider is registered locally at startup.
                     statuses.push(HostProviderStatus { category: category.clone(), name, healthy: true });
                 }
             }

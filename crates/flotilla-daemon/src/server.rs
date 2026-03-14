@@ -368,6 +368,7 @@ impl DaemonServer {
                         PeerWireMessage::Data(msg) => {
                             (msg.origin_host.clone(), msg.repo_path.clone())
                         }
+                        // repo_path is unused for host summaries; handle_inbound always returns Ignored.
                         PeerWireMessage::HostSummary(_) => (env.connection_peer.clone(), PathBuf::new()),
                         PeerWireMessage::Routed(
                             flotilla_protocol::RoutedPeerMessage::ResyncSnapshot {

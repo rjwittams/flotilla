@@ -26,12 +26,14 @@ pub struct SystemInfo {
     pub cpu_count: Option<u16>,
     #[serde(default)]
     pub memory_total_mb: Option<u64>,
+    #[serde(default)]
     pub environment: HostEnvironment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HostEnvironment {
+    // Reserved for future host classification once we can distinguish these locally.
     BareMetal,
     Vm,
     Container,
@@ -87,5 +89,11 @@ mod tests {
         };
 
         assert_roundtrip(&summary);
+    }
+
+    #[test]
+    fn system_info_defaults_environment_when_missing() {
+        let system: SystemInfo = serde_json::from_str(r#"{"os":"linux"}"#).expect("system info should deserialize");
+        assert_eq!(system.environment, HostEnvironment::Unknown);
     }
 }

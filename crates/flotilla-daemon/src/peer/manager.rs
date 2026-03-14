@@ -1062,6 +1062,7 @@ impl PeerManager {
     /// Unlike `disconnect_peer`, this does NOT tear down the connection.
     pub fn clear_peer_data_for_restart(&mut self, origin: &HostName) -> Vec<RepoIdentity> {
         let Some(repos) = self.peer_data.remove(origin) else {
+            // Restart cleanup still owns host-summary eviction even when no repo snapshots were cached.
             self.peer_host_summaries.remove(origin);
             return Vec::new();
         };
