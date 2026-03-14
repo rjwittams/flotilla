@@ -61,7 +61,13 @@ struct PendingRemoteCommand {
 
 #[derive(Debug, Clone)]
 struct ForwardedCommand {
-    command_id: u64,
+    state: ForwardedCommandState,
+}
+
+#[derive(Debug, Clone)]
+enum ForwardedCommandState {
+    Launching { ready: Arc<Notify> },
+    Running { command_id: u64 },
 }
 
 type PendingRemoteCommandMap = Arc<Mutex<HashMap<u64, PendingRemoteCommand>>>;
@@ -886,9 +892,16 @@ async fn execute_forwarded_command(
 ) {
     let mut event_rx = daemon.subscribe();
     let responder_host = daemon.host_name().clone();
+    let ready = Arc::new(Notify::new());
+    forwarded_commands
+        .lock()
+        .await
+        .insert(request_id, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
     let command_id = match daemon.execute(command).await {
         Ok(command_id) => command_id,
         Err(message) => {
+            forwarded_commands.lock().await.remove(&request_id);
+            ready.notify_waiters();
             let response = RoutedPeerMessage::CommandResponse {
                 request_id,
                 requester_host,
@@ -901,7 +914,10 @@ async fn execute_forwarded_command(
             return;
         }
     };
-    forwarded_commands.lock().await.insert(request_id, ForwardedCommand { command_id });
+    if let Some(entry) = forwarded_commands.lock().await.get_mut(&request_id) {
+        entry.state = ForwardedCommandState::Running { command_id };
+    }
+    ready.notify_waiters();
 
     loop {
         match event_rx.recv().await {
@@ -960,6 +976,20 @@ async fn execute_forwarded_command(
     }
 }
 
+async fn await_forwarded_command_id(forwarded_commands: &ForwardedCommandMap, command_request_id: u64) -> Result<u64, String> {
+    loop {
+        let ready = {
+            let forwarded = forwarded_commands.lock().await;
+            match forwarded.get(&command_request_id) {
+                Some(ForwardedCommand { state: ForwardedCommandState::Running { command_id } }) => return Ok(*command_id),
+                Some(ForwardedCommand { state: ForwardedCommandState::Launching { ready } }) => Arc::clone(ready),
+                None => return Err(format!("remote command not found: {command_request_id}")),
+            }
+        };
+        ready.notified().await;
+    }
+}
+
 async fn cancel_forwarded_command(
     daemon: Arc<InProcessDaemon>,
     peer_manager: Arc<Mutex<PeerManager>>,
@@ -970,11 +1000,12 @@ async fn cancel_forwarded_command(
     command_request_id: u64,
 ) {
     let responder_host = daemon.host_name().clone();
-    let command_id = forwarded_commands.lock().await.get(&command_request_id).map(|entry| entry.command_id);
-    let error = match command_id {
-        Some(command_id) => daemon.cancel(command_id).await.err(),
-        None => Some(format!("remote command not found: {command_request_id}")),
-    };
+    let error =
+        match tokio::time::timeout(Duration::from_secs(5), await_forwarded_command_id(&forwarded_commands, command_request_id)).await {
+            Ok(Ok(command_id)) => daemon.cancel(command_id).await.err(),
+            Ok(Err(message)) => Some(message),
+            Err(_) => Some(format!("timed out waiting for remote command registration: {command_request_id}")),
+        };
 
     let response = RoutedPeerMessage::CommandCancelResponse {
         cancel_id,
@@ -2162,6 +2193,55 @@ mod tests {
         };
 
         assert_eq!(extract_command_repo_identity(&command), Some(identity));
+    }
+
+    #[tokio::test]
+    async fn cancel_forwarded_command_waits_for_launching_registration() {
+        let (_tmp, daemon) = empty_daemon().await;
+        let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
+        let forwarded_commands = Arc::new(Mutex::new(HashMap::new()));
+        let sent = Arc::new(StdMutex::new(Vec::new()));
+        peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
+
+        let ready = Arc::new(Notify::new());
+        forwarded_commands
+            .lock()
+            .await
+            .insert(77, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
+
+        let handle = tokio::spawn(cancel_forwarded_command(
+            Arc::clone(&daemon),
+            Arc::clone(&peer_manager),
+            Arc::clone(&forwarded_commands),
+            11,
+            HostName::new("desktop"),
+            HostName::new("relay"),
+            77,
+        ));
+
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+        assert!(sent.lock().expect("lock").is_empty(), "cancel should wait for launch registration");
+
+        if let Some(entry) = forwarded_commands.lock().await.get_mut(&77) {
+            entry.state = ForwardedCommandState::Running { command_id: 123 };
+        }
+        ready.notify_waiters();
+
+        handle.await.expect("cancel task");
+
+        let sent = sent.lock().expect("lock");
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            PeerWireMessage::Routed(RoutedPeerMessage::CommandCancelResponse {
+                cancel_id, requester_host, responder_host, error, ..
+            }) => {
+                assert_eq!(*cancel_id, 11);
+                assert_eq!(requester_host, &HostName::new("desktop"));
+                assert_eq!(responder_host, daemon.host_name());
+                assert_eq!(error.as_deref(), Some("no matching active command"));
+            }
+            other => panic!("expected routed command cancel response, got {other:?}"),
+        }
     }
 
     #[tokio::test]
