@@ -372,7 +372,7 @@ pub(crate) mod testing {
 
         /// Returns the number of unconsumed canned responses.
         pub fn remaining(&self) -> usize {
-            self.responses.lock().unwrap().len()
+            self.responses.lock().expect("MockRunner responses mutex not poisoned").len()
         }
     }
 
