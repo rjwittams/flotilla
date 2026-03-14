@@ -71,6 +71,7 @@ fn format_command_result(result: &flotilla_protocol::commands::CommandResult) ->
         CommandResult::Refreshed { repos } => format!("refreshed {} repo(s)", repos.len()),
         CommandResult::CheckoutCreated { branch, .. } => format!("checkout created: {branch}"),
         CommandResult::CheckoutRemoved { branch } => format!("checkout removed: {branch}"),
+        CommandResult::TerminalPrepared { branch, target_host, .. } => format!("terminal prepared: {branch} on {target_host}"),
         CommandResult::BranchNameGenerated { name, .. } => format!("branch name: {name}"),
         CommandResult::CheckoutStatus(_) => "checkout status received".to_string(),
         CommandResult::Error { message } => format!("error: {message}"),

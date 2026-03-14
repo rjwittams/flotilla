@@ -283,6 +283,33 @@ impl App {
         Command { host: None, context_repo: Some(RepoSelector::Path(self.model.active_repo_root().clone())), action }
     }
 
+    pub fn targeted_command(&self, action: CommandAction) -> Command {
+        Command { host: self.ui.target_host.clone(), context_repo: None, action }
+    }
+
+    pub fn targeted_repo_command(&self, action: CommandAction) -> Command {
+        Command { host: self.ui.target_host.clone(), context_repo: Some(RepoSelector::Path(self.model.active_repo_root().clone())), action }
+    }
+
+    pub fn item_host_command(&self, action: CommandAction, item: &WorkItem) -> Command {
+        Command { host: self.item_execution_host(item), context_repo: None, action }
+    }
+
+    pub fn item_host_repo_command(&self, action: CommandAction, item: &WorkItem) -> Command {
+        Command {
+            host: self.item_execution_host(item),
+            context_repo: Some(RepoSelector::Path(self.model.active_repo_root().clone())),
+            action,
+        }
+    }
+
+    fn item_execution_host(&self, item: &WorkItem) -> Option<HostName> {
+        match self.model.my_host.as_ref() {
+            Some(my_host) if item.host != *my_host => Some(item.host.clone()),
+            _ => None,
+        }
+    }
+
     pub fn visible_status_items(&self) -> Vec<VisibleStatusItem> {
         collect_visible_status_items(&self.model, &self.ui)
     }
@@ -1113,7 +1140,7 @@ mod tests {
     #[test]
     fn close_confirm_y_dispatches_command() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into() };
+        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into(), host: None };
         app.handle_key(key(KeyCode::Char('y')));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         let cmd = app.proto_commands.take_next();
@@ -1123,7 +1150,7 @@ mod tests {
     #[test]
     fn close_confirm_enter_dispatches_command() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into() };
+        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into(), host: None };
         app.handle_key(key(KeyCode::Enter));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         let cmd = app.proto_commands.take_next();
@@ -1133,7 +1160,7 @@ mod tests {
     #[test]
     fn close_confirm_esc_cancels() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into() };
+        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into(), host: None };
         app.handle_key(key(KeyCode::Esc));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         assert!(app.proto_commands.take_next().is_none());
@@ -1142,7 +1169,7 @@ mod tests {
     #[test]
     fn close_confirm_n_cancels() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into() };
+        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into(), host: None };
         app.handle_key(key(KeyCode::Char('n')));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         assert!(app.proto_commands.take_next().is_none());

@@ -118,9 +118,29 @@ impl CommandRunner for DiscoveryMockRunner {
 /// Build a `DiscoveryRuntime` that uses no-op env and a minimal fake runner
 /// (only responds to `git --version`). Avoids probing ambient host tools.
 pub fn fake_discovery(follower: bool) -> super::DiscoveryRuntime {
-    let mut runtime = super::DiscoveryRuntime::for_process(follower);
-    runtime.runner =
-        std::sync::Arc::new(DiscoveryMockRunner::builder().on_run("git", &["--version"], Ok("git version 2.43.0".into())).build());
-    runtime.env = std::sync::Arc::new(TestEnvVars::default());
-    runtime
+    minimal_discovery_runtime(
+        follower,
+        std::sync::Arc::new(DiscoveryMockRunner::builder().on_run("git", &["--version"], Ok("git version 2.43.0".into())).build()),
+    )
+}
+
+/// Build a `DiscoveryRuntime` that allows real git commands while still
+/// avoiding ambient host-tool probes like gh, Codex, Claude, or cmux.
+pub fn git_process_discovery(follower: bool) -> super::DiscoveryRuntime {
+    minimal_discovery_runtime(follower, std::sync::Arc::new(crate::providers::ProcessCommandRunner))
+}
+
+fn minimal_discovery_runtime(follower: bool, runner: std::sync::Arc<dyn CommandRunner>) -> super::DiscoveryRuntime {
+    let factories = if follower { super::FactoryRegistry::for_follower() } else { super::FactoryRegistry::default_all() };
+    super::DiscoveryRuntime {
+        runner,
+        env: std::sync::Arc::new(TestEnvVars::default()),
+        host_detectors: vec![Box::new(super::detectors::generic::CommandDetector::new(
+            "git",
+            &["--version"],
+            super::detectors::generic::parse_first_dotted_version,
+        ))],
+        repo_detectors: super::detectors::default_repo_detectors(),
+        factories,
+    }
 }

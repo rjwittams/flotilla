@@ -110,6 +110,10 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
             KeyCode::Char('r') => {} // refresh handled in main loop
             KeyCode::Char(' ') => self.toggle_multi_select(),
+            KeyCode::Char('h') => {
+                let peer_hosts = self.model.peer_hosts.iter().map(|peer| peer.name.clone()).collect::<Vec<_>>();
+                self.ui.cycle_target_host(&peer_hosts);
+            }
             KeyCode::Char('l') => {
                 self.ui.cycle_layout();
                 self.persist_layout();
@@ -313,7 +317,7 @@ impl App {
         all_issue_keys.dedup();
         if !all_issue_keys.is_empty() {
             self.enter_branch_input(BranchInputKind::Generating);
-            self.proto_commands.push(self.repo_command(CommandAction::GenerateBranchName { issue_keys: all_issue_keys }));
+            self.proto_commands.push(self.targeted_repo_command(CommandAction::GenerateBranchName { issue_keys: all_issue_keys }));
         }
         self.active_ui_mut().multi_selected.clear();
     }
@@ -351,6 +355,7 @@ impl App {
                             _ => return,
                         },
                         title: item.description.clone(),
+                        host: cmd.host.clone(),
                     };
                     return; // Don't push command — confirm handler will
                 }
@@ -426,7 +431,7 @@ impl App {
                 return;
             };
             if !branch.is_empty() {
-                self.proto_commands.push(self.command(CommandAction::Checkout {
+                self.proto_commands.push(self.targeted_command(CommandAction::Checkout {
                     repo: flotilla_protocol::RepoSelector::Path(self.model.active_repo_root().clone()),
                     target: CheckoutTarget::FreshBranch(branch),
                     issue_ids,
@@ -492,8 +497,12 @@ impl App {
     fn handle_close_confirm_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
-                if let UiMode::CloseConfirm { ref id, .. } = self.ui.mode {
-                    self.proto_commands.push(self.repo_command(CommandAction::CloseChangeRequest { id: id.clone() }));
+                if let UiMode::CloseConfirm { ref id, ref host, .. } = self.ui.mode {
+                    self.proto_commands.push(Command {
+                        host: host.clone(),
+                        context_repo: Some(flotilla_protocol::RepoSelector::Path(self.model.active_repo_root().clone())),
+                        action: CommandAction::CloseChangeRequest { id: id.clone() },
+                    });
                 }
                 self.ui.mode = UiMode::Normal;
             }
@@ -531,7 +540,10 @@ mod tests {
 
     use super::{super::RepoViewLayout, *};
     use crate::{
-        app::test_support::{checkout_item, key, setup_selectable_table as setup_table, stub_app},
+        app::{
+            test_support::{checkout_item, key, setup_selectable_table as setup_table, stub_app},
+            PeerHostStatus, PeerStatus,
+        },
         status_bar::{StatusBarAction, StatusBarTarget},
     };
 
@@ -784,6 +796,33 @@ mod tests {
     }
 
     #[test]
+    fn normal_h_cycles_target_host_through_known_peers() {
+        let mut app = stub_app();
+        app.model.peer_hosts = vec![PeerHostStatus { name: HostName::new("alpha"), status: PeerStatus::Connected }, PeerHostStatus {
+            name: HostName::new("beta"),
+            status: PeerStatus::Connected,
+        }];
+
+        app.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(app.ui.target_host, Some(HostName::new("alpha")));
+
+        app.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(app.ui.target_host, Some(HostName::new("beta")));
+
+        app.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(app.ui.target_host, None);
+    }
+
+    #[test]
+    fn normal_h_ignores_empty_peer_list() {
+        let mut app = stub_app();
+
+        app.handle_key(key(KeyCode::Char('h')));
+
+        assert_eq!(app.ui.target_host, None);
+    }
+
+    #[test]
     fn normal_uppercase_k_toggles_status_bar_keys() {
         let mut app = stub_app();
         assert!(app.ui.status_bar.show_keys);
@@ -824,6 +863,18 @@ mod tests {
         app.handle_mouse(left_click(4, 29));
 
         assert_eq!(app.ui.view_layout, RepoViewLayout::Zoom);
+    }
+
+    #[test]
+    fn clicking_host_status_target_cycles_target_host() {
+        let mut app = stub_app();
+        app.model.peer_hosts = vec![PeerHostStatus { name: HostName::new("alpha"), status: PeerStatus::Connected }];
+        app.ui.layout.status_bar.key_targets =
+            vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
+
+        app.handle_mouse(left_click(4, 29));
+
+        assert_eq!(app.ui.target_host, Some(HostName::new("alpha")));
     }
 
     #[test]

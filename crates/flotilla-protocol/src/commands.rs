@@ -20,6 +20,12 @@ pub enum CheckoutTarget {
     FreshBranch(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedTerminalCommand {
+    pub role: String,
+    pub command: String,
+}
+
 /// Routed command envelope shared by all frontends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Command {
@@ -38,8 +44,17 @@ pub enum CommandAction {
     CreateWorkspaceForCheckout {
         checkout_path: PathBuf,
     },
+    CreateWorkspaceFromPreparedTerminal {
+        target_host: crate::HostName,
+        branch: String,
+        checkout_path: PathBuf,
+        commands: Vec<PreparedTerminalCommand>,
+    },
     SelectWorkspace {
         ws_ref: String,
+    },
+    PrepareTerminalForCheckout {
+        checkout_path: PathBuf,
     },
     Checkout {
         repo: RepoSelector,
@@ -111,7 +126,9 @@ impl Command {
     pub fn description(&self) -> &'static str {
         match &self.action {
             CommandAction::CreateWorkspaceForCheckout { .. } => "Creating workspace...",
+            CommandAction::CreateWorkspaceFromPreparedTerminal { .. } => "Creating workspace...",
             CommandAction::SelectWorkspace { .. } => "Switching workspace...",
+            CommandAction::PrepareTerminalForCheckout { .. } => "Preparing terminal...",
             CommandAction::Checkout { target, .. } => match target {
                 CheckoutTarget::Branch(_) => "Checking out branch...",
                 CheckoutTarget::FreshBranch(_) => "Creating checkout...",
@@ -146,6 +163,7 @@ pub enum CommandResult {
     Refreshed { repos: Vec<PathBuf> },
     CheckoutCreated { branch: String, path: PathBuf },
     CheckoutRemoved { branch: String },
+    TerminalPrepared { target_host: crate::HostName, branch: String, checkout_path: PathBuf, commands: Vec<PreparedTerminalCommand> },
     BranchNameGenerated { name: String, issue_ids: Vec<(String, String)> },
     CheckoutStatus(CheckoutStatus),
     Error { message: String },
@@ -190,6 +208,16 @@ mod tests {
             Command { host: None, context_repo: None, action: CommandAction::AddRepo { path: PathBuf::from("/repo") } },
             Command {
                 host: None,
+                context_repo: Some(RepoSelector::Path(PathBuf::from("/repo"))),
+                action: CommandAction::CreateWorkspaceFromPreparedTerminal {
+                    target_host: HostName::new("desktop"),
+                    branch: "feat-x".into(),
+                    checkout_path: PathBuf::from("/remote/repo/feat-x"),
+                    commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }],
+                },
+            },
+            Command {
+                host: None,
                 context_repo: None,
                 action: CommandAction::RemoveRepo { repo: RepoSelector::Query("owner/repo".into()) },
             },
@@ -201,6 +229,11 @@ mod tests {
                     target: CheckoutTarget::FreshBranch("feat-x".into()),
                     issue_ids: vec![("github".into(), "42".into())],
                 },
+            },
+            Command {
+                host: Some(HostName::new("desktop")),
+                context_repo: Some(RepoSelector::Path(PathBuf::from("/repo"))),
+                action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x") },
             },
             Command {
                 host: None,
@@ -303,6 +336,12 @@ mod tests {
             CommandResult::Refreshed { repos: vec![PathBuf::from("/repo-a"), PathBuf::from("/repo-b")] },
             CommandResult::CheckoutCreated { branch: "feat-new".into(), path: PathBuf::from("/repos/project/wt-1") },
             CommandResult::CheckoutRemoved { branch: "feat-old".into() },
+            CommandResult::TerminalPrepared {
+                target_host: HostName::new("desktop"),
+                branch: "feat-x".into(),
+                checkout_path: PathBuf::from("/remote/repo/feat-x"),
+                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }],
+            },
             CommandResult::BranchNameGenerated { name: "feat/cool-thing".into(), issue_ids: vec![("gh".into(), "1".into())] },
             CommandResult::CheckoutStatus(CheckoutStatus {
                 branch: "old".into(),

@@ -54,6 +54,14 @@ pub fn handle_result(result: CommandResult, app: &mut App) {
         CommandResult::CheckoutRemoved { branch } => {
             info!(%branch, "removed checkout");
         }
+        CommandResult::TerminalPrepared { target_host, branch, checkout_path, commands } => {
+            app.proto_commands.push(app.repo_command(CommandAction::CreateWorkspaceFromPreparedTerminal {
+                target_host,
+                branch,
+                checkout_path,
+                commands,
+            }));
+        }
         CommandResult::BranchNameGenerated { name, issue_ids } => {
             app.prefill_branch_input(&name, issue_ids);
         }
@@ -69,6 +77,43 @@ pub fn handle_result(result: CommandResult, app: &mut App) {
         }
         CommandResult::Cancelled => {
             app.model.status_message = Some("Command cancelled".into());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use flotilla_protocol::{CommandAction, HostName, PreparedTerminalCommand};
+
+    use super::*;
+    use crate::app::test_support::stub_app;
+
+    #[test]
+    fn terminal_prepared_queues_local_workspace_creation() {
+        let mut app = stub_app();
+
+        handle_result(
+            CommandResult::TerminalPrepared {
+                target_host: HostName::new("remote-a"),
+                branch: "feat-x".into(),
+                checkout_path: PathBuf::from("/remote/feat-x"),
+                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }],
+            },
+            &mut app,
+        );
+
+        let cmd = app.proto_commands.take_next().expect("queued workspace creation");
+        match cmd.action {
+            CommandAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, commands } => {
+                assert_eq!(cmd.host, None);
+                assert_eq!(target_host, HostName::new("remote-a"));
+                assert_eq!(branch, "feat-x");
+                assert_eq!(checkout_path, PathBuf::from("/remote/feat-x"));
+                assert_eq!(commands, vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }]);
+            }
+            other => panic!("expected CreateWorkspaceFromPreparedTerminal, got {other:?}"),
         }
     }
 }

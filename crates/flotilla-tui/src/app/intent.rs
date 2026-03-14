@@ -62,14 +62,7 @@ impl Intent {
     /// (switch workspace, create workspace, remove checkout, create checkout,
     /// teleport session). These should be hidden for work items from remote hosts.
     pub fn requires_local_host(&self) -> bool {
-        matches!(
-            self,
-            Intent::SwitchToWorkspace
-                | Intent::CreateWorkspace
-                | Intent::RemoveCheckout
-                | Intent::CreateCheckoutAndWorkspace
-                | Intent::TeleportSession
-        )
+        matches!(self, Intent::SwitchToWorkspace | Intent::RemoveCheckout | Intent::TeleportSession)
     }
 
     /// Whether this intent is allowed given the item's host provenance.
@@ -108,9 +101,17 @@ impl Intent {
             Intent::SwitchToWorkspace => {
                 item.workspace_refs.first().map(|ws_ref| app.repo_command(CommandAction::SelectWorkspace { ws_ref: ws_ref.clone() }))
             }
-            Intent::CreateWorkspace => {
-                item.checkout_key().map(|p| app.repo_command(CommandAction::CreateWorkspaceForCheckout { checkout_path: p.path.clone() }))
-            }
+            Intent::CreateWorkspace => item.checkout_key().map(|p| {
+                if app
+                    .item_host_repo_command(CommandAction::PrepareTerminalForCheckout { checkout_path: p.path.clone() }, item)
+                    .host
+                    .is_some()
+                {
+                    app.item_host_repo_command(CommandAction::PrepareTerminalForCheckout { checkout_path: p.path.clone() }, item)
+                } else {
+                    app.repo_command(CommandAction::CreateWorkspaceForCheckout { checkout_path: p.path.clone() })
+                }
+            }),
             Intent::RemoveCheckout => {
                 if item.kind != WorkItemKind::Checkout || item.is_main_checkout {
                     return None;
@@ -126,7 +127,7 @@ impl Intent {
                 } else {
                     CheckoutTarget::FreshBranch(branch.to_string())
                 };
-                app.command(CommandAction::Checkout {
+                app.targeted_command(CommandAction::Checkout {
                     repo: flotilla_protocol::RepoSelector::Path(app.model.active_repo_root().clone()),
                     target,
                     issue_ids: Vec::new(),
@@ -134,15 +135,18 @@ impl Intent {
             }),
             Intent::GenerateBranchName => {
                 if !item.issue_keys.is_empty() {
-                    Some(app.repo_command(CommandAction::GenerateBranchName { issue_keys: item.issue_keys.clone() }))
+                    Some(app.targeted_repo_command(CommandAction::GenerateBranchName { issue_keys: item.issue_keys.clone() }))
                 } else {
                     None
                 }
             }
-            Intent::OpenChangeRequest => {
-                item.change_request_key.as_ref().map(|k| app.repo_command(CommandAction::OpenChangeRequest { id: k.clone() }))
+            Intent::OpenChangeRequest => item
+                .change_request_key
+                .as_ref()
+                .map(|k| app.item_host_repo_command(CommandAction::OpenChangeRequest { id: k.clone() }, item)),
+            Intent::OpenIssue => {
+                item.issue_keys.first().map(|k| app.item_host_repo_command(CommandAction::OpenIssue { id: k.clone() }, item))
             }
-            Intent::OpenIssue => item.issue_keys.first().map(|k| app.repo_command(CommandAction::OpenIssue { id: k.clone() })),
             Intent::LinkIssuesToChangeRequest => {
                 let change_request_key = item.change_request_key.as_ref()?;
                 let co_key = item.checkout_key()?;
@@ -175,10 +179,10 @@ impl Intent {
                 if missing.is_empty() {
                     return None;
                 }
-                Some(app.repo_command(CommandAction::LinkIssuesToChangeRequest {
-                    change_request_id: change_request_key.clone(),
-                    issue_ids: missing,
-                }))
+                Some(app.item_host_repo_command(
+                    CommandAction::LinkIssuesToChangeRequest { change_request_id: change_request_key.clone(), issue_ids: missing },
+                    item,
+                ))
             }
             Intent::TeleportSession => item.session_key.as_ref().map(|k| {
                 app.repo_command(CommandAction::TeleportSession {
@@ -188,7 +192,7 @@ impl Intent {
                 })
             }),
             Intent::ArchiveSession => {
-                item.session_key.as_ref().map(|k| app.repo_command(CommandAction::ArchiveSession { session_id: k.clone() }))
+                item.session_key.as_ref().map(|k| app.item_host_repo_command(CommandAction::ArchiveSession { session_id: k.clone() }, item))
             }
             Intent::CloseChangeRequest => {
                 let cr_key = item.change_request_key.as_ref()?;
@@ -197,7 +201,7 @@ impl Intent {
                 if cr.status != flotilla_protocol::ChangeRequestStatus::Open {
                     return None;
                 }
-                Some(app.repo_command(CommandAction::CloseChangeRequest { id: cr_key.clone() }))
+                Some(app.item_host_repo_command(CommandAction::CloseChangeRequest { id: cr_key.clone() }, item))
             }
         }
     }
@@ -582,15 +586,37 @@ mod tests {
 
     #[test]
     fn resolve_create_workspace() {
-        let app = stub_app();
+        let mut app = stub_app();
+        app.ui.target_host = Some(HostName::new("remote-a"));
         let item = checkout_item("feat/x", "/tmp/feat-x", false);
         let cmd = Intent::CreateWorkspace.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::CreateWorkspaceForCheckout { checkout_path }, .. } => {
+            Command { host, action: CommandAction::CreateWorkspaceForCheckout { checkout_path }, .. } => {
+                assert_eq!(host, None);
                 assert_eq!(checkout_path, PathBuf::from("/tmp/feat-x"))
             }
             other => panic!("expected CreateWorkspaceForCheckout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_create_workspace_on_remote_checkout_prepares_remote_terminal() {
+        let mut app = stub_app();
+        app.model.my_host = Some(HostName::local());
+        let mut item = checkout_item("feat/x", "/tmp/feat-x", false);
+        item.host = HostName::new("remote-a");
+        item.checkout =
+            Some(CheckoutRef { key: HostPath::new(HostName::new("remote-a"), PathBuf::from("/remote/feat-x")), is_main_checkout: false });
+
+        let cmd = Intent::CreateWorkspace.resolve(&item, &app).unwrap();
+
+        match cmd {
+            Command { host, action: CommandAction::PrepareTerminalForCheckout { checkout_path }, .. } => {
+                assert_eq!(host, Some(HostName::new("remote-a")));
+                assert_eq!(checkout_path, PathBuf::from("/remote/feat-x"));
+            }
+            other => panic!("expected PrepareTerminalForCheckout, got {other:?}"),
         }
     }
 
@@ -686,6 +712,17 @@ mod tests {
     }
 
     #[test]
+    fn resolve_create_worktree_and_workspace_uses_selected_target_host() {
+        let mut app = stub_app();
+        app.ui.target_host = Some(HostName::new("remote-a"));
+        let item = remote_branch_item("feat/remote");
+
+        let cmd = Intent::CreateCheckoutAndWorkspace.resolve(&item, &app).unwrap();
+
+        assert_eq!(cmd.host, Some(HostName::new("remote-a")));
+    }
+
+    #[test]
     fn resolve_create_worktree_and_workspace_session_item() {
         let app = stub_app();
         let item = session_item("sess-1");
@@ -730,12 +767,18 @@ mod tests {
 
     #[test]
     fn resolve_open_pr() {
-        let app = stub_app();
-        let item = pr_item("123");
+        let mut app = stub_app();
+        app.model.my_host = Some(HostName::local());
+        app.ui.target_host = Some(HostName::new("remote-a"));
+        let mut item = pr_item("123");
+        item.host = HostName::new("remote-b");
         let cmd = Intent::OpenChangeRequest.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::OpenChangeRequest { id }, .. } => assert_eq!(id, "123"),
+            Command { host, action: CommandAction::OpenChangeRequest { id }, .. } => {
+                assert_eq!(host, Some(HostName::new("remote-b")));
+                assert_eq!(id, "123");
+            }
             other => panic!("expected OpenChangeRequest, got {other:?}"),
         }
     }
@@ -952,14 +995,14 @@ mod tests {
     #[test]
     fn requires_local_host_true_for_filesystem_intents() {
         assert!(Intent::SwitchToWorkspace.requires_local_host());
-        assert!(Intent::CreateWorkspace.requires_local_host());
         assert!(Intent::RemoveCheckout.requires_local_host());
-        assert!(Intent::CreateCheckoutAndWorkspace.requires_local_host());
         assert!(Intent::TeleportSession.requires_local_host());
     }
 
     #[test]
     fn requires_local_host_false_for_non_filesystem_intents() {
+        assert!(!Intent::CreateWorkspace.requires_local_host());
+        assert!(!Intent::CreateCheckoutAndWorkspace.requires_local_host());
         assert!(!Intent::GenerateBranchName.requires_local_host());
         assert!(!Intent::OpenChangeRequest.requires_local_host());
         assert!(!Intent::OpenIssue.requires_local_host());
@@ -986,14 +1029,14 @@ mod tests {
         item.host = HostName::new("remote-host");
         let my_host = Some(HostName::local());
 
-        // Filesystem intents should be blocked
+        // Local-only filesystem intents should be blocked
         assert!(!Intent::SwitchToWorkspace.is_allowed_for_host(&item, &my_host));
-        assert!(!Intent::CreateWorkspace.is_allowed_for_host(&item, &my_host));
         assert!(!Intent::RemoveCheckout.is_allowed_for_host(&item, &my_host));
-        assert!(!Intent::CreateCheckoutAndWorkspace.is_allowed_for_host(&item, &my_host));
         assert!(!Intent::TeleportSession.is_allowed_for_host(&item, &my_host));
 
-        // Non-filesystem intents should be allowed
+        // Remote-executable intents should remain allowed
+        assert!(Intent::CreateWorkspace.is_allowed_for_host(&item, &my_host));
+        assert!(Intent::CreateCheckoutAndWorkspace.is_allowed_for_host(&item, &my_host));
         assert!(Intent::OpenChangeRequest.is_allowed_for_host(&item, &my_host));
         assert!(Intent::OpenIssue.is_allowed_for_host(&item, &my_host));
         assert!(Intent::GenerateBranchName.is_allowed_for_host(&item, &my_host));
@@ -1015,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_item_action_menu_excludes_filesystem_intents() {
+    fn remote_item_action_menu_excludes_local_only_intents() {
         // A rich remote item that would normally have many intents
         let mut item = checkout_item("feat/x", "/tmp/feat-x", false);
         item.host = HostName::new("remote-host");
@@ -1029,14 +1072,14 @@ mod tests {
         let available: Vec<_> =
             Intent::all_in_menu_order().iter().filter(|i| i.is_available(&item) && i.is_allowed_for_host(&item, &my_host)).collect();
 
-        // Filesystem intents should be excluded
+        // Local-only intents should be excluded
         assert!(!available.contains(&&Intent::SwitchToWorkspace));
         assert!(!available.contains(&&Intent::RemoveCheckout));
-        assert!(!available.contains(&&Intent::CreateWorkspace));
         assert!(!available.contains(&&Intent::CreateCheckoutAndWorkspace));
         assert!(!available.contains(&&Intent::TeleportSession));
 
-        // Non-filesystem intents should remain
+        // Remote-executable intents should remain. CreateWorkspace is not
+        // available here because the item already has a workspace.
         assert!(available.contains(&&Intent::OpenChangeRequest));
         assert!(available.contains(&&Intent::OpenIssue));
         assert!(available.contains(&&Intent::LinkIssuesToChangeRequest));

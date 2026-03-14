@@ -1591,13 +1591,13 @@ fn extract_str_param(params: &serde_json::Value, field: &str) -> Result<String, 
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, sync::Mutex as StdMutex};
+    use std::{path::Path, process::Command as ProcessCommand, sync::Mutex as StdMutex, time::Duration as StdDuration};
 
     use async_trait::async_trait;
-    use flotilla_core::providers::discovery::test_support::fake_discovery;
+    use flotilla_core::providers::discovery::test_support::{fake_discovery, git_process_discovery};
     use flotilla_protocol::{
-        Checkout, Command, CommandAction, CommandPeerEvent, CommandResult, DaemonEvent, HostName, HostPath, PeerDataKind, PeerDataMessage,
-        PeerWireMessage, ProviderData, RepoIdentity, RepoInfo, RoutedPeerMessage, VectorClock,
+        Checkout, CheckoutTarget, Command, CommandAction, CommandPeerEvent, CommandResult, DaemonEvent, HostName, HostPath, PeerDataKind,
+        PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RepoInfo, RepoSelector, RoutedPeerMessage, VectorClock,
     };
     use indexmap::IndexMap;
 
@@ -1683,6 +1683,46 @@ mod tests {
                 seq: 1,
             },
         }
+    }
+
+    fn init_git_repo(path: &Path) {
+        std::fs::create_dir_all(path).expect("create repo dir");
+        let status = ProcessCommand::new("git").args(["init", "--initial-branch=main"]).arg(path).status().expect("run git init");
+        assert!(status.success(), "git init should succeed");
+
+        let repo = path.to_str().expect("repo path utf8");
+        let status = ProcessCommand::new("git")
+            .args(["-C", repo, "config", "user.name", "Flotilla Tests"])
+            .status()
+            .expect("configure git user.name");
+        assert!(status.success(), "git config user.name should succeed");
+
+        let status = ProcessCommand::new("git")
+            .args(["-C", repo, "config", "user.email", "tests@example.com"])
+            .status()
+            .expect("configure git user.email");
+        assert!(status.success(), "git config user.email should succeed");
+
+        std::fs::write(path.join("README.md"), "hello\n").expect("write readme");
+        let status = ProcessCommand::new("git").args(["-C", repo, "add", "README.md"]).status().expect("git add");
+        assert!(status.success(), "git add should succeed");
+
+        let status = ProcessCommand::new("git").args(["-C", repo, "commit", "-m", "init"]).status().expect("git commit");
+        assert!(status.success(), "git commit should succeed");
+    }
+
+    async fn wait_for_command_result(rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>, command_id: u64) -> CommandResult {
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(DaemonEvent::CommandFinished { command_id: id, result, .. }) if id == command_id => return result,
+                    Ok(_) => continue,
+                    Err(e) => panic!("recv error: {e:?}"),
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for command result")
     }
 
     #[tokio::test]
@@ -1905,6 +1945,126 @@ mod tests {
         }
 
         assert!(saw_started);
+        assert!(saw_finished);
+        assert!(saw_response);
+    }
+
+    #[tokio::test]
+    async fn execute_forwarded_prepare_terminal_returns_terminal_prepared() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        init_git_repo(&repo);
+        let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
+        let daemon = InProcessDaemon::new(vec![repo.clone()], config, git_process_discovery(false), HostName::new("local")).await;
+        daemon.refresh(&repo).await.expect("refresh repo");
+
+        let mut setup_rx = daemon.subscribe();
+        let checkout_id = daemon
+            .execute(Command {
+                host: None,
+                context_repo: None,
+                action: CommandAction::Checkout {
+                    repo: RepoSelector::Path(repo.clone()),
+                    target: CheckoutTarget::FreshBranch("feat-remote".into()),
+                    issue_ids: vec![],
+                },
+            })
+            .await
+            .expect("dispatch checkout");
+        let checkout_result = wait_for_command_result(&mut setup_rx, checkout_id).await;
+        match checkout_result {
+            CommandResult::CheckoutCreated { branch, path } => {
+                assert_eq!(branch, "feat-remote");
+                assert!(path.ends_with("repo.feat-remote"), "unexpected checkout path: {}", path.display());
+            }
+            other => panic!("expected checkout creation, got {other:?}"),
+        };
+        let checkout_path = tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                let snapshot = daemon.get_state(&repo).await.expect("get state");
+                if let Some((path, _checkout)) = snapshot.providers.checkouts.iter().find(|(_, checkout)| checkout.branch == "feat-remote")
+                {
+                    return path.path.clone();
+                }
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timeout waiting for checkout path from state");
+
+        let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
+        let sent = Arc::new(StdMutex::new(Vec::new()));
+        peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
+
+        execute_forwarded_command(
+            Arc::clone(&daemon),
+            Arc::clone(&peer_manager),
+            8,
+            HostName::new("desktop"),
+            HostName::new("relay"),
+            Command {
+                host: Some(daemon.host_name().clone()),
+                context_repo: Some(RepoSelector::Path(repo.clone())),
+                action: CommandAction::PrepareTerminalForCheckout { checkout_path: checkout_path.clone() },
+            },
+        )
+        .await;
+
+        let sent = sent.lock().expect("lock");
+        let mut saw_preparing = false;
+        let mut saw_finished = false;
+        let mut saw_response = false;
+
+        for msg in sent.iter() {
+            match msg {
+                PeerWireMessage::Routed(RoutedPeerMessage::CommandEvent { request_id, requester_host, responder_host, event, .. }) => {
+                    assert_eq!(*request_id, 8);
+                    assert_eq!(requester_host, &HostName::new("desktop"));
+                    assert_eq!(responder_host, daemon.host_name());
+                    match event.as_ref() {
+                        CommandPeerEvent::Started { repo: event_repo, description } => {
+                            assert_eq!(event_repo, &repo);
+                            assert_eq!(description, "Preparing terminal...");
+                            saw_preparing = true;
+                        }
+                        CommandPeerEvent::Finished { repo: event_repo, result } => {
+                            assert_eq!(event_repo, &repo);
+                            match result {
+                                CommandResult::TerminalPrepared { target_host, branch, checkout_path: returned_path, commands } => {
+                                    assert_eq!(target_host, daemon.host_name());
+                                    assert_eq!(branch, "feat-remote");
+                                    assert_eq!(returned_path, &checkout_path);
+                                    assert!(!commands.is_empty(), "prepared terminal should include commands");
+                                }
+                                other => panic!("expected TerminalPrepared finish event, got {other:?}"),
+                            }
+                            saw_finished = true;
+                        }
+                        CommandPeerEvent::StepUpdate { .. } => {}
+                    }
+                }
+                PeerWireMessage::Routed(RoutedPeerMessage::CommandResponse {
+                    request_id, requester_host, responder_host, result, ..
+                }) => {
+                    assert_eq!(*request_id, 8);
+                    assert_eq!(requester_host, &HostName::new("desktop"));
+                    assert_eq!(responder_host, daemon.host_name());
+                    match result.as_ref() {
+                        CommandResult::TerminalPrepared { target_host, branch, checkout_path: returned_path, commands } => {
+                            assert_eq!(target_host, daemon.host_name());
+                            assert_eq!(branch, "feat-remote");
+                            assert_eq!(returned_path, &checkout_path);
+                            assert!(!commands.is_empty(), "prepared terminal should include commands");
+                        }
+                        other => panic!("expected TerminalPrepared response, got {other:?}"),
+                    }
+                    saw_response = true;
+                }
+                other => panic!("unexpected proxied message: {other:?}"),
+            }
+        }
+
+        assert!(saw_preparing);
         assert!(saw_finished);
         assert!(saw_response);
     }

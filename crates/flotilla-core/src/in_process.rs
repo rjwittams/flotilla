@@ -15,8 +15,9 @@ use std::{
 
 use async_trait::async_trait;
 use flotilla_protocol::{
-    AssociationKey, Command, DaemonEvent, DeltaEntry, HostName, Issue, PeerConnectionState, ProviderData, ProviderError, ProviderInfo,
-    RepoDetailResponse, RepoInfo, RepoProvidersResponse, RepoSummary, RepoWorkResponse, Snapshot, StatusResponse, UnmetRequirementInfo,
+    AssociationKey, Command, CorrelationKey, DaemonEvent, DeltaEntry, HostName, HostPath, Issue, PeerConnectionState, ProviderData,
+    ProviderError, ProviderInfo, RepoDetailResponse, RepoInfo, RepoProvidersResponse, RepoSummary, RepoWorkResponse, Snapshot,
+    StatusResponse, UnmetRequirementInfo,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -37,6 +38,40 @@ use crate::{
 
 fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn normalize_local_provider_hosts(mut providers: ProviderData, host_name: &HostName) -> ProviderData {
+    providers.checkouts = providers
+        .checkouts
+        .into_iter()
+        .map(|(host_path, mut checkout)| {
+            checkout.correlation_keys = normalize_correlation_keys(checkout.correlation_keys, host_name);
+            (HostPath::new(host_name.clone(), host_path.path), checkout)
+        })
+        .collect();
+
+    for change_request in providers.change_requests.values_mut() {
+        change_request.correlation_keys = normalize_correlation_keys(std::mem::take(&mut change_request.correlation_keys), host_name);
+    }
+
+    for session in providers.sessions.values_mut() {
+        session.correlation_keys = normalize_correlation_keys(std::mem::take(&mut session.correlation_keys), host_name);
+    }
+
+    for workspace in providers.workspaces.values_mut() {
+        workspace.correlation_keys = normalize_correlation_keys(std::mem::take(&mut workspace.correlation_keys), host_name);
+    }
+
+    providers
+}
+
+fn normalize_correlation_keys(keys: Vec<CorrelationKey>, host_name: &HostName) -> Vec<CorrelationKey> {
+    keys.into_iter()
+        .map(|key| match key {
+            CorrelationKey::CheckoutPath(host_path) => CorrelationKey::CheckoutPath(HostPath::new(host_name.clone(), host_path.path)),
+            other => other,
+        })
+        .collect()
 }
 
 /// Returned by `execute()` for commands that run inline without lifecycle events.
@@ -96,7 +131,7 @@ fn build_repo_snapshot_with_peers(
     host_name: &HostName,
     peer_overlay: Option<&[(HostName, ProviderData)]>,
 ) -> Snapshot {
-    let local_providers = inject_issues(&base.providers, cache, search_results);
+    let local_providers = normalize_local_provider_hosts(inject_issues(&base.providers, cache, search_results), host_name);
 
     // Merge peer provider data if any
     let providers = if let Some(peers) = peer_overlay {
@@ -502,6 +537,8 @@ impl InProcessDaemon {
             | CommandAction::GenerateBranchName { .. }
             | CommandAction::TeleportSession { .. }
             | CommandAction::CreateWorkspaceForCheckout { .. }
+            | CommandAction::CreateWorkspaceFromPreparedTerminal { .. }
+            | CommandAction::PrepareTerminalForCheckout { .. }
             | CommandAction::SelectWorkspace { .. } => {
                 let selector = command.context_repo.as_ref().ok_or_else(|| "command requires repo context".to_string())?;
                 self.resolve_repo_selector(selector).await
@@ -517,7 +554,10 @@ impl InProcessDaemon {
     pub async fn get_local_providers(&self, repo: &Path) -> Option<(ProviderData, u64)> {
         let repos = self.repos.read().await;
         let state = repos.get(repo)?;
-        let providers = inject_issues(&state.last_snapshot.providers, &state.issue_cache, &state.search_results);
+        let providers = normalize_local_provider_hosts(
+            inject_issues(&state.last_snapshot.providers, &state.issue_cache, &state.search_results),
+            &self.host_name,
+        );
         Some((providers, state.local_data_version))
     }
 
@@ -553,7 +593,10 @@ impl InProcessDaemon {
                         return None;
                     }
                     let snapshot = handle.snapshot_rx.borrow_and_update().clone();
-                    let providers = inject_issues(&snapshot.providers, &state.issue_cache, &state.search_results);
+                    let providers = normalize_local_provider_hosts(
+                        inject_issues(&snapshot.providers, &state.issue_cache, &state.search_results),
+                        &self.host_name,
+                    );
 
                     Some((
                         path.clone(),
@@ -1269,8 +1312,9 @@ impl DaemonHandle for InProcessDaemon {
         // build_plan runs execute() inline for Immediate commands, which may
         // do network I/O (e.g. GenerateBranchName, ArchiveSession).
         let active_ref = Arc::clone(&self.active_command);
+        let local_host = self.host_name.clone();
         tokio::spawn(async move {
-            let plan = executor::build_plan(command, repo_path.clone(), registry, providers_data, runner, config_base).await;
+            let plan = executor::build_plan(command, repo_path.clone(), registry, providers_data, runner, config_base, local_host).await;
 
             match plan {
                 ExecutionPlan::Immediate(result) => {
