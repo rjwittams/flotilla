@@ -158,6 +158,8 @@ Reuse existing daemon discovery state:
 
 Convert these existing internal representations into protocol-friendly summary types rather than serializing core discovery internals directly. That keeps the protocol stable even if discovery internals evolve.
 
+For this batch, the local provider list is derived from the daemon's discovered/registered provider set at startup, with `healthy = true` for those available providers. Dynamic host-level health refresh remains out of scope with the rest of the static-only decision.
+
 ## Daemon Storage Model
 
 ### Local Summary

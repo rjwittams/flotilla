@@ -150,7 +150,9 @@ pub enum PeerDataKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Command, CommandAction, CommandResult, HostEnvironment, HostProviderStatus, HostSummary, RepoSelector, SystemInfo, ToolInventory};
+    use crate::{
+        Command, CommandAction, CommandResult, HostEnvironment, HostProviderStatus, HostSummary, RepoSelector, SystemInfo, ToolInventory,
+    };
 
     fn sample_host_summary() -> HostSummary {
         HostSummary {

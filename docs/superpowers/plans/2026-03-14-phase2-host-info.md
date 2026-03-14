@@ -43,7 +43,7 @@
 - Create: `crates/flotilla-protocol/src/host_summary.rs`
 - Modify: `crates/flotilla-protocol/src/peer.rs`
 
-- [ ] **Step 1: Write the failing `HostSummary` roundtrip tests**
+- [x] **Step 1: Write the failing `HostSummary` roundtrip tests**
 
 Add tests covering:
 
@@ -79,12 +79,12 @@ fn peer_wire_message_host_summary_roundtrips() {
 }
 ```
 
-- [ ] **Step 2: Run protocol tests to verify failure**
+- [x] **Step 2: Run protocol tests to verify failure**
 
 Run: `cargo test -p flotilla-protocol --locked host_summary -- --nocapture`
 Expected: FAIL because the new module/types/variant do not exist yet.
 
-- [ ] **Step 3: Add the protocol types and wire variant**
+- [x] **Step 3: Add the protocol types and wire variant**
 
 Implement:
 
@@ -97,12 +97,12 @@ Implement:
 
 Keep all system fields optional except the environment enum and `host_name`.
 
-- [ ] **Step 4: Run protocol tests to verify pass**
+- [x] **Step 4: Run protocol tests to verify pass**
 
 Run: `cargo test -p flotilla-protocol --locked host_summary -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 5: Commit protocol host summary types**
+- [x] **Step 5: Commit protocol host summary types**
 
 ```bash
 git add crates/flotilla-protocol/src/lib.rs crates/flotilla-protocol/src/peer.rs crates/flotilla-protocol/src/host_summary.rs
@@ -118,7 +118,7 @@ git commit -m "feat: add peer host summary protocol"
 - Modify: `crates/flotilla-core/src/convert.rs`
 - Modify: `crates/flotilla-core/src/in_process.rs`
 
-- [ ] **Step 1: Write failing tests for discovery-to-summary conversion**
+- [x] **Step 1: Write failing tests for discovery-to-summary conversion**
 
 Add tests for:
 
@@ -138,12 +138,12 @@ fn host_inventory_includes_versioned_binaries() {
 }
 ```
 
-- [ ] **Step 2: Run the focused core tests to verify failure**
+- [x] **Step 2: Run the focused core tests to verify failure**
 
-Run: `cargo test -p flotilla-core --locked host_summary -- --nocapture`
+Run: `cargo test -p flotilla-core --locked --lib host_summary -- --nocapture`
 Expected: FAIL because the collector/conversion helpers do not exist yet.
 
-- [ ] **Step 3: Implement host-summary assembly**
+- [x] **Step 3: Implement host-summary assembly**
 
 Add:
 
@@ -156,7 +156,7 @@ Add:
 
 Use cheap probes only; prefer `None`/`Unknown` over brittle detection.
 
-- [ ] **Step 4: Store the local host summary on `InProcessDaemon`**
+- [x] **Step 4: Store the local host summary on `InProcessDaemon`**
 
 Update `InProcessDaemon` to:
 
@@ -166,12 +166,12 @@ Update `InProcessDaemon` to:
   - `pub fn local_host_summary(&self) -> &HostSummary`
   - a helper returning the host-level provider status if the assembly logic needs it
 
-- [ ] **Step 5: Run the focused core tests to verify pass**
+- [x] **Step 5: Run the focused core tests to verify pass**
 
-Run: `cargo test -p flotilla-core --locked host_summary -- --nocapture`
+Run: `cargo test -p flotilla-core --locked --lib host_summary -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 6: Commit local host summary assembly**
+- [x] **Step 6: Commit local host summary assembly**
 
 ```bash
 git add crates/flotilla-core/src/convert.rs crates/flotilla-core/src/host_summary.rs crates/flotilla-core/src/in_process.rs
@@ -188,7 +188,7 @@ git commit -m "feat: build local host summaries"
 - Modify: `crates/flotilla-daemon/src/peer_networking.rs`
 - Modify: `crates/flotilla-daemon/src/server.rs`
 
-- [ ] **Step 1: Write failing `PeerManager` tests for host summary storage and cleanup**
+- [x] **Step 1: Write failing `PeerManager` tests for host summary storage and cleanup**
 
 Add tests covering:
 
@@ -208,12 +208,12 @@ fn remove_peer_data_clears_host_summary() {
 }
 ```
 
-- [ ] **Step 2: Run the manager tests to verify failure**
+- [x] **Step 2: Run the manager tests to verify failure**
 
 Run: `cargo test -p flotilla-daemon --locked peer::manager::tests::host_summary -- --nocapture`
 Expected: FAIL because remote host-summary storage does not exist yet.
 
-- [ ] **Step 3: Implement remote host-summary storage on `PeerManager`**
+- [x] **Step 3: Implement remote host-summary storage on `PeerManager`**
 
 Add:
 
@@ -224,7 +224,7 @@ Add:
 
 Do not mix host summaries into per-repo peer state.
 
-- [ ] **Step 4: Send local host summaries during initial peer synchronization**
+- [x] **Step 4: Send local host summaries during initial peer synchronization**
 
 Update both peer transport entry points:
 
@@ -233,7 +233,7 @@ Update both peer transport entry points:
 
 So that on connection activation they send `PeerWireMessage::HostSummary(daemon.local_host_summary().clone())` during the same synchronization window as the existing repo snapshot push.
 
-- [ ] **Step 5: Handle inbound host summaries without triggering repo overlay rebuilds**
+- [x] **Step 5: Handle inbound host summaries without triggering repo overlay rebuilds**
 
 Ensure the inbound message processor:
 
@@ -241,7 +241,7 @@ Ensure the inbound message processor:
 - does not enqueue repo overlay updates for host-only changes
 - preserves existing peer data routing/cleanup semantics
 
-- [ ] **Step 6: Run the focused daemon tests to verify pass**
+- [x] **Step 6: Run the focused daemon tests to verify pass**
 
 Run:
 
@@ -250,7 +250,7 @@ Run:
 
 Expected: PASS
 
-- [ ] **Step 7: Commit peer host-summary transport/storage**
+- [x] **Step 7: Commit peer host-summary transport/storage**
 
 ```bash
 git add crates/flotilla-daemon/src/peer/manager.rs crates/flotilla-daemon/src/peer/mod.rs crates/flotilla-daemon/src/peer_networking.rs crates/flotilla-daemon/src/server.rs
@@ -266,7 +266,7 @@ git commit -m "feat: replicate peer host summaries"
 - Modify: `docs/superpowers/specs/2026-03-14-phase2-host-info-design.md`
 - Modify: `docs/superpowers/plans/2026-03-14-phase2-host-info.md`
 
-- [ ] **Step 1: Write the failing multi-host integration test**
+- [x] **Step 1: Write the failing multi-host integration test**
 
 Add a test that:
 
@@ -275,16 +275,16 @@ Add a test that:
 - verifies the leader retains the follower `HostSummary`
 - verifies disconnect/restart cleanup removes stale remote summary
 
-- [ ] **Step 2: Run the focused integration test to verify failure**
+- [x] **Step 2: Run the focused integration test to verify failure**
 
 Run: `cargo test -p flotilla-daemon --locked --test multi_host host_summary -- --nocapture`
-Expected: FAIL until the transport/storage wiring is complete.
+Expected: the test should catch any missing transport/storage wiring. In this branch it passed immediately because the lower-level implementation was already complete.
 
-- [ ] **Step 3: Implement any minimal missing wiring surfaced by the integration test**
+- [x] **Step 3: Implement any minimal missing wiring surfaced by the integration test**
 
-Keep this step narrow. Only add the missing glue required for the already-approved design.
+No additional wiring was needed beyond the completed lower-level transport/storage work.
 
-- [ ] **Step 4: Run the full verification set**
+- [x] **Step 4: Run the full verification set**
 
 Run:
 
@@ -295,7 +295,7 @@ Run:
 
 Expected: all PASS
 
-- [ ] **Step 5: Mark docs complete**
+- [x] **Step 5: Mark docs complete**
 
 Update:
 
@@ -304,7 +304,7 @@ Update:
 
 to reflect any final naming or file-path adjustments made during implementation.
 
-- [ ] **Step 6: Commit final verification/docs**
+- [x] **Step 6: Commit final verification/docs**
 
 ```bash
 git add crates/flotilla-daemon/tests/multi_host.rs docs/superpowers/specs/2026-03-14-phase2-host-info-design.md docs/superpowers/plans/2026-03-14-phase2-host-info.md

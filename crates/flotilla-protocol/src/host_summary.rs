@@ -67,9 +67,8 @@ pub struct HostProviderStatus {
 
 #[cfg(test)]
 mod tests {
-    use crate::{test_helpers::assert_roundtrip, HostName};
-
     use super::*;
+    use crate::{test_helpers::assert_roundtrip, HostName};
 
     #[test]
     fn host_summary_roundtrips_with_optional_fields() {

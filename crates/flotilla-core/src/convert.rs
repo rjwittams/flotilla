@@ -5,7 +5,9 @@
 
 use std::{collections::HashMap, path::Path};
 
-use flotilla_protocol::{CheckoutRef, DiscoveryEntry, DiscoveryFact, HostName, HostProviderStatus, ProviderError, Snapshot, ToolInventory, WorkItem};
+use flotilla_protocol::{
+    CheckoutRef, DiscoveryEntry, DiscoveryFact, HostName, HostProviderStatus, ProviderError, Snapshot, ToolInventory, WorkItem,
+};
 
 use crate::{
     data::{CorrelationResult, RefreshError},
@@ -130,16 +132,10 @@ pub fn inventory_from_bag(bag: &crate::providers::discovery::EnvironmentBag) -> 
                 inventory.binaries.push(DiscoveryFact { name: name.clone(), detail });
             }
             EnvironmentAssertion::SocketAvailable { name, path } => {
-                inventory.sockets.push(DiscoveryFact {
-                    name: name.clone(),
-                    detail: vec![("path".into(), path.display().to_string())],
-                });
+                inventory.sockets.push(DiscoveryFact { name: name.clone(), detail: vec![("path".into(), path.display().to_string())] });
             }
             EnvironmentAssertion::AuthFileExists { provider, path } => {
-                inventory.auth.push(DiscoveryFact {
-                    name: provider.clone(),
-                    detail: vec![("path".into(), path.display().to_string())],
-                });
+                inventory.auth.push(DiscoveryFact { name: provider.clone(), detail: vec![("path".into(), path.display().to_string())] });
             }
             EnvironmentAssertion::EnvVarSet { key, .. } => {
                 inventory.env_vars.push(DiscoveryFact { name: key.clone(), detail: vec![("value".into(), "<set>".into())] });
@@ -226,8 +222,11 @@ mod tests {
 
     #[test]
     fn inventory_from_bag_includes_versioned_binary() {
-        let bag = crate::providers::discovery::EnvironmentBag::new()
-            .with(EnvironmentAssertion::versioned_binary("git", "/usr/bin/git", "2.49.0"));
+        let bag = crate::providers::discovery::EnvironmentBag::new().with(EnvironmentAssertion::versioned_binary(
+            "git",
+            "/usr/bin/git",
+            "2.49.0",
+        ));
 
         let inventory = inventory_from_bag(&bag);
 
@@ -238,10 +237,7 @@ mod tests {
 
     #[test]
     fn provider_health_to_host_statuses_flattens_categories() {
-        let health = HashMap::from([
-            (("vcs", "Git".to_string()), true),
-            (("cloud_agent", "Claude".to_string()), false),
-        ]);
+        let health = HashMap::from([(("vcs", "Git".to_string()), true), (("cloud_agent", "Claude".to_string()), false)]);
 
         let statuses = provider_health_to_host_statuses(&health);
 

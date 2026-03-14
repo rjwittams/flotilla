@@ -6,7 +6,10 @@ use sysinfo::System;
 use crate::{
     convert::inventory_from_bag,
     model::provider_names_from_registry,
-    providers::{discovery::{EnvVars, EnvironmentBag}, registry::ProviderRegistry},
+    providers::{
+        discovery::{EnvVars, EnvironmentBag},
+        registry::ProviderRegistry,
+    },
 };
 
 pub fn build_local_host_summary(
@@ -15,12 +18,7 @@ pub fn build_local_host_summary(
     providers: Vec<HostProviderStatus>,
     env: &dyn EnvVars,
 ) -> HostSummary {
-    HostSummary {
-        host_name: host_name.clone(),
-        system: collect_system_info(env),
-        inventory: inventory_from_bag(host_bag),
-        providers,
-    }
+    HostSummary { host_name: host_name.clone(), system: collect_system_info(env), inventory: inventory_from_bag(host_bag), providers }
 }
 
 pub fn provider_statuses_from_registries<'a>(registries: impl IntoIterator<Item = &'a ProviderRegistry>) -> Vec<HostProviderStatus> {
