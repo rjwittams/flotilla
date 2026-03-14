@@ -545,3 +545,11 @@ async fn get_repo_work_returns_work_items() {
     assert_eq!(work.path, repo);
     // Work items may or may not be present depending on repo state, but the call should succeed
 }
+
+#[tokio::test]
+async fn cancel_nonexistent_command_returns_error() {
+    let (_temp, _repo, daemon) = daemon_for_cwd().await;
+    let result = daemon.cancel(999).await;
+    assert!(result.is_err(), "cancelling a non-existent command should fail");
+    assert!(result.unwrap_err().contains("no matching active command"), "error should mention no matching active command");
+}
