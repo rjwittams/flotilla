@@ -97,6 +97,7 @@ pub struct PendingAction {
 pub struct PendingActionContext {
     pub identity: WorkItemIdentity,
     pub description: String,
+    pub repo_path: std::path::PathBuf,
 }
 
 /// Per-repo UI state (selection, table widget state, visual flags).

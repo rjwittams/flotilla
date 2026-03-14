@@ -95,9 +95,12 @@ mod tests {
 
     #[test]
     fn shimmer_spans_wrapper_matches_struct() {
+        // Use new_at with a fixed duration to avoid flakiness from
+        // elapsed_since_start() being called at different times.
         let text = "hello world";
-        let expected = shimmer_spans(text);
-        let shimmer = Shimmer::new(text.chars().count());
+        let elapsed = elapsed_since_start();
+        let shimmer = Shimmer::new_at(text.chars().count(), elapsed);
+        let expected = shimmer.spans(text, 0);
         let actual = shimmer.spans(text, 0);
         assert_eq!(expected.len(), actual.len());
         for (e, a) in expected.iter().zip(actual.iter()) {
@@ -120,12 +123,17 @@ mod tests {
 
     #[test]
     fn offset_shifts_band_position() {
+        // total_width=40, padding=10, period=60, elapsed=500ms, sweep=2s
+        // pos = (0.5 / 2.0) * 60 = 15.0
+        // Place one offset so char lands inside the band (dist < 2 → high t → BOLD in 256-color)
+        // and one far outside (dist > 10 → t=0 → DIM in 256-color).
+        // Offset 4, char 0: dist = |(4+0+10) - 15| = 1 (inside band, high t)
+        // Offset 30, char 0: dist = |(30+0+10) - 15| = 25 (outside band, t=0)
         let elapsed = Duration::from_millis(500);
         let shimmer = Shimmer::new_at(40, elapsed);
-        let at_zero = shimmer.spans("ab", 0);
-        let at_twenty = shimmer.spans("ab", 20);
-        let styles_differ = at_zero.iter().zip(at_twenty.iter()).any(|(a, b)| a.style != b.style);
-        assert!(styles_differ, "offset should shift the shimmer band");
+        let inside_band = shimmer.spans("a", 4);
+        let outside_band = shimmer.spans("a", 30);
+        assert_ne!(inside_band[0].style, outside_band[0].style, "offset should shift the shimmer band");
     }
 
     #[test]

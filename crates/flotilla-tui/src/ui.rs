@@ -683,6 +683,7 @@ fn build_item_row<'a>(
         String::new()
     };
 
+    // Pending action rendering — column order must mirror the Row::new path below.
     if let Some(pending) = pending {
         match &pending.status {
             PendingStatus::InFlight => {

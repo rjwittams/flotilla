@@ -37,8 +37,7 @@ pub async fn dispatch(cmd: Command, app: &mut App, pending_ctx: Option<PendingAc
     match app.daemon.execute(cmd).await {
         Ok(command_id) => {
             if let Some(ctx) = pending_ctx {
-                let repo_path = app.model.active_repo_root().clone();
-                if let Some(rui) = app.ui.repo_ui.get_mut(&repo_path) {
+                if let Some(rui) = app.ui.repo_ui.get_mut(&ctx.repo_path) {
                     rui.pending_actions.insert(ctx.identity, PendingAction {
                         command_id,
                         status: PendingStatus::InFlight,

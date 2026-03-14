@@ -71,6 +71,8 @@ pub struct CommandQueue {
 }
 
 impl CommandQueue {
+    /// Push a command without pending-action tracking. Use `push_with_context`
+    /// for user-visible actions that should show a row indicator.
     pub fn push(&mut self, cmd: Command) {
         self.queue.push_back((cmd, None));
     }
@@ -331,6 +333,7 @@ impl App {
                     });
 
                     if let Some((repo_path, identity)) = found {
+                        // Safe: repo_path was found by iterating repo_ui above.
                         let rui = self.ui.repo_ui.get_mut(&repo_path).expect("repo exists");
                         if let Some(message) = error_message {
                             if let Some(entry) = rui.pending_actions.get_mut(&identity) {
@@ -1183,7 +1186,11 @@ mod tests {
         use crate::app::ui_state::PendingActionContext;
 
         let mut q = CommandQueue::default();
-        let ctx = PendingActionContext { identity: WorkItemIdentity::Session("s1".into()), description: "Archive session".into() };
+        let ctx = PendingActionContext {
+            identity: WorkItemIdentity::Session("s1".into()),
+            description: "Archive session".into(),
+            repo_path: "/tmp/test-repo".into(),
+        };
         q.push_with_context(Command { host: None, context_repo: None, action: CommandAction::Refresh { repo: None } }, Some(ctx));
         let (cmd, ctx) = q.take_next().expect("should have one entry");
         assert!(matches!(cmd.action, CommandAction::Refresh { .. }));

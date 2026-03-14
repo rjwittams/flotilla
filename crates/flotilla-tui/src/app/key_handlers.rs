@@ -359,8 +359,11 @@ impl App {
                 }
                 _ => {}
             }
-            let pending_ctx =
-                PendingActionContext { identity: item.identity.clone(), description: intent.label(self.model.active_labels()) };
+            let pending_ctx = PendingActionContext {
+                identity: item.identity.clone(),
+                description: intent.label(self.model.active_labels()),
+                repo_path: self.model.active_repo_root().clone(),
+            };
             self.proto_commands.push_with_context(cmd, Some(pending_ctx));
         }
     }
@@ -498,7 +501,11 @@ impl App {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
                 if let UiMode::CloseConfirm { ref id, ref identity, .. } = self.ui.mode {
-                    let ctx = PendingActionContext { identity: identity.clone(), description: format!("Close {}", id) };
+                    let ctx = PendingActionContext {
+                        identity: identity.clone(),
+                        description: format!("Close {}", id),
+                        repo_path: self.model.active_repo_root().clone(),
+                    };
                     self.proto_commands
                         .push_with_context(self.repo_command(CommandAction::CloseChangeRequest { id: id.clone() }), Some(ctx));
                 }
