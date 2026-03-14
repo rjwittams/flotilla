@@ -12,9 +12,12 @@ use tracing::{info, warn};
 
 use crate::providers::{run, types::*, CommandRunner};
 
-/// Timeout for individual `zellij action` calls.  If the Zellij server is
-/// deadlocked or unresponsive, we don't want to pile up blocked child processes
-/// forever.
+/// Timeout for individual `zellij action` calls.  Combined with the 1-permit
+/// semaphore this limits the blast radius when Zellij is unresponsive: at most
+/// one child process can be waiting at a time, and callers give up after the
+/// timeout.  Note that the timed-out child process itself may linger until the
+/// Zellij server recovers or is killed — the runner's `Command::output()` does
+/// not set `kill_on_drop`.
 const ZELLIJ_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -52,8 +55,9 @@ impl ZellijWorkspaceManager {
 
     /// Run `zellij action <args>` and return stdout, or an error on failure.
     ///
-    /// Serialised via a semaphore and wrapped in a timeout to prevent runaway
-    /// child processes when the Zellij server is unresponsive.
+    /// Serialised via a semaphore so at most one `zellij action` child is
+    /// outstanding at a time, and wrapped in a timeout so callers give up
+    /// rather than blocking forever.
     async fn zellij_action(&self, args: &[&str]) -> Result<String, String> {
         let _permit = self.action_semaphore.acquire().await.map_err(|_| "zellij action semaphore closed".to_string())?;
 

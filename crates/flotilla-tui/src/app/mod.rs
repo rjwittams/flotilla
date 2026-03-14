@@ -385,7 +385,8 @@ impl App {
                     };
                     // Auto-create workspace for local checkouts. Remote checkouts
                     // go through the PrepareTerminal → TerminalPrepared flow instead.
-                    let auto_workspace = match (&result, host == HostName::local()) {
+                    let is_local = self.model.my_host.as_ref().is_some_and(|my| *my == host);
+                    let auto_workspace = match (&result, is_local) {
                         (CommandResult::CheckoutCreated { path, .. }, true) => Some(path.clone()),
                         _ => None,
                     };
@@ -1468,6 +1469,7 @@ mod tests {
     #[test]
     fn local_checkout_created_queues_workspace_creation() {
         let mut app = stub_app();
+        app.model.my_host = Some(HostName::new("my-desktop"));
         let repo = app.model.repo_order[0].clone();
         let checkout_path = PathBuf::from("/tmp/repo/wt-feat");
 
@@ -1479,7 +1481,7 @@ mod tests {
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
-            host: HostName::local(),
+            host: HostName::new("my-desktop"),
             repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
             repo,
             result: CommandResult::CheckoutCreated { branch: "feat".into(), path: checkout_path.clone() },
@@ -1495,6 +1497,7 @@ mod tests {
     #[test]
     fn remote_checkout_created_does_not_queue_workspace() {
         let mut app = stub_app();
+        app.model.my_host = Some(HostName::new("my-desktop"));
         let repo = app.model.repo_order[0].clone();
 
         app.in_flight.insert(42, InFlightCommand {
