@@ -10,7 +10,7 @@ pub enum Event {
     Tick,
     Key(crossterm::event::KeyEvent),
     Mouse(crossterm::event::MouseEvent),
-    Daemon(DaemonEvent),
+    Daemon(Box<DaemonEvent>),
 }
 
 pub struct EventHandler {
@@ -67,7 +67,7 @@ impl EventHandler {
             loop {
                 match daemon_rx.recv().await {
                     Ok(event) => {
-                        let _ = tx.send(Event::Daemon(event));
+                        let _ = tx.send(Event::Daemon(Box::new(event)));
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(skipped = n, "daemon event receiver lagged");

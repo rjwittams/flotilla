@@ -6,7 +6,8 @@
 use std::{collections::HashMap, path::Path};
 
 use flotilla_protocol::{
-    CheckoutRef, DiscoveryEntry, DiscoveryFact, HostName, HostProviderStatus, ProviderError, Snapshot, ToolInventory, WorkItem,
+    CheckoutRef, DiscoveryEntry, DiscoveryFact, HostName, HostProviderStatus, ProviderError, RepoIdentity, Snapshot, ToolInventory,
+    WorkItem,
 };
 
 use crate::{
@@ -164,9 +165,10 @@ pub fn provider_health_to_host_statuses(health: &HashMap<(&'static str, String),
     statuses
 }
 
-pub fn snapshot_to_proto(repo: &Path, seq: u64, refresh: &RefreshSnapshot, host_name: &HostName) -> Snapshot {
+pub fn snapshot_to_proto(repo_identity: RepoIdentity, repo: &Path, seq: u64, refresh: &RefreshSnapshot, host_name: &HostName) -> Snapshot {
     Snapshot {
         seq,
+        repo_identity,
         repo: repo.to_path_buf(),
         host_name: host_name.clone(),
         work_items: refresh

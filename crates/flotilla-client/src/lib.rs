@@ -490,7 +490,7 @@ fn handle_event(
                 }
             }
         }
-        DaemonEvent::RepoRemoved { path } => {
+        DaemonEvent::RepoRemoved { path, .. } => {
             // Sync lock: evict before dispatching
             local_seqs.write().unwrap().remove(path);
             let _ = event_tx.send(event);
@@ -651,7 +651,7 @@ impl DaemonHandle for SocketDaemon {
 
 #[cfg(test)]
 mod tests {
-    use flotilla_protocol::{Snapshot, SnapshotDelta};
+    use flotilla_protocol::{RepoIdentity, Snapshot, SnapshotDelta};
     use tokio::net::{unix::OwnedReadHalf, UnixStream};
 
     use super::*;
@@ -667,9 +667,14 @@ mod tests {
         lines: RequestLines,
     }
 
+    fn repo_identity() -> RepoIdentity {
+        RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() }
+    }
+
     fn make_snapshot(repo: &Path, seq: u64) -> Snapshot {
         Snapshot {
             seq,
+            repo_identity: repo_identity(),
             repo: repo.to_path_buf(),
             host_name: flotilla_protocol::HostName::new("test-host"),
             work_items: vec![],
@@ -686,6 +691,7 @@ mod tests {
         SnapshotDelta {
             seq,
             prev_seq,
+            repo_identity: repo_identity(),
             repo: repo.to_path_buf(),
             changes: vec![],
             work_items: vec![],
@@ -1016,6 +1022,7 @@ mod tests {
         let (writer, pending, next_id, _server) = event_harness();
 
         let repo_info = flotilla_protocol::RepoInfo {
+            identity: repo_identity(),
             path: PathBuf::from("/tmp/new-repo"),
             name: "new-repo".into(),
             labels: flotilla_protocol::RepoLabels::default(),
@@ -1041,6 +1048,7 @@ mod tests {
                 command_id: 42,
                 host: flotilla_protocol::HostName::new("test"),
                 repo: PathBuf::from("/tmp/repo"),
+                repo_identity: repo_identity(),
                 description: "testing".into(),
             },
             &local_seqs,
@@ -1067,6 +1075,7 @@ mod tests {
                 command_id: 7,
                 host: flotilla_protocol::HostName::new("host"),
                 repo: PathBuf::from("/tmp/repo"),
+                repo_identity: repo_identity(),
                 result: flotilla_protocol::commands::CommandResult::Ok,
             },
             &local_seqs,
@@ -1093,6 +1102,7 @@ mod tests {
                 command_id: 3,
                 host: flotilla_protocol::HostName::new("host"),
                 repo: PathBuf::from("/tmp/repo"),
+                repo_identity: repo_identity(),
                 step_index: 1,
                 step_count: 3,
                 description: "step 2".into(),
@@ -1145,7 +1155,15 @@ mod tests {
         let (event_tx, mut event_rx) = broadcast::channel(16);
         let (writer, pending, next_id, _server) = event_harness();
 
-        handle_event(DaemonEvent::RepoRemoved { path: repo.clone() }, &local_seqs, &recovering, &event_tx, &writer, &pending, &next_id);
+        handle_event(
+            DaemonEvent::RepoRemoved { path: repo.clone(), repo_identity: repo_identity() },
+            &local_seqs,
+            &recovering,
+            &event_tx,
+            &writer,
+            &pending,
+            &next_id,
+        );
 
         // Seq should be evicted.
         assert!(local_seqs.read().expect("local_seqs read lock").get(&repo).is_none(), "seq should be evicted for removed repo");
@@ -1335,6 +1353,7 @@ mod tests {
             command_id: 99,
             host: flotilla_protocol::HostName::new("test"),
             repo: repo.clone(),
+            repo_identity: repo_identity(),
             description: "replayed".into(),
         }];
         let tx = harness.pending.lock().await.remove(&id).expect("pending sender");

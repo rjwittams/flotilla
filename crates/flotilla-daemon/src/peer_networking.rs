@@ -419,7 +419,7 @@ impl PeerNetworkingTask {
                                 );
 
                                 if let Err(e) = peer_daemon
-                                    .add_virtual_repo(synthetic.clone(), merged)
+                                    .add_virtual_repo(updated_repo_id.clone(), synthetic.clone(), merged)
                                     .await
                                 {
                                     warn!(
@@ -526,11 +526,23 @@ impl PeerNetworkingTask {
                                 "ignoring routed peer command in peer_networking task"
                             );
                         }
+                        HandleResult::CommandCancelRequested { cancel_id, requester_host, reply_via, command_request_id } => {
+                            warn!(
+                                %cancel_id,
+                                requester = %requester_host,
+                                reply_via = %reply_via,
+                                %command_request_id,
+                                "ignoring routed peer command cancel in peer_networking task"
+                            );
+                        }
                         HandleResult::CommandEventReceived { request_id, responder_host, .. } => {
                             warn!(%request_id, responder = %responder_host, "ignoring routed peer command event in peer_networking task");
                         }
                         HandleResult::CommandResponseReceived { request_id, responder_host, .. } => {
                             warn!(%request_id, responder = %responder_host, "ignoring routed peer command response in peer_networking task");
+                        }
+                        HandleResult::CommandCancelResponseReceived { cancel_id, responder_host, .. } => {
+                            warn!(%cancel_id, responder = %responder_host, "ignoring routed peer command cancel response in peer_networking task");
                         }
                         HandleResult::Ignored => {}
                     }
@@ -691,8 +703,10 @@ pub(crate) async fn dispatch_resync_requests(peer_manager: &Arc<Mutex<PeerManage
             RoutedPeerMessage::RequestResync { target_host, .. } => target_host.clone(),
             RoutedPeerMessage::ResyncSnapshot { requester_host, .. } => requester_host.clone(),
             RoutedPeerMessage::CommandRequest { target_host, .. } => target_host.clone(),
+            RoutedPeerMessage::CommandCancelRequest { target_host, .. } => target_host.clone(),
             RoutedPeerMessage::CommandEvent { requester_host, .. } => requester_host.clone(),
             RoutedPeerMessage::CommandResponse { requester_host, .. } => requester_host.clone(),
+            RoutedPeerMessage::CommandCancelResponse { requester_host, .. } => requester_host.clone(),
         };
         let sender = {
             let pm = peer_manager.lock().await;

@@ -5,7 +5,7 @@ use std::{
 };
 
 use flotilla_core::data::{GroupEntry, GroupedWorkItems};
-use flotilla_protocol::{CheckoutStatus, WorkItemIdentity};
+use flotilla_protocol::{CheckoutStatus, HostName, WorkItemIdentity};
 use ratatui::{layout::Rect, widgets::TableState};
 use tui_input::Input;
 
@@ -60,6 +60,7 @@ pub enum UiMode {
         id: String,
         title: String,
         identity: WorkItemIdentity,
+        command: flotilla_protocol::Command,
     },
     IssueSearch {
         input: Input,
@@ -241,6 +242,7 @@ impl Default for EventLogUiState {
 pub struct UiState {
     pub mode: UiMode,
     pub repo_ui: HashMap<PathBuf, RepoUiState>,
+    pub target_host: Option<HostName>,
     pub view_layout: RepoViewLayout,
     pub status_bar: StatusBarUiState,
     pub layout: LayoutAreas,
@@ -257,6 +259,7 @@ impl UiState {
         Self {
             mode: UiMode::default(),
             repo_ui,
+            target_host: None,
             view_layout: RepoViewLayout::default(),
             status_bar: StatusBarUiState::default(),
             layout: LayoutAreas::default(),
@@ -280,10 +283,25 @@ impl UiState {
             RepoViewLayout::Below => RepoViewLayout::Auto,
         };
     }
+
+    /// Cycle through currently connected peer hosts, then back to local.
+    ///
+    /// If the current target is no longer present in `peer_hosts`, cycling
+    /// restarts from the first available peer. Peer status updates are
+    /// responsible for clearing a stale selection when the chosen host
+    /// disconnects.
+    pub fn cycle_target_host(&mut self, peer_hosts: &[HostName]) {
+        self.target_host = match self.target_host.as_ref() {
+            None => peer_hosts.first().cloned(),
+            Some(current) => peer_hosts.iter().position(|host| host == current).and_then(|index| peer_hosts.get(index + 1).cloned()),
+        };
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use flotilla_protocol::HostName;
+
     use super::*;
 
     // ── UiMode tests ──────────────────────────────────────────────────
@@ -306,7 +324,19 @@ mod tests {
                 },
                 false,
             ),
-            (UiMode::CloseConfirm { id: "42".into(), title: "test".into(), identity: WorkItemIdentity::Session("test".into()) }, false),
+            (
+                UiMode::CloseConfirm {
+                    id: "42".into(),
+                    title: "test".into(),
+                    identity: WorkItemIdentity::Session("test".into()),
+                    command: flotilla_protocol::Command {
+                        host: None,
+                        context_repo: None,
+                        action: flotilla_protocol::CommandAction::CloseChangeRequest { id: "42".into() },
+                    },
+                },
+                false,
+            ),
             (UiMode::IssueSearch { input: Input::default() }, false),
         ];
         for (mode, expected) in &cases {
@@ -361,6 +391,12 @@ mod tests {
     }
 
     #[test]
+    fn ui_state_defaults_target_host_to_local() {
+        let state = UiState::new(&[]);
+        assert_eq!(state.target_host, None);
+    }
+
+    #[test]
     fn status_bar_ui_state_defaults_to_showing_keys() {
         assert!(StatusBarUiState::default().show_keys);
     }
@@ -380,6 +416,30 @@ mod tests {
 
         state.cycle_layout();
         assert_eq!(state.view_layout, RepoViewLayout::Auto);
+    }
+
+    #[test]
+    fn cycle_target_host_advances_through_known_peers_and_back_to_local() {
+        let mut state = UiState::new(&[]);
+        let peers = vec![HostName::new("alpha"), HostName::new("beta")];
+
+        state.cycle_target_host(&peers);
+        assert_eq!(state.target_host, Some(HostName::new("alpha")));
+
+        state.cycle_target_host(&peers);
+        assert_eq!(state.target_host, Some(HostName::new("beta")));
+
+        state.cycle_target_host(&peers);
+        assert_eq!(state.target_host, None);
+    }
+
+    #[test]
+    fn cycle_target_host_ignores_empty_peer_list() {
+        let mut state = UiState::new(&[]);
+
+        state.cycle_target_host(&[]);
+
+        assert_eq!(state.target_host, None);
     }
 
     // ── active_repo_ui tests ──────────────────────────────────────────

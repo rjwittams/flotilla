@@ -21,8 +21,8 @@ use flotilla_core::{
     data::{self, GroupEntry, SectionLabels},
 };
 use flotilla_protocol::{
-    Command, CommandAction, CommandResult, DaemonEvent, HostName, PeerConnectionState, ProviderData, ProviderError, RepoInfo, RepoLabels,
-    RepoSelector, Snapshot, SnapshotDelta, StepStatus, WorkItem, WorkItemIdentity,
+    Command, CommandAction, CommandResult, DaemonEvent, HostName, PeerConnectionState, ProviderData, ProviderError, RepoIdentity, RepoInfo,
+    RepoLabels, RepoSelector, Snapshot, SnapshotDelta, StepStatus, WorkItem, WorkItemIdentity,
 };
 pub use intent::Intent;
 use tui_input::Input;
@@ -87,6 +87,7 @@ impl CommandQueue {
 /// Per-repo view-model state for the TUI. Contains only what the UI needs
 /// to render — no provider registry, no refresh handle.
 pub struct TuiRepoModel {
+    pub identity: RepoIdentity,
     pub providers: Arc<ProviderData>,
     pub labels: RepoLabels,
     pub provider_names: HashMap<String, Vec<String>>,
@@ -123,6 +124,7 @@ impl TuiModel {
         let mut order = Vec::new();
         for info in repos_info {
             repos.insert(info.path.clone(), TuiRepoModel {
+                identity: info.identity,
                 providers: Arc::new(ProviderData::default()),
                 labels: info.labels,
                 provider_names: info.provider_names,
@@ -155,6 +157,10 @@ impl TuiModel {
         &self.repo_order[self.active_repo]
     }
 
+    pub fn active_repo_identity(&self) -> &RepoIdentity {
+        &self.active().identity
+    }
+
     pub fn active_labels(&self) -> &RepoLabels {
         &self.active().labels
     }
@@ -166,6 +172,7 @@ impl TuiModel {
 
 /// A command that has been dispatched to the daemon and is awaiting completion.
 pub struct InFlightCommand {
+    pub repo_identity: RepoIdentity,
     pub repo: PathBuf,
     pub description: String,
 }
@@ -292,6 +299,57 @@ impl App {
         Command { host: None, context_repo: Some(RepoSelector::Path(self.model.active_repo_root().clone())), action }
     }
 
+    pub fn repo_command_for_path(&self, repo: PathBuf, action: CommandAction) -> Command {
+        Command { host: None, context_repo: Some(RepoSelector::Path(repo)), action }
+    }
+
+    pub fn targeted_command(&self, action: CommandAction) -> Command {
+        Command { host: self.ui.target_host.clone(), context_repo: None, action }
+    }
+
+    pub fn targeted_repo_command(&self, action: CommandAction) -> Command {
+        Command {
+            host: self.ui.target_host.clone(),
+            context_repo: Some(RepoSelector::Identity(self.model.active_repo_identity().clone())),
+            action,
+        }
+    }
+
+    pub fn item_host_command(&self, action: CommandAction, item: &WorkItem) -> Command {
+        Command { host: self.item_execution_host(item), context_repo: None, action }
+    }
+
+    pub fn item_host_repo_command(&self, action: CommandAction, item: &WorkItem) -> Command {
+        Command {
+            host: self.item_execution_host(item),
+            context_repo: Some(RepoSelector::Identity(self.model.active_repo_identity().clone())),
+            action,
+        }
+    }
+
+    pub fn provider_repo_command(&self, action: CommandAction, item: &WorkItem) -> Command {
+        if self.active_repo_is_remote_only() {
+            self.item_host_repo_command(action, item)
+        } else {
+            self.repo_command(action)
+        }
+    }
+
+    pub fn repo_path_for_identity(&self, identity: &RepoIdentity) -> Option<PathBuf> {
+        self.model.repos.iter().find(|(_, repo)| &repo.identity == identity).map(|(path, _)| path.clone())
+    }
+
+    fn item_execution_host(&self, item: &WorkItem) -> Option<HostName> {
+        match self.model.my_host.as_ref() {
+            Some(my_host) if item.host != *my_host => Some(item.host.clone()),
+            _ => None,
+        }
+    }
+
+    fn active_repo_is_remote_only(&self) -> bool {
+        self.model.active_repo_root().starts_with(Path::new("<remote>"))
+    }
+
     pub fn visible_status_items(&self) -> Vec<VisibleStatusItem> {
         collect_visible_status_items(&self.model, &self.ui)
     }
@@ -313,10 +371,10 @@ impl App {
             DaemonEvent::SnapshotFull(snap) => self.apply_snapshot(*snap),
             DaemonEvent::SnapshotDelta(delta) => self.apply_delta(*delta),
             DaemonEvent::RepoAdded(info) => self.handle_repo_added(*info),
-            DaemonEvent::RepoRemoved { path } => self.handle_repo_removed(&path),
-            DaemonEvent::CommandStarted { command_id, repo, description, .. } => {
+            DaemonEvent::RepoRemoved { path, .. } => self.handle_repo_removed(&path),
+            DaemonEvent::CommandStarted { command_id, repo_identity, repo, description, .. } => {
                 tracing::info!(%command_id, %description, "command started");
-                self.in_flight.insert(command_id, InFlightCommand { repo, description });
+                self.in_flight.insert(command_id, InFlightCommand { repo_identity, repo, description });
             }
             DaemonEvent::CommandFinished { command_id, result, .. } => {
                 if let Some(_cmd) = self.in_flight.remove(&command_id) {
@@ -365,10 +423,15 @@ impl App {
             }
             DaemonEvent::PeerStatusChanged { host, status } => {
                 let peer_status = PeerStatus::from(status);
+                let clear_target =
+                    matches!(peer_status, PeerStatus::Disconnected | PeerStatus::Rejected) && self.ui.target_host.as_ref() == Some(&host);
                 if let Some(existing) = self.model.peer_hosts.iter_mut().find(|p| p.name == host) {
                     existing.status = peer_status;
                 } else {
                     self.model.peer_hosts.push(PeerHostStatus { name: host, status: peer_status });
+                }
+                if clear_target {
+                    self.ui.target_host = None;
                 }
                 self.model.peer_hosts.sort_by(|a, b| a.name.cmp(&b.name));
             }
@@ -539,6 +602,7 @@ impl App {
             return;
         }
         self.model.repos.insert(path.clone(), TuiRepoModel {
+            identity: info.identity,
             providers: Arc::new(ProviderData::default()),
             labels: info.labels,
             provider_names: info.provider_names,
@@ -1100,12 +1164,25 @@ mod tests {
         app.handle_daemon_event(DaemonEvent::CommandStarted {
             command_id: 99,
             host: HostName::local(),
+            repo_identity: app.model.active_repo_identity().clone(),
             repo: repo.clone(),
             description: "test cmd".into(),
         });
 
         assert!(app.in_flight.contains_key(&99));
         assert_eq!(app.in_flight[&99].description, "test cmd");
+    }
+
+    #[test]
+    fn peer_disconnect_clears_selected_target_host() {
+        let mut app = stub_app();
+        app.ui.target_host = Some(HostName::new("alpha"));
+        app.model.peer_hosts = vec![PeerHostStatus { name: HostName::new("alpha"), status: PeerStatus::Connected }];
+
+        app.handle_daemon_event(DaemonEvent::PeerStatusChanged { host: HostName::new("alpha"), status: PeerConnectionState::Disconnected });
+
+        assert_eq!(app.ui.target_host, None);
+        assert_eq!(app.model.peer_hosts[0].status, PeerStatus::Disconnected);
     }
 
     // -- Convenience accessors --
@@ -1144,7 +1221,12 @@ mod tests {
     #[test]
     fn close_confirm_y_dispatches_command() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into(), identity: WorkItemIdentity::Session("test".into()) };
+        app.ui.mode = UiMode::CloseConfirm {
+            id: "42".into(),
+            title: "Test PR".into(),
+            identity: WorkItemIdentity::Session("test".into()),
+            command: Command { host: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } },
+        };
         app.handle_key(key(KeyCode::Char('y')));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         let cmd = app.proto_commands.take_next();
@@ -1154,7 +1236,12 @@ mod tests {
     #[test]
     fn close_confirm_enter_dispatches_command() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into(), identity: WorkItemIdentity::Session("test".into()) };
+        app.ui.mode = UiMode::CloseConfirm {
+            id: "42".into(),
+            title: "Test PR".into(),
+            identity: WorkItemIdentity::Session("test".into()),
+            command: Command { host: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } },
+        };
         app.handle_key(key(KeyCode::Enter));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         let cmd = app.proto_commands.take_next();
@@ -1164,7 +1251,12 @@ mod tests {
     #[test]
     fn close_confirm_esc_cancels() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into(), identity: WorkItemIdentity::Session("test".into()) };
+        app.ui.mode = UiMode::CloseConfirm {
+            id: "42".into(),
+            title: "Test PR".into(),
+            identity: WorkItemIdentity::Session("test".into()),
+            command: Command { host: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } },
+        };
         app.handle_key(key(KeyCode::Esc));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         assert!(app.proto_commands.take_next().is_none());
@@ -1173,7 +1265,12 @@ mod tests {
     #[test]
     fn close_confirm_n_cancels() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm { id: "42".into(), title: "Test PR".into(), identity: WorkItemIdentity::Session("test".into()) };
+        app.ui.mode = UiMode::CloseConfirm {
+            id: "42".into(),
+            title: "Test PR".into(),
+            identity: WorkItemIdentity::Session("test".into()),
+            command: Command { host: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } },
+        };
         app.handle_key(key(KeyCode::Char('n')));
         assert!(matches!(app.ui.mode, UiMode::Normal));
         assert!(app.proto_commands.take_next().is_none());
@@ -1221,11 +1318,16 @@ mod tests {
             status: PendingStatus::InFlight,
             description: "test".into(),
         });
-        app.in_flight.insert(42, InFlightCommand { repo: repo.clone(), description: "test".into() });
+        app.in_flight.insert(42, InFlightCommand {
+            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
+            repo: repo.clone(),
+            description: "test".into(),
+        });
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::local(),
+            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
             repo: repo.clone(),
             result: CommandResult::Ok,
         });
@@ -1246,11 +1348,16 @@ mod tests {
             status: PendingStatus::InFlight,
             description: "test".into(),
         });
-        app.in_flight.insert(42, InFlightCommand { repo: repo.clone(), description: "test".into() });
+        app.in_flight.insert(42, InFlightCommand {
+            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
+            repo: repo.clone(),
+            description: "test".into(),
+        });
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::local(),
+            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
             repo: repo.clone(),
             result: CommandResult::Error { message: "boom".into() },
         });
@@ -1272,11 +1379,16 @@ mod tests {
             status: PendingStatus::InFlight,
             description: "test".into(),
         });
-        app.in_flight.insert(42, InFlightCommand { repo: repo.clone(), description: "test".into() });
+        app.in_flight.insert(42, InFlightCommand {
+            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
+            repo: repo.clone(),
+            description: "test".into(),
+        });
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::local(),
+            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
             repo: repo.clone(),
             result: CommandResult::Cancelled,
         });
@@ -1298,11 +1410,16 @@ mod tests {
             status: PendingStatus::InFlight,
             description: "test".into(),
         });
-        app.in_flight.insert(42, InFlightCommand { repo: repo.clone(), description: "test".into() });
+        app.in_flight.insert(42, InFlightCommand {
+            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
+            repo: repo.clone(),
+            description: "test".into(),
+        });
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::local(),
+            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
             repo: repo.clone(),
             result: CommandResult::Ok,
         });

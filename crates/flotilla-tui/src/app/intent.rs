@@ -7,7 +7,7 @@ pub enum Intent {
     SwitchToWorkspace,
     CreateWorkspace,
     RemoveCheckout,
-    CreateCheckoutAndWorkspace,
+    CreateCheckout,
     GenerateBranchName,
     OpenChangeRequest,
     OpenIssue,
@@ -23,9 +23,7 @@ impl Intent {
             Intent::SwitchToWorkspace => "Switch to workspace".into(),
             Intent::CreateWorkspace => "Create workspace".into(),
             Intent::RemoveCheckout => format!("Remove {}", labels.checkouts.noun),
-            Intent::CreateCheckoutAndWorkspace => {
-                format!("Create {} + workspace", labels.checkouts.noun)
-            }
+            Intent::CreateCheckout => format!("Create {}", labels.checkouts.noun),
             Intent::GenerateBranchName => "Generate branch name".into(),
             Intent::OpenChangeRequest => format!("Open {} in browser", labels.code_review.noun),
             Intent::OpenIssue => "Open issue in browser".into(),
@@ -43,7 +41,7 @@ impl Intent {
             Intent::SwitchToWorkspace => !item.workspace_refs.is_empty(),
             Intent::CreateWorkspace => item.checkout_key().is_some() && item.workspace_refs.is_empty(),
             Intent::RemoveCheckout => item.checkout_key().is_some() && !item.is_main_checkout,
-            Intent::CreateCheckoutAndWorkspace => item.checkout_key().is_none() && item.branch.is_some(),
+            Intent::CreateCheckout => item.checkout_key().is_none() && item.branch.is_some(),
             Intent::GenerateBranchName => item.branch.is_none() && !item.issue_keys.is_empty(),
             Intent::OpenChangeRequest => item.change_request_key.is_some(),
             Intent::OpenIssue => !item.issue_keys.is_empty(),
@@ -59,17 +57,10 @@ impl Intent {
     /// Whether this intent requires local filesystem access.
     ///
     /// Returns `true` for actions that operate on the local filesystem
-    /// (switch workspace, create workspace, remove checkout, create checkout,
-    /// teleport session). These should be hidden for work items from remote hosts.
+    /// (switch workspace, remove checkout, teleport session). These should be
+    /// hidden for work items from remote hosts.
     pub fn requires_local_host(&self) -> bool {
-        matches!(
-            self,
-            Intent::SwitchToWorkspace
-                | Intent::CreateWorkspace
-                | Intent::RemoveCheckout
-                | Intent::CreateCheckoutAndWorkspace
-                | Intent::TeleportSession
-        )
+        matches!(self, Intent::SwitchToWorkspace | Intent::RemoveCheckout | Intent::TeleportSession)
     }
 
     /// Whether this intent is allowed given the item's host provenance.
@@ -108,9 +99,14 @@ impl Intent {
             Intent::SwitchToWorkspace => {
                 item.workspace_refs.first().map(|ws_ref| app.repo_command(CommandAction::SelectWorkspace { ws_ref: ws_ref.clone() }))
             }
-            Intent::CreateWorkspace => {
-                item.checkout_key().map(|p| app.repo_command(CommandAction::CreateWorkspaceForCheckout { checkout_path: p.path.clone() }))
-            }
+            Intent::CreateWorkspace => item.checkout_key().map(|p| {
+                let command = app.item_host_repo_command(CommandAction::PrepareTerminalForCheckout { checkout_path: p.path.clone() }, item);
+                if command.host.is_some() {
+                    command
+                } else {
+                    app.repo_command(CommandAction::CreateWorkspaceForCheckout { checkout_path: p.path.clone() })
+                }
+            }),
             Intent::RemoveCheckout => {
                 if item.kind != WorkItemKind::Checkout || item.is_main_checkout {
                     return None;
@@ -120,29 +116,32 @@ impl Intent {
                 let change_request_id = item.change_request_key.clone();
                 Some(app.repo_command(CommandAction::FetchCheckoutStatus { branch, checkout_path, change_request_id }))
             }
-            Intent::CreateCheckoutAndWorkspace => item.branch.as_ref().map(|branch| {
+            Intent::CreateCheckout => item.branch.as_ref().map(|branch| {
                 let target = if item.kind == WorkItemKind::RemoteBranch || item.kind == WorkItemKind::ChangeRequest {
                     CheckoutTarget::Branch(branch.to_string())
                 } else {
                     CheckoutTarget::FreshBranch(branch.to_string())
                 };
-                app.command(CommandAction::Checkout {
-                    repo: flotilla_protocol::RepoSelector::Path(app.model.active_repo_root().clone()),
+                app.targeted_command(CommandAction::Checkout {
+                    repo: flotilla_protocol::RepoSelector::Identity(app.model.active_repo_identity().clone()),
                     target,
                     issue_ids: Vec::new(),
                 })
             }),
             Intent::GenerateBranchName => {
                 if !item.issue_keys.is_empty() {
-                    Some(app.repo_command(CommandAction::GenerateBranchName { issue_keys: item.issue_keys.clone() }))
+                    Some(app.targeted_repo_command(CommandAction::GenerateBranchName { issue_keys: item.issue_keys.clone() }))
                 } else {
                     None
                 }
             }
-            Intent::OpenChangeRequest => {
-                item.change_request_key.as_ref().map(|k| app.repo_command(CommandAction::OpenChangeRequest { id: k.clone() }))
+            Intent::OpenChangeRequest => item
+                .change_request_key
+                .as_ref()
+                .map(|k| app.provider_repo_command(CommandAction::OpenChangeRequest { id: k.clone() }, item)),
+            Intent::OpenIssue => {
+                item.issue_keys.first().map(|k| app.provider_repo_command(CommandAction::OpenIssue { id: k.clone() }, item))
             }
-            Intent::OpenIssue => item.issue_keys.first().map(|k| app.repo_command(CommandAction::OpenIssue { id: k.clone() })),
             Intent::LinkIssuesToChangeRequest => {
                 let change_request_key = item.change_request_key.as_ref()?;
                 let co_key = item.checkout_key()?;
@@ -175,10 +174,10 @@ impl Intent {
                 if missing.is_empty() {
                     return None;
                 }
-                Some(app.repo_command(CommandAction::LinkIssuesToChangeRequest {
-                    change_request_id: change_request_key.clone(),
-                    issue_ids: missing,
-                }))
+                Some(app.provider_repo_command(
+                    CommandAction::LinkIssuesToChangeRequest { change_request_id: change_request_key.clone(), issue_ids: missing },
+                    item,
+                ))
             }
             Intent::TeleportSession => item.session_key.as_ref().map(|k| {
                 app.repo_command(CommandAction::TeleportSession {
@@ -188,7 +187,7 @@ impl Intent {
                 })
             }),
             Intent::ArchiveSession => {
-                item.session_key.as_ref().map(|k| app.repo_command(CommandAction::ArchiveSession { session_id: k.clone() }))
+                item.session_key.as_ref().map(|k| app.provider_repo_command(CommandAction::ArchiveSession { session_id: k.clone() }, item))
             }
             Intent::CloseChangeRequest => {
                 let cr_key = item.change_request_key.as_ref()?;
@@ -197,7 +196,7 @@ impl Intent {
                 if cr.status != flotilla_protocol::ChangeRequestStatus::Open {
                     return None;
                 }
-                Some(app.repo_command(CommandAction::CloseChangeRequest { id: cr_key.clone() }))
+                Some(app.provider_repo_command(CommandAction::CloseChangeRequest { id: cr_key.clone() }, item))
             }
         }
     }
@@ -207,7 +206,7 @@ impl Intent {
             Intent::SwitchToWorkspace,
             Intent::CreateWorkspace,
             Intent::RemoveCheckout,
-            Intent::CreateCheckoutAndWorkspace,
+            Intent::CreateCheckout,
             Intent::GenerateBranchName,
             Intent::OpenChangeRequest,
             Intent::OpenIssue,
@@ -219,24 +218,24 @@ impl Intent {
     }
 
     pub fn enter_priority() -> &'static [Intent] {
-        &[
-            Intent::SwitchToWorkspace,
-            Intent::TeleportSession,
-            Intent::CreateWorkspace,
-            Intent::CreateCheckoutAndWorkspace,
-            Intent::GenerateBranchName,
-        ]
+        &[Intent::SwitchToWorkspace, Intent::TeleportSession, Intent::CreateWorkspace, Intent::CreateCheckout, Intent::GenerateBranchName]
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
-    use flotilla_protocol::{CategoryLabels, CheckoutRef, HostName, HostPath, RepoLabels};
+    use flotilla_protocol::{
+        CategoryLabels, ChangeRequest, ChangeRequestStatus, Checkout, CheckoutRef, CorrelationKey, HostName, HostPath, RepoLabels,
+        RepoSelector,
+    };
 
     use super::*;
-    use crate::app::test_support::{bare_item, checkout_item, pr_item, remote_branch_item, session_item, stub_app};
+    use crate::app::{
+        test_support::{bare_item, checkout_item, pr_item, remote_branch_item, session_item, stub_app},
+        TuiRepoModel,
+    };
 
     // ── Helpers ──
 
@@ -297,15 +296,15 @@ mod tests {
     fn create_worktree_and_workspace_needs_no_checkout_and_has_branch() {
         // Remote branch: no checkout, has branch -> available
         let item = remote_branch_item("feat/remote");
-        assert!(Intent::CreateCheckoutAndWorkspace.is_available(&item));
+        assert!(Intent::CreateCheckout.is_available(&item));
 
         // Has checkout -> not available
         let co_item = checkout_item("feat/x", "/tmp/feat-x", false);
-        assert!(!Intent::CreateCheckoutAndWorkspace.is_available(&co_item));
+        assert!(!Intent::CreateCheckout.is_available(&co_item));
 
         // No branch -> not available
         let no_branch = bare_item();
-        assert!(!Intent::CreateCheckoutAndWorkspace.is_available(&no_branch));
+        assert!(!Intent::CreateCheckout.is_available(&no_branch));
     }
 
     #[test]
@@ -412,7 +411,7 @@ mod tests {
         assert_eq!(Intent::SwitchToWorkspace.label(&labels), "Switch to workspace");
         assert_eq!(Intent::CreateWorkspace.label(&labels), "Create workspace");
         assert_eq!(Intent::RemoveCheckout.label(&labels), "Remove item");
-        assert_eq!(Intent::CreateCheckoutAndWorkspace.label(&labels), "Create item + workspace");
+        assert_eq!(Intent::CreateCheckout.label(&labels), "Create item");
         assert_eq!(Intent::GenerateBranchName.label(&labels), "Generate branch name");
         assert_eq!(Intent::OpenChangeRequest.label(&labels), "Open item in browser");
         assert_eq!(Intent::OpenIssue.label(&labels), "Open issue in browser");
@@ -426,7 +425,7 @@ mod tests {
     fn label_with_custom_labels() {
         let labels = custom_labels();
         assert_eq!(Intent::RemoveCheckout.label(&labels), "Remove worktree");
-        assert_eq!(Intent::CreateCheckoutAndWorkspace.label(&labels), "Create worktree + workspace");
+        assert_eq!(Intent::CreateCheckout.label(&labels), "Create worktree");
         assert_eq!(Intent::OpenChangeRequest.label(&labels), "Open PR in browser");
         assert_eq!(Intent::LinkIssuesToChangeRequest.label(&labels), "Link issues to PR");
         assert_eq!(Intent::CloseChangeRequest.label(&labels), "Close PR");
@@ -469,7 +468,7 @@ mod tests {
         let labels = default_labels();
         assert!(Intent::SwitchToWorkspace.shortcut_hint(&labels).is_none());
         assert!(Intent::CreateWorkspace.shortcut_hint(&labels).is_none());
-        assert!(Intent::CreateCheckoutAndWorkspace.shortcut_hint(&labels).is_none());
+        assert!(Intent::CreateCheckout.shortcut_hint(&labels).is_none());
         assert!(Intent::GenerateBranchName.shortcut_hint(&labels).is_none());
         assert!(Intent::OpenIssue.shortcut_hint(&labels).is_none());
         assert!(Intent::LinkIssuesToChangeRequest.shortcut_hint(&labels).is_none());
@@ -489,7 +488,7 @@ mod tests {
             Intent::SwitchToWorkspace,
             Intent::CreateWorkspace,
             Intent::RemoveCheckout,
-            Intent::CreateCheckoutAndWorkspace,
+            Intent::CreateCheckout,
             Intent::GenerateBranchName,
             Intent::OpenChangeRequest,
             Intent::OpenIssue,
@@ -503,7 +502,7 @@ mod tests {
             Intent::SwitchToWorkspace => v,
             Intent::CreateWorkspace => v,
             Intent::RemoveCheckout => v,
-            Intent::CreateCheckoutAndWorkspace => v,
+            Intent::CreateCheckout => v,
             Intent::GenerateBranchName => v,
             Intent::OpenChangeRequest => v,
             Intent::OpenIssue => v,
@@ -533,7 +532,7 @@ mod tests {
             Intent::SwitchToWorkspace,
             Intent::TeleportSession,
             Intent::CreateWorkspace,
-            Intent::CreateCheckoutAndWorkspace,
+            Intent::CreateCheckout,
             Intent::GenerateBranchName,
         ];
         assert_eq!(Intent::enter_priority(), &expected);
@@ -545,7 +544,6 @@ mod tests {
     // ── resolve tests ──
     //
     // resolve() requires &App so we use the shared TUI test harness.
-    use std::sync::Arc;
 
     use flotilla_protocol::ProviderData;
 
@@ -582,15 +580,37 @@ mod tests {
 
     #[test]
     fn resolve_create_workspace() {
-        let app = stub_app();
+        let mut app = stub_app();
+        app.ui.target_host = Some(HostName::new("remote-a"));
         let item = checkout_item("feat/x", "/tmp/feat-x", false);
         let cmd = Intent::CreateWorkspace.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::CreateWorkspaceForCheckout { checkout_path }, .. } => {
+            Command { host, action: CommandAction::CreateWorkspaceForCheckout { checkout_path }, .. } => {
+                assert_eq!(host, None);
                 assert_eq!(checkout_path, PathBuf::from("/tmp/feat-x"))
             }
             other => panic!("expected CreateWorkspaceForCheckout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_create_workspace_on_remote_checkout_prepares_remote_terminal() {
+        let mut app = stub_app();
+        app.model.my_host = Some(HostName::local());
+        let mut item = checkout_item("feat/x", "/tmp/feat-x", false);
+        item.host = HostName::new("remote-a");
+        item.checkout =
+            Some(CheckoutRef { key: HostPath::new(HostName::new("remote-a"), PathBuf::from("/remote/feat-x")), is_main_checkout: false });
+
+        let cmd = Intent::CreateWorkspace.resolve(&item, &app).unwrap();
+
+        match cmd {
+            Command { host, action: CommandAction::PrepareTerminalForCheckout { checkout_path }, .. } => {
+                assert_eq!(host, Some(HostName::new("remote-a")));
+                assert_eq!(checkout_path, PathBuf::from("/remote/feat-x"));
+            }
+            other => panic!("expected PrepareTerminalForCheckout, got {other:?}"),
         }
     }
 
@@ -660,10 +680,11 @@ mod tests {
     fn resolve_create_worktree_and_workspace_remote_branch() {
         let app = stub_app();
         let item = remote_branch_item("feat/remote");
-        let cmd = Intent::CreateCheckoutAndWorkspace.resolve(&item, &app);
+        let cmd = Intent::CreateCheckout.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::Checkout { target, issue_ids, .. }, .. } => {
+            Command { action: CommandAction::Checkout { repo, target, issue_ids }, .. } => {
+                assert_eq!(repo, flotilla_protocol::RepoSelector::Identity(app.model.active_repo_identity().clone()));
                 assert_eq!(target, CheckoutTarget::Branch("feat/remote".into()));
                 assert!(issue_ids.is_empty());
             }
@@ -675,10 +696,11 @@ mod tests {
     fn resolve_create_worktree_and_workspace_pr_item() {
         let app = stub_app();
         let item = pr_item("42");
-        let cmd = Intent::CreateCheckoutAndWorkspace.resolve(&item, &app);
+        let cmd = Intent::CreateCheckout.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::Checkout { target, .. }, .. } => {
+            Command { action: CommandAction::Checkout { repo, target, .. }, .. } => {
+                assert_eq!(repo, flotilla_protocol::RepoSelector::Identity(app.model.active_repo_identity().clone()));
                 assert_eq!(target, CheckoutTarget::Branch("feat/pr-branch".into()));
             }
             other => panic!("expected CreateCheckout, got {other:?}"),
@@ -686,10 +708,21 @@ mod tests {
     }
 
     #[test]
+    fn resolve_create_worktree_and_workspace_uses_selected_target_host() {
+        let mut app = stub_app();
+        app.ui.target_host = Some(HostName::new("remote-a"));
+        let item = remote_branch_item("feat/remote");
+
+        let cmd = Intent::CreateCheckout.resolve(&item, &app).unwrap();
+
+        assert_eq!(cmd.host, Some(HostName::new("remote-a")));
+    }
+
+    #[test]
     fn resolve_create_worktree_and_workspace_session_item() {
         let app = stub_app();
         let item = session_item("sess-1");
-        let cmd = Intent::CreateCheckoutAndWorkspace.resolve(&item, &app);
+        let cmd = Intent::CreateCheckout.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
             Command { action: CommandAction::Checkout { target, .. }, .. } => {
@@ -703,7 +736,7 @@ mod tests {
     fn resolve_create_worktree_and_workspace_none_without_branch() {
         let app = stub_app();
         let item = bare_item(); // no branch
-        assert!(Intent::CreateCheckoutAndWorkspace.resolve(&item, &app).is_none());
+        assert!(Intent::CreateCheckout.resolve(&item, &app).is_none());
     }
 
     #[test]
@@ -714,7 +747,8 @@ mod tests {
         let cmd = Intent::GenerateBranchName.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::GenerateBranchName { issue_keys }, .. } => {
+            Command { context_repo, action: CommandAction::GenerateBranchName { issue_keys }, .. } => {
+                assert_eq!(context_repo, Some(flotilla_protocol::RepoSelector::Identity(app.model.active_repo_identity().clone())));
                 assert_eq!(issue_keys, vec!["42".to_string(), "43".to_string()]);
             }
             other => panic!("expected GenerateBranchName, got {other:?}"),
@@ -730,13 +764,35 @@ mod tests {
 
     #[test]
     fn resolve_open_pr() {
-        let app = stub_app();
-        let item = pr_item("123");
+        let mut app = stub_app();
+        app.model.my_host = Some(HostName::local());
+        app.ui.target_host = Some(HostName::new("remote-a"));
+        let mut item = pr_item("123");
+        item.host = HostName::new("remote-b");
         let cmd = Intent::OpenChangeRequest.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::OpenChangeRequest { id }, .. } => assert_eq!(id, "123"),
+            Command { host, action: CommandAction::OpenChangeRequest { id }, .. } => {
+                assert_eq!(host, None);
+                assert_eq!(id, "123");
+            }
             other => panic!("expected OpenChangeRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_open_pr_on_remote_only_repo_routes_to_remote_host_by_identity() {
+        let app = remote_only_app();
+        let mut item = pr_item("123");
+        item.host = HostName::new("desktop");
+        let cmd = Intent::OpenChangeRequest.resolve(&item, &app).expect("command");
+        match cmd {
+            Command { host, context_repo, action: CommandAction::OpenChangeRequest { id } } => {
+                assert_eq!(host, Some(HostName::new("desktop")));
+                assert_eq!(context_repo, Some(RepoSelector::Identity(app.model.active_repo_identity().clone())));
+                assert_eq!(id, "123");
+            }
+            other => panic!("expected remote OpenChangeRequest, got {other:?}"),
         }
     }
 
@@ -760,6 +816,23 @@ mod tests {
                 assert_eq!(id, "7");
             }
             other => panic!("expected OpenIssue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_open_issue_on_remote_only_repo_routes_to_remote_host_by_identity() {
+        let app = remote_only_app();
+        let mut item = bare_item();
+        item.host = HostName::new("desktop");
+        item.issue_keys = vec!["7".into(), "8".into()];
+        let cmd = Intent::OpenIssue.resolve(&item, &app).expect("command");
+        match cmd {
+            Command { host, context_repo, action: CommandAction::OpenIssue { id } } => {
+                assert_eq!(host, Some(HostName::new("desktop")));
+                assert_eq!(context_repo, Some(RepoSelector::Identity(app.model.active_repo_identity().clone())));
+                assert_eq!(id, "7");
+            }
+            other => panic!("expected remote OpenIssue, got {other:?}"),
         }
     }
 
@@ -815,8 +888,27 @@ mod tests {
         let cmd = Intent::ArchiveSession.resolve(&item, &app);
         assert!(cmd.is_some());
         match cmd.unwrap() {
-            Command { action: CommandAction::ArchiveSession { session_id }, .. } => assert_eq!(session_id, "sess-99"),
+            Command { host, action: CommandAction::ArchiveSession { session_id }, .. } => {
+                assert_eq!(host, None);
+                assert_eq!(session_id, "sess-99");
+            }
             other => panic!("expected ArchiveSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_archive_session_on_remote_only_repo_routes_to_remote_host_by_identity() {
+        let app = remote_only_app();
+        let mut item = session_item("sess-99");
+        item.host = HostName::new("desktop");
+        let cmd = Intent::ArchiveSession.resolve(&item, &app).expect("command");
+        match cmd {
+            Command { host, context_repo, action: CommandAction::ArchiveSession { session_id } } => {
+                assert_eq!(host, Some(HostName::new("desktop")));
+                assert_eq!(context_repo, Some(RepoSelector::Identity(app.model.active_repo_identity().clone())));
+                assert_eq!(session_id, "sess-99");
+            }
+            other => panic!("expected remote ArchiveSession, got {other:?}"),
         }
     }
 
@@ -866,6 +958,64 @@ mod tests {
         app
     }
 
+    fn remote_only_app() -> App {
+        let mut app = stub_app();
+        let old_path = PathBuf::from("/tmp/test-repo");
+        let synthetic_path = PathBuf::from("<remote>/desktop/home/dev/repo");
+        let old = app.model.repos.remove(&old_path).expect("default repo");
+        let model = TuiRepoModel {
+            identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            providers: old.providers,
+            labels: old.labels,
+            provider_names: old.provider_names,
+            provider_health: old.provider_health,
+            loading: old.loading,
+            issue_has_more: old.issue_has_more,
+            issue_total: old.issue_total,
+            issue_search_active: old.issue_search_active,
+            issue_fetch_pending: old.issue_fetch_pending,
+            issue_initial_requested: old.issue_initial_requested,
+        };
+        app.model.repo_order[0] = synthetic_path.clone();
+        app.model.repos.insert(synthetic_path, model);
+        app.model.my_host = Some(HostName::local());
+        app
+    }
+
+    fn remote_only_app_with_providers() -> App {
+        use flotilla_protocol::AssociationKey;
+
+        let mut app = remote_only_app();
+        let remote_host = HostName::new("desktop");
+        let checkout_path = HostPath::new(remote_host.clone(), PathBuf::from("/srv/repo.feat-x"));
+
+        let mut providers = flotilla_protocol::ProviderData::default();
+        providers.change_requests.insert("42".into(), ChangeRequest {
+            title: "Fix bug".into(),
+            branch: "feat/x".into(),
+            status: ChangeRequestStatus::Open,
+            body: None,
+            correlation_keys: vec![],
+            association_keys: vec![AssociationKey::IssueRef("gh".into(), "10".into())],
+            provider_name: String::new(),
+            provider_display_name: String::new(),
+        });
+        providers.checkouts.insert(checkout_path.clone(), Checkout {
+            branch: "feat/x".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![CorrelationKey::CheckoutPath(checkout_path)],
+            association_keys: vec![AssociationKey::IssueRef("gh".into(), "10".into()), AssociationKey::IssueRef("gh".into(), "20".into())],
+        });
+
+        let synthetic_path = PathBuf::from("<remote>/desktop/home/dev/repo");
+        app.model.repos.get_mut(&synthetic_path).expect("remote repo").providers = Arc::new(providers);
+        app
+    }
+
     #[test]
     fn resolve_link_issues_to_pr_returns_none_when_provider_data_missing() {
         // Even if the WorkItem has the right keys, resolve needs matching
@@ -900,6 +1050,29 @@ mod tests {
     }
 
     #[test]
+    fn resolve_link_issues_to_pr_on_remote_only_repo_routes_to_remote_host_by_identity() {
+        let app = remote_only_app_with_providers();
+
+        let mut item = checkout_item("feat/x", "/srv/repo.feat-x", false);
+        item.host = HostName::new("desktop");
+        item.checkout =
+            Some(CheckoutRef { key: HostPath::new(HostName::new("desktop"), PathBuf::from("/srv/repo.feat-x")), is_main_checkout: false });
+        item.change_request_key = Some("42".into());
+        item.issue_keys = vec!["10".into(), "20".into()];
+
+        let cmd = Intent::LinkIssuesToChangeRequest.resolve(&item, &app).expect("command");
+        match cmd {
+            Command { host, context_repo, action: CommandAction::LinkIssuesToChangeRequest { change_request_id, issue_ids } } => {
+                assert_eq!(host, Some(HostName::new("desktop")));
+                assert_eq!(context_repo, Some(RepoSelector::Identity(app.model.active_repo_identity().clone())));
+                assert_eq!(change_request_id, "42");
+                assert_eq!(issue_ids, vec!["20".to_string()]);
+            }
+            other => panic!("expected remote LinkIssuesToChangeRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn resolve_link_issues_to_pr_none_when_all_issues_already_linked() {
         // Checkout has only issue "10", which is already on the PR
         let app = app_with_pr_and_issues(&["10"]);
@@ -911,6 +1084,23 @@ mod tests {
         // All issues already linked -> returns None
         let cmd = Intent::LinkIssuesToChangeRequest.resolve(&item, &app);
         assert!(cmd.is_none());
+    }
+
+    #[test]
+    fn resolve_close_change_request_on_remote_only_repo_routes_to_remote_host_by_identity() {
+        let app = remote_only_app_with_providers();
+        let mut item = pr_item("42");
+        item.host = HostName::new("desktop");
+
+        let cmd = Intent::CloseChangeRequest.resolve(&item, &app).expect("command");
+        match cmd {
+            Command { host, context_repo, action: CommandAction::CloseChangeRequest { id } } => {
+                assert_eq!(host, Some(HostName::new("desktop")));
+                assert_eq!(context_repo, Some(RepoSelector::Identity(app.model.active_repo_identity().clone())));
+                assert_eq!(id, "42");
+            }
+            other => panic!("expected remote CloseChangeRequest, got {other:?}"),
+        }
     }
 
     // ── Combined availability scenario ──
@@ -936,7 +1126,7 @@ mod tests {
 
         // These should NOT be available
         assert!(!available.contains(&&Intent::CreateWorkspace)); // has workspace
-        assert!(!available.contains(&&Intent::CreateCheckoutAndWorkspace)); // has checkout
+        assert!(!available.contains(&&Intent::CreateCheckout)); // has checkout
         assert!(!available.contains(&&Intent::GenerateBranchName)); // has branch
     }
 
@@ -952,14 +1142,14 @@ mod tests {
     #[test]
     fn requires_local_host_true_for_filesystem_intents() {
         assert!(Intent::SwitchToWorkspace.requires_local_host());
-        assert!(Intent::CreateWorkspace.requires_local_host());
         assert!(Intent::RemoveCheckout.requires_local_host());
-        assert!(Intent::CreateCheckoutAndWorkspace.requires_local_host());
         assert!(Intent::TeleportSession.requires_local_host());
     }
 
     #[test]
     fn requires_local_host_false_for_non_filesystem_intents() {
+        assert!(!Intent::CreateWorkspace.requires_local_host());
+        assert!(!Intent::CreateCheckout.requires_local_host());
         assert!(!Intent::GenerateBranchName.requires_local_host());
         assert!(!Intent::OpenChangeRequest.requires_local_host());
         assert!(!Intent::OpenIssue.requires_local_host());
@@ -986,14 +1176,14 @@ mod tests {
         item.host = HostName::new("remote-host");
         let my_host = Some(HostName::local());
 
-        // Filesystem intents should be blocked
+        // Local-only filesystem intents should be blocked
         assert!(!Intent::SwitchToWorkspace.is_allowed_for_host(&item, &my_host));
-        assert!(!Intent::CreateWorkspace.is_allowed_for_host(&item, &my_host));
         assert!(!Intent::RemoveCheckout.is_allowed_for_host(&item, &my_host));
-        assert!(!Intent::CreateCheckoutAndWorkspace.is_allowed_for_host(&item, &my_host));
         assert!(!Intent::TeleportSession.is_allowed_for_host(&item, &my_host));
 
-        // Non-filesystem intents should be allowed
+        // Remote-executable intents should remain allowed
+        assert!(Intent::CreateWorkspace.is_allowed_for_host(&item, &my_host));
+        assert!(Intent::CreateCheckout.is_allowed_for_host(&item, &my_host));
         assert!(Intent::OpenChangeRequest.is_allowed_for_host(&item, &my_host));
         assert!(Intent::OpenIssue.is_allowed_for_host(&item, &my_host));
         assert!(Intent::GenerateBranchName.is_allowed_for_host(&item, &my_host));
@@ -1015,7 +1205,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_item_action_menu_excludes_filesystem_intents() {
+    fn remote_item_action_menu_excludes_local_only_intents() {
         // A rich remote item that would normally have many intents
         let mut item = checkout_item("feat/x", "/tmp/feat-x", false);
         item.host = HostName::new("remote-host");
@@ -1029,14 +1219,14 @@ mod tests {
         let available: Vec<_> =
             Intent::all_in_menu_order().iter().filter(|i| i.is_available(&item) && i.is_allowed_for_host(&item, &my_host)).collect();
 
-        // Filesystem intents should be excluded
+        // Local-only intents should be excluded
         assert!(!available.contains(&&Intent::SwitchToWorkspace));
         assert!(!available.contains(&&Intent::RemoveCheckout));
-        assert!(!available.contains(&&Intent::CreateWorkspace));
-        assert!(!available.contains(&&Intent::CreateCheckoutAndWorkspace));
+        assert!(!available.contains(&&Intent::CreateCheckout));
         assert!(!available.contains(&&Intent::TeleportSession));
 
-        // Non-filesystem intents should remain
+        // Remote-executable intents should remain. CreateWorkspace is not
+        // available here because the item already has a workspace.
         assert!(available.contains(&&Intent::OpenChangeRequest));
         assert!(available.contains(&&Intent::OpenIssue));
         assert!(available.contains(&&Intent::LinkIssuesToChangeRequest));

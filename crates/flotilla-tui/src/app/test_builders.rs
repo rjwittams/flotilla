@@ -124,8 +124,10 @@ pub fn remote_branch_item(branch: &str) -> WorkItem {
 }
 
 pub fn repo_info(path: impl Into<PathBuf>, name: impl Into<String>, labels: RepoLabels) -> RepoInfo {
+    let path = path.into();
     RepoInfo {
-        path: path.into(),
+        identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: path.display().to_string() },
+        path,
         name: name.into(),
         labels,
         provider_names: HashMap::new(),

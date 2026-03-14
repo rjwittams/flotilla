@@ -14,14 +14,18 @@ use std::{
 
 use async_trait::async_trait;
 use flotilla_core::{
-    config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::test_support::fake_discovery,
+    config::ConfigStore,
+    daemon::DaemonHandle,
+    in_process::InProcessDaemon,
+    providers::discovery::test_support::{fake_discovery, git_process_discovery, init_git_repo},
 };
 use flotilla_daemon::peer::{
     channel_transport_pair, merge::merge_provider_data, test_support::handle_test_peer_data, HandleResult, PeerConnectionStatus,
     PeerManager, PeerSender, PeerTransport,
 };
 use flotilla_protocol::{
-    Checkout, GoodbyeReason, HostName, HostPath, PeerDataKind, PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, VectorClock,
+    Checkout, CheckoutTarget, Command, CommandAction, CommandResult, DaemonEvent, GoodbyeReason, HostName, HostPath, PeerDataKind,
+    PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RepoSelector, VectorClock,
 };
 use indexmap::IndexMap;
 use tokio::sync::mpsc;
@@ -122,11 +126,39 @@ fn snapshot_msg(origin: &str, seq: u64, data: ProviderData) -> PeerDataMessage {
     }
 }
 
+async fn wait_for_command_result(rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>, command_id: u64) -> CommandResult {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::CommandFinished { command_id: finished_id, result, .. }) if finished_id == command_id => return result,
+                Ok(_) => {}
+                Err(e) => panic!("recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for command result")
+}
+
+async fn wait_for_local_checkout(daemon: &Arc<InProcessDaemon>, repo: &std::path::Path, branch: &str) -> ProviderData {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            daemon.refresh(repo).await.expect("refresh");
+            if let Some((providers, _)) = daemon.get_local_providers(repo).await {
+                if providers.checkouts.values().any(|checkout| checkout.branch == branch) {
+                    return providers;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("timeout waiting for local checkout providers")
+}
 async fn empty_daemon_with_host(temp: &tempfile::TempDir, host: &str) -> Arc<InProcessDaemon> {
     let config = Arc::new(ConfigStore::with_base(temp.path().join(format!("config-{host}"))));
     InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::new(host)).await
 }
-
 // ---------------------------------------------------------------------------
 // Test 1: PeerManager stores snapshot data and returns Updated
 // ---------------------------------------------------------------------------
@@ -277,6 +309,75 @@ async fn daemon_snapshot_has_correct_host_attribution() {
     for item in &snapshot.work_items {
         assert_eq!(item.host, HostName::local(), "work item {:?} should have local host attribution", item.identity);
     }
+}
+
+#[tokio::test]
+async fn remote_checkout_replication_attributes_checkout_to_follower_host() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let leader_repo = temp.path().join("leader-repo");
+    let follower_repo = temp.path().join("follower-repo");
+    init_git_repo(&leader_repo);
+    init_git_repo(&follower_repo);
+
+    let leader = InProcessDaemon::new(
+        vec![leader_repo.clone()],
+        Arc::new(ConfigStore::with_base(temp.path().join("leader-config"))),
+        git_process_discovery(false),
+        HostName::new("leader"),
+    )
+    .await;
+    let follower = InProcessDaemon::new(
+        vec![follower_repo.clone()],
+        Arc::new(ConfigStore::with_base(temp.path().join("follower-config"))),
+        git_process_discovery(false),
+        HostName::new("follower"),
+    )
+    .await;
+
+    leader.refresh(&leader_repo).await.expect("refresh leader");
+
+    let mut follower_rx = follower.subscribe();
+    let command_id = follower
+        .execute(Command {
+            host: None,
+            context_repo: None,
+            action: CommandAction::Checkout {
+                repo: RepoSelector::Path(follower_repo.clone()),
+                target: CheckoutTarget::FreshBranch("feat-remote".into()),
+                issue_ids: vec![],
+            },
+        })
+        .await
+        .expect("dispatch follower checkout");
+
+    let result = wait_for_command_result(&mut follower_rx, command_id).await;
+    assert!(
+        matches!(result, CommandResult::CheckoutCreated { ref branch, .. } if branch == "feat-remote"),
+        "expected checkout creation on follower, got {result:?}"
+    );
+
+    let follower_providers = wait_for_local_checkout(&follower, &follower_repo, "feat-remote").await;
+
+    leader.set_peer_providers(&leader_repo, vec![(HostName::new("follower"), follower_providers)]).await;
+
+    let snapshot = leader.get_state(&leader_repo).await.expect("leader state");
+    assert!(
+        snapshot
+            .providers
+            .checkouts
+            .iter()
+            .any(|(path, checkout)| path.host == HostName::new("follower") && checkout.branch == "feat-remote"),
+        "leader snapshot providers should include the follower checkout"
+    );
+    let checkout_item = snapshot
+        .work_items
+        .iter()
+        .find(|item| {
+            item.checkout_key().is_some_and(|path| path.host == HostName::new("follower")) && item.branch.as_deref() == Some("feat-remote")
+        })
+        .expect("replicated remote checkout");
+
+    assert_eq!(checkout_item.host, HostName::new("follower"));
 }
 
 // ---------------------------------------------------------------------------

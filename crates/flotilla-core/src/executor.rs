@@ -8,7 +8,9 @@ use std::{
     sync::Arc,
 };
 
-use flotilla_protocol::{CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, ManagedTerminalId};
+use flotilla_protocol::{
+    CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, HostName, HostPath, ManagedTerminalId, PreparedTerminalCommand,
+};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -36,6 +38,12 @@ pub enum ExecutionPlan {
     Steps(StepPlan),
 }
 
+#[derive(Clone)]
+pub struct RepoExecutionContext {
+    pub identity: flotilla_protocol::RepoIdentity,
+    pub root: PathBuf,
+}
+
 #[derive(Clone, Copy)]
 enum CheckoutIntent {
     ExistingBranch,
@@ -50,13 +58,13 @@ enum CheckoutIntent {
 /// `execute()` and return `ExecutionPlan::Immediate`.
 pub async fn build_plan(
     cmd: Command,
-    repo_root: PathBuf,
+    repo: RepoExecutionContext,
     registry: Arc<ProviderRegistry>,
     providers_data: Arc<ProviderData>,
     runner: Arc<dyn CommandRunner>,
     config_base: PathBuf,
+    local_host: HostName,
 ) -> ExecutionPlan {
-    let local_host = flotilla_protocol::HostName::local();
     let Command { action, .. } = cmd;
 
     match action {
@@ -65,29 +73,18 @@ pub async fn build_plan(
                 CheckoutTarget::Branch(branch) => (branch, false, CheckoutIntent::ExistingBranch),
                 CheckoutTarget::FreshBranch(branch) => (branch, true, CheckoutIntent::FreshBranch),
             };
-            build_create_checkout_plan(
-                branch,
-                create_branch,
-                intent,
-                issue_ids,
-                repo_root,
-                registry,
-                providers_data,
-                runner,
-                config_base,
-                local_host,
-            )
-            .await
+            build_create_checkout_plan(branch, create_branch, intent, issue_ids, repo.root, registry, providers_data, runner, local_host)
+                .await
         }
 
         CommandAction::TeleportSession { session_id, branch, checkout_key } => {
-            build_teleport_session_plan(session_id, branch, checkout_key, repo_root, registry, providers_data, config_base, local_host)
+            build_teleport_session_plan(session_id, branch, checkout_key, repo.root, registry, providers_data, config_base, local_host)
                 .await
         }
 
         CommandAction::RemoveCheckout { checkout, terminal_keys } => {
             match resolve_checkout_branch(&checkout, &providers_data, &local_host) {
-                Ok(branch) => build_remove_checkout_plan(branch, terminal_keys, repo_root, registry),
+                Ok(branch) => build_remove_checkout_plan(branch, terminal_keys, repo.root, registry),
                 Err(message) => ExecutionPlan::Immediate(CommandResult::Error { message }),
             }
         }
@@ -97,7 +94,7 @@ pub async fn build_plan(
         CommandAction::GenerateBranchName { issue_keys } => build_generate_branch_name_plan(issue_keys, registry, providers_data).await,
 
         action => {
-            let result = execute(action, &repo_root, &registry, &providers_data, &*runner, &config_base).await;
+            let result = execute(action, &repo, &registry, &providers_data, &*runner, &config_base, &local_host).await;
             ExecutionPlan::Immediate(result)
         }
     }
@@ -108,7 +105,6 @@ pub async fn build_plan(
 /// Steps:
 /// 1. Create the checkout (skipped if it already exists on the local host)
 /// 2. Link issues to the branch (skipped if no issue_ids)
-/// 3. Create workspace (reads checkout path from shared slot)
 #[allow(clippy::too_many_arguments)]
 async fn build_create_checkout_plan(
     branch: String,
@@ -119,7 +115,6 @@ async fn build_create_checkout_plan(
     registry: Arc<ProviderRegistry>,
     providers_data: Arc<ProviderData>,
     runner: Arc<dyn CommandRunner>,
-    config_base: PathBuf,
     local_host: flotilla_protocol::HostName,
 ) -> ExecutionPlan {
     // Shared slot for the checkout path — pre-populated if the checkout already exists.
@@ -180,34 +175,6 @@ async fn build_create_checkout_plan(
             action: Box::new(move || {
                 Box::pin(async move {
                     write_branch_issue_links(&repo_root, &branch, &issue_ids, &*runner).await;
-                    Ok(StepOutcome::Completed)
-                })
-            }),
-        });
-    }
-
-    // Step 3: Create workspace
-    {
-        let slot = Arc::clone(&checkout_path_slot);
-        let branch = branch.clone();
-        let repo_root = repo_root.clone();
-        let registry = Arc::clone(&registry);
-        let config_base = config_base.clone();
-        steps.push(Step {
-            description: "Create workspace".to_string(),
-            action: Box::new(move || {
-                Box::pin(async move {
-                    let checkout_path = slot.lock().await.clone().ok_or_else(|| "checkout path not available".to_string())?;
-                    if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await;
-                        if !already_exists {
-                            let mut config = workspace_config(&repo_root, &branch, &checkout_path, "claude", &config_base);
-                            if let Some((_, tp)) = &registry.terminal_pool {
-                                resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                            }
-                            ws_mgr.create_workspace(&config).await.map_err(|e| format!("workspace creation failed after checkout: {e}"))?;
-                        }
-                    }
                     Ok(StepOutcome::Completed)
                 })
             }),
@@ -476,23 +443,23 @@ async fn build_generate_branch_name_plan(
 /// should not reach this function — the caller should handle them directly.
 pub async fn execute(
     action: CommandAction,
-    repo_root: &Path,
+    repo: &RepoExecutionContext,
     registry: &ProviderRegistry,
     providers_data: &ProviderData,
     runner: &dyn CommandRunner,
     config_base: &Path,
+    local_host: &HostName,
 ) -> CommandResult {
-    let local_host = flotilla_protocol::HostName::local();
     match action {
         CommandAction::CreateWorkspaceForCheckout { checkout_path } => {
-            let host_key = flotilla_protocol::HostPath::new(local_host.clone(), checkout_path.clone());
+            let host_key = HostPath::new(local_host.clone(), checkout_path.clone());
             if let Some(co) = providers_data.checkouts.get(&host_key).cloned() {
                 info!(branch = %co.branch, "entering workspace");
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
                     if select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await {
                         return CommandResult::Ok;
                     }
-                    let mut config = workspace_config(repo_root, &co.branch, &checkout_path, "claude", config_base);
+                    let mut config = workspace_config(&repo.root, &co.branch, &checkout_path, "claude", config_base);
                     if let Some((_, tp)) = &registry.terminal_pool {
                         resolve_terminal_pool(&mut config, tp.as_ref()).await;
                     }
@@ -504,6 +471,25 @@ pub async fn execute(
             } else {
                 CommandResult::Error { message: format!("checkout not found: {}", checkout_path.display()) }
             }
+        }
+
+        CommandAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, commands } => {
+            if let Some((_, ws_mgr)) = &registry.workspace_manager {
+                let wrapped = match wrap_remote_attach_commands(&target_host, &checkout_path, &commands, config_base) {
+                    Ok(commands) => commands,
+                    Err(message) => return CommandResult::Error { message },
+                };
+                // The workspace itself is local to the presentation host, so its
+                // working directory only needs to be a valid local directory.
+                // The wrapped attach commands handle entering the remote checkout path.
+                let working_dir = local_workspace_directory(&repo.root, config_base);
+                let mut config = workspace_config(&repo.root, &branch, &working_dir, "claude", config_base);
+                config.resolved_commands = Some(wrapped.into_iter().map(|cmd| (cmd.role, cmd.command)).collect());
+                if let Err(e) = ws_mgr.create_workspace(&config).await {
+                    return CommandResult::Error { message: e };
+                }
+            }
+            CommandResult::Ok
         }
 
         CommandAction::SelectWorkspace { ws_ref } => {
@@ -521,12 +507,12 @@ pub async fn execute(
                 CheckoutTarget::Branch(branch) => (branch, false, CheckoutIntent::ExistingBranch),
                 CheckoutTarget::FreshBranch(branch) => (branch, true, CheckoutIntent::FreshBranch),
             };
-            if let Err(message) = validate_checkout_target(repo_root, &branch, intent, runner).await {
+            if let Err(message) = validate_checkout_target(&repo.root, &branch, intent, runner).await {
                 return CommandResult::Error { message };
             }
             info!(%branch, "creating checkout");
             let checkout_result = if let Some((_, cm)) = registry.checkout_managers.values().next() {
-                Some(cm.create_checkout(repo_root, &branch, create_branch).await)
+                Some(cm.create_checkout(&repo.root, &branch, create_branch).await)
             } else {
                 None
             };
@@ -534,24 +520,9 @@ pub async fn execute(
                 Some(Ok((checkout_path, _checkout))) => {
                     // Write issue links to git config
                     if !issue_ids.is_empty() {
-                        write_branch_issue_links(repo_root, &branch, &issue_ids, runner).await;
+                        write_branch_issue_links(&repo.root, &branch, &issue_ids, runner).await;
                     }
                     info!(checkout_path = %checkout_path.display(), "created checkout");
-                    // Create workspace if manager available
-                    if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                        let already_exists = select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await;
-                        if !already_exists {
-                            let mut config = workspace_config(repo_root, &branch, &checkout_path, "claude", config_base);
-                            if let Some((_, tp)) = &registry.terminal_pool {
-                                resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                            }
-                            if let Err(e) = ws_mgr.create_workspace(&config).await {
-                                // Checkout was created but workspace failed — report as error
-                                // but the checkout still exists
-                                error!(err = %e, "workspace creation failed after checkout");
-                            }
-                        }
-                    }
                     CommandResult::CheckoutCreated { branch: branch.clone(), path: checkout_path }
                 }
                 Some(Err(e)) => {
@@ -562,14 +533,32 @@ pub async fn execute(
             }
         }
 
+        CommandAction::PrepareTerminalForCheckout { checkout_path } => {
+            let host_key = HostPath::new(local_host.clone(), checkout_path.clone());
+            if let Some(co) = providers_data.checkouts.get(&host_key).cloned() {
+                match prepare_terminal_commands(&repo.root, &co.branch, &checkout_path, registry, config_base).await {
+                    Ok(commands) => CommandResult::TerminalPrepared {
+                        repo_identity: repo.identity.clone(),
+                        target_host: local_host.clone(),
+                        branch: co.branch,
+                        checkout_path,
+                        commands,
+                    },
+                    Err(message) => CommandResult::Error { message },
+                }
+            } else {
+                CommandResult::Error { message: format!("checkout not found: {}", checkout_path.display()) }
+            }
+        }
+
         CommandAction::RemoveCheckout { checkout, terminal_keys } => {
-            let branch = match resolve_checkout_branch(&checkout, providers_data, &local_host) {
+            let branch = match resolve_checkout_branch(&checkout, providers_data, local_host) {
                 Ok(branch) => branch,
                 Err(message) => return CommandResult::Error { message },
             };
             info!(%branch, "removing checkout");
             let result = if let Some((_, cm)) = registry.checkout_managers.values().next() {
-                Some(cm.remove_checkout(repo_root, &branch).await)
+                Some(cm.remove_checkout(&repo.root, &branch).await)
             } else {
                 None
             };
@@ -596,14 +585,14 @@ pub async fn execute(
 
         CommandAction::FetchCheckoutStatus { branch, checkout_path, change_request_id } => {
             let info =
-                data::fetch_checkout_status(&branch, checkout_path.as_deref(), change_request_id.as_deref(), repo_root, runner).await;
+                data::fetch_checkout_status(&branch, checkout_path.as_deref(), change_request_id.as_deref(), &repo.root, runner).await;
             CommandResult::CheckoutStatus(info)
         }
 
         CommandAction::OpenChangeRequest { id } => {
             debug!(%id, "opening change request in browser");
             if let Some((_, cr)) = registry.code_review.values().next() {
-                let _ = cr.open_in_browser(repo_root, &id).await;
+                let _ = cr.open_in_browser(&repo.root, &id).await;
             }
             CommandResult::Ok
         }
@@ -611,7 +600,7 @@ pub async fn execute(
         CommandAction::CloseChangeRequest { id } => {
             debug!(%id, "closing change request");
             if let Some((_, cr)) = registry.code_review.values().next() {
-                let _ = cr.close_change_request(repo_root, &id).await;
+                let _ = cr.close_change_request(&repo.root, &id).await;
             }
             CommandResult::Ok
         }
@@ -619,14 +608,14 @@ pub async fn execute(
         CommandAction::OpenIssue { id } => {
             debug!(%id, "opening issue in browser");
             if let Some((_, it)) = registry.issue_trackers.values().next() {
-                let _ = it.open_in_browser(repo_root, &id).await;
+                let _ = it.open_in_browser(&repo.root, &id).await;
             }
             CommandResult::Ok
         }
 
         CommandAction::LinkIssuesToChangeRequest { change_request_id, issue_ids } => {
             info!(issue_ids = ?issue_ids, %change_request_id, "linking issues to change request");
-            let body_result = run!(runner, "gh", &["pr", "view", &change_request_id, "--json", "body", "--jq", ".body",], repo_root,);
+            let body_result = run!(runner, "gh", &["pr", "view", &change_request_id, "--json", "body", "--jq", ".body",], &repo.root,);
             match body_result {
                 Ok(current_body) => {
                     let fixes_lines: Vec<String> = issue_ids.iter().map(|id| format!("Fixes #{id}")).collect();
@@ -635,7 +624,7 @@ pub async fn execute(
                     } else {
                         format!("{}\n\n{}", current_body.trim(), fixes_lines.join("\n"))
                     };
-                    let result = run!(runner, "gh", &["pr", "edit", &change_request_id, "--body", &new_body], repo_root,);
+                    let result = run!(runner, "gh", &["pr", "edit", &change_request_id, "--body", &new_body], &repo.root,);
                     match result {
                         Ok(_) => {
                             info!(%change_request_id, "linked issues to change request");
@@ -669,7 +658,7 @@ pub async fn execute(
                 providers_data.checkouts.get(&host_key).map(|_| key.clone())
             } else if let Some(branch_name) = &branch {
                 let checkout_result = if let Some((_, cm)) = registry.checkout_managers.values().next() {
-                    cm.create_checkout(repo_root, branch_name, false).await.ok()
+                    cm.create_checkout(&repo.root, branch_name, false).await.ok()
                 } else {
                     None
                 };
@@ -680,7 +669,7 @@ pub async fn execute(
             if let Some(path) = wt_path {
                 let name = branch.as_deref().unwrap_or("session");
                 if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                    let mut config = workspace_config(repo_root, name, &path, &teleport_cmd, config_base);
+                    let mut config = workspace_config(&repo.root, name, &path, &teleport_cmd, config_base);
                     if let Some((_, tp)) = &registry.terminal_pool {
                         resolve_terminal_pool(&mut config, tp.as_ref()).await;
                     }
@@ -864,6 +853,85 @@ async fn resolve_terminal_pool(config: &mut WorkspaceConfig, terminal_pool: &dyn
     }
 }
 
+async fn prepare_terminal_commands(
+    repo_root: &Path,
+    branch: &str,
+    checkout_path: &Path,
+    registry: &ProviderRegistry,
+    config_base: &Path,
+) -> Result<Vec<PreparedTerminalCommand>, String> {
+    let mut config = workspace_config(repo_root, branch, checkout_path, "claude", config_base);
+    if let Some((_, tp)) = &registry.terminal_pool {
+        resolve_terminal_pool(&mut config, tp.as_ref()).await;
+    }
+
+    let commands = if let Some(resolved) = config.resolved_commands { resolved } else { render_template_commands(&config) };
+
+    Ok(commands.into_iter().map(|(role, command)| PreparedTerminalCommand { role, command }).collect())
+}
+
+fn render_template_commands(config: &WorkspaceConfig) -> Vec<(String, String)> {
+    let tmpl = if let Some(ref yaml) = config.template_yaml {
+        serde_yml::from_str::<WorkspaceTemplate>(yaml).unwrap_or_else(|e| {
+            warn!(err = %e, "failed to parse workspace template, using default");
+            template::default_template()
+        })
+    } else {
+        template::default_template()
+    };
+
+    let rendered = tmpl.render(&config.template_vars);
+    let mut commands = Vec::new();
+    for entry in &rendered.content {
+        if entry.content_type != "terminal" {
+            continue;
+        }
+        let count = entry.count.unwrap_or(1);
+        for _ in 0..count {
+            commands.push((entry.role.clone(), entry.command.clone()));
+        }
+    }
+    commands
+}
+
+fn wrap_remote_attach_commands(
+    target_host: &HostName,
+    checkout_path: &Path,
+    commands: &[PreparedTerminalCommand],
+    config_base: &Path,
+) -> Result<Vec<PreparedTerminalCommand>, String> {
+    let ssh_target = remote_ssh_target(target_host, config_base)?;
+    let remote_dir = shell_quote(&checkout_path.display().to_string());
+    Ok(commands
+        .iter()
+        .map(|entry| {
+            let remote_shell = format!("cd {remote_dir} && {}", entry.command);
+            PreparedTerminalCommand {
+                role: entry.role.clone(),
+                command: format!("ssh -t {} {}", shell_quote(&ssh_target), shell_quote(&remote_shell)),
+            }
+        })
+        .collect())
+}
+
+fn remote_ssh_target(target_host: &HostName, config_base: &Path) -> Result<String, String> {
+    let config = crate::config::ConfigStore::with_base(config_base);
+    let hosts = config.load_hosts()?;
+    let remote = hosts
+        .hosts
+        .values()
+        .find(|host| host.expected_host_name == target_host.as_str())
+        .ok_or_else(|| format!("unknown remote host: {target_host}"))?;
+    Ok(match &remote.user {
+        Some(user) => format!("{user}@{}", remote.hostname),
+        None => remote.hostname.clone(),
+    })
+}
+
+fn shell_quote(input: &str) -> String {
+    format!("'{}'", input.replace('\'', "'\\''"))
+}
+
 fn session_provider_key<'a>(session: &'a CloudAgentSession, session_id: &str) -> Option<&'a str> {
     session.correlation_keys.iter().find_map(|k| match k {
         CorrelationKey::SessionRef(provider, id) if id == session_id => Some(provider.as_str()),
@@ -904,6 +972,19 @@ pub(crate) fn workspace_config(
         template_yaml,
         resolved_commands: None,
     }
+}
+
+fn local_workspace_directory(repo_root: &Path, config_base: &Path) -> PathBuf {
+    if repo_root.exists() {
+        return repo_root.to_path_buf();
+    }
+    if let Some(home) = dirs::home_dir() {
+        return home;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        return cwd;
+    }
+    config_base.to_path_buf()
 }
 
 /// Write branch-to-issue links into git config.
@@ -995,6 +1076,7 @@ mod tests {
         existing: Vec<(String, Workspace)>,
         create_result: tokio::sync::Mutex<Result<(), String>>,
         select_result: tokio::sync::Mutex<Result<(), String>>,
+        created_configs: tokio::sync::Mutex<Vec<WorkspaceConfig>>,
         calls: tokio::sync::Mutex<Vec<String>>,
     }
 
@@ -1004,6 +1086,7 @@ mod tests {
                 existing: vec![],
                 create_result: tokio::sync::Mutex::new(Ok(())),
                 select_result: tokio::sync::Mutex::new(Ok(())),
+                created_configs: tokio::sync::Mutex::new(Vec::new()),
                 calls: tokio::sync::Mutex::new(vec![]),
             }
         }
@@ -1013,6 +1096,7 @@ mod tests {
                 existing: vec![],
                 create_result: tokio::sync::Mutex::new(Err(msg.to_string())),
                 select_result: tokio::sync::Mutex::new(Err(msg.to_string())),
+                created_configs: tokio::sync::Mutex::new(Vec::new()),
                 calls: tokio::sync::Mutex::new(vec![]),
             }
         }
@@ -1022,6 +1106,7 @@ mod tests {
                 existing,
                 create_result: tokio::sync::Mutex::new(Ok(())),
                 select_result: tokio::sync::Mutex::new(Ok(())),
+                created_configs: tokio::sync::Mutex::new(Vec::new()),
                 calls: tokio::sync::Mutex::new(vec![]),
             }
         }
@@ -1034,6 +1119,7 @@ mod tests {
             Ok(self.existing.clone())
         }
         async fn create_workspace(&self, config: &WorkspaceConfig) -> Result<(String, Workspace), String> {
+            self.created_configs.lock().await.push(config.clone());
             self.calls.lock().await.push(format!("create_workspace:{}", config.name));
             let result = self.create_result.lock().await;
             match &*result {
@@ -1210,6 +1296,10 @@ mod tests {
         Command { host: None, context_repo: None, action }
     }
 
+    fn local_host() -> HostName {
+        HostName::local()
+    }
+
     fn fresh_checkout_action(branch: &str) -> CommandAction {
         CommandAction::Checkout { repo: repo_selector(), target: CheckoutTarget::FreshBranch(branch.to_string()), issue_ids: vec![] }
     }
@@ -1224,7 +1314,11 @@ mod tests {
         providers_data: &ProviderData,
         runner: &MockRunner,
     ) -> CommandResult {
-        execute(action, &repo_root(), registry, providers_data, runner, &config_base()).await
+        let repo = RepoExecutionContext {
+            identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            root: repo_root(),
+        };
+        execute(action, &repo, registry, providers_data, runner, &config_base(), &local_host()).await
     }
 
     fn assert_error_contains(result: CommandResult, expected_substring: &str) {
@@ -1361,6 +1455,76 @@ mod tests {
 
         assert_error_eq(result, "ws creation failed");
     }
+    #[tokio::test]
+    async fn prepare_terminal_for_checkout_returns_terminal_commands() {
+        let registry = empty_registry();
+        let mut data = empty_data();
+        let path = PathBuf::from("/repo/wt-feat");
+        data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
+        let runner = runner_ok();
+
+        let result =
+            run_execute(CommandAction::PrepareTerminalForCheckout { checkout_path: path.clone() }, &registry, &data, &runner).await;
+
+        match result {
+            CommandResult::TerminalPrepared { repo_identity, target_host, branch, checkout_path, commands } => {
+                assert_eq!(repo_identity, flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() });
+                assert_eq!(target_host, HostName::local());
+                assert_eq!(branch, "feat");
+                assert_eq!(checkout_path, path);
+                assert_eq!(commands, vec![PreparedTerminalCommand { role: "main".into(), command: "claude".into() }]);
+            }
+            other => panic!("expected TerminalPrepared, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_workspace_from_prepared_terminal_wraps_remote_commands_in_ssh() {
+        let workspace_manager = Arc::new(MockWorkspaceManager::succeeding());
+        let mut registry = empty_registry();
+        registry.workspace_manager = Some((desc("cmux"), Arc::clone(&workspace_manager) as Arc<dyn WorkspaceManager>));
+        let runner = runner_ok();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        std::fs::write(
+            temp.path().join("hosts.toml"),
+            "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
+        )
+        .expect("write hosts config");
+
+        let repo = RepoExecutionContext {
+            identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            root: repo_root.clone(),
+        };
+        let result = execute(
+            CommandAction::CreateWorkspaceFromPreparedTerminal {
+                target_host: HostName::new("desktop"),
+                branch: "feat".into(),
+                checkout_path: PathBuf::from("/remote/feat"),
+                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }],
+            },
+            &repo,
+            &registry,
+            &empty_data(),
+            &runner,
+            temp.path(),
+            &local_host(),
+        )
+        .await;
+
+        assert_ok(result);
+        let created = workspace_manager.created_configs.lock().await;
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].working_directory, repo_root);
+        let resolved = created[0].resolved_commands.as_ref().expect("resolved commands");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0, "main");
+        assert!(resolved[0].1.contains("ssh -t"));
+        assert!(resolved[0].1.contains("desktop.local"));
+        assert!(resolved[0].1.contains("/remote/feat"));
+        assert!(resolved[0].1.contains("bash -l"));
+    }
 
     #[tokio::test]
     async fn create_workspace_for_checkout_selects_existing_workspace() {
@@ -1384,11 +1548,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkout_action_selects_existing_workspace() {
+    async fn checkout_action_does_not_create_workspace() {
         let checkout_path = PathBuf::from("/repo/wt-feat-x");
-        let existing_workspace =
-            Workspace { name: "feat-x".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
-        let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:99".to_string(), existing_workspace)]));
+        let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:99".to_string(), Workspace {
+            name: "feat-x".to_string(),
+            directories: vec![checkout_path.clone()],
+            correlation_keys: vec![],
+        })]));
 
         let mut registry = empty_registry();
         registry
@@ -1401,8 +1567,52 @@ mod tests {
 
         assert_checkout_created_branch(result, "feat-x");
         let calls = ws_mgr.calls.lock().await;
-        assert!(calls.contains(&"select_workspace:workspace:99".to_string()), "should select existing workspace, got: {calls:?}");
-        assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace, got: {calls:?}");
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("list_workspaces") || c.starts_with("select_workspace") || c.starts_with("create_workspace")),
+            "checkout should not touch workspaces, got: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_workspace_from_prepared_terminal_uses_local_fallback_for_remote_only_repo() {
+        let workspace_manager = Arc::new(MockWorkspaceManager::succeeding());
+        let mut registry = empty_registry();
+        registry.workspace_manager = Some((desc("cmux"), Arc::clone(&workspace_manager) as Arc<dyn WorkspaceManager>));
+        let runner = runner_ok();
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("hosts.toml"),
+            "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
+        )
+        .expect("write hosts config");
+
+        let repo = RepoExecutionContext {
+            identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            root: PathBuf::from("<remote>/desktop/home/dev/repo"),
+        };
+        let result = execute(
+            CommandAction::CreateWorkspaceFromPreparedTerminal {
+                target_host: HostName::new("desktop"),
+                branch: "feat".into(),
+                checkout_path: PathBuf::from("/remote/feat"),
+                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }],
+            },
+            &repo,
+            &registry,
+            &empty_data(),
+            &runner,
+            temp.path(),
+            &local_host(),
+        )
+        .await;
+
+        assert_ok(result);
+        let created = workspace_manager.created_configs.lock().await;
+        assert_eq!(created.len(), 1);
+        assert!(!created[0].working_directory.to_string_lossy().starts_with("<remote>/"));
+        assert!(created[0].working_directory.exists(), "fallback working directory should exist");
     }
 
     #[tokio::test]
@@ -1439,7 +1649,6 @@ mod tests {
         assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "teleport should always create a new workspace, got: {calls:?}");
         assert!(!calls.iter().any(|c| c.starts_with("select_workspace")), "teleport should NOT select existing workspace, got: {calls:?}");
     }
-
     // -----------------------------------------------------------------------
     // Tests: SelectWorkspace
     // -----------------------------------------------------------------------
@@ -2177,7 +2386,19 @@ mod tests {
         providers_data: ProviderData,
         runner: MockRunner,
     ) -> ExecutionPlan {
-        build_plan(local_command(action), repo_root(), Arc::new(registry), Arc::new(providers_data), Arc::new(runner), config_base()).await
+        build_plan(
+            local_command(action),
+            RepoExecutionContext {
+                identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+                root: repo_root(),
+            },
+            Arc::new(registry),
+            Arc::new(providers_data),
+            Arc::new(runner),
+            config_base(),
+            local_host(),
+        )
+        .await
     }
 
     // -----------------------------------------------------------------------
@@ -2198,8 +2419,8 @@ mod tests {
 
         match plan {
             ExecutionPlan::Steps(step_plan) => {
-                // At least 2 steps: checkout + workspace
-                assert!(step_plan.steps.len() >= 2, "expected at least 2 steps, got {}", step_plan.steps.len());
+                assert_eq!(step_plan.steps.len(), 1, "checkout plans should only create the checkout in this batch");
+                assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
         }
@@ -2221,10 +2442,8 @@ mod tests {
 
         match plan {
             ExecutionPlan::Steps(step_plan) => {
-                // Still has steps (checkout step is present but will skip at runtime,
-                // workspace step is present). The plan is structurally the same;
-                // the skip happens when the step action runs.
-                assert!(step_plan.steps.len() >= 2, "expected at least 2 steps, got {}", step_plan.steps.len());
+                assert_eq!(step_plan.steps.len(), 1, "checkout plans should remain single-step even when the branch already exists");
+                assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
         }

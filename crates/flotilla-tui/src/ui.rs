@@ -327,7 +327,7 @@ fn status_bar_content(
             };
 
             let task = active_task(model, in_flight).map(|(description, spinner_index)| TaskSection::new(&description, spinner_index));
-            (status, normal_mode_key_chips(), task)
+            (status, normal_mode_key_chips(ui), task)
         }
         UiMode::Config => (
             StatusSection::plain("FLOTILLA"),
@@ -411,15 +411,23 @@ fn active_task(model: &TuiModel, in_flight: &HashMap<u64, InFlightCommand>) -> O
     Some((description, 0))
 }
 
-fn normal_mode_key_chips() -> Vec<KeyChip> {
+fn normal_mode_key_chips(ui: &UiState) -> Vec<KeyChip> {
     vec![
         key_chip(ENTER_KEY_GLYPH, "OPEN", KeyCode::Enter),
         key_chip(".", "MENU", KeyCode::Char('.')),
         key_chip("/", "SEARCH", KeyCode::Char('/')),
+        key_chip("h", &target_host_key_label(ui), KeyCode::Char('h')),
         key_chip("n", "NEW", KeyCode::Char('n')),
         key_chip("?", "HELP", KeyCode::Char('?')),
         key_chip("q", "QUIT", KeyCode::Char('q')),
     ]
+}
+
+fn target_host_key_label(ui: &UiState) -> String {
+    match ui.target_host.as_ref() {
+        Some(host) => format!("HOST {host}"),
+        None => "HOST LOCAL".into(),
+    }
 }
 
 fn key_chip(key: &str, label: &str, code: KeyCode) -> KeyChip {
@@ -1320,8 +1328,10 @@ fn render_event_log(ui: &mut UiState, frame: &mut Frame, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+    use flotilla_protocol::HostName;
+
     use super::*;
-    use crate::app::RepoViewLayout;
+    use crate::app::{RepoViewLayout, UiState};
 
     #[test]
     fn auto_layout_prefers_right_when_wide() {
@@ -1390,5 +1400,26 @@ mod tests {
         // 90x50: both viable, aspect_ratio = 1.8 (< 2.0) → Below
         let result = resolve_auto_preview_position(Rect::new(0, 0, 90, 50));
         assert_eq!(result, ResolvedPreviewPosition::Below);
+    }
+
+    #[test]
+    fn normal_mode_key_chips_show_local_target_host_by_default() {
+        let ui = UiState::new(&[]);
+
+        let host_chip =
+            normal_mode_key_chips(&ui).into_iter().find(|chip| chip.action == StatusBarAction::key(KeyCode::Char('h'))).expect("host chip");
+
+        assert_eq!(host_chip.label, "HOST LOCAL");
+    }
+
+    #[test]
+    fn normal_mode_key_chips_show_selected_remote_target_host() {
+        let mut ui = UiState::new(&[]);
+        ui.target_host = Some(HostName::new("alpha"));
+
+        let host_chip =
+            normal_mode_key_chips(&ui).into_iter().find(|chip| chip.action == StatusBarAction::key(KeyCode::Char('h'))).expect("host chip");
+
+        assert_eq!(host_chip.label, "HOST alpha");
     }
 }

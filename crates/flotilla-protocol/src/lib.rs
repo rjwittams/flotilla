@@ -33,7 +33,10 @@ pub(crate) mod test_helpers {
     }
 }
 
-pub use commands::{CheckoutSelector, CheckoutStatus, CheckoutTarget, Command, CommandAction, CommandResult, RepoSelector, StepStatus};
+pub use commands::{
+    CheckoutSelector, CheckoutStatus, CheckoutTarget, Command, CommandAction, CommandResult, PreparedTerminalCommand, RepoSelector,
+    StepStatus,
+};
 pub use delta::{Branch, BranchStatus, Change, DeltaEntry, EntryOp};
 pub use provider_data::{
     AheadBehind, AssociationKey, ChangeRequest, ChangeRequestStatus, Checkout, CloudAgentSession, CommitInfo, CorrelationKey, Issue,
@@ -143,15 +146,22 @@ pub enum DaemonEvent {
     #[serde(rename = "repo_added")]
     RepoAdded(Box<RepoInfo>),
     #[serde(rename = "repo_removed")]
-    RepoRemoved { path: std::path::PathBuf },
+    RepoRemoved { repo_identity: RepoIdentity, path: std::path::PathBuf },
     #[serde(rename = "command_started")]
-    CommandStarted { command_id: u64, host: HostName, repo: std::path::PathBuf, description: String },
+    CommandStarted { command_id: u64, host: HostName, repo_identity: RepoIdentity, repo: std::path::PathBuf, description: String },
     #[serde(rename = "command_finished")]
-    CommandFinished { command_id: u64, host: HostName, repo: std::path::PathBuf, result: commands::CommandResult },
+    CommandFinished {
+        command_id: u64,
+        host: HostName,
+        repo_identity: RepoIdentity,
+        repo: std::path::PathBuf,
+        result: commands::CommandResult,
+    },
     #[serde(rename = "command_step_update")]
     CommandStepUpdate {
         command_id: u64,
         host: HostName,
+        repo_identity: RepoIdentity,
         repo: std::path::PathBuf,
         step_index: usize,
         step_count: usize,
@@ -178,6 +188,7 @@ pub enum PeerConnectionState {
 pub struct SnapshotDelta {
     pub seq: u64,
     pub prev_seq: u64,
+    pub repo_identity: RepoIdentity,
     pub repo: std::path::PathBuf,
     pub changes: Vec<Change>,
     /// Pre-correlated work items from the daemon (avoids re-correlation on TUI side).
@@ -252,6 +263,7 @@ mod tests {
     fn message_event_snapshot_roundtrip() {
         let snapshot = Snapshot {
             seq: 7,
+            repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/my-repo".into() },
             repo: PathBuf::from("/tmp/my-repo"),
             host_name: HostName::new("test-host"),
             work_items: vec![WorkItem {
@@ -288,6 +300,7 @@ mod tests {
                 DaemonEvent::SnapshotFull(snap) => {
                     let snap = *snap;
                     assert_eq!(snap.seq, 7);
+                    assert_eq!(snap.repo_identity, RepoIdentity { authority: "github.com".into(), path: "owner/my-repo".into() });
                     assert_eq!(snap.repo, PathBuf::from("/tmp/my-repo"));
                     assert_eq!(snap.work_items.len(), 1);
                     assert_eq!(snap.work_items[0].branch.as_deref(), Some("feature-x"));
@@ -308,6 +321,7 @@ mod tests {
         let delta = SnapshotDelta {
             seq: 3,
             prev_seq: 2,
+            repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/my-repo".into() },
             repo: PathBuf::from("/tmp/my-repo"),
             changes: vec![
                 Change::Branch { key: "feat-x".into(), op: EntryOp::Added(Branch { status: BranchStatus::Remote }) },
@@ -326,6 +340,7 @@ mod tests {
                 DaemonEvent::SnapshotDelta(d) => {
                     assert_eq!(d.seq, 3);
                     assert_eq!(d.prev_seq, 2);
+                    assert_eq!(d.repo_identity, RepoIdentity { authority: "github.com".into(), path: "owner/my-repo".into() });
                     assert_eq!(d.repo, PathBuf::from("/tmp/my-repo"));
                     assert_eq!(d.changes.len(), 2);
                     assert_eq!(d.issue_total, Some(100));
@@ -388,15 +403,17 @@ mod tests {
         let event = DaemonEvent::CommandStarted {
             command_id: 42,
             host: HostName::new("desktop"),
+            repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
             repo: PathBuf::from("/tmp/repo"),
             description: "Creating checkout...".to_string(),
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let decoded: DaemonEvent = serde_json::from_str(&json).expect("deserialize");
         match decoded {
-            DaemonEvent::CommandStarted { command_id, host, repo, description } => {
+            DaemonEvent::CommandStarted { command_id, host, repo_identity, repo, description } => {
                 assert_eq!(command_id, 42);
                 assert_eq!(host, HostName::new("desktop"));
+                assert_eq!(repo_identity, RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() });
                 assert_eq!(repo, PathBuf::from("/tmp/repo"));
                 assert_eq!(description, "Creating checkout...");
             }
@@ -409,15 +426,17 @@ mod tests {
         let event = DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::new("desktop"),
+            repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
             repo: PathBuf::from("/tmp/repo"),
             result: CommandResult::CheckoutCreated { branch: "feat-x".into(), path: PathBuf::from("/tmp/repo/feat-x") },
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let decoded: DaemonEvent = serde_json::from_str(&json).expect("deserialize");
         match decoded {
-            DaemonEvent::CommandFinished { command_id, host, repo, result } => {
+            DaemonEvent::CommandFinished { command_id, host, repo_identity, repo, result } => {
                 assert_eq!(command_id, 42);
                 assert_eq!(host, HostName::new("desktop"));
+                assert_eq!(repo_identity, RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() });
                 assert_eq!(repo, PathBuf::from("/tmp/repo"));
                 match result {
                     CommandResult::CheckoutCreated { branch, path } => {
@@ -429,6 +448,26 @@ mod tests {
             }
             other => panic!("expected CommandFinished, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn snapshot_delta_roundtrip_preserves_repo_identity() {
+        let delta = SnapshotDelta {
+            seq: 2,
+            prev_seq: 1,
+            repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            repo: PathBuf::from("/tmp/repo"),
+            changes: vec![],
+            work_items: vec![],
+            issue_total: Some(12),
+            issue_has_more: true,
+            issue_search_results: None,
+        };
+
+        let json = serde_json::to_string(&delta).expect("serialize");
+        let decoded: SnapshotDelta = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.repo_identity, RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() });
+        assert_eq!(decoded.repo, PathBuf::from("/tmp/repo"));
     }
 
     #[test]

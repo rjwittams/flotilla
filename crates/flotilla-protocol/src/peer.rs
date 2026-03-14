@@ -108,6 +108,13 @@ pub enum RoutedPeerMessage {
         remaining_hops: u8,
         command: Box<crate::Command>,
     },
+    CommandCancelRequest {
+        cancel_id: u64,
+        requester_host: HostName,
+        target_host: HostName,
+        remaining_hops: u8,
+        command_request_id: u64,
+    },
     CommandEvent {
         request_id: u64,
         requester_host: HostName,
@@ -122,14 +129,21 @@ pub enum RoutedPeerMessage {
         remaining_hops: u8,
         result: Box<crate::CommandResult>,
     },
+    CommandCancelResponse {
+        cancel_id: u64,
+        requester_host: HostName,
+        responder_host: HostName,
+        remaining_hops: u8,
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum CommandPeerEvent {
-    Started { repo: PathBuf, description: String },
-    StepUpdate { repo: PathBuf, step_index: usize, step_count: usize, description: String, status: StepStatus },
-    Finished { repo: PathBuf, result: CommandResult },
+    Started { repo_identity: RepoIdentity, repo: PathBuf, description: String },
+    StepUpdate { repo_identity: RepoIdentity, repo: PathBuf, step_index: usize, step_count: usize, description: String, status: StepStatus },
+    Finished { repo_identity: RepoIdentity, repo: PathBuf, result: CommandResult },
 }
 
 /// The payload kind within a peer data exchange.
@@ -369,6 +383,29 @@ mod tests {
     }
 
     #[test]
+    fn routed_command_cancel_request_roundtrip() {
+        let msg = RoutedPeerMessage::CommandCancelRequest {
+            cancel_id: 7,
+            requester_host: HostName::new("workstation"),
+            target_host: HostName::new("feta"),
+            remaining_hops: 4,
+            command_request_id: 42,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let back: RoutedPeerMessage = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            RoutedPeerMessage::CommandCancelRequest { cancel_id, requester_host, target_host, remaining_hops, command_request_id } => {
+                assert_eq!(cancel_id, 7);
+                assert_eq!(requester_host, HostName::new("workstation"));
+                assert_eq!(target_host, HostName::new("feta"));
+                assert_eq!(remaining_hops, 4);
+                assert_eq!(command_request_id, 42);
+            }
+            other => panic!("expected CommandCancelRequest, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn routed_command_event_roundtrip() {
         let msg = RoutedPeerMessage::CommandEvent {
             request_id: 9,
@@ -376,6 +413,7 @@ mod tests {
             responder_host: HostName::new("feta"),
             remaining_hops: 5,
             event: Box::new(CommandPeerEvent::StepUpdate {
+                repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
                 repo: PathBuf::from("/repo"),
                 step_index: 1,
                 step_count: 3,
@@ -392,6 +430,7 @@ mod tests {
                 assert_eq!(responder_host, HostName::new("feta"));
                 assert_eq!(remaining_hops, 5);
                 assert_eq!(*event, CommandPeerEvent::StepUpdate {
+                    repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
                     repo: PathBuf::from("/repo"),
                     step_index: 1,
                     step_count: 3,
@@ -400,6 +439,29 @@ mod tests {
                 });
             }
             other => panic!("expected CommandEvent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn routed_command_cancel_response_roundtrip() {
+        let msg = RoutedPeerMessage::CommandCancelResponse {
+            cancel_id: 7,
+            requester_host: HostName::new("workstation"),
+            responder_host: HostName::new("feta"),
+            remaining_hops: 4,
+            error: Some("command not found".into()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let back: RoutedPeerMessage = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            RoutedPeerMessage::CommandCancelResponse { cancel_id, requester_host, responder_host, remaining_hops, error } => {
+                assert_eq!(cancel_id, 7);
+                assert_eq!(requester_host, HostName::new("workstation"));
+                assert_eq!(responder_host, HostName::new("feta"));
+                assert_eq!(remaining_hops, 4);
+                assert_eq!(error.as_deref(), Some("command not found"));
+            }
+            other => panic!("expected CommandCancelResponse, got {:?}", other),
         }
     }
 }

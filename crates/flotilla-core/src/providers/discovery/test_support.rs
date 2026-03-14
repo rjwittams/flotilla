@@ -7,26 +7,20 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
     sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
-use flotilla_protocol::{ChangeRequest, ChangeRequestStatus, Checkout, CorrelationKey, Issue, IssueChangeset, IssuePage};
+use flotilla_protocol::{ChangeRequest, ChangeRequestStatus, Checkout, CorrelationKey, Issue, IssueChangeset, IssuePage, RepoIdentity};
 use tokio::sync::Mutex as TokioMutex;
 
 use super::{DiscoveryRuntime, EnvironmentBag, Factory, FactoryRegistry, ProviderDescriptor, UnmetRequirement};
 use crate::{
     config::ConfigStore,
     providers::{
-        code_review::CodeReview,
-        discovery::{
-            detectors,
-            detectors::generic::{parse_first_dotted_version, CommandDetector},
-            EnvVars,
-        },
-        issue_tracker::IssueTracker,
-        vcs::CheckoutManager,
-        ChannelLabel, CommandOutput, CommandRunner,
+        code_review::CodeReview, discovery::EnvVars, issue_tracker::IssueTracker, vcs::CheckoutManager, ChannelLabel, CommandOutput,
+        CommandRunner,
     },
 };
 
@@ -63,6 +57,38 @@ impl DiscoveryMockRunner {
     pub fn exists_call_count(&self, cmd: &str) -> usize {
         self.exists_calls.lock().expect("lock poisoned").iter().filter(|(called, _)| called == cmd).count()
     }
+}
+
+pub fn init_git_repo(path: &Path) {
+    std::fs::create_dir_all(path).expect("create repo dir");
+    let status = ProcessCommand::new("git").args(["init", "--initial-branch=main"]).arg(path).status().expect("run git init");
+    assert!(status.success(), "git init should succeed");
+
+    let repo = path.to_str().expect("repo path utf8");
+    let status =
+        ProcessCommand::new("git").args(["-C", repo, "config", "user.name", "Flotilla Tests"]).status().expect("configure git user.name");
+    assert!(status.success(), "git config user.name should succeed");
+
+    let status = ProcessCommand::new("git")
+        .args(["-C", repo, "config", "user.email", "flotilla@example.com"])
+        .status()
+        .expect("configure git user.email");
+    assert!(status.success(), "git config user.email should succeed");
+
+    std::fs::write(path.join("README.md"), "hello\n").expect("write README");
+    let status = ProcessCommand::new("git").args(["-C", repo, "add", "README.md"]).status().expect("run git add");
+    assert!(status.success(), "git add should succeed");
+
+    let status = ProcessCommand::new("git").args(["-C", repo, "commit", "-m", "init"]).status().expect("run git commit");
+    assert!(status.success(), "git commit should succeed");
+}
+
+pub fn init_git_repo_with_remote(path: &Path, remote: &str) -> RepoIdentity {
+    init_git_repo(path);
+    let repo = path.to_str().expect("repo path utf8");
+    let status = ProcessCommand::new("git").args(["-C", repo, "remote", "add", "origin", remote]).status().expect("git remote add origin");
+    assert!(status.success(), "git remote add origin should succeed");
+    RepoIdentity::from_remote_url(remote).expect("remote should produce repo identity")
 }
 
 impl DiscoveryMockRunnerBuilder {
@@ -130,21 +156,35 @@ impl CommandRunner for DiscoveryMockRunner {
         self.tool_exists.get(cmd).copied().unwrap_or(false)
     }
 }
-
 /// Build a `DiscoveryRuntime` that uses no-op env and a minimal fake runner
 /// (only responds to `git --version`). Avoids probing ambient host tools.
 pub fn fake_discovery(follower: bool) -> super::DiscoveryRuntime {
-    let factories = if follower { FactoryRegistry::for_follower() } else { FactoryRegistry::default_all() };
+    minimal_discovery_runtime(
+        follower,
+        std::sync::Arc::new(DiscoveryMockRunner::builder().on_run("git", &["--version"], Ok("git version 2.43.0".into())).build()),
+    )
+}
 
+/// Build a `DiscoveryRuntime` that allows real git commands while still
+/// avoiding ambient host-tool probes like gh, Codex, Claude, or cmux.
+pub fn git_process_discovery(follower: bool) -> super::DiscoveryRuntime {
+    minimal_discovery_runtime(follower, std::sync::Arc::new(crate::providers::ProcessCommandRunner))
+}
+
+fn minimal_discovery_runtime(follower: bool, runner: std::sync::Arc<dyn CommandRunner>) -> super::DiscoveryRuntime {
+    let factories = if follower { super::FactoryRegistry::for_follower() } else { super::FactoryRegistry::default_all() };
     super::DiscoveryRuntime {
-        runner: Arc::new(DiscoveryMockRunner::builder().on_run("git", &["--version"], Ok("git version 2.43.0".into())).build()),
-        env: Arc::new(TestEnvVars::default()),
-        host_detectors: vec![Box::new(CommandDetector::new("git", &["--version"], parse_first_dotted_version))],
-        repo_detectors: detectors::default_repo_detectors(),
+        runner,
+        env: std::sync::Arc::new(TestEnvVars::default()),
+        host_detectors: vec![Box::new(super::detectors::generic::CommandDetector::new(
+            "git",
+            &["--version"],
+            super::detectors::generic::parse_first_dotted_version,
+        ))],
+        repo_detectors: super::detectors::default_repo_detectors(),
         factories,
     }
 }
-
 // ---------------------------------------------------------------------------
 // Fake providers for integration / E2E tests
 // ---------------------------------------------------------------------------
