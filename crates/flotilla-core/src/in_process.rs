@@ -1783,11 +1783,8 @@ impl DaemonHandle for InProcessDaemon {
             })
             .collect();
 
-        let unmet_requirements = state
-            .unmet
-            .iter()
-            .map(|(factory, req)| crate::convert::unmet_requirement_to_proto(factory, req))
-            .collect();
+        let unmet_requirements =
+            state.unmet.iter().map(|(factory, req)| crate::convert::unmet_requirement_to_proto(factory, req)).collect();
 
         Ok(RepoProvidersResponse {
             path,

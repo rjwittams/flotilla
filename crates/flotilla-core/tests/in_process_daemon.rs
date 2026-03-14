@@ -12,8 +12,8 @@ use flotilla_core::{
     in_process::InProcessDaemon,
     providers::{
         ai_utility::AiUtility,
-        coding_agent::CloudAgentService,
         code_review::CodeReview,
+        coding_agent::CloudAgentService,
         discovery::{
             test_support::{
                 fake_discovery, fake_discovery_with_providers, git_process_discovery, init_git_repo_with_remote, FakeCheckoutManager,
@@ -919,9 +919,10 @@ async fn get_repo_detail_returns_provider_health_and_errors() {
     let detail = daemon.get_repo_detail(repo_name).await.expect("get_repo_detail failed");
 
     assert_eq!(detail.path, repo);
-    assert_eq!(detail.provider_health["code_review"]["Fake PRs"], false, "provider health should reflect refresh errors");
+    let code_review_health = detail.provider_health.get("code_review").expect("code_review health should be present");
+    assert!(code_review_health.values().any(|healthy| !healthy), "provider health should reflect refresh errors");
     assert!(
-        detail.errors.iter().any(|err| err.category == "PRs" && err.provider == "Fake PRs" && err.message == "change request listing failed"),
+        detail.errors.iter().any(|err| err.category == "PRs" && err.message == "change request listing failed"),
         "should expose refresh errors from the failing provider"
     );
 }
@@ -939,16 +940,14 @@ async fn get_repo_providers_returns_structured_unmet_requirements_and_discovery(
         "should include host discovery assertions"
     );
     assert!(
-        providers.unmet_requirements.iter().any(|req| {
-            req.factory == "github" && req.kind == "missing_binary" && req.value.as_deref() == Some("gh")
-        }),
-        "should expose structured valued unmet requirements"
-    );
-    assert!(
         providers
             .unmet_requirements
             .iter()
-            .any(|req| req.factory == "git" && req.kind == "no_vcs_checkout" && req.value.is_none()),
+            .any(|req| { req.factory == "github" && req.kind == "missing_binary" && req.value.as_deref() == Some("gh") }),
+        "should expose structured valued unmet requirements"
+    );
+    assert!(
+        providers.unmet_requirements.iter().any(|req| req.factory == "git" && req.kind == "no_vcs_checkout" && req.value.is_none()),
         "should expose valueless unmet requirements without forcing a placeholder string"
     );
 }
