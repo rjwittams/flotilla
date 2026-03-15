@@ -123,19 +123,19 @@ impl ProviderRegistry {
     /// Category strings match the keys used in `compute_provider_health`.
     pub fn provider_infos(&self) -> Vec<(String, String)> {
         let mut infos = Vec::new();
-        fn collect<T: ?Sized>(infos: &mut Vec<(String, String)>, category: &str, set: &ProviderSet<T>) {
-            for name in set.display_names() {
-                infos.push((category.into(), name.to_string()));
+        fn collect<T: ?Sized>(infos: &mut Vec<(String, String)>, set: &ProviderSet<T>) {
+            for (desc, _) in set.iter() {
+                infos.push((desc.category.slug().to_string(), desc.display_name.clone()));
             }
         }
-        collect(&mut infos, "vcs", &self.vcs);
-        collect(&mut infos, "checkout_manager", &self.checkout_managers);
-        collect(&mut infos, "change_request", &self.change_requests);
-        collect(&mut infos, "issue_tracker", &self.issue_trackers);
-        collect(&mut infos, "cloud_agent", &self.cloud_agents);
-        collect(&mut infos, "ai_utility", &self.ai_utilities);
-        collect(&mut infos, "workspace_manager", &self.workspace_manager);
-        collect(&mut infos, "terminal_pool", &self.terminal_pool);
+        collect(&mut infos, &self.vcs);
+        collect(&mut infos, &self.checkout_managers);
+        collect(&mut infos, &self.change_requests);
+        collect(&mut infos, &self.issue_trackers);
+        collect(&mut infos, &self.cloud_agents);
+        collect(&mut infos, &self.ai_utilities);
+        collect(&mut infos, &self.workspace_manager);
+        collect(&mut infos, &self.terminal_pool);
         infos
     }
 }

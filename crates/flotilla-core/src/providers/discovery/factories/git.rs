@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use crate::{
     config::ConfigStore,
     providers::{
-        discovery::{EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement, VcsKind},
+        discovery::{EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement, VcsKind},
         vcs::{git::GitVcs, git_worktree::GitCheckoutManager, wt::WtCheckoutManager, CheckoutManager, Vcs},
         CommandRunner,
     },
@@ -24,7 +24,7 @@ impl Factory for GitVcsFactory {
     type Output = dyn Vcs;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("git", "Git", "", "", "")
+        ProviderDescriptor::labeled_simple(ProviderCategory::Vcs, "git", "Git", "", "", "")
     }
 
     async fn probe(
@@ -53,7 +53,7 @@ impl Factory for WtCheckoutManagerFactory {
     type Output = dyn CheckoutManager;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("wt", "wt", "CO", "Checkouts", "checkout")
+        ProviderDescriptor::labeled(ProviderCategory::CheckoutManager, "git", "wt", "wt", "CO", "Checkouts", "checkout")
     }
 
     async fn probe(
@@ -90,7 +90,7 @@ impl Factory for GitCheckoutManagerFactory {
     type Output = dyn CheckoutManager;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("git", "git worktrees", "WT", "Checkouts", "worktree")
+        ProviderDescriptor::labeled(ProviderCategory::CheckoutManager, "git", "git", "git worktrees", "WT", "Checkouts", "worktree")
     }
 
     async fn probe(
@@ -158,7 +158,8 @@ mod tests {
     #[tokio::test]
     async fn git_vcs_factory_descriptor() {
         let desc = GitVcsFactory.descriptor();
-        assert_eq!(desc.name, "git");
+        assert_eq!(desc.backend, "git");
+        assert_eq!(desc.implementation, "git");
         assert_eq!(desc.display_name, "Git");
     }
 
@@ -226,7 +227,8 @@ mod tests {
     #[tokio::test]
     async fn wt_factory_descriptor() {
         let desc = WtCheckoutManagerFactory.descriptor();
-        assert_eq!(desc.name, "wt");
+        assert_eq!(desc.backend, "git");
+        assert_eq!(desc.implementation, "wt");
         assert_eq!(desc.display_name, "wt");
         assert_eq!(desc.abbreviation, "CO");
         assert_eq!(desc.section_label, "Checkouts");
@@ -296,7 +298,8 @@ mod tests {
     #[tokio::test]
     async fn git_checkout_factory_descriptor() {
         let desc = GitCheckoutManagerFactory.descriptor();
-        assert_eq!(desc.name, "git");
+        assert_eq!(desc.backend, "git");
+        assert_eq!(desc.implementation, "git");
         assert_eq!(desc.display_name, "git worktrees");
         assert_eq!(desc.abbreviation, "WT");
         assert_eq!(desc.section_label, "Checkouts");

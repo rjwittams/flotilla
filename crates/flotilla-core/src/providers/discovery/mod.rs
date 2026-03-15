@@ -240,9 +240,51 @@ pub enum UnmetRequirement {
     NoVcsCheckout,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderCategory {
+    Vcs,
+    CheckoutManager,
+    ChangeRequest,
+    IssueTracker,
+    CloudAgent,
+    AiUtility,
+    WorkspaceManager,
+    TerminalPool,
+}
+
+impl ProviderCategory {
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Self::Vcs => "vcs",
+            Self::CheckoutManager => "checkout_manager",
+            Self::ChangeRequest => "change_request",
+            Self::IssueTracker => "issue_tracker",
+            Self::CloudAgent => "cloud_agent",
+            Self::AiUtility => "ai_utility",
+            Self::WorkspaceManager => "workspace_manager",
+            Self::TerminalPool => "terminal_pool",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Vcs => "VCS",
+            Self::CheckoutManager => "Checkout Manager",
+            Self::ChangeRequest => "Change Requests",
+            Self::IssueTracker => "Issue Tracker",
+            Self::CloudAgent => "Cloud Agent",
+            Self::AiUtility => "AI Utility",
+            Self::WorkspaceManager => "Workspace Manager",
+            Self::TerminalPool => "Terminal Pool",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderDescriptor {
-    pub name: String,
+    pub category: ProviderCategory,
+    pub backend: String,
+    pub implementation: String,
     pub display_name: String,
     pub abbreviation: String,
     pub section_label: String,
@@ -250,20 +292,52 @@ pub struct ProviderDescriptor {
 }
 
 impl ProviderDescriptor {
-    pub fn named(name: impl Into<String>) -> Self {
+    pub fn named(category: ProviderCategory, name: impl Into<String>) -> Self {
         let name = name.into();
-        Self { display_name: name.clone(), name, abbreviation: String::new(), section_label: String::new(), item_noun: String::new() }
+        Self {
+            category,
+            backend: name.clone(),
+            implementation: name.clone(),
+            display_name: name,
+            abbreviation: String::new(),
+            section_label: String::new(),
+            item_noun: String::new(),
+        }
     }
 
     pub fn labeled(
-        name: impl Into<String>,
+        category: ProviderCategory,
+        backend: impl Into<String>,
+        implementation: impl Into<String>,
         display_name: impl Into<String>,
         abbreviation: impl Into<String>,
         section_label: impl Into<String>,
         item_noun: impl Into<String>,
     ) -> Self {
         Self {
-            name: name.into(),
+            category,
+            backend: backend.into(),
+            implementation: implementation.into(),
+            display_name: display_name.into(),
+            abbreviation: abbreviation.into(),
+            section_label: section_label.into(),
+            item_noun: item_noun.into(),
+        }
+    }
+
+    pub fn labeled_simple(
+        category: ProviderCategory,
+        backend: impl Into<String>,
+        display_name: impl Into<String>,
+        abbreviation: impl Into<String>,
+        section_label: impl Into<String>,
+        item_noun: impl Into<String>,
+    ) -> Self {
+        let backend = backend.into();
+        Self {
+            category,
+            implementation: backend.clone(),
+            backend,
             display_name: display_name.into(),
             abbreviation: abbreviation.into(),
             section_label: section_label.into(),
@@ -411,7 +485,7 @@ pub async fn discover_providers(
             match factory.probe(env, config, repo_root, runner.clone()).await {
                 Ok(provider) => insert(factory.descriptor(), provider),
                 Err(reqs) => {
-                    let name = factory.descriptor().name.clone();
+                    let name = factory.descriptor().implementation.clone();
                     unmet.extend(reqs.into_iter().map(|r| (name.clone(), r)));
                 }
             }
@@ -430,7 +504,7 @@ pub async fn discover_providers(
             match factory.probe(env, config, repo_root, runner.clone()).await {
                 Ok(provider) => return Some((factory.descriptor(), provider)),
                 Err(reqs) => {
-                    let name = factory.descriptor().name.clone();
+                    let name = factory.descriptor().implementation.clone();
                     unmet.extend(reqs.into_iter().map(|r| (name.clone(), r)));
                 }
             }
@@ -439,33 +513,33 @@ pub async fn discover_providers(
     }
 
     probe_all(&factories.vcs, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
-        registry.vcs.insert(desc.name.clone(), desc, provider);
+        registry.vcs.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
     if let Some((desc, provider)) = probe_first(&factories.checkout_managers, &combined, config, repo_root, &runner, &mut unmet).await {
-        registry.checkout_managers.insert(desc.name.clone(), desc, provider);
+        registry.checkout_managers.insert(desc.implementation.clone(), desc, provider);
     }
     probe_all(&factories.change_requests, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
-        registry.change_requests.insert(desc.name.clone(), desc, provider);
+        registry.change_requests.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
     probe_all(&factories.issue_trackers, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
-        registry.issue_trackers.insert(desc.name.clone(), desc, provider);
+        registry.issue_trackers.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
     probe_all(&factories.cloud_agents, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
-        registry.cloud_agents.insert(desc.name.clone(), desc, provider);
+        registry.cloud_agents.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
     probe_all(&factories.ai_utilities, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
-        registry.ai_utilities.insert(desc.name.clone(), desc, provider);
+        registry.ai_utilities.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
     if let Some((desc, provider)) = probe_first(&factories.workspace_managers, &combined, config, repo_root, &runner, &mut unmet).await {
-        registry.workspace_manager.insert(desc.name.clone(), desc, provider);
+        registry.workspace_manager.insert(desc.implementation.clone(), desc, provider);
     }
     if let Some((desc, provider)) = probe_first(&factories.terminal_pools, &combined, config, repo_root, &runner, &mut unmet).await {
-        registry.terminal_pool.insert(desc.name.clone(), desc, provider);
+        registry.terminal_pool.insert(desc.implementation.clone(), desc, provider);
     }
 
     let repo_slug = combined.repo_slug();
@@ -614,8 +688,18 @@ mod tests {
 
     #[test]
     fn provider_descriptor_fields() {
-        let desc = ProviderDescriptor::labeled("github-cr", "GitHub PRs", "PR", "Pull Requests", "pull request");
-        assert_eq!(desc.name, "github-cr");
+        let desc = ProviderDescriptor::labeled(
+            ProviderCategory::ChangeRequest,
+            "github",
+            "github-cr",
+            "GitHub PRs",
+            "PR",
+            "Pull Requests",
+            "pull request",
+        );
+        assert_eq!(desc.category, ProviderCategory::ChangeRequest);
+        assert_eq!(desc.backend, "github");
+        assert_eq!(desc.implementation, "github-cr");
         assert_eq!(desc.display_name, "GitHub PRs");
         assert_eq!(desc.abbreviation, "PR");
         assert_eq!(desc.section_label, "Pull Requests");
@@ -624,12 +708,40 @@ mod tests {
 
     #[test]
     fn provider_descriptor_named_defaults_labels() {
-        let desc = ProviderDescriptor::named("claude");
-        assert_eq!(desc.name, "claude");
+        let desc = ProviderDescriptor::named(ProviderCategory::CloudAgent, "claude");
+        assert_eq!(desc.category, ProviderCategory::CloudAgent);
+        assert_eq!(desc.backend, "claude");
+        assert_eq!(desc.implementation, "claude");
         assert_eq!(desc.display_name, "claude");
         assert!(desc.abbreviation.is_empty());
         assert!(desc.section_label.is_empty());
         assert!(desc.item_noun.is_empty());
+    }
+
+    #[test]
+    fn provider_descriptor_labeled_simple() {
+        let desc = ProviderDescriptor::labeled_simple(ProviderCategory::IssueTracker, "github", "GitHub Issues", "#", "Issues", "issue");
+        assert_eq!(desc.category, ProviderCategory::IssueTracker);
+        assert_eq!(desc.backend, "github");
+        assert_eq!(desc.implementation, "github");
+        assert_eq!(desc.display_name, "GitHub Issues");
+    }
+
+    #[test]
+    fn provider_category_slug_round_trip() {
+        let categories = [
+            (ProviderCategory::Vcs, "vcs"),
+            (ProviderCategory::CheckoutManager, "checkout_manager"),
+            (ProviderCategory::ChangeRequest, "change_request"),
+            (ProviderCategory::IssueTracker, "issue_tracker"),
+            (ProviderCategory::CloudAgent, "cloud_agent"),
+            (ProviderCategory::AiUtility, "ai_utility"),
+            (ProviderCategory::WorkspaceManager, "workspace_manager"),
+            (ProviderCategory::TerminalPool, "terminal_pool"),
+        ];
+        for (cat, expected_slug) in categories {
+            assert_eq!(cat.slug(), expected_slug);
+        }
     }
 
     #[test]

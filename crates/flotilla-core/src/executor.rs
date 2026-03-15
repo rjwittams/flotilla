@@ -1064,12 +1064,19 @@ mod tests {
 
     use super::*;
     use crate::providers::{
-        ai_utility::AiUtility, change_request::ChangeRequestTracker, coding_agent::CloudAgentService, discovery::ProviderDescriptor,
-        issue_tracker::IssueTracker, testing::MockRunner, types::*, vcs::CheckoutManager, workspace::WorkspaceManager,
+        ai_utility::AiUtility,
+        change_request::ChangeRequestTracker,
+        coding_agent::CloudAgentService,
+        discovery::{ProviderCategory, ProviderDescriptor},
+        issue_tracker::IssueTracker,
+        testing::MockRunner,
+        types::*,
+        vcs::CheckoutManager,
+        workspace::WorkspaceManager,
     };
 
     fn desc(name: &str) -> ProviderDescriptor {
-        ProviderDescriptor::named(name)
+        ProviderDescriptor::named(ProviderCategory::Vcs, name)
     }
     use async_trait::async_trait;
     use flotilla_protocol::{HostName, HostPath, RepoSelector};

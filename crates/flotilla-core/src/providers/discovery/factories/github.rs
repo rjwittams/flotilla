@@ -8,7 +8,7 @@ use crate::{
     config::ConfigStore,
     providers::{
         change_request::{github::GitHubChangeRequest, ChangeRequestTracker},
-        discovery::{EnvironmentBag, Factory, HostPlatform, ProviderDescriptor, UnmetRequirement},
+        discovery::{EnvironmentBag, Factory, HostPlatform, ProviderCategory, ProviderDescriptor, UnmetRequirement},
         github_api::GhApiClient,
         issue_tracker::{github::GitHubIssueTracker, IssueTracker},
         CommandRunner,
@@ -42,7 +42,14 @@ impl Factory for GitHubChangeRequestFactory {
     type Output = dyn ChangeRequestTracker;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("github", "GitHub Pull Requests", "PR", "Pull Requests", "pull request")
+        ProviderDescriptor::labeled_simple(
+            ProviderCategory::ChangeRequest,
+            "github",
+            "GitHub Pull Requests",
+            "PR",
+            "Pull Requests",
+            "pull request",
+        )
     }
 
     async fn probe(
@@ -69,7 +76,7 @@ impl Factory for GitHubIssueTrackerFactory {
     type Output = dyn IssueTracker;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("github", "GitHub Issues", "#", "Issues", "issue")
+        ProviderDescriptor::labeled_simple(ProviderCategory::IssueTracker, "github", "GitHub Issues", "#", "Issues", "issue")
     }
 
     async fn probe(
@@ -170,7 +177,8 @@ mod tests {
     #[tokio::test]
     async fn github_change_request_factory_descriptor() {
         let desc = GitHubChangeRequestFactory.descriptor();
-        assert_eq!(desc.name, "github");
+        assert_eq!(desc.backend, "github");
+        assert_eq!(desc.implementation, "github");
         assert_eq!(desc.display_name, "GitHub Pull Requests");
         assert_eq!(desc.abbreviation, "PR");
         assert_eq!(desc.section_label, "Pull Requests");
@@ -229,7 +237,8 @@ mod tests {
     #[tokio::test]
     async fn github_issue_tracker_factory_descriptor() {
         let desc = GitHubIssueTrackerFactory.descriptor();
-        assert_eq!(desc.name, "github");
+        assert_eq!(desc.backend, "github");
+        assert_eq!(desc.implementation, "github");
         assert_eq!(desc.display_name, "GitHub Issues");
         assert_eq!(desc.abbreviation, "#");
         assert_eq!(desc.section_label, "Issues");

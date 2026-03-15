@@ -19,7 +19,7 @@ use flotilla_core::{
                 fake_discovery, fake_discovery_with_providers, git_process_discovery, init_git_repo_with_remote, FakeCheckoutManager,
                 FakeIssueTracker,
             },
-            DiscoveryRuntime, EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement,
+            DiscoveryRuntime, EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement,
         },
         types::{ChangeRequest, CloudAgentSession, RepoCriteria, SessionStatus},
     },
@@ -85,7 +85,7 @@ impl Factory for SlowCloudAgentFactory {
     type Output = dyn CloudAgentService;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("slow-agent", "Slow Agent", "AG", "Sessions", "session")
+        ProviderDescriptor::labeled_simple(ProviderCategory::CloudAgent, "slow-agent", "Slow Agent", "AG", "Sessions", "session")
     }
 
     async fn probe(
@@ -142,7 +142,7 @@ impl Factory for SlowAiUtilityFactory {
     type Output = dyn AiUtility;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::named("slow-ai")
+        ProviderDescriptor::named(ProviderCategory::AiUtility, "slow-ai")
     }
 
     async fn probe(

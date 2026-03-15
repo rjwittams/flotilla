@@ -9,7 +9,7 @@ use crate::{
     providers::{
         ai_utility::{claude_api::ClaudeApiAiUtility, claude_cli::ClaudeCliAiUtility, AiUtility},
         coding_agent::{claude::ClaudeCodingAgent, CloudAgentService},
-        discovery::{EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement},
+        discovery::{EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement},
         CommandRunner, ReqwestHttpClient,
     },
 };
@@ -25,7 +25,7 @@ impl Factory for ClaudeCodingAgentFactory {
     type Output = dyn CloudAgentService;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("claude", "Claude", "S", "Sessions", "session")
+        ProviderDescriptor::labeled_simple(ProviderCategory::CloudAgent, "claude", "Claude", "S", "Sessions", "session")
     }
 
     async fn probe(
@@ -55,7 +55,7 @@ impl Factory for ClaudeApiAiUtilityFactory {
     type Output = dyn AiUtility;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("claude-api", "Claude API", "", "", "")
+        ProviderDescriptor::labeled(ProviderCategory::AiUtility, "claude", "api", "Claude API", "", "", "")
     }
 
     async fn probe(
@@ -85,7 +85,7 @@ impl Factory for ClaudeCliAiUtilityFactory {
     type Output = dyn AiUtility;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("claude-cli", "Claude CLI", "", "", "")
+        ProviderDescriptor::labeled(ProviderCategory::AiUtility, "claude", "cli", "Claude CLI", "", "", "")
     }
 
     async fn probe(
@@ -152,7 +152,8 @@ mod tests {
     #[tokio::test]
     async fn claude_coding_agent_factory_descriptor() {
         let desc = ClaudeCodingAgentFactory.descriptor();
-        assert_eq!(desc.name, "claude");
+        assert_eq!(desc.backend, "claude");
+        assert_eq!(desc.implementation, "claude");
         assert_eq!(desc.display_name, "Claude");
         assert_eq!(desc.abbreviation, "S");
         assert_eq!(desc.section_label, "Sessions");
@@ -185,7 +186,8 @@ mod tests {
     #[tokio::test]
     async fn claude_api_ai_utility_factory_descriptor() {
         let desc = ClaudeApiAiUtilityFactory.descriptor();
-        assert_eq!(desc.name, "claude-api");
+        assert_eq!(desc.backend, "claude");
+        assert_eq!(desc.implementation, "api");
         assert_eq!(desc.display_name, "Claude API");
     }
 
@@ -215,7 +217,8 @@ mod tests {
     #[tokio::test]
     async fn claude_cli_ai_utility_factory_descriptor() {
         let desc = ClaudeCliAiUtilityFactory.descriptor();
-        assert_eq!(desc.name, "claude-cli");
+        assert_eq!(desc.backend, "claude");
+        assert_eq!(desc.implementation, "cli");
         assert_eq!(desc.display_name, "Claude CLI");
     }
 }

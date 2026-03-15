@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use flotilla_protocol::{ChangeRequest, ChangeRequestStatus, Checkout, CorrelationKey, Issue, IssueChangeset, IssuePage, RepoIdentity};
 use tokio::sync::Mutex as TokioMutex;
 
-use super::{DiscoveryRuntime, EnvironmentBag, Factory, FactoryRegistry, ProviderDescriptor, UnmetRequirement};
+use super::{DiscoveryRuntime, EnvironmentBag, Factory, FactoryRegistry, ProviderCategory, ProviderDescriptor, UnmetRequirement};
 use crate::{
     config::ConfigStore,
     providers::{
@@ -376,7 +376,7 @@ impl Factory for FakeIssueTrackerFactory {
     type Output = dyn IssueTracker;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("fake-issues", "Fake Issues", "#", "Issues", "issue")
+        ProviderDescriptor::labeled_simple(ProviderCategory::IssueTracker, "fake-issues", "Fake Issues", "#", "Issues", "issue")
     }
 
     async fn probe(
@@ -398,7 +398,14 @@ impl Factory for FakeCheckoutManagerFactory {
     type Output = dyn CheckoutManager;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("fake-checkouts", "Fake Checkouts", "CO", "Checkouts", "checkout")
+        ProviderDescriptor::labeled_simple(
+            ProviderCategory::CheckoutManager,
+            "fake-checkouts",
+            "Fake Checkouts",
+            "CO",
+            "Checkouts",
+            "checkout",
+        )
     }
 
     async fn probe(
@@ -420,7 +427,7 @@ impl Factory for FakeChangeRequestFactory {
     type Output = dyn ChangeRequestTracker;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("fake-cr", "Fake PRs", "PR", "Pull Requests", "pull request")
+        ProviderDescriptor::labeled_simple(ProviderCategory::ChangeRequest, "fake-cr", "Fake PRs", "PR", "Pull Requests", "pull request")
     }
 
     async fn probe(

@@ -246,22 +246,48 @@ async fn refresh_providers(
 }
 
 fn compute_provider_health(registry: &ProviderRegistry, errors: &[RefreshError]) -> HashMap<(&'static str, String), bool> {
+    use crate::providers::discovery::ProviderCategory;
+
     let mut health = HashMap::new();
 
-    insert_category_health(&mut health, errors, "cloud_agent", registry.cloud_agents.display_names().map(|s| s.to_string()), &["sessions"]);
-    insert_category_health(&mut health, errors, "change_request", registry.change_requests.display_names().map(|s| s.to_string()), &[
-        "PRs", "merged",
+    insert_category_health(
+        &mut health,
+        errors,
+        ProviderCategory::CloudAgent.slug(),
+        registry.cloud_agents.display_names().map(|s| s.to_string()),
+        &["sessions"],
+    );
+    insert_category_health(
+        &mut health,
+        errors,
+        ProviderCategory::ChangeRequest.slug(),
+        registry.change_requests.display_names().map(|s| s.to_string()),
+        &["PRs", "merged"],
+    );
+    insert_category_health(
+        &mut health,
+        errors,
+        ProviderCategory::CheckoutManager.slug(),
+        registry.checkout_managers.display_names().map(|s| s.to_string()),
+        &["checkouts"],
+    );
+    insert_category_health(&mut health, errors, ProviderCategory::Vcs.slug(), registry.vcs.display_names().map(|s| s.to_string()), &[
+        "branches",
     ]);
-    insert_category_health(&mut health, errors, "checkout_manager", registry.checkout_managers.display_names().map(|s| s.to_string()), &[
-        "checkouts",
-    ]);
-    insert_category_health(&mut health, errors, "vcs", registry.vcs.display_names().map(|s| s.to_string()), &["branches"]);
-    insert_category_health(&mut health, errors, "workspace_manager", registry.workspace_manager.display_names().map(|s| s.to_string()), &[
-        "workspaces",
-    ]);
-    insert_category_health(&mut health, errors, "terminal_pool", registry.terminal_pool.display_names().map(|s| s.to_string()), &[
-        "terminals",
-    ]);
+    insert_category_health(
+        &mut health,
+        errors,
+        ProviderCategory::WorkspaceManager.slug(),
+        registry.workspace_manager.display_names().map(|s| s.to_string()),
+        &["workspaces"],
+    );
+    insert_category_health(
+        &mut health,
+        errors,
+        ProviderCategory::TerminalPool.slug(),
+        registry.terminal_pool.display_names().map(|s| s.to_string()),
+        &["terminals"],
+    );
 
     health
 }
@@ -276,14 +302,14 @@ mod tests {
     use crate::providers::{
         change_request::ChangeRequestTracker,
         coding_agent::CloudAgentService,
-        discovery::ProviderDescriptor,
+        discovery::{ProviderCategory, ProviderDescriptor},
         types::*,
         vcs::{CheckoutManager, Vcs},
         workspace::WorkspaceManager,
     };
 
     fn desc(name: &str) -> ProviderDescriptor {
-        ProviderDescriptor::named(name)
+        ProviderDescriptor::named(ProviderCategory::Vcs, name)
     }
 
     struct MockCheckoutManager {

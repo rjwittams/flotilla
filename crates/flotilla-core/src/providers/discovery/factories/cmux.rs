@@ -13,14 +13,14 @@ use async_trait::async_trait;
 use crate::{
     config::ConfigStore,
     providers::{
-        discovery::{EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement},
+        discovery::{EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement},
         workspace::{cmux::CmuxWorkspaceManager, WorkspaceManager},
         CommandRunner,
     },
 };
 
 fn cmux_descriptor() -> ProviderDescriptor {
-    ProviderDescriptor::labeled("cmux", "cmux Workspaces", "", "", "")
+    ProviderDescriptor::labeled_simple(ProviderCategory::WorkspaceManager, "cmux", "cmux Workspaces", "", "", "")
 }
 
 /// Matches when running *inside* cmux (`CMUX_SOCKET_PATH` is set).
@@ -148,9 +148,10 @@ mod tests {
     async fn both_factories_share_descriptor() {
         let inside = CmuxInsideFactory.descriptor();
         let fallback = CmuxBinaryFallbackFactory.descriptor();
-        assert_eq!(inside.name, "cmux");
+        assert_eq!(inside.backend, "cmux");
+        assert_eq!(inside.implementation, "cmux");
         assert_eq!(inside.display_name, "cmux Workspaces");
-        assert_eq!(inside.name, fallback.name);
+        assert_eq!(inside.backend, fallback.backend);
         assert_eq!(inside.display_name, fallback.display_name);
     }
 }

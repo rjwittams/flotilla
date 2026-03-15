@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use crate::{
     config::{flotilla_config_dir, ConfigStore},
     providers::{
-        discovery::{EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement},
+        discovery::{EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement},
         terminal::{shpool::ShpoolTerminalPool, TerminalPool},
         CommandRunner,
     },
@@ -20,7 +20,7 @@ impl Factory for ShpoolTerminalPoolFactory {
     type Output = dyn TerminalPool;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::named("shpool")
+        ProviderDescriptor::named(ProviderCategory::TerminalPool, "shpool")
     }
 
     async fn probe(
@@ -74,7 +74,8 @@ mod tests {
     #[tokio::test]
     async fn shpool_factory_descriptor() {
         let desc = ShpoolTerminalPoolFactory.descriptor();
-        assert_eq!(desc.name, "shpool");
+        assert_eq!(desc.backend, "shpool");
+        assert_eq!(desc.implementation, "shpool");
         assert_eq!(desc.display_name, "shpool");
         assert_eq!(desc.abbreviation, "");
         assert_eq!(desc.section_label, "");

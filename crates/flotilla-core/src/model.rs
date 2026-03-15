@@ -36,20 +36,23 @@ pub fn labels_from_registry(registry: &ProviderRegistry) -> RepoLabels {
 pub fn provider_names_from_registry(registry: &ProviderRegistry) -> HashMap<String, Vec<String>> {
     let mut names: HashMap<String, Vec<String>> = HashMap::new();
 
-    fn collect_names<T: ?Sized>(names: &mut HashMap<String, Vec<String>>, key: impl Into<String>, set: &ProviderSet<T>) {
-        let list: Vec<String> = set.display_names().map(|s| s.to_string()).collect();
-        if !list.is_empty() {
-            names.insert(key.into(), list);
+    fn collect_names<T: ?Sized>(names: &mut HashMap<String, Vec<String>>, set: &ProviderSet<T>) {
+        if let Some((first_desc, _)) = set.iter().next() {
+            let slug = first_desc.category.slug().to_string();
+            let list: Vec<String> = set.display_names().map(|s| s.to_string()).collect();
+            if !list.is_empty() {
+                names.insert(slug, list);
+            }
         }
     }
-    collect_names(&mut names, "vcs", &registry.vcs);
-    collect_names(&mut names, "checkout_manager", &registry.checkout_managers);
-    collect_names(&mut names, "change_request", &registry.change_requests);
-    collect_names(&mut names, "issue_tracker", &registry.issue_trackers);
-    collect_names(&mut names, "cloud_agent", &registry.cloud_agents);
-    collect_names(&mut names, "ai_utility", &registry.ai_utilities);
-    collect_names(&mut names, "workspace_manager", &registry.workspace_manager);
-    collect_names(&mut names, "terminal_pool", &registry.terminal_pool);
+    collect_names(&mut names, &registry.vcs);
+    collect_names(&mut names, &registry.checkout_managers);
+    collect_names(&mut names, &registry.change_requests);
+    collect_names(&mut names, &registry.issue_trackers);
+    collect_names(&mut names, &registry.cloud_agents);
+    collect_names(&mut names, &registry.ai_utilities);
+    collect_names(&mut names, &registry.workspace_manager);
+    collect_names(&mut names, &registry.terminal_pool);
     names
 }
 
@@ -103,7 +106,7 @@ mod tests {
         ai_utility::AiUtility,
         change_request::ChangeRequestTracker,
         coding_agent::CloudAgentService,
-        discovery::ProviderDescriptor,
+        discovery::{ProviderCategory, ProviderDescriptor},
         issue_tracker::IssueTracker,
         types::{
             AheadBehind, BranchInfo, ChangeRequest, Checkout, CloudAgentSession, CommitInfo, Issue, WorkingTreeStatus, Workspace,
@@ -113,12 +116,19 @@ mod tests {
         workspace::WorkspaceManager,
     };
 
-    fn named_desc(name: &str) -> ProviderDescriptor {
-        ProviderDescriptor::named(name)
+    fn named_desc(category: ProviderCategory, name: &str) -> ProviderDescriptor {
+        ProviderDescriptor::named(category, name)
     }
 
-    fn labeled_desc(name: &str, display_name: &str, abbreviation: &str, section_label: &str, item_noun: &str) -> ProviderDescriptor {
-        ProviderDescriptor::labeled(name, display_name, abbreviation, section_label, item_noun)
+    fn labeled_desc(
+        category: ProviderCategory,
+        name: &str,
+        display_name: &str,
+        abbreviation: &str,
+        section_label: &str,
+        item_noun: &str,
+    ) -> ProviderDescriptor {
+        ProviderDescriptor::labeled_simple(category, name, display_name, abbreviation, section_label, item_noun)
     }
 
     // --- Stub providers for populating ProviderRegistry ---
@@ -230,17 +240,29 @@ mod tests {
     /// Build a ProviderRegistry with all provider slots populated.
     fn full_registry() -> ProviderRegistry {
         let mut reg = ProviderRegistry::new();
-        reg.vcs.insert("vcs", named_desc("StubVcs"), Arc::new(StubVcs));
-        reg.checkout_managers.insert("cm", labeled_desc("cm", "StubCM", "WT", "Checkouts", "worktree"), Arc::new(StubCheckoutManager));
+        reg.vcs.insert("vcs", named_desc(ProviderCategory::Vcs, "StubVcs"), Arc::new(StubVcs));
+        reg.checkout_managers.insert(
+            "cm",
+            labeled_desc(ProviderCategory::CheckoutManager, "cm", "StubCM", "WT", "Checkouts", "worktree"),
+            Arc::new(StubCheckoutManager),
+        );
         reg.change_requests.insert(
             "cr",
-            labeled_desc("cr", "StubCR", "PR", "Pull Requests", "pull request"),
+            labeled_desc(ProviderCategory::ChangeRequest, "cr", "StubCR", "PR", "Pull Requests", "pull request"),
             Arc::new(StubChangeRequestTracker),
         );
-        reg.issue_trackers.insert("it", labeled_desc("it", "StubIT", "#", "GitHub Issues", "issue"), Arc::new(StubIssueTracker));
-        reg.cloud_agents.insert("ca", labeled_desc("ca", "StubCA", "CS", "Cloud Agents", "session"), Arc::new(StubCloudAgent));
-        reg.ai_utilities.insert("ai", named_desc("StubAI"), Arc::new(StubAiUtility));
-        reg.workspace_manager.insert("wm", named_desc("StubWM"), Arc::new(StubWorkspaceManager));
+        reg.issue_trackers.insert(
+            "it",
+            labeled_desc(ProviderCategory::IssueTracker, "it", "StubIT", "#", "GitHub Issues", "issue"),
+            Arc::new(StubIssueTracker),
+        );
+        reg.cloud_agents.insert(
+            "ca",
+            labeled_desc(ProviderCategory::CloudAgent, "ca", "StubCA", "CS", "Cloud Agents", "session"),
+            Arc::new(StubCloudAgent),
+        );
+        reg.ai_utilities.insert("ai", named_desc(ProviderCategory::AiUtility, "StubAI"), Arc::new(StubAiUtility));
+        reg.workspace_manager.insert("wm", named_desc(ProviderCategory::WorkspaceManager, "StubWM"), Arc::new(StubWorkspaceManager));
         reg
     }
 
@@ -287,8 +309,16 @@ mod tests {
     fn labels_with_partial_registry() {
         // Only checkout_managers and coding_agents registered.
         let mut reg = ProviderRegistry::new();
-        reg.checkout_managers.insert("cm", labeled_desc("cm", "StubCM", "WT", "Checkouts", "worktree"), Arc::new(StubCheckoutManager));
-        reg.cloud_agents.insert("ca", labeled_desc("ca", "StubCA", "CS", "Cloud Agents", "session"), Arc::new(StubCloudAgent));
+        reg.checkout_managers.insert(
+            "cm",
+            labeled_desc(ProviderCategory::CheckoutManager, "cm", "StubCM", "WT", "Checkouts", "worktree"),
+            Arc::new(StubCheckoutManager),
+        );
+        reg.cloud_agents.insert(
+            "ca",
+            labeled_desc(ProviderCategory::CloudAgent, "ca", "StubCA", "CS", "Cloud Agents", "session"),
+            Arc::new(StubCloudAgent),
+        );
 
         let labels = labels_from_registry(&reg);
 
@@ -332,7 +362,7 @@ mod tests {
         let mut reg = ProviderRegistry::new();
         reg.change_requests.insert(
             "cr",
-            labeled_desc("cr", "StubCR", "PR", "Pull Requests", "pull request"),
+            labeled_desc(ProviderCategory::ChangeRequest, "cr", "StubCR", "PR", "Pull Requests", "pull request"),
             Arc::new(StubChangeRequestTracker),
         );
 

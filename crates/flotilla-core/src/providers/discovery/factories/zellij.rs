@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use crate::{
     config::ConfigStore,
     providers::{
-        discovery::{EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement},
+        discovery::{EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement},
         workspace::{zellij::ZellijWorkspaceManager, WorkspaceManager},
         CommandRunner,
     },
@@ -20,7 +20,7 @@ impl Factory for ZellijWorkspaceManagerFactory {
     type Output = dyn WorkspaceManager;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("zellij", "zellij Workspaces", "", "", "")
+        ProviderDescriptor::labeled_simple(ProviderCategory::WorkspaceManager, "zellij", "zellij Workspaces", "", "", "")
     }
 
     async fn probe(
@@ -110,7 +110,8 @@ mod tests {
     #[tokio::test]
     async fn zellij_factory_descriptor() {
         let desc = ZellijWorkspaceManagerFactory.descriptor();
-        assert_eq!(desc.name, "zellij");
+        assert_eq!(desc.backend, "zellij");
+        assert_eq!(desc.implementation, "zellij");
         assert_eq!(desc.display_name, "zellij Workspaces");
         assert_eq!(desc.abbreviation, "");
         assert_eq!(desc.section_label, "");

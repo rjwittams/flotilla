@@ -8,7 +8,7 @@ use crate::{
     config::ConfigStore,
     providers::{
         coding_agent::{codex::CodexCodingAgent, CloudAgentService},
-        discovery::{EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement},
+        discovery::{EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement},
         CommandRunner, ReqwestHttpClient,
     },
 };
@@ -24,7 +24,7 @@ impl Factory for CodexCodingAgentFactory {
     type Output = dyn CloudAgentService;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("codex", "Codex", "S", "Sessions", "session")
+        ProviderDescriptor::labeled_simple(ProviderCategory::CloudAgent, "codex", "Codex", "S", "Sessions", "session")
     }
 
     async fn probe(
@@ -85,7 +85,8 @@ mod tests {
     #[tokio::test]
     async fn codex_factory_descriptor() {
         let desc = CodexCodingAgentFactory.descriptor();
-        assert_eq!(desc.name, "codex");
+        assert_eq!(desc.backend, "codex");
+        assert_eq!(desc.implementation, "codex");
         assert_eq!(desc.display_name, "Codex");
         assert_eq!(desc.abbreviation, "S");
         assert_eq!(desc.section_label, "Sessions");
