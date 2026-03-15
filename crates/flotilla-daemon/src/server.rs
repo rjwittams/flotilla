@@ -14,6 +14,7 @@ use flotilla_protocol::{
     Command, CommandAction, CommandPeerEvent, CommandResult, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message,
     PeerConnectionState, PeerDataMessage, PeerWireMessage, ReplayCursor, RepoIdentity, RepoSelector, RoutedPeerMessage, PROTOCOL_VERSION,
 };
+use futures::future::join_all;
 use tokio::{
     io::{AsyncBufReadExt, BufReader, BufWriter},
     net::UnixListener,
@@ -422,12 +423,32 @@ fn spawn_peer_networking_runtime(
                 let peer_connected_tx_clone = peer_connected_tx_for_ssh.clone();
 
                 tokio::spawn(async move {
+                    let mut last_known_session_id: Option<uuid::Uuid> = None;
+
                     if let Some((generation, mut inbound_rx)) = initial_rx {
                         let _ = peer_connected_tx_clone.send(PeerConnectedNotice { peer: peer_name.clone(), generation });
-                        if !forward_until_closed(&tx, &mut inbound_rx, &peer_name, generation).await {
-                            return;
+                        last_known_session_id = {
+                            let pm_lock = pm.lock().await;
+                            pm_lock.peer_session_id(&peer_name)
+                        };
+                        let sender = {
+                            let pm_lock = pm.lock().await;
+                            pm_lock.get_sender_if_current(&peer_name, generation)
+                        };
+                        let forward_result = if let Some(sender) = sender {
+                            forward_with_keepalive(&tx, &mut inbound_rx, &peer_name, generation, sender).await
+                        } else {
+                            ForwardResult::Disconnected
+                        };
+                        match forward_result {
+                            ForwardResult::Shutdown => return,
+                            ForwardResult::Disconnected => {
+                                info!(peer = %peer_name, "SSH connection dropped, will reconnect");
+                            }
+                            ForwardResult::KeepaliveTimeout => {
+                                info!(peer = %peer_name, "keepalive timeout, forcing reconnect");
+                            }
                         }
-                        info!(peer = %peer_name, "SSH connection dropped, will reconnect");
                         let plan = disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
                         if plan.was_active {
                             daemon_for_cleanup.send_event(DaemonEvent::PeerStatusChanged {
@@ -464,16 +485,32 @@ fn spawn_peer_networking_runtime(
                         match reconnect_result {
                             Ok((generation, mut inbound_rx)) => {
                                 info!(peer = %peer_name, "reconnected successfully");
+                                last_known_session_id =
+                                    handle_remote_restart_if_needed(&pm, &daemon_for_cleanup, &peer_name, last_known_session_id).await;
                                 daemon_for_cleanup.send_event(DaemonEvent::PeerStatusChanged {
                                     host: peer_name.clone(),
                                     status: PeerConnectionState::Connected,
                                 });
                                 let _ = peer_connected_tx_clone.send(PeerConnectedNotice { peer: peer_name.clone(), generation });
                                 attempt = 1;
-                                if !forward_until_closed(&tx, &mut inbound_rx, &peer_name, generation).await {
-                                    return;
+                                let sender = {
+                                    let pm_lock = pm.lock().await;
+                                    pm_lock.get_sender_if_current(&peer_name, generation)
+                                };
+                                let forward_result = if let Some(sender) = sender {
+                                    forward_with_keepalive(&tx, &mut inbound_rx, &peer_name, generation, sender).await
+                                } else {
+                                    ForwardResult::Disconnected
+                                };
+                                match forward_result {
+                                    ForwardResult::Shutdown => return,
+                                    ForwardResult::Disconnected => {
+                                        info!(peer = %peer_name, "SSH connection dropped, will reconnect");
+                                    }
+                                    ForwardResult::KeepaliveTimeout => {
+                                        info!(peer = %peer_name, "keepalive timeout, forcing reconnect");
+                                    }
                                 }
-                                info!(peer = %peer_name, "SSH connection dropped, will reconnect");
                                 let plan = disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
                                 if plan.was_active {
                                     daemon_for_cleanup.send_event(DaemonEvent::PeerStatusChanged {
@@ -508,11 +545,11 @@ fn spawn_peer_networking_runtime(
                             }
                         };
 
-                        let mut pm = peer_manager_task.lock().await;
                         if let PeerWireMessage::Data(msg) = &env.msg {
-                            pm.relay(&origin, msg).await;
+                            relay_peer_data(&peer_manager_task, &origin, msg).await;
                         }
 
+                        let mut pm = peer_manager_task.lock().await;
                         match pm.handle_inbound(env).await {
                             HandleResult::Updated(ref updated_repo_id) => {
                                 let peers: Vec<(HostName, flotilla_protocol::ProviderData)> = pm
@@ -718,6 +755,59 @@ fn spawn_peer_networking_runtime(
     });
 
     (inbound_handle, peer_connected_tx)
+}
+
+async fn handle_remote_restart_if_needed(
+    peer_manager: &Arc<Mutex<PeerManager>>,
+    daemon: &Arc<InProcessDaemon>,
+    peer_name: &HostName,
+    last_known_session_id: Option<uuid::Uuid>,
+) -> Option<uuid::Uuid> {
+    let current_session_id = {
+        let pm_lock = peer_manager.lock().await;
+        pm_lock.peer_session_id(peer_name)
+    };
+
+    if let (Some(prev), Some(curr)) = (last_known_session_id, current_session_id) {
+        if prev != curr {
+            info!(peer = %peer_name, "remote daemon restarted (session_id changed), clearing stale data");
+            let affected_repos = {
+                let mut pm_lock = peer_manager.lock().await;
+                pm_lock.clear_peer_data_for_restart(peer_name)
+            };
+            if !affected_repos.is_empty() {
+                rebuild_peer_overlays(peer_manager, daemon, affected_repos).await;
+            }
+        }
+    }
+
+    current_session_id
+}
+
+async fn relay_peer_data(peer_manager: &Arc<Mutex<PeerManager>>, origin: &HostName, msg: &PeerDataMessage) {
+    let relay_targets = {
+        let pm = peer_manager.lock().await;
+        pm.prepare_relay(origin, msg)
+    };
+
+    if relay_targets.is_empty() {
+        return;
+    }
+
+    let sends = relay_targets.into_iter().map(|(name, sender, relayed_msg)| async move {
+        match tokio::time::timeout(Duration::from_secs(5), sender.send(PeerWireMessage::Data(relayed_msg))).await {
+            Ok(Ok(())) => {
+                debug!(to = %name, "relayed peer data");
+            }
+            Ok(Err(e)) => {
+                warn!(to = %name, err = %e, "relay send failed");
+            }
+            Err(_) => {
+                warn!(to = %name, "relay send timed out (5s)");
+            }
+        }
+    });
+    join_all(sends).await;
 }
 
 /// Rebuild daemon overlays for repo identities affected by peer disconnect or failover.
@@ -1226,23 +1316,79 @@ async fn send_local_to_peer(
     any_sent
 }
 
-/// Forward messages from an inbound receiver to the shared peer_data channel.
-///
-/// Returns `true` if the inbound receiver was closed (connection dropped),
-/// `false` if the outbound channel was closed (daemon shutting down).
-async fn forward_until_closed(
+enum ForwardResult {
+    Disconnected,
+    Shutdown,
+    KeepaliveTimeout,
+}
+
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Forward messages from an inbound receiver to the shared peer_data channel,
+/// with periodic keepalive pings and liveness timeout detection.
+async fn forward_with_keepalive(
     tx: &mpsc::Sender<InboundPeerEnvelope>,
     inbound_rx: &mut mpsc::Receiver<PeerWireMessage>,
     peer_name: &HostName,
     generation: u64,
-) -> bool {
-    while let Some(msg) = inbound_rx.recv().await {
-        if let Err(e) = tx.send(InboundPeerEnvelope { msg, connection_generation: generation, connection_peer: peer_name.clone() }).await {
-            warn!(peer = %peer_name, err = %e, "forwarding channel closed");
-            return false;
+    sender: Arc<dyn PeerSender>,
+) -> ForwardResult {
+    forward_with_keepalive_for_test(tx, inbound_rx, peer_name, generation, sender, PING_INTERVAL, KEEPALIVE_TIMEOUT).await
+}
+
+async fn forward_with_keepalive_for_test(
+    tx: &mpsc::Sender<InboundPeerEnvelope>,
+    inbound_rx: &mut mpsc::Receiver<PeerWireMessage>,
+    peer_name: &HostName,
+    generation: u64,
+    sender: Arc<dyn PeerSender>,
+    ping_interval_duration: Duration,
+    keepalive_timeout: Duration,
+) -> ForwardResult {
+    let mut ping_interval = tokio::time::interval_at(tokio::time::Instant::now() + ping_interval_duration, ping_interval_duration);
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_message_at = Instant::now();
+
+    loop {
+        tokio::select! {
+            msg = inbound_rx.recv() => {
+                match msg {
+                    Some(peer_msg) => {
+                        last_message_at = Instant::now();
+                        if matches!(&peer_msg, PeerWireMessage::Pong { .. }) {
+                            continue;
+                        }
+                        if let Err(e) = tx.send(InboundPeerEnvelope {
+                            msg: peer_msg,
+                            connection_generation: generation,
+                            connection_peer: peer_name.clone(),
+                        }).await {
+                            warn!(peer = %peer_name, err = %e, "forwarding channel closed");
+                            return ForwardResult::Shutdown;
+                        }
+                    }
+                    None => return ForwardResult::Disconnected,
+                }
+            }
+            _ = ping_interval.tick() => {
+                if last_message_at.elapsed() > keepalive_timeout {
+                    warn!(
+                        peer = %peer_name,
+                        elapsed_secs = last_message_at.elapsed().as_secs(),
+                        "keepalive timeout — no messages received in 90s"
+                    );
+                    return ForwardResult::KeepaliveTimeout;
+                }
+
+                let timestamp =
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                if let Err(e) = sender.send(PeerWireMessage::Ping { timestamp }).await {
+                    debug!(peer = %peer_name, err = %e, "failed to send keepalive ping");
+                }
+            }
         }
     }
-    true
 }
 
 /// Write a JSON message followed by a newline to the writer.
@@ -1756,6 +1902,29 @@ mod tests {
         }
 
         async fn retire(&self, reason: GoodbyeReason) -> Result<(), String> {
+            self.sent.lock().expect("lock").push(PeerWireMessage::Goodbye { reason });
+            Ok(())
+        }
+    }
+
+    struct BlockingPeerSender {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        sent: Arc<StdMutex<Vec<PeerWireMessage>>>,
+    }
+
+    #[async_trait]
+    impl PeerSender for BlockingPeerSender {
+        async fn send(&self, msg: PeerWireMessage) -> Result<(), String> {
+            self.started.notify_waiters();
+            self.release.notified().await;
+            self.sent.lock().expect("lock").push(msg);
+            Ok(())
+        }
+
+        async fn retire(&self, reason: GoodbyeReason) -> Result<(), String> {
+            self.started.notify_waiters();
+            self.release.notified().await;
             self.sent.lock().expect("lock").push(PeerWireMessage::Goodbye { reason });
             Ok(())
         }
@@ -2593,6 +2762,74 @@ mod tests {
         assert!(matches!(&sent[0], PeerWireMessage::HostSummary(summary) if summary.host_name == host_name));
     }
 
+    #[tokio::test]
+    async fn forward_with_keepalive_times_out_after_silence() {
+        let (peer_data_tx, _peer_data_rx) = mpsc::channel(4);
+        let (_inbound_tx, mut inbound_rx) = mpsc::channel(4);
+        let sent = Arc::new(StdMutex::new(Vec::new()));
+        let sender: Arc<dyn PeerSender> = Arc::new(CapturePeerSender { sent: Arc::clone(&sent) });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            forward_with_keepalive_for_test(
+                &peer_data_tx,
+                &mut inbound_rx,
+                &HostName::new("remote-host"),
+                1,
+                sender,
+                Duration::from_millis(10),
+                Duration::from_millis(30),
+            ),
+        )
+        .await
+        .expect("keepalive task should finish before the outer timeout");
+        assert!(matches!(result, ForwardResult::KeepaliveTimeout));
+        let sent = sent.lock().expect("lock");
+        assert!(sent.iter().any(|msg| matches!(msg, PeerWireMessage::Ping { .. })), "keepalive loop should send ping messages");
+    }
+
+    #[tokio::test]
+    async fn relay_peer_data_does_not_hold_peer_manager_lock_across_send() {
+        let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("leader"))));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let sent = Arc::new(StdMutex::new(Vec::new()));
+        let sender: Arc<dyn PeerSender> =
+            Arc::new(BlockingPeerSender { started: Arc::clone(&started), release: Arc::clone(&release), sent: Arc::clone(&sent) });
+
+        {
+            let mut pm = peer_manager.lock().await;
+            pm.register_sender(HostName::new("follower-b"), sender);
+        }
+
+        let msg = peer_snapshot(
+            "follower-a",
+            &RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            Path::new("/tmp/repo"),
+            "/tmp/repo",
+            "feature",
+        );
+        let started_wait = started.notified();
+
+        let relay_task = tokio::spawn({
+            let peer_manager = Arc::clone(&peer_manager);
+            async move {
+                relay_peer_data(&peer_manager, &HostName::new("follower-a"), &msg).await;
+            }
+        });
+
+        started_wait.await;
+        let _guard = tokio::time::timeout(Duration::from_millis(100), peer_manager.lock())
+            .await
+            .expect("peer manager lock should remain available while relay send is blocked");
+
+        release.notify_waiters();
+        relay_task.await.expect("relay task should finish");
+
+        let sent = sent.lock().expect("lock");
+        assert_eq!(sent.len(), 1, "relay should eventually send one message");
+    }
+
     #[test]
     fn should_send_local_version_dedupes_by_repo_identity() {
         let identity = RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() };
@@ -2604,6 +2841,123 @@ mod tests {
         // Different local roots for the same repo identity should share one dedup entry.
         assert!(!should_send_local_version(&last_sent_versions, &identity, 1));
         assert!(should_send_local_version(&last_sent_versions, &identity, 2));
+    }
+
+    #[tokio::test]
+    async fn handle_remote_restart_if_needed_clears_stale_remote_only_peer_state() {
+        let (_tmp, daemon) = empty_daemon().await;
+        let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
+        let repo_identity = RepoIdentity { authority: "github.com".into(), path: "owner/remote-only".into() };
+        let repo_path = PathBuf::from("/srv/remote-only");
+
+        {
+            let mut pm = peer_manager.lock().await;
+            assert_eq!(
+                handle_test_peer_data(
+                    &mut pm,
+                    peer_snapshot("peer-a", &repo_identity, &repo_path, "/srv/peer-a/remote-only", "feature-a"),
+                    || { Arc::new(SocketPeerSender { tx: tokio::sync::Mutex::new(None) }) as Arc<dyn PeerSender> },
+                )
+                .await,
+                crate::peer::HandleResult::Updated(repo_identity.clone())
+            );
+            assert_eq!(
+                handle_test_peer_data(
+                    &mut pm,
+                    peer_snapshot("peer-b", &repo_identity, &repo_path, "/srv/peer-b/remote-only", "feature-b"),
+                    || { Arc::new(SocketPeerSender { tx: tokio::sync::Mutex::new(None) }) as Arc<dyn PeerSender> },
+                )
+                .await,
+                crate::peer::HandleResult::Updated(repo_identity.clone())
+            );
+            pm.store_host_summary(flotilla_protocol::HostSummary {
+                host_name: HostName::new("peer-a"),
+                system: flotilla_protocol::SystemInfo {
+                    home_dir: None,
+                    os: None,
+                    arch: None,
+                    cpu_count: None,
+                    memory_total_mb: None,
+                    environment: flotilla_protocol::HostEnvironment::Unknown,
+                },
+                inventory: Default::default(),
+                providers: vec![],
+            });
+        }
+
+        let synthetic = crate::peer::synthetic_repo_path(&HostName::new("peer-a"), &repo_path);
+        let merged = {
+            let pm = peer_manager.lock().await;
+            let peers: Vec<(HostName, ProviderData)> = pm
+                .get_peer_data()
+                .iter()
+                .filter_map(|(host, repos)| repos.get(&repo_identity).map(|state| (host.clone(), state.provider_data.clone())))
+                .collect();
+            crate::peer::merge_provider_data(
+                &ProviderData::default(),
+                daemon.host_name(),
+                &peers.iter().map(|(h, d)| (h.clone(), d)).collect::<Vec<_>>(),
+            )
+        };
+        daemon.add_virtual_repo(repo_identity.clone(), synthetic.clone(), merged).await.expect("add virtual repo");
+        daemon
+            .set_peer_providers(&synthetic, vec![
+                (HostName::new("peer-a"), ProviderData {
+                    checkouts: IndexMap::from([(HostPath::new(HostName::new("peer-a"), "/srv/peer-a/remote-only"), checkout("feature-a"))]),
+                    ..Default::default()
+                }),
+                (HostName::new("peer-b"), ProviderData {
+                    checkouts: IndexMap::from([(HostPath::new(HostName::new("peer-b"), "/srv/peer-b/remote-only"), checkout("feature-b"))]),
+                    ..Default::default()
+                }),
+            ])
+            .await;
+        let old_session_id = uuid::Uuid::new_v4();
+        let new_session_id = uuid::Uuid::new_v4();
+        {
+            let mut pm = peer_manager.lock().await;
+            pm.register_remote_repo(repo_identity.clone(), synthetic.clone());
+            let peer = HostName::new("peer-a");
+            let previous_generation = pm.current_generation(&peer).expect("peer-a should already have an active test connection");
+            let second_sender: Arc<dyn PeerSender> = Arc::new(CapturePeerSender { sent: Arc::new(StdMutex::new(Vec::new())) });
+            match pm.activate_connection_with_session(
+                peer.clone(),
+                second_sender,
+                crate::peer::ConnectionMeta {
+                    direction: crate::peer::ConnectionDirection::Outbound,
+                    config_label: Some(ConfigLabel("peer-a".into())),
+                    expected_peer: Some(peer.clone()),
+                    config_backed: true,
+                },
+                Some(new_session_id),
+            ) {
+                crate::peer::ActivationResult::Accepted { displaced, .. } => {
+                    assert_eq!(displaced, Some(previous_generation));
+                }
+                crate::peer::ActivationResult::Rejected { reason } => panic!("expected accepted replacement connection, got {reason:?}"),
+            }
+        }
+
+        let current_session_id =
+            handle_remote_restart_if_needed(&peer_manager, &daemon, &HostName::new("peer-a"), Some(old_session_id)).await;
+
+        assert_eq!(current_session_id, Some(new_session_id), "current session id should update to the reconnected peer session");
+        let snapshot = daemon.get_state(&synthetic).await.expect("remote-only repo should remain");
+        assert!(
+            !snapshot.providers.checkouts.contains_key(&HostPath::new(HostName::new("peer-a"), "/srv/peer-a/remote-only")),
+            "restart cleanup should remove stale peer-a checkout"
+        );
+        assert_eq!(snapshot.providers.checkouts[&HostPath::new(HostName::new("peer-b"), "/srv/peer-b/remote-only")].branch, "feature-b");
+
+        let pm = peer_manager.lock().await;
+        assert!(
+            !pm.get_peer_data().get(&HostName::new("peer-a")).is_some_and(|repos| repos.contains_key(&repo_identity)),
+            "restart cleanup should clear stale cached repo data for the restarted peer"
+        );
+        assert!(
+            !pm.get_peer_host_summaries().contains_key(&HostName::new("peer-a")),
+            "restart cleanup should clear stale host summary for the restarted peer"
+        );
     }
 
     #[tokio::test]
