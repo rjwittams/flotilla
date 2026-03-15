@@ -1553,7 +1553,7 @@ impl DaemonHandle for InProcessDaemon {
                     description,
                 });
                 let result = match self.add_repo(path).await {
-                    Ok(()) => flotilla_protocol::CommandResult::RepoAdded { path: path.clone() },
+                    Ok(()) => flotilla_protocol::CommandResult::RepoTracked { path: path.clone(), resolved_from: None },
                     Err(message) => flotilla_protocol::CommandResult::Error { message },
                 };
                 let _ = self.event_tx.send(DaemonEvent::CommandFinished {
@@ -1578,7 +1578,7 @@ impl DaemonHandle for InProcessDaemon {
                     description,
                 });
                 let result = match self.remove_repo(&repo_path).await {
-                    Ok(()) => flotilla_protocol::CommandResult::RepoRemoved { path: repo_path.clone() },
+                    Ok(()) => flotilla_protocol::CommandResult::RepoUntracked { path: repo_path.clone() },
                     Err(message) => flotilla_protocol::CommandResult::Error { message },
                 };
                 let _ = self.event_tx.send(DaemonEvent::CommandFinished {

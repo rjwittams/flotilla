@@ -200,8 +200,8 @@ fn format_command_result(result: &flotilla_protocol::commands::CommandResult) ->
     use flotilla_protocol::commands::CommandResult;
     match result {
         CommandResult::Ok => "ok".to_string(),
-        CommandResult::RepoAdded { path } => format!("repo added: {}", path.display()),
-        CommandResult::RepoRemoved { path } => format!("repo removed: {}", path.display()),
+        CommandResult::RepoTracked { path, .. } => format!("repo added: {}", path.display()),
+        CommandResult::RepoUntracked { path } => format!("repo removed: {}", path.display()),
         CommandResult::Refreshed { repos } => format!("refreshed {} repo(s)", repos.len()),
         CommandResult::CheckoutCreated { branch, .. } => format!("checkout created: {branch}"),
         CommandResult::CheckoutRemoved { branch } => format!("checkout removed: {branch}"),
@@ -851,16 +851,16 @@ mod tests {
         }
 
         #[test]
-        fn repo_added() {
-            let result = CommandResult::RepoAdded { path: PathBuf::from("/tmp/my-repo") };
+        fn repo_tracked() {
+            let result = CommandResult::RepoTracked { path: PathBuf::from("/tmp/my-repo"), resolved_from: None };
             let output = format_command_result(&result);
             assert!(output.contains("repo added"), "should say repo added");
             assert!(output.contains("/tmp/my-repo"), "should include path");
         }
 
         #[test]
-        fn repo_removed() {
-            let result = CommandResult::RepoRemoved { path: PathBuf::from("/tmp/old-repo") };
+        fn repo_untracked() {
+            let result = CommandResult::RepoUntracked { path: PathBuf::from("/tmp/old-repo") };
             let output = format_command_result(&result);
             assert!(output.contains("repo removed"), "should say repo removed");
             assert!(output.contains("/tmp/old-repo"), "should include path");

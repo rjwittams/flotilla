@@ -167,10 +167,12 @@ impl Command {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CommandResult {
     Ok,
-    RepoAdded {
+    RepoTracked {
         path: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_from: Option<PathBuf>,
     },
-    RepoRemoved {
+    RepoUntracked {
         path: PathBuf,
     },
     Refreshed {
@@ -366,8 +368,8 @@ mod tests {
     fn command_result_roundtrip_covers_all_variants() {
         let cases = vec![
             CommandResult::Ok,
-            CommandResult::RepoAdded { path: PathBuf::from("/new/repo") },
-            CommandResult::RepoRemoved { path: PathBuf::from("/old/repo") },
+            CommandResult::RepoTracked { path: PathBuf::from("/new/repo"), resolved_from: None },
+            CommandResult::RepoUntracked { path: PathBuf::from("/old/repo") },
             CommandResult::Refreshed { repos: vec![PathBuf::from("/repo-a"), PathBuf::from("/repo-b")] },
             CommandResult::CheckoutCreated { branch: "feat-new".into(), path: PathBuf::from("/repos/project/wt-1") },
             CommandResult::CheckoutRemoved { branch: "feat-old".into() },

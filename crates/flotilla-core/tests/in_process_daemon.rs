@@ -704,7 +704,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     .await
     .expect("timeout waiting for add command events");
     let (finished_identity, finished_result) = finished_add;
-    assert!(matches!(finished_result, CommandResult::RepoAdded { path } if path == repo));
+    assert!(matches!(finished_result, CommandResult::RepoTracked { path, .. } if path == repo));
     assert_eq!(finished_identity, added.identity, "CommandFinished should use the tracked repo identity");
     assert_eq!(started_add, added.identity, "CommandStarted should use the tracked repo identity");
     assert_eq!(added.path, repo);
@@ -738,7 +738,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     })
     .await
     .expect("timeout waiting for remove command events");
-    assert!(matches!(finished_remove, CommandResult::RepoRemoved { path } if path == repo));
+    assert!(matches!(finished_remove, CommandResult::RepoUntracked { path } if path == repo));
     assert_eq!(removed, repo);
 
     let repos = daemon.list_repos().await.expect("list_repos after remove");
