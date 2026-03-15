@@ -929,7 +929,12 @@ fn wrap_remote_attach_commands(
     Ok(commands
         .iter()
         .map(|entry| {
-            let inner = format!("cd {} && {}", shell_quote(&remote_dir), entry.command);
+            let inner = if entry.command.is_empty() {
+                // Empty command = open a login shell at the remote directory
+                format!("cd {} && exec $SHELL -l", shell_quote(&remote_dir))
+            } else {
+                format!("cd {} && {}", shell_quote(&remote_dir), entry.command)
+            };
             let login_wrapped = format!("$SHELL -l -c \"{}\"", escape_for_double_quotes(&inner));
             PreparedTerminalCommand {
                 role: entry.role.clone(),
