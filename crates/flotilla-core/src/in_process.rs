@@ -1542,7 +1542,7 @@ impl DaemonHandle for InProcessDaemon {
         let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
 
         match &command.action {
-            flotilla_protocol::CommandAction::AddRepo { path } => {
+            flotilla_protocol::CommandAction::TrackRepoPath { path } => {
                 let repo_identity = self.detect_repo_identity(path).await;
                 let description = command.description().to_string();
                 let _ = self.event_tx.send(DaemonEvent::CommandStarted {
@@ -1565,7 +1565,7 @@ impl DaemonHandle for InProcessDaemon {
                 });
                 return Ok(id);
             }
-            flotilla_protocol::CommandAction::RemoveRepo { repo } => {
+            flotilla_protocol::CommandAction::UntrackRepo { repo } => {
                 let repo_path = self.resolve_repo_selector(repo).await?;
                 let repo_identity =
                     self.tracked_repo_identity_for_path(&repo_path).await.unwrap_or_else(|| fallback_repo_identity(&repo_path));

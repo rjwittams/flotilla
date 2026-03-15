@@ -73,7 +73,7 @@ impl App {
         if entry.is_git_repo && !entry.is_added {
             let path = PathBuf::from(format!("{}{}", base, entry.name));
             let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-            self.proto_commands.push(self.command(CommandAction::AddRepo { path: canonical }));
+            self.proto_commands.push(self.command(CommandAction::TrackRepoPath { path: canonical }));
             self.ui.mode = UiMode::Normal;
         } else if entry.is_dir {
             let new_path = format!("{}{}/", base, entry.name);
@@ -326,20 +326,20 @@ mod tests {
         // Mode should be Normal after adding a repo
         assert!(matches!(app.ui.mode, UiMode::Normal));
 
-        // Should have pushed an AddRepo command
+        // Should have pushed a TrackRepoPath command
         let (cmd, _) = app.proto_commands.take_next().expect("expected a command");
         match cmd {
-            Command { action: CommandAction::AddRepo { path }, .. } => {
+            Command { action: CommandAction::TrackRepoPath { path }, .. } => {
                 let canonical = std::fs::canonicalize(&repo_dir).unwrap();
                 assert_eq!(path, canonical);
             }
-            other => panic!("expected AddRepo, got {:?}", other),
+            other => panic!("expected TrackRepoPath, got {:?}", other),
         }
     }
 
     #[test]
     fn enter_on_added_git_repo_navigates_into_it() {
-        // When is_git_repo=true AND is_added=true, the code skips the AddRepo
+        // When is_git_repo=true AND is_added=true, the code skips the TrackRepoPath
         // branch and falls through to the is_dir branch, navigating into it.
         let tmp = tempfile::tempdir().unwrap();
         let sub = tmp.path().join("existing-repo");
@@ -361,7 +361,7 @@ mod tests {
             panic!("expected FilePicker mode");
         }
 
-        // No AddRepo command should have been pushed
+        // No TrackRepoPath command should have been pushed
         assert!(app.proto_commands.take_next().is_none());
     }
 

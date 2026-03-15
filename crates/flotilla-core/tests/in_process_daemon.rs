@@ -678,7 +678,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     let mut rx = daemon.subscribe();
 
     let add_id = daemon
-        .execute(Command { host: None, context_repo: None, action: CommandAction::AddRepo { path: repo.clone() } })
+        .execute(Command { host: None, context_repo: None, action: CommandAction::TrackRepoPath { path: repo.clone() } })
         .await
         .expect("add_repo command should return an id");
 
@@ -717,7 +717,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
         .execute(Command {
             host: None,
             context_repo: None,
-            action: CommandAction::RemoveRepo { repo: RepoSelector::Query("new-repo".into()) },
+            action: CommandAction::UntrackRepo { repo: RepoSelector::Query("new-repo".into()) },
         })
         .await
         .expect("remove_repo command should return an id");

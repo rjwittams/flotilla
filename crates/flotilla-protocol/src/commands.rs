@@ -105,10 +105,10 @@ pub enum CommandAction {
         branch: Option<String>,
         checkout_key: Option<PathBuf>,
     },
-    AddRepo {
+    TrackRepoPath {
         path: PathBuf,
     },
-    RemoveRepo {
+    UntrackRepo {
         repo: RepoSelector,
     },
     Refresh {
@@ -151,8 +151,8 @@ impl Command {
             CommandAction::ArchiveSession { .. } => "Archiving session...",
             CommandAction::GenerateBranchName { .. } => "Generating branch name...",
             CommandAction::TeleportSession { .. } => "Teleporting session...",
-            CommandAction::AddRepo { .. } => "Adding repository...",
-            CommandAction::RemoveRepo { .. } => "Removing repository...",
+            CommandAction::TrackRepoPath { .. } => "Adding repository...",
+            CommandAction::UntrackRepo { .. } => "Removing repository...",
             CommandAction::Refresh { .. } => "Refreshing...",
             CommandAction::SetIssueViewport { .. } => "Loading issues...",
             CommandAction::FetchMoreIssues { .. } => "Fetching issues...",
@@ -240,7 +240,7 @@ mod tests {
                 context_repo: None,
                 action: CommandAction::Refresh { repo: Some(RepoSelector::Query("flotilla".into())) },
             },
-            Command { host: None, context_repo: None, action: CommandAction::AddRepo { path: PathBuf::from("/repo") } },
+            Command { host: None, context_repo: None, action: CommandAction::TrackRepoPath { path: PathBuf::from("/repo") } },
             Command {
                 host: None,
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/repo"))),
@@ -254,7 +254,7 @@ mod tests {
             Command {
                 host: None,
                 context_repo: None,
-                action: CommandAction::RemoveRepo { repo: RepoSelector::Query("owner/repo".into()) },
+                action: CommandAction::UntrackRepo { repo: RepoSelector::Query("owner/repo".into()) },
             },
             Command {
                 host: None,
@@ -525,11 +525,11 @@ mod tests {
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/tmp"))),
                 action: CommandAction::TeleportSession { session_id: "s".into(), branch: None, checkout_key: None },
             },
-            Command { host: None, context_repo: None, action: CommandAction::AddRepo { path: PathBuf::from("/tmp") } },
+            Command { host: None, context_repo: None, action: CommandAction::TrackRepoPath { path: PathBuf::from("/tmp") } },
             Command {
                 host: None,
                 context_repo: None,
-                action: CommandAction::RemoveRepo { repo: RepoSelector::Path(PathBuf::from("/tmp")) },
+                action: CommandAction::UntrackRepo { repo: RepoSelector::Path(PathBuf::from("/tmp")) },
             },
             Command { host: None, context_repo: None, action: CommandAction::Refresh { repo: None } },
             Command {
