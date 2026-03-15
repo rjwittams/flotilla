@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextTransform {
     Uppercase,
-    Titlecase,
+    Capitalize,
     AsIs,
 }
 
@@ -16,7 +16,7 @@ impl TextTransform {
     pub fn apply(&self, text: &str) -> String {
         match self {
             Self::Uppercase => text.to_uppercase(),
-            Self::Titlecase => {
+            Self::Capitalize => {
                 let mut chars = text.chars();
                 match chars.next() {
                     None => String::new(),
@@ -299,14 +299,17 @@ impl Theme {
 // Theme registry
 // ---------------------------------------------------------------------------
 
-/// Returns the list of all built-in theme constructors.
-pub fn available_themes() -> &'static [fn() -> Theme] {
-    &[Theme::classic, Theme::catppuccin_mocha]
+/// A named theme constructor: `(name, constructor)`.
+pub type ThemeEntry = (&'static str, fn() -> Theme);
+
+/// Returns the list of all built-in themes as `(name, constructor)` pairs.
+pub fn available_themes() -> &'static [ThemeEntry] {
+    &[("classic", Theme::classic), ("catppuccin-mocha", Theme::catppuccin_mocha)]
 }
 
 /// Looks up a theme by name (case-insensitive). Falls back to `classic`.
 pub fn theme_by_name(name: &str) -> Theme {
-    available_themes().iter().map(|ctor| ctor()).find(|t| t.name.eq_ignore_ascii_case(name)).unwrap_or_else(Theme::classic)
+    available_themes().iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, ctor)| ctor()).unwrap_or_else(Theme::classic)
 }
 
 #[cfg(test)]
@@ -322,12 +325,12 @@ mod tests {
 
     #[test]
     fn text_transform_titlecase() {
-        assert_eq!(TextTransform::Titlecase.apply("hello world"), "Hello world");
+        assert_eq!(TextTransform::Capitalize.apply("hello world"), "Hello world");
     }
 
     #[test]
     fn text_transform_titlecase_empty() {
-        assert_eq!(TextTransform::Titlecase.apply(""), "");
+        assert_eq!(TextTransform::Capitalize.apply(""), "");
     }
 
     #[test]
@@ -424,7 +427,7 @@ mod tests {
     fn available_themes_length_and_names() {
         let themes = available_themes();
         assert_eq!(themes.len(), 2);
-        let names: Vec<&str> = themes.iter().map(|ctor| ctor().name).collect();
+        let names: Vec<&str> = themes.iter().map(|(name, _)| *name).collect();
         assert!(names.contains(&"classic"));
         assert!(names.contains(&"catppuccin-mocha"));
     }

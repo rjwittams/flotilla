@@ -249,6 +249,9 @@ async fn run_tui(cli: Cli) -> Result<()> {
 
     let theme_name = cli_theme.or_else(|| config.load_config().ui.theme.clone()).unwrap_or_else(|| "catppuccin-mocha".to_string());
     let initial_theme = theme::theme_by_name(&theme_name);
+    if !initial_theme.name.eq_ignore_ascii_case(&theme_name) {
+        tracing::warn!(requested = %theme_name, using = %initial_theme.name, "unknown theme, falling back");
+    }
 
     let repos_info = daemon.list_repos().await.unwrap_or_default();
     let app = app::App::new(daemon.clone(), repos_info, Arc::clone(&config), initial_theme);

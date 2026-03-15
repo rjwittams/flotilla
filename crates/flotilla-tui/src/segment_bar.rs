@@ -1,7 +1,7 @@
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::theme::Theme;
+use crate::theme::{BarSiteStyle, Theme};
 
 /// Client-provided data for one segment in a bar.
 pub struct SegmentItem {
@@ -123,7 +123,7 @@ impl BarStyle for ThemedTabBarStyle<'_> {
 /// Theme-aware ribbon style with chevron-delimited key chips.
 pub struct ThemedRibbonStyle<'a> {
     pub theme: &'a Theme,
-    pub site: &'a crate::theme::BarSiteStyle,
+    pub site: &'a BarSiteStyle,
 }
 
 impl BarStyle for ThemedRibbonStyle<'_> {

@@ -9,7 +9,7 @@ use super::{
     ui_state::{FocusTarget, PendingActionContext},
     App, BranchInputKind, ClearDispatch, Intent, UiMode,
 };
-use crate::status_bar::StatusBarAction;
+use crate::{status_bar::StatusBarAction, theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
@@ -273,11 +273,11 @@ impl App {
                 }
             }
             Action::CycleTheme => {
-                let themes = crate::theme::available_themes();
+                let themes = theme::available_themes();
                 let current = self.theme.name;
-                let idx = themes.iter().position(|f| (f)().name == current).unwrap_or(0);
+                let idx = themes.iter().position(|(name, _)| *name == current).unwrap_or(0);
                 let next = (idx + 1) % themes.len();
-                self.theme = (themes[next])();
+                self.theme = (themes[next].1)();
             }
             Action::OpenActionMenu => {
                 if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
