@@ -51,8 +51,8 @@ pub fn provider_names_from_registry(registry: &ProviderRegistry) -> HashMap<Stri
     collect_names(&mut names, &registry.issue_trackers);
     collect_names(&mut names, &registry.cloud_agents);
     collect_names(&mut names, &registry.ai_utilities);
-    collect_names(&mut names, &registry.workspace_manager);
-    collect_names(&mut names, &registry.terminal_pool);
+    collect_names(&mut names, &registry.workspace_managers);
+    collect_names(&mut names, &registry.terminal_pools);
     names
 }
 
@@ -262,7 +262,7 @@ mod tests {
             Arc::new(StubCloudAgent),
         );
         reg.ai_utilities.insert("ai", named_desc(ProviderCategory::AiUtility, "StubAI"), Arc::new(StubAiUtility));
-        reg.workspace_manager.insert("wm", named_desc(ProviderCategory::WorkspaceManager, "StubWM"), Arc::new(StubWorkspaceManager));
+        reg.workspace_managers.insert("wm", named_desc(ProviderCategory::WorkspaceManager, "StubWM"), Arc::new(StubWorkspaceManager));
         reg
     }
 
@@ -422,7 +422,7 @@ mod tests {
 
         assert!(model.registry.checkout_managers.contains_key("cm"));
         assert!(model.registry.cloud_agents.contains_key("ca"));
-        assert!(!model.registry.workspace_manager.is_empty());
+        assert!(!model.registry.workspace_managers.is_empty());
         model.refresh_handle.trigger_refresh();
     }
 
@@ -443,7 +443,7 @@ mod tests {
         assert!(model.registry.change_requests.is_empty());
         assert!(model.registry.issue_trackers.is_empty());
         assert!(model.registry.cloud_agents.is_empty());
-        assert!(model.registry.workspace_manager.is_empty());
+        assert!(model.registry.workspace_managers.is_empty());
         assert_eq!(model.labels.checkouts.section, "Checkouts");
         assert_eq!(model.labels.change_requests.section, "Change Requests");
         assert_eq!(model.labels.issues.section, "Issues");

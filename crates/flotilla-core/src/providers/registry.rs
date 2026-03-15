@@ -93,8 +93,8 @@ pub struct ProviderRegistry {
     pub issue_trackers: ProviderSet<dyn IssueTracker>,
     pub cloud_agents: ProviderSet<dyn CloudAgentService>,
     pub ai_utilities: ProviderSet<dyn AiUtility>,
-    pub workspace_manager: ProviderSet<dyn WorkspaceManager>,
-    pub terminal_pool: ProviderSet<dyn TerminalPool>,
+    pub workspace_managers: ProviderSet<dyn WorkspaceManager>,
+    pub terminal_pools: ProviderSet<dyn TerminalPool>,
 }
 
 impl ProviderRegistry {
@@ -106,8 +106,8 @@ impl ProviderRegistry {
             issue_trackers: ProviderSet::new(),
             cloud_agents: ProviderSet::new(),
             ai_utilities: ProviderSet::new(),
-            workspace_manager: ProviderSet::new(),
-            terminal_pool: ProviderSet::new(),
+            workspace_managers: ProviderSet::new(),
+            terminal_pools: ProviderSet::new(),
         }
     }
 }
@@ -134,8 +134,8 @@ impl ProviderRegistry {
         collect(&mut infos, &self.issue_trackers);
         collect(&mut infos, &self.cloud_agents);
         collect(&mut infos, &self.ai_utilities);
-        collect(&mut infos, &self.workspace_manager);
-        collect(&mut infos, &self.terminal_pool);
+        collect(&mut infos, &self.workspace_managers);
+        collect(&mut infos, &self.terminal_pools);
         infos
     }
 }

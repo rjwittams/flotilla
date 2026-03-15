@@ -536,10 +536,10 @@ pub async fn discover_providers(
     })
     .await;
     if let Some((desc, provider)) = probe_first(&factories.workspace_managers, &combined, config, repo_root, &runner, &mut unmet).await {
-        registry.workspace_manager.insert(desc.implementation.clone(), desc, provider);
+        registry.workspace_managers.insert(desc.implementation.clone(), desc, provider);
     }
     if let Some((desc, provider)) = probe_first(&factories.terminal_pools, &combined, config, repo_root, &runner, &mut unmet).await {
-        registry.terminal_pool.insert(desc.implementation.clone(), desc, provider);
+        registry.terminal_pools.insert(desc.implementation.clone(), desc, provider);
     }
 
     let repo_slug = combined.repo_slug();
@@ -957,8 +957,8 @@ mod orchestrator_tests {
         assert!(result.registry.issue_trackers.is_empty());
         assert!(result.registry.cloud_agents.is_empty());
         assert!(result.registry.ai_utilities.is_empty());
-        assert!(result.registry.workspace_manager.is_empty());
-        assert!(result.registry.terminal_pool.is_empty());
+        assert!(result.registry.workspace_managers.is_empty());
+        assert!(result.registry.terminal_pools.is_empty());
         assert!(result.unmet.is_empty());
         assert!(result.repo_slug.is_none());
     }

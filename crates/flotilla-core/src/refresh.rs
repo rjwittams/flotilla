@@ -174,7 +174,7 @@ async fn refresh_providers(
     );
 
     let ws_fut = async {
-        if let Some((desc, ws_mgr)) = registry.workspace_manager.preferred_with_desc() {
+        if let Some((desc, ws_mgr)) = registry.workspace_managers.preferred_with_desc() {
             let name = desc.display_name.clone();
             match ws_mgr.list_workspaces().await {
                 Ok(entries) => (entries, vec![]),
@@ -186,7 +186,7 @@ async fn refresh_providers(
     };
 
     let tp_fut = async {
-        if let Some((desc, tp)) = registry.terminal_pool.preferred_with_desc() {
+        if let Some((desc, tp)) = registry.terminal_pools.preferred_with_desc() {
             let name = desc.display_name.clone();
             match tp.list_terminals().await {
                 Ok(entries) => (entries, vec![]),
@@ -278,14 +278,14 @@ fn compute_provider_health(registry: &ProviderRegistry, errors: &[RefreshError])
         &mut health,
         errors,
         ProviderCategory::WorkspaceManager.slug(),
-        registry.workspace_manager.display_names().map(|s| s.to_string()),
+        registry.workspace_managers.display_names().map(|s| s.to_string()),
         &["workspaces"],
     );
     insert_category_health(
         &mut health,
         errors,
         ProviderCategory::TerminalPool.slug(),
-        registry.terminal_pool.display_names().map(|s| s.to_string()),
+        registry.terminal_pools.display_names().map(|s| s.to_string()),
         &["terminals"],
     );
 
@@ -639,7 +639,7 @@ mod tests {
             Arc::new(MockCloudAgent::ok(vec![("sess-1".to_string(), make_session("Debug", "sess-1"))])),
         );
         registry.vcs.insert("git", desc("git"), Arc::new(MockVcs::ok(vec!["remote-only".to_string(), "shared".to_string()])));
-        registry.workspace_manager.insert(
+        registry.workspace_managers.insert(
             "cmux",
             desc("cmux"),
             Arc::new(MockWorkspaceManager::ok(vec![("ws-1".to_string(), make_workspace("dev"))])),
@@ -681,7 +681,7 @@ mod tests {
         registry.change_requests.insert("github", desc("github"), Arc::new(MockChangeRequestTracker::failing("pr fail", "merged fail")));
         registry.cloud_agents.insert("claude", desc("claude"), Arc::new(MockCloudAgent::failing("sessions fail")));
         registry.vcs.insert("git", desc("git"), Arc::new(MockVcs::failing("branches fail")));
-        registry.workspace_manager.insert("cmux", desc("cmux"), Arc::new(MockWorkspaceManager::failing("workspaces fail")));
+        registry.workspace_managers.insert("cmux", desc("cmux"), Arc::new(MockWorkspaceManager::failing("workspaces fail")));
 
         let mut pd = ProviderData::default();
         let errors = refresh_providers(&mut pd, &repo_root(), &registry, &criteria()).await;
