@@ -93,8 +93,8 @@ impl Factory for GitCheckoutManagerFactory {
         runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn CheckoutManager>, Vec<UnmetRequirement>> {
         if env.find_binary("git").is_some() {
-            let checkout_path = config.resolve_checkout_path(repo_root);
-            Ok(Arc::new(GitCheckoutManager::new(checkout_path, runner)))
+            let checkout_config = config.resolve_checkout_config(repo_root);
+            Ok(Arc::new(GitCheckoutManager::new(checkout_config.path, runner)))
         } else {
             Err(vec![UnmetRequirement::MissingBinary("git".into())])
         }

@@ -80,6 +80,8 @@ impl<T: ?Sized> ProviderSet<T> {
     }
 
     /// Reorder so that the first entry whose descriptor.backend matches is first.
+    /// When multiple entries share a backend, the first-registered one is moved
+    /// to front — registration order acts as a tiebreaker within a backend.
     /// Returns `true` if a match was found, `false` otherwise.
     pub fn prefer_by_backend(&mut self, backend: &str) -> bool {
         if let Some(idx) = self.inner.values().position(|(desc, _)| desc.backend == backend) {

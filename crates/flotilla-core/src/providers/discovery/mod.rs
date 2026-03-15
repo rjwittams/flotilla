@@ -330,6 +330,8 @@ impl ProviderDescriptor {
         }
     }
 
+    /// Shorthand for backends with a single implementation — sets `implementation = backend`.
+    /// Use `labeled()` when a backend has multiple implementations (e.g. claude api vs cli).
     pub fn labeled_simple(
         category: ProviderCategory,
         backend: impl Into<String>,
@@ -592,11 +594,11 @@ pub async fn discover_providers(
     );
 
     // Checkout strategy — resolved per-repo, nested under vcs.git
-    let checkout_strategy = config.resolve_checkout_strategy(repo_root);
-    if checkout_strategy != "auto" && !registry.checkout_managers.prefer_by_implementation(&checkout_strategy) {
+    let checkout_config = config.resolve_checkout_config(repo_root);
+    if checkout_config.strategy != "auto" && !registry.checkout_managers.prefer_by_implementation(&checkout_config.strategy) {
         unmet.push((ProviderCategory::CheckoutManager.slug().into(), UnmetRequirement::UnknownProviderPreference {
             category: ProviderCategory::CheckoutManager,
-            key: checkout_strategy,
+            key: checkout_config.strategy,
         }));
     }
 
@@ -931,7 +933,7 @@ mod orchestrator_tests {
         let result = discover_providers(&host_bag, repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
 
         // All checkout managers now register (probe_all); config preferences choose the preferred one
-        assert!(result.registry.checkout_managers.len() >= 1, "at least one checkout manager should be registered");
+        assert!(!result.registry.checkout_managers.is_empty(), "at least one checkout manager should be registered");
     }
 
     #[tokio::test]

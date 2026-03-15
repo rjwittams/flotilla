@@ -127,6 +127,12 @@ pub enum RepoViewLayoutConfig {
     Below,
 }
 
+/// Resolved checkout configuration (strategy + path) after merging per-repo overrides with global.
+pub struct ResolvedCheckoutConfig {
+    pub strategy: String,
+    pub path: String,
+}
+
 /// Full repo config file including optional overrides.
 #[derive(Debug, Default, Deserialize)]
 pub struct RepoFileConfig {
@@ -443,40 +449,25 @@ impl ConfigStore {
         }
     }
 
-    /// Resolve checkout strategy for a repo: per-repo override > global > defaults.
-    pub fn resolve_checkout_strategy(&self, repo_root: &Path) -> String {
+    /// Resolve checkout config for a repo: per-repo override > global > defaults.
+    pub fn resolve_checkout_config(&self, repo_root: &Path) -> ResolvedCheckoutConfig {
         let global = self.load_config();
         let slug = path_to_slug(repo_root);
         let repo_file = self.repos_dir().join(format!("{slug}.toml"));
         if let Ok(content) = std::fs::read_to_string(&repo_file) {
             match toml::from_str::<RepoFileConfig>(&content) {
                 Ok(repo_cfg) => {
-                    return repo_cfg.vcs.git.checkout_strategy.unwrap_or_else(|| global.vcs.git.checkout_strategy.clone());
+                    return ResolvedCheckoutConfig {
+                        strategy: repo_cfg.vcs.git.checkout_strategy.unwrap_or_else(|| global.vcs.git.checkout_strategy.clone()),
+                        path: repo_cfg.vcs.git.checkout_path.unwrap_or_else(|| global.vcs.git.checkout_path.clone()),
+                    };
                 }
                 Err(e) => {
                     tracing::warn!(path = %repo_file.display(), err = %e, "failed to parse");
                 }
             }
         }
-        global.vcs.git.checkout_strategy.clone()
-    }
-
-    /// Resolve checkout path for a repo: per-repo override > global > defaults.
-    pub fn resolve_checkout_path(&self, repo_root: &Path) -> String {
-        let global = self.load_config();
-        let slug = path_to_slug(repo_root);
-        let repo_file = self.repos_dir().join(format!("{slug}.toml"));
-        if let Ok(content) = std::fs::read_to_string(&repo_file) {
-            match toml::from_str::<RepoFileConfig>(&content) {
-                Ok(repo_cfg) => {
-                    return repo_cfg.vcs.git.checkout_path.unwrap_or_else(|| global.vcs.git.checkout_path.clone());
-                }
-                Err(e) => {
-                    tracing::warn!(path = %repo_file.display(), err = %e, "failed to parse");
-                }
-            }
-        }
-        global.vcs.git.checkout_path.clone()
+        ResolvedCheckoutConfig { strategy: global.vcs.git.checkout_strategy.clone(), path: global.vcs.git.checkout_path.clone() }
     }
 }
 
@@ -746,42 +737,55 @@ mod tests {
     }
 
     #[test]
-    fn resolve_checkout_path_uses_global_when_repo_file_missing_or_invalid() {
+    fn resolve_checkout_config_uses_global_when_repo_file_missing_or_invalid() {
         let dir = tempdir().unwrap();
         let base = dir.path();
-        std::fs::write(base.join("config.toml"), "[vcs.git]\ncheckout_path = \"/global/path\"\n").unwrap();
+        std::fs::write(base.join("config.toml"), "[vcs.git]\ncheckout_path = \"/global/path\"\ncheckout_strategy = \"wt\"\n").unwrap();
 
         let repo = make_dir(base, "repo");
         let store = ConfigStore::with_base(base);
 
-        let from_global = store.resolve_checkout_path(&repo);
-        assert_eq!(from_global, "/global/path");
+        let from_global = store.resolve_checkout_config(&repo);
+        assert_eq!(from_global.path, "/global/path");
+        assert_eq!(from_global.strategy, "wt");
 
         let slug = path_to_slug(&repo);
         write_repo_file(base, &format!("{slug}.toml"), "{{invalid toml!!!");
-        let from_invalid = store.resolve_checkout_path(&repo);
-        assert_eq!(from_invalid, "/global/path");
+        let from_invalid = store.resolve_checkout_config(&repo);
+        assert_eq!(from_invalid.path, "/global/path");
+        assert_eq!(from_invalid.strategy, "wt");
     }
 
     #[test]
-    fn resolve_checkout_path_repo_override_merges_with_global() {
+    fn resolve_checkout_config_repo_override_merges_with_global() {
         let dir = tempdir().unwrap();
         let base = dir.path();
-        std::fs::write(base.join("config.toml"), "[vcs.git]\ncheckout_path = \"/global/path\"\n").unwrap();
+        std::fs::write(base.join("config.toml"), "[vcs.git]\ncheckout_path = \"/global/path\"\ncheckout_strategy = \"wt\"\n").unwrap();
 
         let repo = make_dir(base, "repo");
         let store = ConfigStore::with_base(base);
         let slug = path_to_slug(&repo);
 
-        let cases = [("[vcs.git]\ncheckout_path = \"/repo/path\"\n", "/repo/path"), ("", "/global/path")];
+        // Override path only — strategy inherited from global
+        let repo_toml = format!("path = \"{}\"\n[vcs.git]\ncheckout_path = \"/repo/path\"\n", repo.display());
+        write_repo_file(base, &format!("{slug}.toml"), &repo_toml);
+        let resolved = store.resolve_checkout_config(&repo);
+        assert_eq!(resolved.path, "/repo/path");
+        assert_eq!(resolved.strategy, "wt");
 
-        for (override_toml, expected_path) in cases {
-            let repo_toml = format!("path = \"{}\"\n{override_toml}", repo.display());
-            write_repo_file(base, &format!("{slug}.toml"), &repo_toml);
+        // Override strategy only — path inherited from global
+        let repo_toml = format!("path = \"{}\"\n[vcs.git]\ncheckout_strategy = \"git\"\n", repo.display());
+        write_repo_file(base, &format!("{slug}.toml"), &repo_toml);
+        let resolved = store.resolve_checkout_config(&repo);
+        assert_eq!(resolved.path, "/global/path");
+        assert_eq!(resolved.strategy, "git");
 
-            let resolved = store.resolve_checkout_path(&repo);
-            assert_eq!(resolved, expected_path);
-        }
+        // No overrides — both from global
+        let repo_toml = format!("path = \"{}\"\n", repo.display());
+        write_repo_file(base, &format!("{slug}.toml"), &repo_toml);
+        let resolved = store.resolve_checkout_config(&repo);
+        assert_eq!(resolved.path, "/global/path");
+        assert_eq!(resolved.strategy, "wt");
     }
 
     #[test]
