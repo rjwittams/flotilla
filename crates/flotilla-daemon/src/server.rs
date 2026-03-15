@@ -146,6 +146,8 @@ pub fn spawn_test_peer_networking(
     daemon: Arc<InProcessDaemon>,
     peer_manager: Arc<Mutex<PeerManager>>,
 ) -> (tokio::task::JoinHandle<()>, mpsc::UnboundedSender<PeerConnectedNotice>) {
+    // Receiver dropped intentionally — None is passed for the inbound task,
+    // so no messages are forwarded; the sender satisfies the runtime signature.
     let (peer_data_tx, _peer_data_rx) = mpsc::channel(256);
     let pending_remote_commands: PendingRemoteCommandMap = Arc::new(Mutex::new(HashMap::new()));
     let forwarded_commands: ForwardedCommandMap = Arc::new(Mutex::new(HashMap::new()));

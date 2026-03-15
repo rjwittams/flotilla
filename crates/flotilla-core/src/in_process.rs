@@ -786,6 +786,7 @@ impl InProcessDaemon {
     }
 
     /// Test accessor: return the current peer providers for a given repo identity.
+    #[cfg(feature = "test-support")]
     pub async fn peer_providers_for_test(&self, identity: &flotilla_protocol::RepoIdentity) -> Vec<(HostName, ProviderData)> {
         self.peer_providers.read().await.get(identity).cloned().unwrap_or_default()
     }

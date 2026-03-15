@@ -48,10 +48,14 @@ impl PeerSender for NotifyPeerSender {
 async fn wait_for_messages(sent: &Arc<StdMutex<Vec<PeerWireMessage>>>, notify: &Notify, target: usize) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
+            // Register interest BEFORE checking the condition so a
+            // notify_waiters() that fires between the check and the
+            // await is not lost.
+            let notified = notify.notified();
             if sent.lock().expect("lock").len() >= target {
                 return;
             }
-            notify.notified().await;
+            notified.await;
         }
     })
     .await
