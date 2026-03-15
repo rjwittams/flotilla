@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{ffi::OsString, path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use color_eyre::Result;
@@ -61,13 +61,13 @@ enum SubCommand {
     },
     /// Query or control repositories
     Repo {
+        /// Output as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
         /// Repo arguments, e.g. `owner/repo`, `add /path`, `remove owner/repo`,
         /// or `owner/repo checkout --fresh feature/x`
         #[arg(value_name = "ARGS", num_args = 1.., allow_hyphen_values = true)]
         args: Vec<String>,
-        /// Output as JSON instead of human-readable text
-        #[arg(long)]
-        json: bool,
     },
     /// Remove a checkout
     Checkout {
@@ -81,12 +81,12 @@ enum SubCommand {
     },
     /// Route a control command to a specific host
     Host {
-        /// Host query or control arguments
-        #[arg(value_name = "ARGS", num_args = 1.., allow_hyphen_values = true)]
-        args: Vec<String>,
         /// Output as JSON instead of human-readable text
         #[arg(long)]
         json: bool,
+        /// Host query or control arguments
+        #[arg(value_name = "ARGS", num_args = 1.., allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Show the daemon's current multi-host routing view
     Topology {
@@ -114,7 +114,7 @@ impl Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
-    let cli = Cli::parse();
+    let cli = try_parse_cli_from(std::env::args_os()).unwrap_or_else(|err| err.exit());
 
     match &cli.command {
         Some(SubCommand::Daemon { timeout }) => run_daemon(&cli, *timeout).await,
@@ -149,6 +149,55 @@ async fn main() -> Result<()> {
         Some(SubCommand::Topology { json }) => run_topology_command(&cli, OutputFormat::from_json_flag(*json)).await,
         None => run_tui(cli).await,
     }
+}
+
+fn try_parse_cli_from<I, T>(args: I) -> std::result::Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    Cli::try_parse_from(normalize_cli_args(args))
+}
+
+fn normalize_cli_args<I, T>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let mut args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    if args.last().and_then(|value| value.to_str()) != Some("--json") {
+        return args;
+    }
+
+    let Some(subcommand_idx) = find_subcommand_index(&args) else {
+        return args;
+    };
+    let Some(subcommand) = args[subcommand_idx].to_str() else {
+        return args;
+    };
+    if !matches!(subcommand, "repo" | "host") || subcommand_idx + 1 >= args.len() - 1 {
+        return args;
+    }
+
+    let json = args.pop().expect("checked trailing --json");
+    args.insert(subcommand_idx + 1, json);
+    args
+}
+
+fn find_subcommand_index(args: &[OsString]) -> Option<usize> {
+    let mut idx = 1;
+    while idx < args.len() {
+        match args[idx].to_str() {
+            Some("--embedded") => idx += 1,
+            Some("--repo-root") | Some("--config-dir") | Some("--socket") => idx += 2,
+            Some(value) if value.starts_with("--repo-root=") || value.starts_with("--config-dir=") || value.starts_with("--socket=") => {
+                idx += 1;
+            }
+            Some(_) => return Some(idx),
+            None => return None,
+        }
+    }
+    None
 }
 
 async fn run_tui(cli: Cli) -> Result<()> {
@@ -461,10 +510,9 @@ async fn run_topology_command(cli: &Cli, format: OutputFormat) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
     use flotilla_protocol::{CheckoutSelector, CommandAction, RepoSelector};
 
-    use super::{parse_host_command, Cli, HostCommand, HostQueryCommand, SubCommand};
+    use super::{parse_host_command, try_parse_cli_from, HostCommand, HostQueryCommand, SubCommand};
 
     #[test]
     fn parse_host_command_list() {
@@ -512,7 +560,43 @@ mod tests {
 
     #[test]
     fn cli_parses_topology_subcommand() {
-        let cli = Cli::try_parse_from(["flotilla", "topology"]).expect("topology cli should parse");
+        let cli = try_parse_cli_from(["flotilla", "topology"]).expect("topology cli should parse");
         assert!(matches!(cli.command, Some(SubCommand::Topology { json: false })));
+    }
+
+    #[test]
+    fn cli_parses_host_list_with_trailing_json() {
+        let cli = try_parse_cli_from(["flotilla", "host", "list", "--json"]).expect("host list json should parse");
+        assert!(matches!(
+            cli.command,
+            Some(SubCommand::Host { args, json: true }) if args == vec!["list"]
+        ));
+    }
+
+    #[test]
+    fn cli_parses_host_status_with_trailing_json() {
+        let cli = try_parse_cli_from(["flotilla", "host", "alpha", "status", "--json"]).expect("host status json should parse");
+        assert!(matches!(
+            cli.command,
+            Some(SubCommand::Host { args, json: true }) if args == vec!["alpha", "status"]
+        ));
+    }
+
+    #[test]
+    fn cli_parses_host_providers_with_trailing_json() {
+        let cli = try_parse_cli_from(["flotilla", "host", "alpha", "providers", "--json"]).expect("host providers json should parse");
+        assert!(matches!(
+            cli.command,
+            Some(SubCommand::Host { args, json: true }) if args == vec!["alpha", "providers"]
+        ));
+    }
+
+    #[test]
+    fn cli_parses_repo_query_with_trailing_json() {
+        let cli = try_parse_cli_from(["flotilla", "repo", "owner/repo", "--json"]).expect("repo json should parse");
+        assert!(matches!(
+            cli.command,
+            Some(SubCommand::Repo { args, json: true }) if args == vec!["owner/repo"]
+        ));
     }
 }
