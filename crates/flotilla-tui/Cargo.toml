@@ -13,7 +13,6 @@ color-eyre = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-libc = "0.2"
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 tui-input = "0.15"
@@ -26,6 +25,9 @@ tracing-appender = "0.2.4"
 time = { version = "0.3.47", features = ["local-offset"] }
 futures = "0.3"
 comfy-table = "7.2.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 async-trait = { workspace = true }
