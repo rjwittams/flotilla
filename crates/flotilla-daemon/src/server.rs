@@ -632,6 +632,13 @@ fn spawn_peer_networking_runtime(
                             }
                             HandleResult::CommandRequested { request_id, requester_host, reply_via, command } => {
                                 drop(pm);
+                                let ready = Arc::new(Notify::new());
+                                forwarded_commands_task.lock().await.insert(
+                                    request_id,
+                                    ForwardedCommand {
+                                        state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) },
+                                    },
+                                );
                                 tokio::spawn(execute_forwarded_command(
                                     Arc::clone(&peer_daemon),
                                     Arc::clone(&peer_manager_task),
@@ -640,6 +647,7 @@ fn spawn_peer_networking_runtime(
                                     requester_host,
                                     reply_via,
                                     command,
+                                    ready,
                                 ));
                             }
                             HandleResult::CommandCancelRequested { cancel_id, requester_host, reply_via, command_request_id } => {
@@ -890,6 +898,7 @@ async fn dispatch_resync_requests(peer_manager: &Arc<Mutex<PeerManager>>, reques
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_forwarded_command(
     daemon: Arc<InProcessDaemon>,
     peer_manager: Arc<Mutex<PeerManager>>,
@@ -898,14 +907,10 @@ async fn execute_forwarded_command(
     requester_host: HostName,
     reply_via: HostName,
     command: Command,
+    ready: Arc<Notify>,
 ) {
     let mut event_rx = daemon.subscribe();
     let responder_host = daemon.host_name().clone();
-    let ready = Arc::new(Notify::new());
-    forwarded_commands
-        .lock()
-        .await
-        .insert(request_id, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
     let command_id = match daemon.execute(command).await {
         Ok(command_id) => command_id,
         Err(message) => {
@@ -2326,6 +2331,11 @@ mod tests {
         let sent = Arc::new(StdMutex::new(Vec::new()));
         peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
 
+        let ready = Arc::new(Notify::new());
+        forwarded_commands
+            .lock()
+            .await
+            .insert(7, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
         execute_forwarded_command(
             Arc::clone(&daemon),
             Arc::clone(&peer_manager),
@@ -2334,6 +2344,7 @@ mod tests {
             HostName::new("desktop"),
             HostName::new("relay"),
             Command { host: Some(daemon.host_name().clone()), context_repo: None, action: CommandAction::Refresh { repo: None } },
+            ready,
         )
         .await;
 
@@ -2439,6 +2450,11 @@ mod tests {
         let sent = Arc::new(StdMutex::new(Vec::new()));
         peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
 
+        let ready = Arc::new(Notify::new());
+        forwarded_commands
+            .lock()
+            .await
+            .insert(8, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
         execute_forwarded_command(
             Arc::clone(&daemon),
             Arc::clone(&peer_manager),
@@ -2451,6 +2467,7 @@ mod tests {
                 context_repo: Some(RepoSelector::Identity(repo_identity.clone())),
                 action: CommandAction::PrepareTerminalForCheckout { checkout_path: checkout_path.clone() },
             },
+            ready,
         )
         .await;
 
@@ -2548,6 +2565,11 @@ mod tests {
         let sent = Arc::new(StdMutex::new(Vec::new()));
         peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
 
+        let ready = Arc::new(Notify::new());
+        forwarded_commands
+            .lock()
+            .await
+            .insert(9, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
         execute_forwarded_command(
             Arc::clone(&daemon),
             Arc::clone(&peer_manager),
@@ -2564,6 +2586,7 @@ mod tests {
                     issue_ids: vec![],
                 },
             },
+            ready,
         )
         .await;
 
@@ -3310,6 +3333,60 @@ mod tests {
                 );
             }
             other => panic!("expected snapshot event, got {other:?}"),
+        }
+    }
+
+    /// Verifies the fix for the cancel race: when the `Launching` entry is
+    /// pre-inserted (as the dispatch loop now does), a cancel that arrives
+    /// before `execute_forwarded_command` transitions to `Running` will wait
+    /// for the transition rather than failing with "remote command not found".
+    #[tokio::test]
+    async fn cancel_before_execute_registration_finds_entry() {
+        let (_tmp, daemon) = empty_daemon().await;
+        let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
+        let forwarded_commands: ForwardedCommandMap = Arc::new(Mutex::new(HashMap::new()));
+        let sent = Arc::new(StdMutex::new(Vec::new()));
+        peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
+
+        // Pre-insert the Launching entry, mirroring the dispatch-loop fix.
+        let ready = Arc::new(Notify::new());
+        forwarded_commands
+            .lock()
+            .await
+            .insert(99, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
+
+        // Spawn cancel — it should wait on the Launching state instead of
+        // returning "remote command not found".
+        let handle = tokio::spawn(cancel_forwarded_command(
+            Arc::clone(&daemon),
+            Arc::clone(&peer_manager),
+            Arc::clone(&forwarded_commands),
+            42,
+            HostName::new("desktop"),
+            HostName::new("relay"),
+            99,
+        ));
+
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+
+        // Transition to Running and notify — cancel should now proceed.
+        if let Some(entry) = forwarded_commands.lock().await.get_mut(&99) {
+            entry.state = ForwardedCommandState::Running { command_id: 456 };
+        }
+        ready.notify_waiters();
+
+        handle.await.expect("cancel task");
+
+        let sent = sent.lock().expect("lock");
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            PeerWireMessage::Routed(RoutedPeerMessage::CommandCancelResponse { error, .. }) => {
+                assert!(
+                    !error.as_deref().unwrap_or("").contains("remote command not found"),
+                    "cancel should not fail with 'not found', got: {error:?}"
+                );
+            }
+            other => panic!("expected cancel response, got {other:?}"),
         }
     }
 }
