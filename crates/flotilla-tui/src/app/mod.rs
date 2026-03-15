@@ -88,6 +88,7 @@ impl CommandQueue {
 /// to render — no provider registry, no refresh handle.
 pub struct TuiRepoModel {
     pub identity: RepoIdentity,
+    pub path: PathBuf,
     pub providers: Arc<ProviderData>,
     pub labels: RepoLabels,
     pub provider_names: HashMap<String, Vec<String>>,
@@ -105,12 +106,12 @@ pub struct TuiRepoModel {
 /// daemon-internal fields (registry, refresh handles). Populated from
 /// `DaemonHandle::list_repos()` and updated by daemon snapshot events.
 pub struct TuiModel {
-    pub repos: HashMap<PathBuf, TuiRepoModel>,
-    pub repo_order: Vec<PathBuf>,
+    pub repos: HashMap<RepoIdentity, TuiRepoModel>,
+    pub repo_order: Vec<RepoIdentity>,
     pub active_repo: usize,
     /// Per-repo, per-provider auth status from last refresh.
-    /// Key: (repo_path, provider_category, provider_name)
-    pub provider_statuses: HashMap<(PathBuf, String, String), ProviderStatus>,
+    /// Key: (repo_identity, provider_category, provider_name)
+    pub provider_statuses: HashMap<(RepoIdentity, String, String), ProviderStatus>,
     pub status_message: Option<String>,
     /// The daemon's hostname, set from the first Snapshot received.
     pub my_host: Option<HostName>,
@@ -123,8 +124,11 @@ impl TuiModel {
         let mut repos = HashMap::new();
         let mut order = Vec::new();
         for info in repos_info {
-            repos.insert(info.path.clone(), TuiRepoModel {
-                identity: info.identity,
+            let identity = info.identity;
+            order.push(identity.clone());
+            repos.insert(identity.clone(), TuiRepoModel {
+                identity,
+                path: info.path,
                 providers: Arc::new(ProviderData::default()),
                 labels: info.labels,
                 provider_names: info.provider_names,
@@ -136,7 +140,6 @@ impl TuiModel {
                 issue_fetch_pending: false,
                 issue_initial_requested: false,
             });
-            order.push(info.path);
         }
         Self {
             repos,
@@ -154,7 +157,7 @@ impl TuiModel {
     }
 
     pub fn active_repo_root(&self) -> &PathBuf {
-        &self.repo_order[self.active_repo]
+        &self.active().path
     }
 
     pub fn active_repo_identity(&self) -> &RepoIdentity {
@@ -296,11 +299,11 @@ impl App {
     }
 
     pub fn repo_command(&self, action: CommandAction) -> Command {
-        Command { host: None, context_repo: Some(RepoSelector::Path(self.model.active_repo_root().clone())), action }
+        Command { host: None, context_repo: Some(RepoSelector::Identity(self.model.active_repo_identity().clone())), action }
     }
 
-    pub fn repo_command_for_path(&self, repo: PathBuf, action: CommandAction) -> Command {
-        Command { host: None, context_repo: Some(RepoSelector::Path(repo)), action }
+    pub fn repo_command_for_identity(&self, repo_identity: RepoIdentity, action: CommandAction) -> Command {
+        Command { host: None, context_repo: Some(RepoSelector::Identity(repo_identity)), action }
     }
 
     pub fn targeted_command(&self, action: CommandAction) -> Command {
@@ -336,7 +339,7 @@ impl App {
     }
 
     pub fn repo_path_for_identity(&self, identity: &RepoIdentity) -> Option<PathBuf> {
-        self.model.repos.iter().find(|(_, repo)| &repo.identity == identity).map(|(path, _)| path.clone())
+        self.model.repos.get(identity).map(|repo| repo.path.clone())
     }
 
     fn item_execution_host(&self, item: &WorkItem) -> Option<HostName> {
@@ -352,6 +355,10 @@ impl App {
 
     pub fn visible_status_items(&self) -> Vec<VisibleStatusItem> {
         collect_visible_status_items(&self.model, &self.ui)
+    }
+
+    pub fn persisted_tab_order_paths(&self) -> Vec<PathBuf> {
+        self.model.repo_order.iter().filter_map(|repo_identity| self.model.repos.get(repo_identity).map(|repo| repo.path.clone())).collect()
     }
 
     pub fn dismiss_status_item(&mut self, id: usize) {
@@ -371,28 +378,42 @@ impl App {
             DaemonEvent::SnapshotFull(snap) => self.apply_snapshot(*snap),
             DaemonEvent::SnapshotDelta(delta) => self.apply_delta(*delta),
             DaemonEvent::RepoAdded(info) => self.handle_repo_added(*info),
-            DaemonEvent::RepoRemoved { path, .. } => self.handle_repo_removed(&path),
+            DaemonEvent::RepoRemoved { repo_identity, .. } => self.handle_repo_removed(&repo_identity),
             DaemonEvent::CommandStarted { command_id, repo_identity, repo, description, .. } => {
                 tracing::info!(%command_id, %description, "command started");
                 self.in_flight.insert(command_id, InFlightCommand { repo_identity, repo, description });
             }
-            DaemonEvent::CommandFinished { command_id, result, .. } => {
+            DaemonEvent::CommandFinished { command_id, host, repo_identity, repo: _, result, .. } => {
                 if let Some(_cmd) = self.in_flight.remove(&command_id) {
                     tracing::info!(%command_id, "command finished");
                     let error_message = match &result {
                         CommandResult::Error { message } => Some(message.clone()),
                         _ => None,
                     };
+                    // Auto-create workspace for local checkouts. Remote checkouts
+                    // go through the PrepareTerminal → TerminalPrepared flow instead.
+                    let is_local = self.model.my_host.as_ref().is_some_and(|my| *my == host);
+                    let auto_workspace = match (&result, is_local) {
+                        (CommandResult::CheckoutCreated { path, .. }, true) => Some(path.clone()),
+                        _ => None,
+                    };
                     executor::handle_result(result, self);
+                    if let Some(checkout_path) = auto_workspace {
+                        self.proto_commands.push(
+                            self.repo_command_for_identity(repo_identity, CommandAction::CreateWorkspaceForCheckout { checkout_path }),
+                        );
+                    }
 
                     // Find which repo+identity has this command_id
-                    let found: Option<(PathBuf, WorkItemIdentity)> = self.ui.repo_ui.iter().find_map(|(path, rui)| {
-                        rui.pending_actions.iter().find(|(_, a)| a.command_id == command_id).map(|(id, _)| (path.clone(), id.clone()))
+                    let found: Option<(RepoIdentity, WorkItemIdentity)> = self.ui.repo_ui.iter().find_map(|(repo_identity, rui)| {
+                        rui.pending_actions
+                            .iter()
+                            .find(|(_, a)| a.command_id == command_id)
+                            .map(|(id, _)| (repo_identity.clone(), id.clone()))
                     });
 
-                    if let Some((repo_path, identity)) = found {
-                        // Safe: repo_path was found by iterating repo_ui above.
-                        let rui = self.ui.repo_ui.get_mut(&repo_path).expect("repo exists");
+                    if let Some((repo_identity, identity)) = found {
+                        let rui = self.ui.repo_ui.get_mut(&repo_identity).expect("repo exists");
                         if let Some(message) = error_message {
                             if let Some(entry) = rui.pending_actions.get_mut(&identity) {
                                 entry.status = PendingStatus::Failed(message);
@@ -417,6 +438,7 @@ impl App {
                         }
                         StepStatus::Failed { ref message } => {
                             tracing::warn!(%command_id, %description, error = %message, "step failed");
+                            self.set_status_message(Some(format!("{description}: {message}")));
                         }
                     }
                 }
@@ -443,11 +465,13 @@ impl App {
             self.model.my_host = Some(snap.host_name.clone());
         }
 
+        let repo_identity = snap.repo_identity.clone();
         let path = snap.repo.clone();
-        let rm = match self.model.repos.get_mut(&path) {
+        let rm = match self.model.repos.get_mut(&repo_identity) {
             Some(rm) => rm,
             None => return,
         };
+        rm.path = path.clone();
 
         let old_providers = std::mem::replace(&mut rm.providers, Arc::new(snap.providers));
         rm.provider_health = snap.provider_health.clone();
@@ -470,26 +494,28 @@ impl App {
         for (category, providers) in &rm.provider_health {
             for (provider_name, &healthy) in providers {
                 let status = if healthy { ProviderStatus::Ok } else { ProviderStatus::Error };
-                let key = (path.clone(), category.clone(), provider_name.clone());
+                let key = (repo_identity.clone(), category.clone(), provider_name.clone());
                 self.model.provider_statuses.insert(key, status);
             }
         }
 
         // Remove stale provider_statuses entries for providers no longer in health map
-        self.model.provider_statuses.retain(|k, _| k.0 != path || rm.provider_health.get(&k.1).is_some_and(|ps| ps.contains_key(&k.2)));
+        self.model
+            .provider_statuses
+            .retain(|k, _| k.0 != repo_identity || rm.provider_health.get(&k.1).is_some_and(|ps| ps.contains_key(&k.2)));
 
         // Change detection badge for inactive tabs
         let active_idx = self.model.active_repo;
-        let i = self.model.repo_order.iter().position(|p| p == &path);
+        let i = self.model.repo_order.iter().position(|repo| repo == &repo_identity);
         if let Some(idx) = i {
             if idx != active_idx && *old_providers != *rm.providers {
-                if let Some(rui) = self.ui.repo_ui.get_mut(&path) {
+                if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
                     rui.has_unseen_changes = true;
                 }
             }
         }
 
-        if let Some(rui) = self.ui.repo_ui.get_mut(&path) {
+        if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
             rui.update_table_view(table_view);
         }
 
@@ -497,7 +523,7 @@ impl App {
         self.set_status_message(format_error_status(&snap.errors, &path));
 
         // Request initial issue fetch once per repo (on first snapshot received)
-        let rm = self.model.repos.get_mut(&path).unwrap();
+        let rm = self.model.repos.get_mut(&repo_identity).unwrap();
         if !rm.issue_initial_requested {
             rm.issue_initial_requested = true;
             let visible = self.ui.layout.table_area.height.saturating_sub(2) as usize;
@@ -506,12 +532,14 @@ impl App {
     }
 
     fn apply_delta(&mut self, delta: SnapshotDelta) {
+        let repo_identity = delta.repo_identity.clone();
         let path = delta.repo;
         let mut status_message_update = None;
-        let rm = match self.model.repos.get_mut(&path) {
+        let rm = match self.model.repos.get_mut(&repo_identity) {
             Some(rm) => rm,
             None => return,
         };
+        rm.path = path.clone();
 
         // Apply provider data changes
         let mut providers = (*rm.providers).clone();
@@ -562,13 +590,15 @@ impl App {
         for (category, providers) in &rm.provider_health {
             for (provider_name, &healthy) in providers {
                 let status = if healthy { ProviderStatus::Ok } else { ProviderStatus::Error };
-                let key = (path.clone(), category.clone(), provider_name.clone());
+                let key = (repo_identity.clone(), category.clone(), provider_name.clone());
                 self.model.provider_statuses.insert(key, status);
             }
         }
 
         // Remove stale provider_statuses entries for providers no longer in health map
-        self.model.provider_statuses.retain(|k, _| k.0 != path || rm.provider_health.get(&k.1).is_some_and(|ps| ps.contains_key(&k.2)));
+        self.model
+            .provider_statuses
+            .retain(|k, _| k.0 != repo_identity || rm.provider_health.get(&k.1).is_some_and(|ps| ps.contains_key(&k.2)));
 
         // Change detection badge — any non-empty delta on inactive tab
         let has_data_changes = delta
@@ -577,17 +607,17 @@ impl App {
             .any(|c| !matches!(c, flotilla_protocol::Change::ProviderHealth { .. } | flotilla_protocol::Change::ErrorsChanged(_)));
         if has_data_changes {
             let active_idx = self.model.active_repo;
-            let i = self.model.repo_order.iter().position(|p| p == &path);
+            let i = self.model.repo_order.iter().position(|repo| repo == &repo_identity);
             if let Some(idx) = i {
                 if idx != active_idx {
-                    if let Some(rui) = self.ui.repo_ui.get_mut(&path) {
+                    if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
                         rui.has_unseen_changes = true;
                     }
                 }
             }
         }
 
-        if let Some(rui) = self.ui.repo_ui.get_mut(&path) {
+        if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
             rui.update_table_view(table_view);
         }
 
@@ -597,12 +627,13 @@ impl App {
     }
 
     fn handle_repo_added(&mut self, info: RepoInfo) {
-        let path = info.path.clone();
-        if self.model.repos.contains_key(&path) {
+        let identity = info.identity.clone();
+        if self.model.repos.contains_key(&identity) {
             return;
         }
-        self.model.repos.insert(path.clone(), TuiRepoModel {
+        self.model.repos.insert(identity.clone(), TuiRepoModel {
             identity: info.identity,
+            path: info.path,
             providers: Arc::new(ProviderData::default()),
             labels: info.labels,
             provider_names: info.provider_names,
@@ -614,15 +645,14 @@ impl App {
             issue_fetch_pending: false,
             issue_initial_requested: false,
         });
-        self.model.repo_order.push(path.clone());
-        self.ui.repo_ui.insert(path, RepoUiState::default());
+        self.model.repo_order.push(identity.clone());
+        self.ui.repo_ui.insert(identity, RepoUiState::default());
     }
 
-    fn handle_repo_removed(&mut self, path: &Path) {
-        let path = path.to_path_buf();
-        self.model.repos.remove(&path);
-        self.model.repo_order.retain(|p| p != &path);
-        self.ui.repo_ui.remove(&path);
+    fn handle_repo_removed(&mut self, repo_identity: &RepoIdentity) {
+        self.model.repos.remove(repo_identity);
+        self.model.repo_order.retain(|repo| repo != repo_identity);
+        self.ui.repo_ui.remove(repo_identity);
         if self.model.repo_order.is_empty() {
             self.should_quit = true;
             return;
@@ -739,8 +769,8 @@ mod tests {
         assert_eq!(model.repos.len(), 2);
         assert_eq!(model.repo_order.len(), 2);
         assert_eq!(model.active_repo, 0);
-        assert!(model.repos.contains_key(Path::new("/tmp/repo-a")));
-        assert!(model.repos.contains_key(Path::new("/tmp/repo-b")));
+        assert!(model.repos.values().any(|repo| repo.path.as_path() == Path::new("/tmp/repo-a")));
+        assert!(model.repos.values().any(|repo| repo.path.as_path() == Path::new("/tmp/repo-b")));
         assert!(model.status_message.is_none());
     }
 
@@ -748,8 +778,8 @@ mod tests {
     fn from_repo_info_preserves_order() {
         let repos_info = vec![repo_info("/z", "z", RepoLabels::default()), repo_info("/a", "a", RepoLabels::default())];
         let model = TuiModel::from_repo_info(repos_info);
-        assert_eq!(model.repo_order[0], PathBuf::from("/z"));
-        assert_eq!(model.repo_order[1], PathBuf::from("/a"));
+        assert_eq!(model.repos[&model.repo_order[0]].path, PathBuf::from("/z"));
+        assert_eq!(model.repos[&model.repo_order[1]].path, PathBuf::from("/a"));
     }
 
     #[test]
@@ -834,9 +864,10 @@ mod tests {
     #[test]
     fn apply_snapshot_updates_provider_data() {
         let mut app = stub_app();
-        let repo = active_repo_path(&app);
+        let repo = app.model.active_repo_identity().clone();
+        let repo_path = active_repo_path(&app);
 
-        let snap = snapshot(&repo);
+        let snap = snapshot(&repo_path);
         app.apply_snapshot(snap);
         assert!(!app.model.repos[&repo].loading);
     }
@@ -844,9 +875,10 @@ mod tests {
     #[test]
     fn apply_snapshot_updates_issue_metadata() {
         let mut app = stub_app();
-        let repo = active_repo_path(&app);
+        let repo = app.model.active_repo_identity().clone();
+        let repo_path = active_repo_path(&app);
 
-        let mut snap = snapshot(&repo);
+        let mut snap = snapshot(&repo_path);
         snap.issue_has_more = true;
         snap.issue_total = Some(42);
         snap.issue_search_results = Some(vec![]);
@@ -861,9 +893,10 @@ mod tests {
     #[test]
     fn apply_snapshot_maps_provider_health_to_statuses() {
         let mut app = stub_app();
-        let repo = active_repo_path(&app);
+        let repo = app.model.active_repo_identity().clone();
+        let repo_path = active_repo_path(&app);
 
-        let mut snap = snapshot(&repo);
+        let mut snap = snapshot(&repo_path);
         snap.provider_health.insert("vcs".into(), HashMap::from([("git".into(), true), ("wt".into(), false)]));
         app.apply_snapshot(snap);
 
@@ -874,9 +907,9 @@ mod tests {
     #[test]
     fn apply_snapshot_sets_error_status_message() {
         let mut app = stub_app();
-        let repo = active_repo_path(&app);
+        let repo_path = active_repo_path(&app);
 
-        let mut snap = snapshot(&repo);
+        let mut snap = snapshot(&repo_path);
         snap.errors = vec![provider_error("cr", "gh", "fail")];
         app.apply_snapshot(snap);
 
@@ -921,10 +954,10 @@ mod tests {
     #[test]
     fn apply_snapshot_clears_status_on_no_errors() {
         let mut app = stub_app();
-        let repo = active_repo_path(&app);
+        let repo_path = active_repo_path(&app);
         app.set_status_message(Some("old error".into()));
 
-        let snap = snapshot(&repo);
+        let snap = snapshot(&repo_path);
         app.apply_snapshot(snap);
 
         assert!(app.model.status_message.is_none());
@@ -940,15 +973,15 @@ mod tests {
     #[test]
     fn apply_snapshot_requests_initial_issue_fetch() {
         let mut app = stub_app();
-        let repo = active_repo_path(&app);
+        let repo_path = active_repo_path(&app);
 
-        let snap = snapshot(&repo);
+        let snap = snapshot(&repo_path);
         app.apply_snapshot(snap);
 
         let cmd = app.proto_commands.take_next();
         assert!(matches!(cmd, Some((Command { action: CommandAction::SetIssueViewport { .. }, .. }, _))));
         // Second snapshot should NOT queue another
-        let snap2 = snapshot(&repo);
+        let snap2 = snapshot(&repo_path);
         app.apply_snapshot(snap2);
         assert!(app.proto_commands.take_next().is_none());
     }
@@ -957,13 +990,14 @@ mod tests {
     fn apply_snapshot_sets_unseen_changes_for_inactive_tab() {
         let mut app = stub_app_with_repos(2);
         let inactive_repo = app.model.repo_order[1].clone();
+        let inactive_path = app.model.repos[&inactive_repo].path.clone();
 
         // First snapshot to establish baseline providers
-        let snap1 = snapshot(&inactive_repo);
+        let snap1 = snapshot(&inactive_path);
         app.apply_snapshot(snap1);
 
         // Second snapshot with different providers
-        let mut snap2 = snapshot(&inactive_repo);
+        let mut snap2 = snapshot(&inactive_path);
         snap2.seq = 2;
         snap2.work_items = vec![checkout_item("feat", "/wt", false)];
         let mut different_providers = ProviderData::default();
@@ -991,9 +1025,10 @@ mod tests {
     #[test]
     fn apply_delta_updates_issue_metadata() {
         let mut app = stub_app();
-        let repo = active_repo_path(&app);
+        let repo = app.model.active_repo_identity().clone();
+        let repo_path = active_repo_path(&app);
 
-        let mut change = delta(&repo, vec![]);
+        let mut change = delta(&repo_path, vec![]);
         change.issue_total = Some(10);
         change.issue_has_more = true;
         app.apply_delta(change);
@@ -1016,9 +1051,10 @@ mod tests {
     #[test]
     fn apply_delta_provider_health_added() {
         let mut app = stub_app();
-        let repo = active_repo_path(&app);
+        let repo = app.model.active_repo_identity().clone();
+        let repo_path = active_repo_path(&app);
 
-        let change = delta(&repo, vec![flotilla_protocol::Change::ProviderHealth {
+        let change = delta(&repo_path, vec![flotilla_protocol::Change::ProviderHealth {
             category: "vcs".into(),
             provider: "git".into(),
             op: flotilla_protocol::EntryOp::Added(true),
@@ -1032,11 +1068,12 @@ mod tests {
     #[test]
     fn apply_delta_provider_health_removed() {
         let mut app = stub_app();
-        let repo = active_repo_path(&app);
+        let repo = app.model.active_repo_identity().clone();
+        let repo_path = active_repo_path(&app);
 
         app.model.repos.get_mut(&repo).unwrap().provider_health.entry("vcs".into()).or_default().insert("git".into(), true);
 
-        let change = delta(&repo, vec![flotilla_protocol::Change::ProviderHealth {
+        let change = delta(&repo_path, vec![flotilla_protocol::Change::ProviderHealth {
             category: "vcs".into(),
             provider: "git".into(),
             op: flotilla_protocol::EntryOp::Removed,
@@ -1049,9 +1086,9 @@ mod tests {
     #[test]
     fn apply_delta_errors_changed_updates_status() {
         let mut app = stub_app();
-        let repo = active_repo_path(&app);
+        let repo_path = active_repo_path(&app);
 
-        let change = delta(&repo, vec![flotilla_protocol::Change::ErrorsChanged(vec![provider_error("cr", "gh", "broken")])]);
+        let change = delta(&repo_path, vec![flotilla_protocol::Change::ErrorsChanged(vec![provider_error("cr", "gh", "broken")])]);
         app.apply_delta(change);
 
         assert!(app.model.status_message.as_ref().unwrap().contains("broken"));
@@ -1061,8 +1098,9 @@ mod tests {
     fn apply_delta_data_change_on_inactive_tab_sets_unseen() {
         let mut app = stub_app_with_repos(2);
         let inactive_repo = app.model.repo_order[1].clone();
+        let inactive_path = app.model.repos[&inactive_repo].path.clone();
 
-        let change = delta(&inactive_repo, vec![flotilla_protocol::Change::Session {
+        let change = delta(&inactive_path, vec![flotilla_protocol::Change::Session {
             key: "s1".into(),
             op: flotilla_protocol::EntryOp::Added(flotilla_protocol::CloudAgentSession {
                 title: "new session".into(),
@@ -1084,8 +1122,9 @@ mod tests {
     fn apply_delta_health_only_change_does_not_set_unseen() {
         let mut app = stub_app_with_repos(2);
         let inactive_repo = app.model.repo_order[1].clone();
+        let inactive_path = app.model.repos[&inactive_repo].path.clone();
 
-        let change = delta(&inactive_repo, vec![flotilla_protocol::Change::ProviderHealth {
+        let change = delta(&inactive_path, vec![flotilla_protocol::Change::ProviderHealth {
             category: "vcs".into(),
             provider: "git".into(),
             op: flotilla_protocol::EntryOp::Added(true),
@@ -1106,8 +1145,8 @@ mod tests {
         app.handle_repo_added(info);
 
         assert_eq!(app.model.repos.len(), 2);
-        assert!(app.model.repos.contains_key(Path::new("/tmp/new-repo")));
-        assert_eq!(app.model.repo_order.last().unwrap(), Path::new("/tmp/new-repo"));
+        assert!(app.model.repos.values().any(|repo| repo.path.as_path() == Path::new("/tmp/new-repo")));
+        assert_eq!(app.model.repos[app.model.repo_order.last().unwrap()].path, PathBuf::from("/tmp/new-repo"));
         // Adding a repo should not switch to it (it may arrive asynchronously)
         assert_eq!(app.model.active_repo, 0);
     }
@@ -1116,7 +1155,7 @@ mod tests {
     fn handle_repo_added_duplicate_is_noop() {
         let mut app = stub_app();
         let existing_path = app.model.repo_order[0].clone();
-        let info = repo_info(existing_path.to_str().unwrap(), "dup", RepoLabels::default());
+        let info = repo_info(app.model.repos[&existing_path].path.clone(), "dup", RepoLabels::default());
         app.handle_repo_added(info);
         assert_eq!(app.model.repos.len(), 1);
     }
@@ -1159,7 +1198,7 @@ mod tests {
     #[test]
     fn handle_daemon_event_command_started_tracked() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo = app.model.active_repo_root().clone();
 
         app.handle_daemon_event(DaemonEvent::CommandStarted {
             command_id: 99,
@@ -1171,6 +1210,33 @@ mod tests {
 
         assert!(app.in_flight.contains_key(&99));
         assert_eq!(app.in_flight[&99].description, "test cmd");
+    }
+
+    #[test]
+    fn step_failure_surfaces_error_in_status_message() {
+        let mut app = stub_app();
+        let repo_identity = app.model.repo_order[0].clone();
+        let repo_path = app.model.repos[&repo_identity].path.clone();
+
+        app.in_flight.insert(42, InFlightCommand {
+            repo_identity: repo_identity.clone(),
+            repo: repo_path.clone(),
+            description: "Creating checkout...".into(),
+        });
+
+        app.handle_daemon_event(DaemonEvent::CommandStepUpdate {
+            command_id: 42,
+            host: HostName::local(),
+            repo_identity,
+            repo: repo_path,
+            step_index: 0,
+            step_count: 1,
+            description: "Create checkout for branch my-branch".into(),
+            status: StepStatus::Failed { message: "branch already exists: my-branch".into() },
+        });
+
+        let msg = app.model.status_message.as_deref().expect("status_message should be set");
+        assert!(msg.contains("branch already exists"), "expected error detail in status message, got: {msg}");
     }
 
     #[test]
@@ -1286,7 +1352,7 @@ mod tests {
         let ctx = PendingActionContext {
             identity: WorkItemIdentity::Session("s1".into()),
             description: "Archive session".into(),
-            repo_path: "/tmp/test-repo".into(),
+            repo_identity: RepoIdentity { authority: "local".into(), path: "/tmp/test-repo".into() },
         };
         q.push_with_context(Command { host: None, context_repo: None, action: CommandAction::Refresh { repo: None } }, Some(ctx));
         let (cmd, ctx) = q.take_next().expect("should have one entry");
@@ -1311,6 +1377,7 @@ mod tests {
 
         let mut app = stub_app();
         let repo = app.model.repo_order[0].clone();
+        let repo_path = app.model.repos[&repo].path.clone();
         let identity = WorkItemIdentity::Session("s1".into());
 
         app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
@@ -1318,17 +1385,13 @@ mod tests {
             status: PendingStatus::InFlight,
             description: "test".into(),
         });
-        app.in_flight.insert(42, InFlightCommand {
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo: repo.clone(),
-            description: "test".into(),
-        });
+        app.in_flight.insert(42, InFlightCommand { repo_identity: repo.clone(), repo: repo_path.clone(), description: "test".into() });
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::local(),
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo: repo.clone(),
+            repo_identity: repo.clone(),
+            repo: repo_path,
             result: CommandResult::Ok,
         });
 
@@ -1341,6 +1404,7 @@ mod tests {
 
         let mut app = stub_app();
         let repo = app.model.repo_order[0].clone();
+        let repo_path = app.model.repos[&repo].path.clone();
         let identity = WorkItemIdentity::Session("s1".into());
 
         app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
@@ -1348,17 +1412,13 @@ mod tests {
             status: PendingStatus::InFlight,
             description: "test".into(),
         });
-        app.in_flight.insert(42, InFlightCommand {
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo: repo.clone(),
-            description: "test".into(),
-        });
+        app.in_flight.insert(42, InFlightCommand { repo_identity: repo.clone(), repo: repo_path.clone(), description: "test".into() });
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::local(),
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo: repo.clone(),
+            repo_identity: repo.clone(),
+            repo: repo_path,
             result: CommandResult::Error { message: "boom".into() },
         });
 
@@ -1372,6 +1432,7 @@ mod tests {
 
         let mut app = stub_app();
         let repo = app.model.repo_order[0].clone();
+        let repo_path = app.model.repos[&repo].path.clone();
         let identity = WorkItemIdentity::Session("s1".into());
 
         app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
@@ -1379,17 +1440,13 @@ mod tests {
             status: PendingStatus::InFlight,
             description: "test".into(),
         });
-        app.in_flight.insert(42, InFlightCommand {
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo: repo.clone(),
-            description: "test".into(),
-        });
+        app.in_flight.insert(42, InFlightCommand { repo_identity: repo.clone(), repo: repo_path.clone(), description: "test".into() });
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::local(),
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo: repo.clone(),
+            repo_identity: repo.clone(),
+            repo: repo_path,
             result: CommandResult::Cancelled,
         });
 
@@ -1402,6 +1459,7 @@ mod tests {
 
         let mut app = stub_app();
         let repo = app.model.repo_order[0].clone();
+        let repo_path = app.model.repos[&repo].path.clone();
         let identity = WorkItemIdentity::Session("s1".into());
 
         // Insert pending action with command_id 99 (different from finished event)
@@ -1410,21 +1468,71 @@ mod tests {
             status: PendingStatus::InFlight,
             description: "test".into(),
         });
-        app.in_flight.insert(42, InFlightCommand {
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo: repo.clone(),
-            description: "test".into(),
-        });
+        app.in_flight.insert(42, InFlightCommand { repo_identity: repo.clone(), repo: repo_path.clone(), description: "test".into() });
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::local(),
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo: repo.clone(),
+            repo_identity: repo.clone(),
+            repo: repo_path,
             result: CommandResult::Ok,
         });
 
         // The pending action with command_id 99 should still be there
         assert!(app.ui.repo_ui[&repo].pending_actions.contains_key(&identity));
+    }
+
+    #[test]
+    fn local_checkout_created_queues_workspace_creation() {
+        let mut app = stub_app();
+        app.model.my_host = Some(HostName::new("my-desktop"));
+        let repo_identity = app.model.repo_order[0].clone();
+        let repo_path = app.model.repos[&repo_identity].path.clone();
+        let checkout_path = PathBuf::from("/tmp/repo/wt-feat");
+
+        app.in_flight.insert(42, InFlightCommand {
+            repo_identity: repo_identity.clone(),
+            repo: repo_path.clone(),
+            description: "test".into(),
+        });
+
+        app.handle_daemon_event(DaemonEvent::CommandFinished {
+            command_id: 42,
+            host: HostName::new("my-desktop"),
+            repo_identity: repo_identity.clone(),
+            repo: repo_path,
+            result: CommandResult::CheckoutCreated { branch: "feat".into(), path: checkout_path.clone() },
+        });
+
+        let (cmd, _) = app.proto_commands.take_next().expect("should queue workspace creation");
+        assert_eq!(cmd.context_repo, Some(RepoSelector::Identity(repo_identity)));
+        match cmd.action {
+            CommandAction::CreateWorkspaceForCheckout { checkout_path: p } => assert_eq!(p, checkout_path),
+            other => panic!("expected CreateWorkspaceForCheckout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_checkout_created_does_not_queue_workspace() {
+        let mut app = stub_app();
+        app.model.my_host = Some(HostName::new("my-desktop"));
+        let repo_identity = app.model.repo_order[0].clone();
+        let repo_path = app.model.repos[&repo_identity].path.clone();
+
+        app.in_flight.insert(42, InFlightCommand {
+            repo_identity: repo_identity.clone(),
+            repo: repo_path.clone(),
+            description: "test".into(),
+        });
+
+        app.handle_daemon_event(DaemonEvent::CommandFinished {
+            command_id: 42,
+            host: HostName::new("remote-a"),
+            repo_identity,
+            repo: repo_path,
+            result: CommandResult::CheckoutCreated { branch: "feat".into(), path: PathBuf::from("/remote/wt-feat") },
+        });
+
+        assert!(app.proto_commands.take_next().is_none(), "remote checkout should not auto-create local workspace");
     }
 }

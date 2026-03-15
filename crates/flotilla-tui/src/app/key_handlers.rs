@@ -195,7 +195,7 @@ impl App {
                             let ctx = PendingActionContext {
                                 identity: identity.clone(),
                                 description: format!("Remove {}", info.branch),
-                                repo_path: self.model.active_repo_root().clone(),
+                                repo_identity: self.model.active_repo_identity().clone(),
                             };
                             self.proto_commands.push_with_context(
                                 self.command(CommandAction::RemoveCheckout {
@@ -213,7 +213,7 @@ impl App {
                         let ctx = PendingActionContext {
                             identity: identity.clone(),
                             description: format!("Close {}", id),
-                            repo_path: self.model.active_repo_root().clone(),
+                            repo_identity: self.model.active_repo_identity().clone(),
                         };
                         self.proto_commands.push_with_context(command.clone(), Some(ctx));
                     }
@@ -226,12 +226,12 @@ impl App {
             Action::NextTab => self.next_tab(),
             Action::MoveTabLeft => {
                 if !self.ui.mode.is_config() && self.move_tab(-1) {
-                    self.config.save_tab_order(&self.model.repo_order);
+                    self.config.save_tab_order(&self.persisted_tab_order_paths());
                 }
             }
             Action::MoveTabRight => {
                 if !self.ui.mode.is_config() && self.move_tab(1) {
-                    self.config.save_tab_order(&self.model.repo_order);
+                    self.config.save_tab_order(&self.persisted_tab_order_paths());
                 }
             }
             Action::ToggleHelp => match self.ui.mode {
@@ -584,7 +584,7 @@ impl App {
             let pending_ctx = PendingActionContext {
                 identity: item.identity.clone(),
                 description: intent.label(self.model.active_labels()),
-                repo_path: self.model.active_repo_root().clone(),
+                repo_identity: self.model.active_repo_identity().clone(),
             };
             self.proto_commands.push_with_context(cmd, Some(pending_ctx));
         }
@@ -636,7 +636,7 @@ impl App {
                         let ctx = PendingActionContext {
                             identity: identity.clone(),
                             description: format!("Remove {}", info.branch),
-                            repo_path: self.model.active_repo_root().clone(),
+                            repo_identity: self.model.active_repo_identity().clone(),
                         };
                         self.proto_commands.push_with_context(
                             self.command(CommandAction::RemoveCheckout {
@@ -663,7 +663,7 @@ impl App {
                     let ctx = PendingActionContext {
                         identity: identity.clone(),
                         description: format!("Close {}", id),
-                        repo_path: self.model.active_repo_root().clone(),
+                        repo_identity: self.model.active_repo_identity().clone(),
                     };
                     self.proto_commands.push_with_context(command.clone(), Some(ctx));
                 }

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
-use flotilla_core::{config::ConfigStore, daemon::DaemonHandle};
+use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, providers::discovery::test_support::git_process_discovery};
 use flotilla_daemon::server::DaemonServer;
 use flotilla_protocol::{Command, CommandAction, CommandResult, DaemonEvent};
 use tokio::time::Instant;
@@ -18,7 +18,7 @@ async fn socket_roundtrip() {
 
     // Start daemon server
     let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-    let server = DaemonServer::new(vec![repo.clone()], config, socket_path.clone(), Duration::from_secs(300))
+    let server = DaemonServer::new(vec![repo.clone()], config, git_process_discovery(false), socket_path.clone(), Duration::from_secs(300))
         .await
         .expect("server config should be valid");
 
@@ -78,12 +78,12 @@ async fn socket_roundtrip() {
 
     // replay_since with current seq — should return empty (up to date)
     let snapshot = client.get_state(&repo).await.expect("get_state");
-    let last_seen = HashMap::from([(repo.clone(), snapshot.seq)]);
+    let last_seen = HashMap::from([(snapshot.repo_identity.clone(), snapshot.seq)]);
     let replay = client.replay_since(&last_seen).await.expect("replay_since");
     assert!(replay.is_empty(), "should be empty when up to date, got {} events", replay.len());
 
     // replay_since with bogus seq — should return full snapshot
-    let last_seen = HashMap::from([(repo.clone(), 999999)]);
+    let last_seen = HashMap::from([(snapshot.repo_identity, 999999)]);
     let replay = client.replay_since(&last_seen).await.expect("replay_since");
     assert_eq!(replay.len(), 1, "should get one full snapshot");
     assert!(matches!(&replay[0], DaemonEvent::SnapshotFull(snap) if snap.repo == repo), "expected SnapshotFull, got {:?}", replay[0]);
@@ -105,7 +105,7 @@ async fn query_commands_roundtrip() {
 
     // Start daemon server
     let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-    let server = DaemonServer::new(vec![repo.clone()], config, socket_path.clone(), Duration::from_secs(300))
+    let server = DaemonServer::new(vec![repo.clone()], config, git_process_discovery(false), socket_path.clone(), Duration::from_secs(300))
         .await
         .expect("server config should be valid");
 
@@ -195,7 +195,7 @@ async fn execute_refresh_all_roundtrip_emits_lifecycle_events() {
     let repo = manifest_dir.parent().expect("parent").parent().expect("grandparent").to_path_buf();
 
     let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-    let server = DaemonServer::new(vec![repo.clone()], config, socket_path.clone(), Duration::from_secs(300))
+    let server = DaemonServer::new(vec![repo.clone()], config, git_process_discovery(false), socket_path.clone(), Duration::from_secs(300))
         .await
         .expect("server config should be valid");
 

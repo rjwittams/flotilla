@@ -9,10 +9,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon};
+use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::DiscoveryRuntime};
 use flotilla_protocol::{
     Command, CommandAction, CommandPeerEvent, CommandResult, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message,
-    PeerConnectionState, PeerDataMessage, PeerWireMessage, RepoIdentity, RepoSelector, RoutedPeerMessage, PROTOCOL_VERSION,
+    PeerConnectionState, PeerDataMessage, PeerWireMessage, ReplayCursor, RepoIdentity, RepoSelector, RoutedPeerMessage, PROTOCOL_VERSION,
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader, BufWriter},
@@ -121,17 +121,19 @@ impl DaemonServer {
     /// Create a new daemon server.
     ///
     /// `repo_paths` — initial repos to track.
+    /// `config` — daemon configuration store, used for hostname and peer config.
+    /// `discovery` — discovery runtime used to initialize tracked repos.
     /// `socket_path` — path to the Unix domain socket.
     /// `idle_timeout` — how long to wait after the last client disconnects before shutting down.
     pub async fn new(
         repo_paths: Vec<PathBuf>,
         config: Arc<ConfigStore>,
+        discovery: DiscoveryRuntime,
         socket_path: PathBuf,
         idle_timeout: Duration,
     ) -> Result<Self, String> {
         let daemon_config = config.load_daemon_config();
         let host_name = daemon_config.host_name.map(HostName::new).unwrap_or_else(HostName::local);
-        let discovery = flotilla_core::providers::discovery::DiscoveryRuntime::for_process(daemon_config.follower);
         let daemon = InProcessDaemon::new(repo_paths, Arc::clone(&config), discovery, host_name.clone()).await;
         let hosts_config = config.load_hosts()?;
 
@@ -665,7 +667,7 @@ impl DaemonServer {
             let mut event_rx = outbound_daemon.subscribe();
             let mut outbound_clock = flotilla_protocol::VectorClock::default();
             let host_name = outbound_daemon.host_name().clone();
-            let mut last_sent_versions: std::collections::HashMap<std::path::PathBuf, u64> = std::collections::HashMap::new();
+            let mut last_sent_versions: std::collections::HashMap<RepoIdentity, u64> = std::collections::HashMap::new();
 
             loop {
                 tokio::select! {
@@ -702,11 +704,13 @@ impl DaemonServer {
                             // updates, searches), not peer data merges. This prevents a
                             // feedback loop where peer data triggers re-sending unchanged
                             // local data back to peers endlessly.
+                            let Some(repo_identity) = outbound_daemon.find_identity_for_path(&repo_path).await else {
+                                continue;
+                            };
                             let Some((local_providers, version)) = outbound_daemon.get_local_providers(&repo_path).await else {
                                 continue;
                             };
-                            let last = last_sent_versions.get(&repo_path).copied().unwrap_or(0);
-                            if version <= last {
+                            if !should_send_local_version(&last_sent_versions, &repo_identity, version) {
                                 continue;
                             }
                             let sent = send_local_to_peers(
@@ -723,7 +727,7 @@ impl DaemonServer {
                             // received it. Otherwise a version produced while no peers
                             // are connected would be suppressed forever on reconnect.
                             if sent {
-                                last_sent_versions.insert(repo_path, version);
+                                last_sent_versions.insert(repo_identity, version);
                             }
                         }
                     }
@@ -1231,6 +1235,14 @@ async fn send_local_to_peers(
     any_sent
 }
 
+fn should_send_local_version(
+    last_sent_versions: &std::collections::HashMap<RepoIdentity, u64>,
+    repo_identity: &RepoIdentity,
+    local_data_version: u64,
+) -> bool {
+    local_data_version > last_sent_versions.get(repo_identity).copied().unwrap_or(0)
+}
+
 /// Send current local state for all repos to a specific newly-connected peer.
 ///
 /// Unlike `send_local_to_peers` (which broadcasts), this targets a single peer
@@ -1727,8 +1739,12 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, method: &str, para
         }
 
         "replay_since" => {
-            let last_seen: std::collections::HashMap<std::path::PathBuf, u64> =
-                params.get("last_seen").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_else(|| {
+            let last_seen = params
+                .get("last_seen")
+                .cloned()
+                .and_then(|v| serde_json::from_value::<Vec<ReplayCursor>>(v).ok())
+                .map(|entries| entries.into_iter().map(|entry| (entry.repo_identity, entry.seq)).collect())
+                .unwrap_or_else(|| {
                     warn!("replay_since: failed to parse last_seen, returning full snapshots");
                     std::collections::HashMap::new()
                 });
@@ -2479,7 +2495,8 @@ mod tests {
     async fn take_peer_data_rx_returns_some_once() {
         let tmp = tempfile::tempdir().unwrap();
         let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-        let mut server = DaemonServer::new(vec![], config, tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
+        let mut server =
+            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
 
         assert!(server.take_peer_data_rx().is_some(), "first call should return Some");
         assert!(server.take_peer_data_rx().is_none(), "second call should return None");
@@ -2497,7 +2514,8 @@ mod tests {
         .unwrap();
 
         let config = Arc::new(ConfigStore::with_base(&base));
-        let server = DaemonServer::new(vec![], config, tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
+        let server =
+            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
 
         let events = server.daemon.replay_since(&HashMap::new()).await.unwrap();
         let mut statuses: Vec<(HostName, PeerConnectionState)> = events
@@ -2660,6 +2678,19 @@ mod tests {
         assert!(matches!(&sent[0], PeerWireMessage::HostSummary(summary) if summary.host_name == host_name));
     }
 
+    #[test]
+    fn should_send_local_version_dedupes_by_repo_identity() {
+        let identity = RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() };
+        let mut last_sent_versions = HashMap::new();
+
+        assert!(should_send_local_version(&last_sent_versions, &identity, 1));
+        last_sent_versions.insert(identity.clone(), 1);
+
+        // Different local roots for the same repo identity should share one dedup entry.
+        assert!(!should_send_local_version(&last_sent_versions, &identity, 1));
+        assert!(should_send_local_version(&last_sent_versions, &identity, 2));
+    }
+
     #[tokio::test]
     async fn peer_manager_initialized_from_config() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2677,7 +2708,8 @@ mod tests {
         .unwrap();
 
         let config = Arc::new(ConfigStore::with_base(&base));
-        let server = DaemonServer::new(vec![], config, tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
+        let server =
+            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
 
         // PeerManager should be initialized and accessible
         let pm = server.peer_manager.lock().await;
@@ -2689,7 +2721,8 @@ mod tests {
     async fn peer_manager_default_when_no_config() {
         let tmp = tempfile::tempdir().unwrap();
         let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-        let server = DaemonServer::new(vec![], config, tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
+        let server =
+            DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await.unwrap();
 
         // Should still have a PeerManager with no peers
         let pm = server.peer_manager.lock().await;
@@ -2708,7 +2741,7 @@ mod tests {
         .unwrap();
 
         let config = Arc::new(ConfigStore::with_base(&base));
-        let result = DaemonServer::new(vec![], config, tmp.path().join("test.sock"), Duration::from_secs(60)).await;
+        let result = DaemonServer::new(vec![], config, fake_discovery(false), tmp.path().join("test.sock"), Duration::from_secs(60)).await;
 
         match result {
             Ok(_) => panic!("invalid hosts config should return startup error"),

@@ -1,11 +1,10 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
     time::Instant,
 };
 
 use flotilla_core::data::{GroupEntry, GroupedWorkItems};
-use flotilla_protocol::{CheckoutStatus, HostName, WorkItemIdentity};
+use flotilla_protocol::{CheckoutStatus, HostName, RepoIdentity, WorkItemIdentity};
 use ratatui::{layout::Rect, widgets::TableState};
 use tui_input::Input;
 
@@ -126,7 +125,7 @@ pub struct PendingAction {
 pub struct PendingActionContext {
     pub identity: WorkItemIdentity,
     pub description: String,
-    pub repo_path: std::path::PathBuf,
+    pub repo_identity: RepoIdentity,
 }
 
 /// Per-repo UI state (selection, table widget state, visual flags).
@@ -268,7 +267,7 @@ impl Default for EventLogUiState {
 
 pub struct UiState {
     pub mode: UiMode,
-    pub repo_ui: HashMap<PathBuf, RepoUiState>,
+    pub repo_ui: HashMap<RepoIdentity, RepoUiState>,
     pub target_host: Option<HostName>,
     pub view_layout: RepoViewLayout,
     pub status_bar: StatusBarUiState,
@@ -281,8 +280,8 @@ pub struct UiState {
 }
 
 impl UiState {
-    pub fn new(repo_paths: &[PathBuf]) -> Self {
-        let repo_ui = repo_paths.iter().map(|p| (p.clone(), RepoUiState::default())).collect();
+    pub fn new(repo_ids: &[RepoIdentity]) -> Self {
+        let repo_ui = repo_ids.iter().map(|repo_id| (repo_id.clone(), RepoUiState::default())).collect();
         Self {
             mode: UiMode::default(),
             repo_ui,
@@ -298,7 +297,7 @@ impl UiState {
         }
     }
 
-    pub fn active_repo_ui(&self, repo_order: &[PathBuf], active_repo: usize) -> &RepoUiState {
+    pub fn active_repo_ui(&self, repo_order: &[RepoIdentity], active_repo: usize) -> &RepoUiState {
         &self.repo_ui[&repo_order[active_repo]]
     }
 
@@ -330,6 +329,10 @@ mod tests {
     use flotilla_protocol::HostName;
 
     use super::*;
+
+    fn repo_id(path: &str) -> RepoIdentity {
+        RepoIdentity { authority: "local".into(), path: path.into() }
+    }
 
     // ── UiMode tests ──────────────────────────────────────────────────
 
@@ -431,15 +434,15 @@ mod tests {
 
     #[test]
     fn new_with_single_path_creates_one_repo() {
-        let paths = vec![PathBuf::from("/repo/a")];
+        let paths = vec![repo_id("/repo/a")];
         let state = UiState::new(&paths);
         assert_eq!(state.repo_ui.len(), 1);
-        assert!(state.repo_ui.contains_key(&PathBuf::from("/repo/a")));
+        assert!(state.repo_ui.contains_key(&repo_id("/repo/a")));
     }
 
     #[test]
     fn new_with_multiple_paths_creates_correct_count() {
-        let paths = vec![PathBuf::from("/repo/a"), PathBuf::from("/repo/b"), PathBuf::from("/repo/c")];
+        let paths = vec![repo_id("/repo/a"), repo_id("/repo/b"), repo_id("/repo/c")];
         let state = UiState::new(&paths);
         assert_eq!(state.repo_ui.len(), 3);
         for p in &paths {
@@ -515,7 +518,7 @@ mod tests {
 
     #[test]
     fn active_repo_ui_returns_repos_for_valid_indices() {
-        let paths = vec![PathBuf::from("/repo/a"), PathBuf::from("/repo/b")];
+        let paths = vec![repo_id("/repo/a"), repo_id("/repo/b")];
         let state = UiState::new(&paths);
         for idx in 0..paths.len() {
             let repo_ui = state.active_repo_ui(&paths, idx);
@@ -527,7 +530,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn active_repo_ui_panics_on_out_of_bounds_index() {
-        let paths = vec![PathBuf::from("/repo/a")];
+        let paths = vec![repo_id("/repo/a")];
         let state = UiState::new(&paths);
         let _ = state.active_repo_ui(&paths, 5);
     }
