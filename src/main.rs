@@ -157,13 +157,16 @@ async fn run_tui(cli: Cli) -> Result<()> {
     // Initialize terminal and show splash immediately for fast visual feedback.
     // Mouse capture is enabled AFTER the splash so mouse events don't cut it short.
     let mut terminal = ratatui::init();
+    flotilla_tui::terminal::install_panic_hook();
+    #[cfg(unix)]
+    flotilla_tui::terminal::install_sigterm_handler();
 
     // Resolve repos before splash (fast — just reads config files).
     let embedded = cli.embedded;
     let repo_roots = if embedded {
         let roots = flotilla_core::config::resolve_repo_roots(&cli.repo_root, &config);
         if roots.is_empty() {
-            ratatui::restore();
+            flotilla_tui::terminal::restore_terminal();
             eprintln!("Error: no git repositories found (use --repo-root to specify)");
             std::process::exit(1);
         }
@@ -216,13 +219,13 @@ async fn run_tui(cli: Cli) -> Result<()> {
             daemon
         }
         Ok(Err(e)) => {
-            ratatui::restore();
+            flotilla_tui::terminal::restore_terminal();
             eprintln!("Error: {e}");
             eprintln!("  Check daemon log at {}", daemon_log_path.display());
             std::process::exit(1);
         }
         Err(e) => {
-            ratatui::restore();
+            flotilla_tui::terminal::restore_terminal();
             eprintln!("Error: daemon initialization panicked: {e}");
             std::process::exit(1);
         }
