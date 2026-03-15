@@ -1,0 +1,9 @@
+# Override: use pre-built binary from host instead of cargo build.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+services:
+  node-a:
+    build:
+      target: dev
+  node-b:
+    build:
+      target: dev
