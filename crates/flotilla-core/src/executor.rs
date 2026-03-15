@@ -487,7 +487,8 @@ pub async fn execute(
                 // working directory only needs to be a valid local directory.
                 // The wrapped attach commands handle entering the remote checkout path.
                 let working_dir = local_workspace_directory(&repo.root, config_base);
-                let mut config = workspace_config(&repo.root, &branch, &working_dir, "claude", config_base);
+                let remote_name = format!("{}:{}", target_host, branch);
+                let mut config = workspace_config(&repo.root, &remote_name, &working_dir, "claude", config_base);
                 config.resolved_commands = Some(wrapped.into_iter().map(|cmd| (cmd.role, cmd.command)).collect());
                 if let Err(e) = ws_mgr.create_workspace(&config).await {
                     return CommandResult::Error { message: e };
@@ -1568,6 +1569,47 @@ mod tests {
         assert!(resolved[0].1.contains("/remote/feat"));
         assert!(resolved[0].1.contains("bash -l"));
         assert!(resolved[0].1.contains("$SHELL -l -c"), "expected login shell wrapper, got: {}", resolved[0].1);
+    }
+
+    #[tokio::test]
+    async fn create_workspace_from_prepared_terminal_prefixes_name_with_host() {
+        let workspace_manager = Arc::new(MockWorkspaceManager::succeeding());
+        let mut registry = empty_registry();
+        registry.workspace_manager = Some((desc("cmux"), Arc::clone(&workspace_manager) as Arc<dyn WorkspaceManager>));
+        let runner = runner_ok();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        std::fs::write(
+            temp.path().join("hosts.toml"),
+            "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
+        )
+        .expect("write hosts config");
+
+        let repo = RepoExecutionContext {
+            identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            root: repo_root,
+        };
+        let result = execute(
+            CommandAction::CreateWorkspaceFromPreparedTerminal {
+                target_host: HostName::new("desktop"),
+                branch: "feat".into(),
+                checkout_path: PathBuf::from("/remote/feat"),
+                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }],
+            },
+            &repo,
+            &registry,
+            &empty_data(),
+            &runner,
+            temp.path(),
+            &local_host(),
+        )
+        .await;
+
+        assert_ok(result);
+        let created = workspace_manager.created_configs.lock().await;
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].name, "desktop:feat", "workspace name should be host:branch");
     }
 
     #[tokio::test]
