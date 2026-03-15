@@ -652,6 +652,20 @@ mod tests {
             .expect("spawn sleep process");
         let pid = child.id();
 
+        // Wait until sysinfo can see the process name — avoids flakiness
+        // where is_expected_process returns false because /proc/<pid>/stat
+        // isn't fully populated yet under load.
+        for _ in 0..50 {
+            if ShpoolTerminalPool::is_expected_process(pid as i32, "sleep") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            ShpoolTerminalPool::is_expected_process(pid as i32, "sleep"),
+            "sleep process should be visible to sysinfo before testing stop_daemon"
+        );
+
         std::fs::write(&socket_path, b"").expect("create fake socket");
         std::fs::write(&pid_path, pid.to_string()).expect("write pid file");
 
