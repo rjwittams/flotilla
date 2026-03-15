@@ -1,10 +1,7 @@
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::Span,
-};
+use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::Span};
 use unicode_width::UnicodeWidthStr;
+
+use crate::theme::{BarSiteStyle, Theme};
 
 /// Client-provided data for one segment in a bar.
 pub struct SegmentItem {
@@ -95,25 +92,27 @@ pub fn render(items: &[SegmentItem], style: &dyn BarStyle, area: Rect, buf: &mut
 /// Powerline chevron character (U+E0B0).
 const CHEVRON: &str = "\u{e0b0}";
 
-/// Tab bar style: pipe separators, cyan active, dark gray inactive.
-pub struct TabBarStyle;
+/// Theme-aware tab bar style: reads colours from a `Theme`.
+pub struct ThemedTabBarStyle<'a> {
+    pub theme: &'a Theme,
+}
 
-impl BarStyle for TabBarStyle {
+impl BarStyle for ThemedTabBarStyle<'_> {
     fn render_item(&self, item: &SegmentItem) -> RenderedItem {
         let style = if let Some(override_style) = item.style_override {
             override_style
         } else if item.active && item.dragging {
-            Style::default().bold().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)
+            self.theme.tab_style(true, true)
         } else if item.active {
-            Style::default().bold().fg(Color::Cyan)
+            self.theme.tab_style(true, false)
         } else {
-            Style::default().fg(Color::DarkGray)
+            self.theme.tab_style(false, false)
         };
         RenderedItem::from_spans(vec![Span::styled(item.label.clone(), style)])
     }
 
     fn separator(&self) -> RenderedItem {
-        RenderedItem::from_spans(vec![Span::styled(" | ", Style::default().fg(Color::DarkGray))])
+        RenderedItem::from_spans(vec![Span::styled(" | ", Style::default().fg(self.theme.muted))])
     }
 
     fn background_fill(&self) -> Option<Style> {
@@ -121,20 +120,24 @@ impl BarStyle for TabBarStyle {
     }
 }
 
-/// Status bar key ribbon style with chevron-delimited key chips.
-pub struct RibbonStyle;
+/// Theme-aware ribbon style with chevron-delimited key chips.
+pub struct ThemedRibbonStyle<'a> {
+    pub theme: &'a Theme,
+    pub site: &'a BarSiteStyle,
+}
 
-impl BarStyle for RibbonStyle {
+impl BarStyle for ThemedRibbonStyle<'_> {
     fn render_item(&self, item: &SegmentItem) -> RenderedItem {
         let key = item.key_hint.as_deref().unwrap_or("");
+        let label = self.site.transform_label(&item.label);
         RenderedItem::from_spans(vec![
-            Span::styled(CHEVRON, Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::styled(" ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::styled("<", Style::default().fg(Color::Black).bg(Color::DarkGray).bold()),
-            Span::styled(key.to_string(), Style::default().fg(Color::Indexed(208)).bg(Color::DarkGray).bold()),
-            Span::styled(">", Style::default().fg(Color::Black).bg(Color::DarkGray).bold()),
-            Span::styled(format!(" {} ", item.label), Style::default().fg(Color::Black).bg(Color::DarkGray).bold()),
-            Span::styled(CHEVRON, Style::default().fg(Color::DarkGray).bg(Color::Black)),
+            Span::styled(CHEVRON, Style::default().fg(self.theme.bar_bg).bg(self.theme.key_chip_bg)),
+            Span::styled(" ", Style::default().fg(self.theme.key_chip_fg).bg(self.theme.key_chip_bg)),
+            Span::styled("<", Style::default().fg(self.theme.key_chip_fg).bg(self.theme.key_chip_bg).bold()),
+            Span::styled(key.to_string(), Style::default().fg(self.theme.key_hint).bg(self.theme.key_chip_bg).bold()),
+            Span::styled(">", Style::default().fg(self.theme.key_chip_fg).bg(self.theme.key_chip_bg).bold()),
+            Span::styled(format!(" {label} "), Style::default().fg(self.theme.key_chip_fg).bg(self.theme.key_chip_bg).bold()),
+            Span::styled(CHEVRON, Style::default().fg(self.theme.key_chip_bg).bg(self.theme.bar_bg)),
         ])
     }
 
@@ -143,13 +146,13 @@ impl BarStyle for RibbonStyle {
     }
 
     fn background_fill(&self) -> Option<Style> {
-        Some(Style::default().fg(Color::White).bg(Color::Black))
+        Some(Style::default().fg(self.theme.text).bg(self.theme.bar_bg))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
 
     use super::*;
 
@@ -203,7 +206,8 @@ mod tests {
 
     #[test]
     fn tab_style_renders_active_and_inactive() {
-        let style = TabBarStyle;
+        let theme = crate::theme::Theme::classic();
+        let style = ThemedTabBarStyle { theme: &theme };
         let active = SegmentItem { label: "active".into(), key_hint: None, active: true, dragging: false, style_override: None };
         let inactive = SegmentItem { label: "inactive".into(), key_hint: None, active: false, dragging: false, style_override: None };
 
@@ -217,7 +221,8 @@ mod tests {
 
     #[test]
     fn tab_style_applies_style_override() {
-        let style = TabBarStyle;
+        let theme = crate::theme::Theme::classic();
+        let style = ThemedTabBarStyle { theme: &theme };
         let item = SegmentItem {
             label: "[+]".into(),
             key_hint: None,
@@ -231,7 +236,8 @@ mod tests {
 
     #[test]
     fn tab_style_separator_width() {
-        let sep = TabBarStyle.separator();
+        let theme = crate::theme::Theme::classic();
+        let sep = ThemedTabBarStyle { theme: &theme }.separator();
         assert_eq!(sep.width, 3);
     }
 
@@ -261,23 +267,26 @@ mod tests {
 
     #[test]
     fn ribbon_style_renders_with_key_hint() {
-        let style = RibbonStyle;
-        let item = SegmentItem { label: "OPEN".into(), key_hint: Some("ENT".into()), active: false, dragging: false, style_override: None };
+        let theme = crate::theme::Theme::classic();
+        let style = ThemedRibbonStyle { theme: &theme, site: &theme.status_bar };
+        let item = SegmentItem { label: "open".into(), key_hint: Some("ENT".into()), active: false, dragging: false, style_override: None };
         let rendered = style.render_item(&item);
         assert_eq!(rendered.spans.len(), 7);
         let text: String = rendered.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
         assert!(text.contains("ENT"));
-        assert!(text.contains("OPEN"));
+        assert!(text.contains("OPEN")); // label is uppercased by status_bar transform
     }
 
     #[test]
     fn ribbon_style_separator_is_empty() {
-        let sep = RibbonStyle.separator();
+        let theme = crate::theme::Theme::classic();
+        let sep = ThemedRibbonStyle { theme: &theme, site: &theme.status_bar }.separator();
         assert_eq!(sep.width, 0);
     }
 
     #[test]
     fn ribbon_style_fills_background() {
-        assert!(RibbonStyle.background_fill().is_some());
+        let theme = crate::theme::Theme::classic();
+        assert!(ThemedRibbonStyle { theme: &theme, site: &theme.status_bar }.background_fill().is_some());
     }
 }

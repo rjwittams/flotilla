@@ -4,7 +4,7 @@ use clap::Parser;
 use color_eyre::Result;
 use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon};
 use flotilla_protocol::{output::OutputFormat, CheckoutSelector, CheckoutTarget, Command, CommandAction, HostName, RepoSelector};
-use flotilla_tui::{app, event_log};
+use flotilla_tui::{app, event_log, theme};
 use tracing::info;
 
 /// Flotilla: TUI dashboard for managing development workspaces
@@ -26,6 +26,10 @@ struct Cli {
     /// Run in embedded mode (no daemon, in-process)
     #[arg(long)]
     embedded: bool,
+
+    /// Theme name (catppuccin-mocha, classic)
+    #[arg(long)]
+    theme: Option<String>,
 
     #[command(subcommand)]
     command: Option<SubCommand>,
@@ -191,12 +195,13 @@ fn find_subcommand_index(args: &[OsString]) -> Option<usize> {
     while idx < args.len() {
         match args[idx].to_str() {
             Some("--embedded") => idx += 1,
-            Some("--repo-root") | Some("--config-dir") | Some("--socket") => idx += 2,
+            Some("--repo-root") | Some("--config-dir") | Some("--socket") | Some("--theme") => idx += 2,
             Some(value)
                 if value.starts_with("--embedded=")
                     || value.starts_with("--repo-root=")
                     || value.starts_with("--config-dir=")
-                    || value.starts_with("--socket=") =>
+                    || value.starts_with("--socket=")
+                    || value.starts_with("--theme=") =>
             {
                 idx += 1;
             }
@@ -239,6 +244,7 @@ async fn run_tui(cli: Cli) -> Result<()> {
     };
 
     let cli_repo_roots = cli.repo_root.clone();
+    let cli_theme = cli.theme.clone();
 
     // Spawn daemon init on a separate task so it runs concurrently with the splash
     // (show_splash uses blocking crossterm::event::poll calls).
@@ -300,8 +306,14 @@ async fn run_tui(cli: Cli) -> Result<()> {
         }
     }
 
+    let theme_name = cli_theme.or_else(|| config.load_config().ui.theme.clone()).unwrap_or_else(|| "catppuccin-mocha".to_string());
+    let initial_theme = theme::theme_by_name(&theme_name);
+    if !initial_theme.name.eq_ignore_ascii_case(&theme_name) {
+        tracing::warn!(requested = %theme_name, using = %initial_theme.name, "unknown theme, falling back");
+    }
+
     let repos_info = daemon.list_repos().await.unwrap_or_default();
-    let app = app::App::new(daemon.clone(), repos_info, Arc::clone(&config));
+    let app = app::App::new(daemon.clone(), repos_info, Arc::clone(&config), initial_theme);
 
     flotilla_tui::run::run_event_loop(terminal, app).await
 }

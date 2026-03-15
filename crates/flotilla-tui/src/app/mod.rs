@@ -29,6 +29,8 @@ use tui_input::Input;
 use ui_state::PendingStatus;
 pub use ui_state::{BranchInputKind, DirEntry, RepoUiState, RepoViewLayout, TabId, UiMode, UiState};
 
+use crate::theme::Theme;
+
 /// Per-provider auth/health status from last refresh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderStatus {
@@ -244,6 +246,7 @@ pub struct App {
     pub config: Arc<ConfigStore>,
     pub model: TuiModel,
     pub ui: UiState,
+    pub theme: Theme,
     pub proto_commands: CommandQueue,
     pub in_flight: HashMap<u64, InFlightCommand>,
     pub pending_cancel: Option<u64>,
@@ -251,7 +254,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(daemon: Arc<dyn DaemonHandle>, repos_info: Vec<RepoInfo>, config: Arc<ConfigStore>) -> Self {
+    pub fn new(daemon: Arc<dyn DaemonHandle>, repos_info: Vec<RepoInfo>, config: Arc<ConfigStore>, theme: Theme) -> Self {
         let model = TuiModel::from_repo_info(repos_info);
         let mut ui = UiState::new(&model.repo_order);
         let loaded_config = config.load_config();
@@ -266,6 +269,7 @@ impl App {
             config,
             model,
             ui,
+            theme,
             proto_commands: Default::default(),
             in_flight: HashMap::new(),
             pending_cancel: None,
@@ -805,7 +809,7 @@ mod tests {
 
         let daemon: Arc<dyn DaemonHandle> = Arc::new(test_support::StubDaemon::new());
         let config = Arc::new(ConfigStore::with_base(dir.path()));
-        let app = App::new(daemon, vec![repo_info("/tmp/repo-a", "repo-a", RepoLabels::default())], config);
+        let app = App::new(daemon, vec![repo_info("/tmp/repo-a", "repo-a", RepoLabels::default())], config, Theme::classic());
 
         assert_eq!(app.ui.view_layout, RepoViewLayout::Below);
     }
@@ -815,7 +819,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let daemon: Arc<dyn DaemonHandle> = Arc::new(test_support::StubDaemon::new());
         let config = Arc::new(ConfigStore::with_base(dir.path()));
-        let mut app = App::new(daemon, vec![repo_info("/tmp/repo-a", "repo-a", RepoLabels::default())], config);
+        let mut app = App::new(daemon, vec![repo_info("/tmp/repo-a", "repo-a", RepoLabels::default())], config, Theme::classic());
 
         app.ui.view_layout = RepoViewLayout::Right;
         app.persist_layout();
