@@ -59,18 +59,10 @@ impl Factory for WtCheckoutManagerFactory {
     async fn probe(
         &self,
         env: &EnvironmentBag,
-        config: &ConfigStore,
-        repo_root: &Path,
+        _config: &ConfigStore,
+        _repo_root: &Path,
         runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn CheckoutManager>, Vec<UnmetRequirement>> {
-        let checkouts_config = config.resolve_checkouts_config(repo_root);
-        let provider = checkouts_config.provider.as_str();
-
-        // If config explicitly names a different provider, yield gracefully.
-        if provider != "auto" && provider != "wt" {
-            return Err(vec![]);
-        }
-
         if env.find_binary("wt").is_some() {
             Ok(Arc::new(WtCheckoutManager::new(runner)))
         } else {
@@ -100,16 +92,9 @@ impl Factory for GitCheckoutManagerFactory {
         repo_root: &Path,
         runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn CheckoutManager>, Vec<UnmetRequirement>> {
-        let checkouts_config = config.resolve_checkouts_config(repo_root);
-        let provider = checkouts_config.provider.as_str();
-
-        // If config explicitly names a different provider, yield gracefully.
-        if provider != "auto" && provider != "git" {
-            return Err(vec![]);
-        }
-
         if env.find_binary("git").is_some() {
-            Ok(Arc::new(GitCheckoutManager::new(checkouts_config, runner)))
+            let checkout_path = config.resolve_checkout_path(repo_root);
+            Ok(Arc::new(GitCheckoutManager::new(checkout_path, runner)))
         } else {
             Err(vec![UnmetRequirement::MissingBinary("git".into())])
         }
@@ -187,44 +172,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wt_factory_excluded_by_config_git() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("wt", "/usr/local/bin/wt"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let base = dir.path();
-        // Write config that forces provider = "git"
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\nprovider = \"git\"\n").expect("failed to write config");
-        let config = ConfigStore::with_base(base);
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = WtCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        // Config exclusion returns empty unmet list
-        let unmet = result.err().expect("should be excluded by config");
-        assert!(unmet.is_empty());
-    }
-
-    #[tokio::test]
-    async fn wt_factory_allowed_by_config_auto() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("wt", "/usr/local/bin/wt"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let config = ConfigStore::with_base(dir.path());
-        // Default config has provider = "auto"
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = WtCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn wt_factory_allowed_by_config_wt() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("wt", "/usr/local/bin/wt"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let base = dir.path();
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\nprovider = \"wt\"\n").expect("failed to write config");
-        let config = ConfigStore::with_base(base);
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = WtCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
     async fn wt_factory_descriptor() {
         let desc = WtCheckoutManagerFactory.descriptor();
         assert_eq!(desc.backend, "git");
@@ -256,43 +203,6 @@ mod tests {
         let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
         let unmet = result.err().expect("should fail without git binary");
         assert!(unmet.contains(&UnmetRequirement::MissingBinary("git".into())));
-    }
-
-    #[tokio::test]
-    async fn git_checkout_factory_excluded_by_config_wt() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("git", "/usr/bin/git"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let base = dir.path();
-        // Write config that forces provider = "wt"
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\nprovider = \"wt\"\n").expect("failed to write config");
-        let config = ConfigStore::with_base(base);
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        // Config exclusion returns empty unmet list
-        let unmet = result.err().expect("should be excluded by config");
-        assert!(unmet.is_empty());
-    }
-
-    #[tokio::test]
-    async fn git_checkout_factory_allowed_by_config_auto() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("git", "/usr/bin/git"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let config = ConfigStore::with_base(dir.path());
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn git_checkout_factory_allowed_by_config_git() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("git", "/usr/bin/git"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let base = dir.path();
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\nprovider = \"git\"\n").expect("failed to write config");
-        let config = ConfigStore::with_base(base);
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        assert!(result.is_ok());
     }
 
     #[tokio::test]

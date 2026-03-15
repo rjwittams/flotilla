@@ -78,6 +78,26 @@ impl<T: ?Sized> ProviderSet<T> {
     pub fn clear(&mut self) {
         self.inner.clear();
     }
+
+    /// Reorder so that the first entry whose descriptor.backend matches is first.
+    /// No-op if no entry matches.
+    pub fn prefer_by_backend(&mut self, backend: &str) {
+        if let Some(idx) = self.inner.values().position(|(desc, _)| desc.backend == backend) {
+            if idx > 0 {
+                self.inner.move_index(idx, 0);
+            }
+        }
+    }
+
+    /// Reorder so that the entry with the given implementation key is first.
+    /// No-op if no entry matches.
+    pub fn prefer_by_implementation(&mut self, implementation: &str) {
+        if let Some(idx) = self.inner.get_index_of(implementation) {
+            if idx > 0 {
+                self.inner.move_index(idx, 0);
+            }
+        }
+    }
 }
 
 impl<T: ?Sized> Default for ProviderSet<T> {
@@ -143,11 +163,76 @@ impl ProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::discovery::ProviderCategory;
 
     #[test]
     fn provider_infos_from_empty_registry() {
         let registry = ProviderRegistry::new();
         let infos = registry.provider_infos();
         assert!(infos.is_empty());
+    }
+
+    // Helper: create a ProviderDescriptor with specific backend/implementation for testing.
+    fn test_desc(backend: &str, implementation: &str) -> ProviderDescriptor {
+        ProviderDescriptor::labeled(ProviderCategory::Vcs, backend, implementation, implementation, "", "", "")
+    }
+
+    // A trivial trait we can use for test ProviderSet entries.
+    trait Dummy: Send + Sync {}
+    struct DummyImpl;
+    impl Dummy for DummyImpl {}
+
+    fn make_set_with_entries(entries: &[(&str, &str, &str)]) -> ProviderSet<dyn Dummy> {
+        let mut set = ProviderSet::<dyn Dummy>::new();
+        for (key, backend, implementation) in entries {
+            set.insert(key.to_string(), test_desc(backend, implementation), Arc::new(DummyImpl) as Arc<dyn Dummy>);
+        }
+        set
+    }
+
+    #[test]
+    fn prefer_by_backend_moves_matching_entry_to_front() {
+        let mut set = make_set_with_entries(&[("a", "alpha", "a"), ("b", "beta", "b"), ("c", "beta", "c")]);
+        assert_eq!(set.preferred_name(), Some("a"));
+
+        set.prefer_by_backend("beta");
+        assert_eq!(set.preferred_name(), Some("b"));
+    }
+
+    #[test]
+    fn prefer_by_backend_noop_when_already_first() {
+        let mut set = make_set_with_entries(&[("a", "alpha", "a"), ("b", "beta", "b")]);
+        set.prefer_by_backend("alpha");
+        assert_eq!(set.preferred_name(), Some("a"));
+    }
+
+    #[test]
+    fn prefer_by_backend_noop_when_not_found() {
+        let mut set = make_set_with_entries(&[("a", "alpha", "a"), ("b", "beta", "b")]);
+        set.prefer_by_backend("gamma");
+        assert_eq!(set.preferred_name(), Some("a"));
+    }
+
+    #[test]
+    fn prefer_by_implementation_moves_matching_entry_to_front() {
+        let mut set = make_set_with_entries(&[("a", "alpha", "a"), ("b", "beta", "b"), ("c", "gamma", "c")]);
+        assert_eq!(set.preferred_name(), Some("a"));
+
+        set.prefer_by_implementation("c");
+        assert_eq!(set.preferred_name(), Some("c"));
+    }
+
+    #[test]
+    fn prefer_by_implementation_noop_when_already_first() {
+        let mut set = make_set_with_entries(&[("a", "alpha", "a"), ("b", "beta", "b")]);
+        set.prefer_by_implementation("a");
+        assert_eq!(set.preferred_name(), Some("a"));
+    }
+
+    #[test]
+    fn prefer_by_implementation_noop_when_not_found() {
+        let mut set = make_set_with_entries(&[("a", "alpha", "a"), ("b", "beta", "b")]);
+        set.prefer_by_implementation("z");
+        assert_eq!(set.preferred_name(), Some("a"));
     }
 }

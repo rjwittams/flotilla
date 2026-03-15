@@ -6,6 +6,54 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+/// Per-category provider preference.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ProviderPreference {
+    pub backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ChangeRequestConfig {
+    #[serde(flatten)]
+    pub preference: ProviderPreference,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct IssueTrackerConfig {
+    #[serde(flatten)]
+    pub preference: ProviderPreference,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CloudAgentConfig {
+    #[serde(flatten)]
+    pub preference: ProviderPreference,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AiUtilityConfig {
+    #[serde(flatten)]
+    pub preference: ProviderPreference,
+    pub claude: Option<ClaudeAiUtilityConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ClaudeAiUtilityConfig {
+    pub implementation: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WorkspaceManagerConfig {
+    #[serde(flatten)]
+    pub preference: ProviderPreference,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct TerminalPoolConfig {
+    #[serde(flatten)]
+    pub preference: ProviderPreference,
+}
+
 /// Global flotilla config from ~/.config/flotilla/config.toml
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct FlotillaConfig {
@@ -13,6 +61,18 @@ pub struct FlotillaConfig {
     pub vcs: VcsConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub change_request: ChangeRequestConfig,
+    #[serde(default)]
+    pub issue_tracker: IssueTrackerConfig,
+    #[serde(default)]
+    pub cloud_agent: CloudAgentConfig,
+    #[serde(default)]
+    pub ai_utility: AiUtilityConfig,
+    #[serde(default)]
+    pub workspace_manager: WorkspaceManagerConfig,
+    #[serde(default)]
+    pub terminal_pool: TerminalPoolConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -21,33 +81,26 @@ pub struct VcsConfig {
     pub git: GitConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct GitConfig {
-    #[serde(default)]
-    pub checkouts: CheckoutsConfig,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CheckoutsConfig {
-    #[serde(default = "CheckoutsConfig::default_path")]
-    pub path: String,
-    #[serde(default = "CheckoutsConfig::default_provider")]
-    pub provider: String,
+pub struct GitConfig {
+    #[serde(default = "default_checkout_strategy")]
+    pub checkout_strategy: String,
+    #[serde(default = "default_checkout_path")]
+    pub checkout_path: String,
 }
 
-impl Default for CheckoutsConfig {
+impl Default for GitConfig {
     fn default() -> Self {
-        Self { path: Self::default_path(), provider: Self::default_provider() }
+        Self { checkout_strategy: default_checkout_strategy(), checkout_path: default_checkout_path() }
     }
 }
 
-impl CheckoutsConfig {
-    fn default_path() -> String {
-        "{{ repo_path }}/../{{ repo }}.{{ branch | sanitize }}".to_string()
-    }
-    fn default_provider() -> String {
-        "auto".to_string()
-    }
+fn default_checkout_strategy() -> String {
+    "auto".to_string()
+}
+
+pub fn default_checkout_path() -> String {
+    "{{ repo_path }}/../{{ repo }}.{{ branch | sanitize }}".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -89,18 +142,12 @@ pub struct RepoVcsConfig {
     pub git: RepoGitConfig,
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct RepoGitConfig {
-    #[serde(default)]
-    pub checkouts: RepoCheckoutsOverride,
-}
-
-/// Per-repo checkout overrides. Fields are Option so we can distinguish
+/// Per-repo git overrides. Fields are Option so we can distinguish
 /// "not set" from "explicitly set to the default value."
 #[derive(Debug, Default, Deserialize)]
-pub struct RepoCheckoutsOverride {
-    pub path: Option<String>,
-    pub provider: Option<String>,
+pub struct RepoGitConfig {
+    pub checkout_strategy: Option<String>,
+    pub checkout_path: Option<String>,
 }
 
 /// Global SSH settings for remote host connections.
@@ -396,26 +443,22 @@ impl ConfigStore {
         }
     }
 
-    /// Resolve checkouts config for a repo: per-repo override > global > defaults.
-    pub fn resolve_checkouts_config(&self, repo_root: &Path) -> CheckoutsConfig {
+    /// Resolve checkout path for a repo: per-repo override > global > defaults.
+    pub fn resolve_checkout_path(&self, repo_root: &Path) -> String {
         let global = self.load_config();
         let slug = path_to_slug(repo_root);
         let repo_file = self.repos_dir().join(format!("{slug}.toml"));
         if let Ok(content) = std::fs::read_to_string(&repo_file) {
             match toml::from_str::<RepoFileConfig>(&content) {
                 Ok(repo_cfg) => {
-                    let repo_co = &repo_cfg.vcs.git.checkouts;
-                    return CheckoutsConfig {
-                        path: repo_co.path.clone().unwrap_or_else(|| global.vcs.git.checkouts.path.clone()),
-                        provider: repo_co.provider.clone().unwrap_or_else(|| global.vcs.git.checkouts.provider.clone()),
-                    };
+                    return repo_cfg.vcs.git.checkout_path.unwrap_or_else(|| global.vcs.git.checkout_path.clone());
                 }
                 Err(e) => {
                     tracing::warn!(path = %repo_file.display(), err = %e, "failed to parse");
                 }
             }
         }
-        global.vcs.git.checkouts.clone()
+        global.vcs.git.checkout_path.clone()
     }
 }
 
@@ -601,34 +644,37 @@ mod tests {
         let root = tempdir().unwrap();
 
         let missing_store = ConfigStore::with_base(root.path().join("missing"));
-        assert_eq!(missing_store.load_config().vcs.git.checkouts.provider, "auto");
+        assert_eq!(missing_store.load_config().vcs.git.checkout_strategy, "auto");
 
         let invalid_base = root.path().join("invalid");
         std::fs::create_dir_all(&invalid_base).unwrap();
         std::fs::write(invalid_base.join("config.toml"), "this is not valid {{toml").unwrap();
         let invalid_store = ConfigStore::with_base(&invalid_base);
-        assert_eq!(invalid_store.load_config().vcs.git.checkouts.provider, "auto");
+        assert_eq!(invalid_store.load_config().vcs.git.checkout_strategy, "auto");
     }
 
     #[test]
     fn load_config_parses_full_overrides() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("config.toml"), "[vcs.git.checkouts]\npath = \"/custom/{{ branch }}\"\nprovider = \"worktree\"\n")
-            .unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[vcs.git]\ncheckout_path = \"/custom/{{ branch }}\"\ncheckout_strategy = \"worktree\"\n",
+        )
+        .unwrap();
         let store = ConfigStore::with_base(dir.path());
         let cfg = store.load_config();
-        assert_eq!(cfg.vcs.git.checkouts.path, "/custom/{{ branch }}");
-        assert_eq!(cfg.vcs.git.checkouts.provider, "worktree");
+        assert_eq!(cfg.vcs.git.checkout_path, "/custom/{{ branch }}");
+        assert_eq!(cfg.vcs.git.checkout_strategy, "worktree");
     }
 
     #[test]
     fn load_config_partial_override_keeps_defaults() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("config.toml"), "[vcs.git.checkouts]\nprovider = \"worktree\"\n").unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[vcs.git]\ncheckout_strategy = \"worktree\"\n").unwrap();
         let store = ConfigStore::with_base(dir.path());
         let cfg = store.load_config();
-        assert_eq!(cfg.vcs.git.checkouts.provider, "worktree");
-        assert_eq!(cfg.vcs.git.checkouts.path, CheckoutsConfig::default_path());
+        assert_eq!(cfg.vcs.git.checkout_strategy, "worktree");
+        assert_eq!(cfg.vcs.git.checkout_path, default_checkout_path());
     }
 
     #[test]
@@ -644,14 +690,14 @@ mod tests {
     #[test]
     fn save_layout_writes_global_config() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("config.toml"), "[vcs.git.checkouts]\nprovider = \"worktree\"\n").unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[vcs.git]\ncheckout_strategy = \"worktree\"\n").unwrap();
 
         let store = ConfigStore::with_base(dir.path());
         store.save_layout(RepoViewLayoutConfig::Right);
 
         let reloaded = ConfigStore::with_base(dir.path());
         let cfg = reloaded.load_config();
-        assert_eq!(cfg.vcs.git.checkouts.provider, "worktree");
+        assert_eq!(cfg.vcs.git.checkout_strategy, "worktree");
         assert_eq!(cfg.ui.preview.layout, RepoViewLayoutConfig::Right);
     }
 
@@ -672,70 +718,63 @@ mod tests {
     fn load_config_is_cached() {
         let dir = tempdir().unwrap();
         let base = dir.path();
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\nprovider = \"first\"\n").unwrap();
+        std::fs::write(base.join("config.toml"), "[vcs.git]\ncheckout_strategy = \"first\"\n").unwrap();
 
         let store = ConfigStore::with_base(base);
-        assert_eq!(store.load_config().vcs.git.checkouts.provider, "first");
+        assert_eq!(store.load_config().vcs.git.checkout_strategy, "first");
 
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\nprovider = \"second\"\n").unwrap();
-        assert_eq!(store.load_config().vcs.git.checkouts.provider, "first");
+        std::fs::write(base.join("config.toml"), "[vcs.git]\ncheckout_strategy = \"second\"\n").unwrap();
+        assert_eq!(store.load_config().vcs.git.checkout_strategy, "first");
     }
 
     #[test]
-    fn resolve_checkouts_config_uses_global_when_repo_file_missing_or_invalid() {
+    fn resolve_checkout_path_uses_global_when_repo_file_missing_or_invalid() {
         let dir = tempdir().unwrap();
         let base = dir.path();
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\npath = \"/global/path\"\nprovider = \"global-prov\"\n").unwrap();
+        std::fs::write(base.join("config.toml"), "[vcs.git]\ncheckout_path = \"/global/path\"\n").unwrap();
 
         let repo = make_dir(base, "repo");
         let store = ConfigStore::with_base(base);
 
-        let from_global = store.resolve_checkouts_config(&repo);
-        assert_eq!(from_global.path, "/global/path");
-        assert_eq!(from_global.provider, "global-prov");
+        let from_global = store.resolve_checkout_path(&repo);
+        assert_eq!(from_global, "/global/path");
 
         let slug = path_to_slug(&repo);
         write_repo_file(base, &format!("{slug}.toml"), "{{invalid toml!!!");
-        let from_invalid = store.resolve_checkouts_config(&repo);
-        assert_eq!(from_invalid.path, "/global/path");
-        assert_eq!(from_invalid.provider, "global-prov");
+        let from_invalid = store.resolve_checkout_path(&repo);
+        assert_eq!(from_invalid, "/global/path");
     }
 
     #[test]
-    fn resolve_checkouts_config_repo_override_merges_with_global() {
+    fn resolve_checkout_path_repo_override_merges_with_global() {
         let dir = tempdir().unwrap();
         let base = dir.path();
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\npath = \"/global/path\"\nprovider = \"global-prov\"\n").unwrap();
+        std::fs::write(base.join("config.toml"), "[vcs.git]\ncheckout_path = \"/global/path\"\n").unwrap();
 
         let repo = make_dir(base, "repo");
         let store = ConfigStore::with_base(base);
         let slug = path_to_slug(&repo);
 
-        let cases = [
-            ("[vcs.git.checkouts]\npath = \"/repo/path\"\nprovider = \"repo-prov\"\n", "/repo/path", "repo-prov"),
-            ("[vcs.git.checkouts]\npath = \"/repo/path-only\"\n", "/repo/path-only", "global-prov"),
-            ("[vcs.git.checkouts]\nprovider = \"repo-only\"\n", "/global/path", "repo-only"),
-        ];
+        let cases = [("[vcs.git]\ncheckout_path = \"/repo/path\"\n", "/repo/path"), ("", "/global/path")];
 
-        for (override_toml, expected_path, expected_provider) in cases {
+        for (override_toml, expected_path) in cases {
             let repo_toml = format!("path = \"{}\"\n{override_toml}", repo.display());
             write_repo_file(base, &format!("{slug}.toml"), &repo_toml);
 
-            let resolved = store.resolve_checkouts_config(&repo);
-            assert_eq!(resolved.path, expected_path);
-            assert_eq!(resolved.provider, expected_provider);
+            let resolved = store.resolve_checkout_path(&repo);
+            assert_eq!(resolved, expected_path);
         }
     }
 
     #[test]
     fn defaults_have_expected_values_and_base_path_roundtrips() {
-        let checkouts = CheckoutsConfig::default();
-        assert_eq!(checkouts.path, "{{ repo_path }}/../{{ repo }}.{{ branch | sanitize }}");
-        assert_eq!(checkouts.provider, "auto");
+        let git_config = GitConfig::default();
+        assert_eq!(git_config.checkout_path, "{{ repo_path }}/../{{ repo }}.{{ branch | sanitize }}");
+        assert_eq!(git_config.checkout_strategy, "auto");
 
-        let repo_override = RepoCheckoutsOverride::default();
-        assert!(repo_override.path.is_none());
-        assert!(repo_override.provider.is_none());
+        let repo_override = RepoGitConfig::default();
+        assert!(repo_override.checkout_path.is_none());
+        assert!(repo_override.checkout_strategy.is_none());
 
         let dir = tempdir().unwrap();
         let store = ConfigStore::with_base(dir.path());
@@ -892,5 +931,29 @@ host_name = "my-desktop"
         // No [ssh] section — defaults to multiplex=true
         assert!(config.ssh.multiplex);
         assert!(config.resolved_ssh_multiplex("desktop"));
+    }
+
+    #[test]
+    fn parse_config_with_provider_preferences() {
+        let toml = r#"
+[ai_utility]
+backend = "claude"
+
+[ai_utility.claude]
+implementation = "api"
+
+[workspace_manager]
+backend = "zellij"
+
+[vcs.git]
+checkout_strategy = "wt"
+checkout_path = "/tmp/{{ branch }}"
+"#;
+        let config: FlotillaConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.ai_utility.preference.backend.as_deref(), Some("claude"));
+        assert_eq!(config.ai_utility.claude.unwrap().implementation.as_deref(), Some("api"));
+        assert_eq!(config.workspace_manager.preference.backend.as_deref(), Some("zellij"));
+        assert_eq!(config.vcs.git.checkout_strategy, "wt");
+        assert_eq!(config.vcs.git.checkout_path, "/tmp/{{ branch }}");
     }
 }

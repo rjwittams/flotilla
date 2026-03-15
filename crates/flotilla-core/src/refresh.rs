@@ -153,9 +153,17 @@ async fn refresh_providers(
 ) -> Vec<RefreshError> {
     let mut errors = Vec::new();
 
-    let checkouts_fut = collect_named_results(
-        registry.checkout_managers.iter().map(|(desc, cm)| (desc.display_name.clone(), cm.list_checkouts(repo_root))).collect(),
-    );
+    let checkouts_fut = async {
+        if let Some((desc, cm)) = registry.checkout_managers.preferred_with_desc() {
+            let name = desc.display_name.clone();
+            match cm.list_checkouts(repo_root).await {
+                Ok(entries) => (entries, vec![]),
+                Err(e) => (vec![], vec![(name, e)]),
+            }
+        } else {
+            (vec![], vec![])
+        }
+    };
 
     let cr_fut = collect_named_results(
         registry.change_requests.iter().map(|(desc, cr)| (desc.display_name.clone(), cr.list_change_requests(repo_root, 20))).collect(),

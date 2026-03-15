@@ -492,33 +492,14 @@ pub async fn discover_providers(
         }
     }
 
-    async fn probe_first<T: ?Sized + Send + Sync + 'static>(
-        factories: &[Box<dyn Factory<Output = T>>],
-        env: &EnvironmentBag,
-        config: &ConfigStore,
-        repo_root: &Path,
-        runner: &Arc<dyn CommandRunner>,
-        unmet: &mut Vec<(String, UnmetRequirement)>,
-    ) -> Option<(ProviderDescriptor, Arc<T>)> {
-        for factory in factories {
-            match factory.probe(env, config, repo_root, runner.clone()).await {
-                Ok(provider) => return Some((factory.descriptor(), provider)),
-                Err(reqs) => {
-                    let name = factory.descriptor().implementation.clone();
-                    unmet.extend(reqs.into_iter().map(|r| (name.clone(), r)));
-                }
-            }
-        }
-        None
-    }
-
     probe_all(&factories.vcs, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
         registry.vcs.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
-    if let Some((desc, provider)) = probe_first(&factories.checkout_managers, &combined, config, repo_root, &runner, &mut unmet).await {
+    probe_all(&factories.checkout_managers, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
         registry.checkout_managers.insert(desc.implementation.clone(), desc, provider);
-    }
+    })
+    .await;
     probe_all(&factories.change_requests, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
         registry.change_requests.insert(desc.implementation.clone(), desc, provider);
     })
@@ -535,11 +516,44 @@ pub async fn discover_providers(
         registry.ai_utilities.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
-    if let Some((desc, provider)) = probe_first(&factories.workspace_managers, &combined, config, repo_root, &runner, &mut unmet).await {
+    probe_all(&factories.workspace_managers, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
         registry.workspace_managers.insert(desc.implementation.clone(), desc, provider);
-    }
-    if let Some((desc, provider)) = probe_first(&factories.terminal_pools, &combined, config, repo_root, &runner, &mut unmet).await {
+    })
+    .await;
+    probe_all(&factories.terminal_pools, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
         registry.terminal_pools.insert(desc.implementation.clone(), desc, provider);
+    })
+    .await;
+
+    // Apply provider preferences from config
+    let flotilla_config = config.load_config();
+
+    if let Some(backend) = flotilla_config.change_request.preference.backend.as_deref() {
+        registry.change_requests.prefer_by_backend(backend);
+    }
+    if let Some(backend) = flotilla_config.issue_tracker.preference.backend.as_deref() {
+        registry.issue_trackers.prefer_by_backend(backend);
+    }
+    if let Some(backend) = flotilla_config.cloud_agent.preference.backend.as_deref() {
+        registry.cloud_agents.prefer_by_backend(backend);
+    }
+    if let Some(backend) = flotilla_config.ai_utility.preference.backend.as_deref() {
+        registry.ai_utilities.prefer_by_backend(backend);
+    }
+    if let Some(impl_name) = flotilla_config.ai_utility.claude.as_ref().and_then(|c| c.implementation.as_deref()) {
+        registry.ai_utilities.prefer_by_implementation(impl_name);
+    }
+    if let Some(backend) = flotilla_config.workspace_manager.preference.backend.as_deref() {
+        registry.workspace_managers.prefer_by_backend(backend);
+    }
+    if let Some(backend) = flotilla_config.terminal_pool.preference.backend.as_deref() {
+        registry.terminal_pools.prefer_by_backend(backend);
+    }
+
+    // Checkout strategy (nested under vcs.git)
+    let checkout_strategy = &flotilla_config.vcs.git.checkout_strategy;
+    if checkout_strategy != "auto" {
+        registry.checkout_managers.prefer_by_implementation(checkout_strategy);
     }
 
     let repo_slug = combined.repo_slug();
@@ -853,7 +867,7 @@ mod orchestrator_tests {
     }
 
     #[tokio::test]
-    async fn discover_providers_checkout_manager_first_wins() {
+    async fn discover_providers_registers_all_checkout_managers() {
         let dir = tempdir().expect("tempdir");
         let repo_root = dir.path();
         std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
@@ -871,8 +885,8 @@ mod orchestrator_tests {
 
         let result = discover_providers(&host_bag, repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
 
-        // Checkout managers use first-wins: should have exactly one
-        assert_eq!(result.registry.checkout_managers.len(), 1, "checkout managers should be first-wins (at-most-one)");
+        // All checkout managers now register (probe_all); config preferences choose the preferred one
+        assert!(result.registry.checkout_managers.len() >= 1, "at least one checkout manager should be registered");
     }
 
     #[tokio::test]
