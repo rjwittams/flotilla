@@ -26,7 +26,7 @@ use flotilla_core::{
 };
 use flotilla_protocol::{
     AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, CorrelationKey, DaemonEvent,
-    HostName, Issue, ProviderData, RepoIdentity, RepoSelector,
+    HostName, HostPath, Issue, ProviderData, RepoIdentity, RepoSelector,
 };
 use tokio::sync::Notify;
 
@@ -212,6 +212,17 @@ async fn daemon_for_git_repo(remote: &str) -> (tempfile::TempDir, PathBuf, Arc<I
     let daemon = InProcessDaemon::new(vec![repo.clone()], config, git_process_discovery(false), HostName::local()).await;
     let identity = daemon.find_identity_for_path(&repo).await.expect("repo identity should be detected");
     (temp, repo, daemon, identity)
+}
+
+async fn daemon_for_duplicate_git_repos(remote: &str) -> (tempfile::TempDir, PathBuf, PathBuf, Arc<InProcessDaemon>) {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    init_git_repo_with_remote(&repo_a, remote);
+    init_git_repo_with_remote(&repo_b, remote);
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![repo_a.clone(), repo_b.clone()], config, git_process_discovery(false), HostName::local()).await;
+    (temp, repo_a, repo_b, daemon)
 }
 
 async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>) -> DaemonEvent {
@@ -448,13 +459,14 @@ async fn generate_branch_name_can_be_cancelled_while_provider_call_is_in_flight(
 #[tokio::test]
 async fn replay_since_returns_full_snapshot_for_unknown_seq() {
     let (_temp, repo, daemon) = daemon_for_cwd().await;
+    let identity = daemon.find_identity_for_path(&repo).await.expect("repo identity should be detected");
 
     // Wait for at least one broadcast so the daemon has state
     let mut rx = daemon.subscribe();
     let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
 
     // Request replay with a seq that won't be in the delta log
-    let last_seen = HashMap::from([(repo.clone(), 999999)]);
+    let last_seen = HashMap::from([(identity, 999999)]);
     let events = daemon.replay_since(&last_seen).await.expect("replay_since");
 
     assert_eq!(events.len(), 1, "should get exactly one event");
@@ -489,6 +501,7 @@ async fn replay_since_returns_full_snapshot_for_new_repo() {
 #[tokio::test]
 async fn replay_since_returns_empty_when_up_to_date() {
     let (_temp, repo, daemon) = daemon_for_cwd().await;
+    let identity = daemon.find_identity_for_path(&repo).await.expect("repo identity should be detected");
 
     // Wait for the first snapshot to get the current seq
     let mut rx = daemon.subscribe();
@@ -501,7 +514,7 @@ async fn replay_since_returns_empty_when_up_to_date() {
     };
 
     // Request replay at current seq — should return nothing
-    let last_seen = HashMap::from([(repo.clone(), current_seq)]);
+    let last_seen = HashMap::from([(identity, current_seq)]);
     let events = daemon.replay_since(&last_seen).await.expect("replay_since");
 
     assert!(events.is_empty(), "should be empty when up to date");
@@ -583,6 +596,114 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
 
     let repos = daemon.list_repos().await.expect("list_repos after remove");
     assert!(repos.is_empty());
+}
+
+#[tokio::test]
+async fn duplicate_local_roots_share_identity_but_remain_tracked() {
+    let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_git_repos("git@github.com:owner/repo.git").await;
+
+    let identity_a = daemon.find_identity_for_path(&repo_a).await.expect("identity for first repo");
+    let identity_b = daemon.find_identity_for_path(&repo_b).await.expect("identity for second repo");
+    assert_eq!(identity_a, identity_b, "same upstream repo should resolve to one repo identity");
+
+    let tracked = daemon.tracked_repo_paths().await;
+    assert!(tracked.contains(&repo_a));
+    assert!(tracked.contains(&repo_b));
+
+    let repos = daemon.list_repos().await.expect("list_repos");
+    assert_eq!(repos.len(), 1, "list_repos should expose one logical repo per identity");
+    assert_eq!(repos[0].identity, identity_a);
+    assert_eq!(repos[0].path, repo_a, "first tracked root should remain the deterministic preferred path");
+
+    daemon.remove_repo(&repo_a).await.expect("remove preferred root");
+    let repos = daemon.list_repos().await.expect("list_repos after removing preferred root");
+    assert_eq!(repos.len(), 1);
+    assert_eq!(repos[0].identity, identity_b);
+    assert_eq!(repos[0].path, repo_b, "remaining root should become the preferred path");
+    assert!(daemon.find_identity_for_path(&repo_a).await.is_none());
+    assert_eq!(daemon.find_identity_for_path(&repo_b).await, Some(identity_b));
+}
+
+#[tokio::test]
+async fn adding_local_clone_promotes_remote_only_identity_to_local_execution() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let local_repo = temp.path().join("repo");
+    let identity = init_git_repo_with_remote(&local_repo, "git@github.com:owner/repo.git");
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![], config, git_process_discovery(false), HostName::local()).await;
+
+    daemon
+        .add_virtual_repo(identity.clone(), PathBuf::from("/remote/desktop/owner/repo"), ProviderData::default())
+        .await
+        .expect("add virtual repo");
+    daemon.add_repo(&local_repo).await.expect("add local repo");
+
+    let repos = daemon.list_repos().await.expect("list repos");
+    assert_eq!(repos.len(), 1);
+    assert_eq!(repos[0].identity, identity);
+    assert_eq!(repos[0].path, local_repo, "local clone should become the preferred executable path");
+    assert_eq!(daemon.find_repo_by_identity(&identity).await, Some(local_repo.clone()));
+    assert!(daemon.get_local_providers(&local_repo).await.is_some(), "local providers should now resolve for the identity");
+    assert_eq!(daemon.tracked_repo_paths().await, vec![local_repo]);
+}
+
+#[tokio::test]
+async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
+    let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_git_repos("git@github.com:owner/repo.git").await;
+    let mut rx = daemon.subscribe();
+
+    daemon.refresh(&repo_a).await.expect("refresh first repo");
+    let _ = recv_event(&mut rx).await;
+
+    daemon.remove_repo(&repo_a).await.expect("remove preferred root");
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::SnapshotFull(snapshot)) => break Some(snapshot.repo),
+                Ok(DaemonEvent::SnapshotDelta(delta)) => break Some(delta.repo),
+                Ok(_) => {}
+                Err(_) => break None,
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for preferred-path snapshot")
+    .expect("snapshot event");
+
+    assert_eq!(event, repo_b, "surviving root should be broadcast immediately as the new preferred path");
+}
+
+#[tokio::test]
+async fn get_local_providers_excludes_peer_overlay_data() {
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+
+    daemon.refresh(&repo).await.expect("refresh local repo");
+
+    let peer_checkout = HostPath::new(HostName::new("follower"), "/srv/follower/repo");
+    let mut peer_data = ProviderData::default();
+    peer_data.checkouts.insert(peer_checkout.clone(), Checkout {
+        branch: "peer-branch".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+    });
+
+    daemon.set_peer_providers(&repo, vec![(HostName::new("follower"), peer_data)]).await;
+
+    let (providers, _) = daemon.get_local_providers(&repo).await.expect("local providers after peer overlay");
+    assert!(
+        !providers.checkouts.contains_key(&HostPath::new(HostName::local(), "/srv/follower/repo")),
+        "peer overlay checkout should not be restamped and re-broadcast as local data"
+    );
+    assert!(
+        !providers.checkouts.values().any(|checkout| checkout.branch == "peer-branch"),
+        "peer overlay checkout should be excluded from local replication"
+    );
 }
 
 #[tokio::test]

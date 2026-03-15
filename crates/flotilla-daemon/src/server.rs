@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::DiscoveryRuntime};
 use flotilla_protocol::{
     Command, CommandAction, CommandPeerEvent, CommandResult, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message,
-    PeerConnectionState, PeerDataMessage, PeerWireMessage, RepoIdentity, RepoSelector, RoutedPeerMessage, PROTOCOL_VERSION,
+    PeerConnectionState, PeerDataMessage, PeerWireMessage, ReplayCursor, RepoIdentity, RepoSelector, RoutedPeerMessage, PROTOCOL_VERSION,
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader, BufWriter},
@@ -667,7 +667,7 @@ impl DaemonServer {
             let mut event_rx = outbound_daemon.subscribe();
             let mut outbound_clock = flotilla_protocol::VectorClock::default();
             let host_name = outbound_daemon.host_name().clone();
-            let mut last_sent_versions: std::collections::HashMap<std::path::PathBuf, u64> = std::collections::HashMap::new();
+            let mut last_sent_versions: std::collections::HashMap<RepoIdentity, u64> = std::collections::HashMap::new();
 
             loop {
                 tokio::select! {
@@ -704,11 +704,13 @@ impl DaemonServer {
                             // updates, searches), not peer data merges. This prevents a
                             // feedback loop where peer data triggers re-sending unchanged
                             // local data back to peers endlessly.
+                            let Some(repo_identity) = outbound_daemon.find_identity_for_path(&repo_path).await else {
+                                continue;
+                            };
                             let Some((local_providers, version)) = outbound_daemon.get_local_providers(&repo_path).await else {
                                 continue;
                             };
-                            let last = last_sent_versions.get(&repo_path).copied().unwrap_or(0);
-                            if version <= last {
+                            if !should_send_local_version(&last_sent_versions, &repo_identity, version) {
                                 continue;
                             }
                             let sent = send_local_to_peers(
@@ -725,7 +727,7 @@ impl DaemonServer {
                             // received it. Otherwise a version produced while no peers
                             // are connected would be suppressed forever on reconnect.
                             if sent {
-                                last_sent_versions.insert(repo_path, version);
+                                last_sent_versions.insert(repo_identity, version);
                             }
                         }
                     }
@@ -1233,6 +1235,14 @@ async fn send_local_to_peers(
     any_sent
 }
 
+fn should_send_local_version(
+    last_sent_versions: &std::collections::HashMap<RepoIdentity, u64>,
+    repo_identity: &RepoIdentity,
+    local_data_version: u64,
+) -> bool {
+    local_data_version > last_sent_versions.get(repo_identity).copied().unwrap_or(0)
+}
+
 /// Send current local state for all repos to a specific newly-connected peer.
 ///
 /// Unlike `send_local_to_peers` (which broadcasts), this targets a single peer
@@ -1729,8 +1739,12 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, method: &str, para
         }
 
         "replay_since" => {
-            let last_seen: std::collections::HashMap<std::path::PathBuf, u64> =
-                params.get("last_seen").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_else(|| {
+            let last_seen = params
+                .get("last_seen")
+                .cloned()
+                .and_then(|v| serde_json::from_value::<Vec<ReplayCursor>>(v).ok())
+                .map(|entries| entries.into_iter().map(|entry| (entry.repo_identity, entry.seq)).collect())
+                .unwrap_or_else(|| {
                     warn!("replay_since: failed to parse last_seen, returning full snapshots");
                     std::collections::HashMap::new()
                 });
@@ -2662,6 +2676,19 @@ mod tests {
         assert!(sent_any, "host summary should count as initial peer sync");
         let sent = sent.lock().expect("lock");
         assert!(matches!(&sent[0], PeerWireMessage::HostSummary(summary) if summary.host_name == host_name));
+    }
+
+    #[test]
+    fn should_send_local_version_dedupes_by_repo_identity() {
+        let identity = RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() };
+        let mut last_sent_versions = HashMap::new();
+
+        assert!(should_send_local_version(&last_sent_versions, &identity, 1));
+        last_sent_versions.insert(identity.clone(), 1);
+
+        // Different local roots for the same repo identity should share one dedup entry.
+        assert!(!should_send_local_version(&last_sent_versions, &identity, 1));
+        assert!(should_send_local_version(&last_sent_versions, &identity, 2));
     }
 
     #[tokio::test]
