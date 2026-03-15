@@ -6,15 +6,16 @@ use std::io;
 
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
 struct App {
     scroll: u16,
+    total_lines: u16,
     sections: Vec<GlyphSection>,
 }
 
@@ -307,15 +308,14 @@ fn build_sections() -> Vec<GlyphSection> {
 
 impl App {
     fn new() -> Self {
-        Self {
-            scroll: 0,
-            sections: build_sections(),
-        }
+        let sections = build_sections();
+        let total_lines = Self::count_lines(&sections);
+        Self { scroll: 0, total_lines, sections }
     }
 
-    fn total_lines(&self) -> u16 {
+    fn count_lines(sections: &[GlyphSection]) -> u16 {
         let mut count: u16 = 0;
-        for section in &self.sections {
+        for section in sections {
             count += 2; // title + blank line before content
             for row in &section.rows {
                 count += row.glyphs.lines().count() as u16;
@@ -329,29 +329,16 @@ impl App {
         let mut lines = Vec::new();
         for section in &self.sections {
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("━━ {} ", section.title),
-                    Style::default().fg(section.color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "━".repeat(60),
-                    Style::default().fg(section.color).add_modifier(Modifier::DIM),
-                ),
+                Span::styled(format!("━━ {} ", section.title), Style::default().fg(section.color).add_modifier(Modifier::BOLD)),
+                Span::styled("━".repeat(60), Style::default().fg(section.color).add_modifier(Modifier::DIM)),
             ]));
             lines.push(Line::default());
 
             for row in &section.rows {
                 let glyph_lines: Vec<&str> = row.glyphs.lines().collect();
                 for (i, glyph_line) in glyph_lines.iter().enumerate() {
-                    let label = if i == 0 {
-                        format!("  {:<22} ", row.label)
-                    } else {
-                        " ".repeat(25)
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(label, Style::default().add_modifier(Modifier::DIM)),
-                        Span::raw(*glyph_line),
-                    ]));
+                    let label = if i == 0 { format!("  {:<22} ", row.label) } else { " ".repeat(25) };
+                    lines.push(Line::from(vec![Span::styled(label, Style::default().add_modifier(Modifier::DIM)), Span::raw(*glyph_line)]));
                 }
             }
             lines.push(Line::default());
@@ -363,41 +350,26 @@ impl App {
         let area = frame.area();
 
         let [header_area, main_area, footer_area] =
-            Layout::vertical([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
-                .areas(area);
+            Layout::vertical([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
         // Header
         let header = Paragraph::new(Line::from(vec![
-            Span::styled(
-                " Glyph Showcase ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(" Glyph Showcase ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw("  Interesting glyphs for terminal UIs"),
         ]))
         .block(Block::default().borders(Borders::BOTTOM));
         frame.render_widget(header, header_area);
 
-        // Main content
+        // Main content (no Wrap — horizontal clipping avoids scroll/line-count mismatch)
         let content_lines = self.render_content();
-        let paragraph = Paragraph::new(content_lines)
-            .scroll((self.scroll, 0))
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::RIGHT));
+        let paragraph = Paragraph::new(content_lines).scroll((self.scroll, 0)).block(Block::default().borders(Borders::RIGHT));
         frame.render_widget(paragraph, main_area);
 
         // Scrollbar
-        let total = self.total_lines();
-        let mut scrollbar_state = ScrollbarState::new(total as usize)
-            .position(self.scroll as usize)
-            .viewport_content_length(main_area.height as usize);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            main_area,
-            &mut scrollbar_state,
-        );
+        let total = self.total_lines;
+        let mut scrollbar_state =
+            ScrollbarState::new(total as usize).position(self.scroll as usize).viewport_content_length(main_area.height as usize);
+        frame.render_stateful_widget(Scrollbar::new(ScrollbarOrientation::VerticalRight), main_area, &mut scrollbar_state);
 
         // Footer
         let footer = Paragraph::new(Line::from(vec![
@@ -415,8 +387,8 @@ impl App {
         frame.render_widget(footer, footer_area);
     }
 
-    fn scroll_down(&mut self, amount: u16, viewport: u16) {
-        let max = self.total_lines().saturating_sub(viewport);
+    fn scroll_down(&mut self, amount: u16, viewport_height: u16) {
+        let max = self.total_lines.saturating_sub(viewport_height);
         self.scroll = (self.scroll + amount).min(max);
     }
 
@@ -424,20 +396,20 @@ impl App {
         self.scroll = self.scroll.saturating_sub(amount);
     }
 
-    fn handle_event(&mut self, viewport: Rect) -> io::Result<bool> {
+    fn handle_event(&mut self, viewport_height: u16) -> io::Result<bool> {
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
                 return Ok(false);
             }
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
-                KeyCode::Down | KeyCode::Char('j') => self.scroll_down(1, viewport.height),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_down(1, viewport_height),
                 KeyCode::Up | KeyCode::Char('k') => self.scroll_up(1),
-                KeyCode::PageDown | KeyCode::Char(' ') => self.scroll_down(viewport.height, viewport.height),
-                KeyCode::PageUp => self.scroll_up(viewport.height),
+                KeyCode::PageDown | KeyCode::Char(' ') => self.scroll_down(viewport_height, viewport_height),
+                KeyCode::PageUp => self.scroll_up(viewport_height),
                 KeyCode::Home | KeyCode::Char('g') => self.scroll = 0,
                 KeyCode::End | KeyCode::Char('G') => {
-                    let max = self.total_lines().saturating_sub(viewport.height);
+                    let max = self.total_lines.saturating_sub(viewport_height);
                     self.scroll = max;
                 }
                 _ => {}
@@ -452,9 +424,12 @@ fn main() -> io::Result<()> {
     let mut app = App::new();
 
     loop {
-        let viewport = terminal.get_frame().area();
-        terminal.draw(|frame| app.draw(frame))?;
-        if app.handle_event(viewport)? {
+        let mut viewport_height = 0u16;
+        terminal.draw(|frame| {
+            viewport_height = frame.area().height.saturating_sub(4); // minus header + footer
+            app.draw(frame);
+        })?;
+        if app.handle_event(viewport_height)? {
             break;
         }
     }
