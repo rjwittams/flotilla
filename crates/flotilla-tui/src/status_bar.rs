@@ -210,9 +210,9 @@ mod tests {
             status: StatusSection::plain("Connected"),
             task: Some(TaskSection::new("Refreshing repository...", 0)),
             keys: vec![
-                KeyChip::new("enter", "OPEN", StatusBarAction::key(KeyCode::Enter)),
-                KeyChip::new("/", "SEARCH", StatusBarAction::key(KeyCode::Char('/'))),
-                KeyChip::new("q", "QUIT", StatusBarAction::key(KeyCode::Char('q'))),
+                KeyChip::new("enter", "Open", StatusBarAction::key(KeyCode::Enter)),
+                KeyChip::new("/", "Search", StatusBarAction::key(KeyCode::Char('/'))),
+                KeyChip::new("q", "Quit", StatusBarAction::key(KeyCode::Char('q'))),
             ],
         });
 
@@ -229,7 +229,7 @@ mod tests {
             keys_visible: false,
             status: StatusSection::plain("Ready"),
             task: None,
-            keys: vec![KeyChip::new("q", "QUIT", StatusBarAction::key(KeyCode::Char('q')))],
+            keys: vec![KeyChip::new("q", "Quit", StatusBarAction::key(KeyCode::Char('q')))],
         });
 
         assert!(model.visible_keys.is_empty());
@@ -244,7 +244,7 @@ mod tests {
             keys_visible: true,
             status: StatusSection::plain("Ready"),
             task: None,
-            keys: vec![KeyChip::new("/", "SEARCH", StatusBarAction::key(KeyCode::Char('/')))],
+            keys: vec![KeyChip::new("/", "Search", StatusBarAction::key(KeyCode::Char('/')))],
         });
 
         assert_eq!(model.keys_start, 28);
@@ -258,7 +258,7 @@ mod tests {
             keys_visible: true,
             status: StatusSection::plain("Ready"),
             task: Some(TaskSection::new("Generating branch name...", 0)),
-            keys: vec![KeyChip::new("/", "SEARCH", StatusBarAction::key(KeyCode::Char('/')))],
+            keys: vec![KeyChip::new("/", "Search", StatusBarAction::key(KeyCode::Char('/')))],
         });
 
         assert_eq!(model.task_start + displayed_width(&model.task_text), 80);

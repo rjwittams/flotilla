@@ -341,11 +341,11 @@ fn status_bar_content(
         UiMode::Config => (
             StatusSection::plain("FLOTILLA"),
             vec![
-                key_chip("j", "DOWN", KeyCode::Char('j')),
-                key_chip("k", "UP", KeyCode::Char('k')),
-                key_chip("[", "PREV", KeyCode::Char('[')),
-                key_chip("]", "NEXT", KeyCode::Char(']')),
-                key_chip("q", "QUIT", KeyCode::Char('q')),
+                key_chip("j", "Down", KeyCode::Char('j')),
+                key_chip("k", "Up", KeyCode::Char('k')),
+                key_chip("[", "Prev", KeyCode::Char('[')),
+                key_chip("]", "Next", KeyCode::Char(']')),
+                key_chip("q", "Quit", KeyCode::Char('q')),
             ],
             None,
         ),
@@ -354,52 +354,52 @@ fn status_bar_content(
         }
         UiMode::BranchInput { kind: BranchInputKind::Manual, .. } => (
             StatusSection::plain("NEW BRANCH"),
-            vec![key_chip(ENTER_KEY_GLYPH, "CREATE", KeyCode::Enter), key_chip("esc", "CANCEL", KeyCode::Esc)],
+            vec![key_chip(ENTER_KEY_GLYPH, "Create", KeyCode::Enter), key_chip("esc", "Cancel", KeyCode::Esc)],
             None,
         ),
         UiMode::ActionMenu { .. } => (
             StatusSection::plain("ACTIONS"),
             vec![
-                key_chip("j", "DOWN", KeyCode::Char('j')),
-                key_chip("k", "UP", KeyCode::Char('k')),
-                key_chip(ENTER_KEY_GLYPH, "SELECT", KeyCode::Enter),
-                key_chip("esc", "CLOSE", KeyCode::Esc),
+                key_chip("j", "Down", KeyCode::Char('j')),
+                key_chip("k", "Up", KeyCode::Char('k')),
+                key_chip(ENTER_KEY_GLYPH, "Select", KeyCode::Enter),
+                key_chip("esc", "Close", KeyCode::Esc),
             ],
             None,
         ),
         UiMode::IssueSearch { input } => (
             StatusSection::plain(&format!("SEARCH {}", input.value())),
-            vec![key_chip(ENTER_KEY_GLYPH, "APPLY", KeyCode::Enter), key_chip("esc", "CANCEL", KeyCode::Esc)],
+            vec![key_chip(ENTER_KEY_GLYPH, "Apply", KeyCode::Enter), key_chip("esc", "Cancel", KeyCode::Esc)],
             None,
         ),
         UiMode::FilePicker { .. } => (
             StatusSection::plain("ADD REPO"),
             vec![
-                key_chip("j", "DOWN", KeyCode::Char('j')),
-                key_chip("k", "UP", KeyCode::Char('k')),
-                key_chip("tab", "COMPLETE", KeyCode::Tab),
-                key_chip(ENTER_KEY_GLYPH, "SELECT", KeyCode::Enter),
-                key_chip("esc", "CANCEL", KeyCode::Esc),
+                key_chip("j", "Down", KeyCode::Char('j')),
+                key_chip("k", "Up", KeyCode::Char('k')),
+                key_chip("tab", "Complete", KeyCode::Tab),
+                key_chip(ENTER_KEY_GLYPH, "Select", KeyCode::Enter),
+                key_chip("esc", "Cancel", KeyCode::Esc),
             ],
             None,
         ),
         UiMode::DeleteConfirm { .. } => (
             StatusSection::plain("CONFIRM DELETE"),
-            vec![key_chip("y", "YES", KeyCode::Char('y')), key_chip("n", "NO", KeyCode::Char('n'))],
+            vec![key_chip("y", "Yes", KeyCode::Char('y')), key_chip("n", "No", KeyCode::Char('n'))],
             None,
         ),
         UiMode::CloseConfirm { .. } => (
             StatusSection::plain("CONFIRM CLOSE"),
-            vec![key_chip("y", "YES", KeyCode::Char('y')), key_chip("n", "NO", KeyCode::Char('n'))],
+            vec![key_chip("y", "Yes", KeyCode::Char('y')), key_chip("n", "No", KeyCode::Char('n'))],
             None,
         ),
         UiMode::Help => (
             StatusSection::plain("HELP"),
             vec![
-                key_chip("j", "DOWN", KeyCode::Char('j')),
-                key_chip("k", "UP", KeyCode::Char('k')),
-                key_chip("esc", "CLOSE", KeyCode::Esc),
-                key_chip("?", "CLOSE", KeyCode::Char('?')),
+                key_chip("j", "Down", KeyCode::Char('j')),
+                key_chip("k", "Up", KeyCode::Char('k')),
+                key_chip("esc", "Close", KeyCode::Esc),
+                key_chip("?", "Close", KeyCode::Char('?')),
             ],
             None,
         ),
@@ -423,20 +423,20 @@ fn active_task(model: &TuiModel, in_flight: &HashMap<u64, InFlightCommand>) -> O
 
 fn normal_mode_key_chips(ui: &UiState) -> Vec<KeyChip> {
     vec![
-        key_chip(ENTER_KEY_GLYPH, "OPEN", KeyCode::Enter),
-        key_chip(".", "MENU", KeyCode::Char('.')),
-        key_chip("/", "SEARCH", KeyCode::Char('/')),
+        key_chip(ENTER_KEY_GLYPH, "Open", KeyCode::Enter),
+        key_chip(".", "Menu", KeyCode::Char('.')),
+        key_chip("/", "Search", KeyCode::Char('/')),
         key_chip("h", &target_host_key_label(ui), KeyCode::Char('h')),
-        key_chip("n", "NEW", KeyCode::Char('n')),
-        key_chip("?", "HELP", KeyCode::Char('?')),
-        key_chip("q", "QUIT", KeyCode::Char('q')),
+        key_chip("n", "New", KeyCode::Char('n')),
+        key_chip("?", "Help", KeyCode::Char('?')),
+        key_chip("q", "Quit", KeyCode::Char('q')),
     ]
 }
 
 fn target_host_key_label(ui: &UiState) -> String {
     match ui.target_host.as_ref() {
-        Some(host) => format!("HOST {host}"),
-        None => "HOST LOCAL".into(),
+        Some(host) => format!("Host {host}"),
+        None => "Host Local".into(),
     }
 }
 
@@ -1414,7 +1414,7 @@ mod tests {
         let host_chip =
             normal_mode_key_chips(&ui).into_iter().find(|chip| chip.action == StatusBarAction::key(KeyCode::Char('h'))).expect("host chip");
 
-        assert_eq!(host_chip.label, "HOST LOCAL");
+        assert_eq!(host_chip.label, "Host Local");
     }
 
     #[test]
@@ -1425,6 +1425,6 @@ mod tests {
         let host_chip =
             normal_mode_key_chips(&ui).into_iter().find(|chip| chip.action == StatusBarAction::key(KeyCode::Char('h'))).expect("host chip");
 
-        assert_eq!(host_chip.label, "HOST alpha");
+        assert_eq!(host_chip.label, "Host alpha");
     }
 }
