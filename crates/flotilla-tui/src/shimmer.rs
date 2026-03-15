@@ -8,6 +8,8 @@ use ratatui::{
     text::Span,
 };
 
+use crate::theme::Theme;
+
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 
 fn elapsed_since_start() -> Duration {
@@ -26,6 +28,16 @@ fn blend(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
     (r, g, b_val)
 }
 
+fn color_to_rgb(c: Color) -> (u8, u8, u8) {
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Yellow => (255, 240, 120),
+        Color::Red => (255, 0, 0),
+        Color::Green => (0, 255, 0),
+        _ => (200, 200, 100),
+    }
+}
+
 /// Shimmer animation: a bright band sweeps across text on a 2-second cycle.
 ///
 /// For multi-segment use (e.g. table rows), create one `Shimmer` with the total
@@ -36,19 +48,28 @@ pub(crate) struct Shimmer {
     band_half_width: f32,
     true_color: bool,
     padding: usize,
+    base: (u8, u8, u8),
+    highlight: (u8, u8, u8),
+    fallback_color: Color,
 }
 
 impl Shimmer {
-    pub fn new(total_width: usize) -> Self {
-        Self::new_at(total_width, elapsed_since_start())
+    pub fn new(total_width: usize, theme: &Theme) -> Self {
+        Self::new_at(total_width, elapsed_since_start(), theme)
     }
 
-    pub fn new_at(total_width: usize, elapsed: Duration) -> Self {
+    pub fn new_at(total_width: usize, elapsed: Duration, theme: &Theme) -> Self {
         let padding = 10usize;
         let period = total_width + padding * 2;
         let sweep_seconds = 2.0f32;
         let pos = (elapsed.as_secs_f32() % sweep_seconds) / sweep_seconds * period as f32;
-        Self { pos, band_half_width: 5.0, true_color: has_true_color(), padding }
+        let base = color_to_rgb(theme.shimmer_base);
+        let highlight = color_to_rgb(theme.shimmer_highlight);
+        let fallback_color = match theme.shimmer_highlight {
+            Color::Rgb(_, _, _) => Color::Yellow,
+            other => other,
+        };
+        Self { pos, band_half_width: 5.0, true_color: has_true_color(), padding, base, highlight, fallback_color }
     }
 
     /// Render a segment of the shimmer at `offset` characters from the row start.
@@ -58,9 +79,6 @@ impl Shimmer {
             return Vec::new();
         }
 
-        let base: (u8, u8, u8) = (140, 130, 40);
-        let highlight: (u8, u8, u8) = (255, 240, 120);
-
         let mut spans = Vec::with_capacity(chars.len());
         for (i, ch) in chars.iter().enumerate() {
             let dist = (((offset + i) as f32 + self.padding as f32) - self.pos).abs();
@@ -68,14 +86,14 @@ impl Shimmer {
                 if dist <= self.band_half_width { 0.5 * (1.0 + (std::f32::consts::PI * dist / self.band_half_width).cos()) } else { 0.0 };
 
             let style = if self.true_color {
-                let (r, g, b) = blend(highlight, base, t);
+                let (r, g, b) = blend(self.highlight, self.base, t);
                 Style::default().fg(Color::Rgb(r, g, b))
             } else if t < 0.2 {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM)
+                Style::default().fg(self.fallback_color).add_modifier(Modifier::DIM)
             } else if t < 0.6 {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(self.fallback_color)
             } else {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default().fg(self.fallback_color).add_modifier(Modifier::BOLD)
             };
 
             spans.push(Span::styled(ch.to_string(), style));
@@ -85,8 +103,8 @@ impl Shimmer {
 }
 
 /// Convenience wrapper -- single-segment shimmer (status bar, etc.).
-pub(crate) fn shimmer_spans(text: &str) -> Vec<Span<'static>> {
-    Shimmer::new(text.chars().count()).spans(text, 0)
+pub(crate) fn shimmer_spans(text: &str, theme: &Theme) -> Vec<Span<'static>> {
+    Shimmer::new(text.chars().count(), theme).spans(text, 0)
 }
 
 #[cfg(test)]
@@ -98,8 +116,9 @@ mod tests {
         // Use new_at with a fixed duration to avoid flakiness from
         // elapsed_since_start() being called at different times.
         let text = "hello world";
+        let theme = Theme::classic();
         let elapsed = elapsed_since_start();
-        let shimmer = Shimmer::new_at(text.chars().count(), elapsed);
+        let shimmer = Shimmer::new_at(text.chars().count(), elapsed, &theme);
         let expected = shimmer.spans(text, 0);
         let actual = shimmer.spans(text, 0);
         assert_eq!(expected.len(), actual.len());
@@ -112,8 +131,9 @@ mod tests {
     #[test]
     fn new_at_deterministic() {
         let elapsed = Duration::from_millis(500);
-        let s1 = Shimmer::new_at(20, elapsed);
-        let s2 = Shimmer::new_at(20, elapsed);
+        let theme = Theme::classic();
+        let s1 = Shimmer::new_at(20, elapsed, &theme);
+        let s2 = Shimmer::new_at(20, elapsed, &theme);
         let spans1 = s1.spans("test", 0);
         let spans2 = s2.spans("test", 0);
         for (a, b) in spans1.iter().zip(spans2.iter()) {
@@ -130,7 +150,8 @@ mod tests {
         // Offset 4, char 0: dist = |(4+0+10) - 15| = 1 (inside band, high t)
         // Offset 30, char 0: dist = |(30+0+10) - 15| = 25 (outside band, t=0)
         let elapsed = Duration::from_millis(500);
-        let shimmer = Shimmer::new_at(40, elapsed);
+        let theme = Theme::classic();
+        let shimmer = Shimmer::new_at(40, elapsed, &theme);
         let inside_band = shimmer.spans("a", 4);
         let outside_band = shimmer.spans("a", 30);
         assert_ne!(inside_band[0].style, outside_band[0].style, "offset should shift the shimmer band");
@@ -138,7 +159,8 @@ mod tests {
 
     #[test]
     fn empty_text_returns_empty_spans() {
-        let shimmer = Shimmer::new(10);
+        let theme = Theme::classic();
+        let shimmer = Shimmer::new(10, &theme);
         assert!(shimmer.spans("", 0).is_empty());
     }
 }

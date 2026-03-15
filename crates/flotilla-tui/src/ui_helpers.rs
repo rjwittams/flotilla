@@ -7,6 +7,8 @@ use ratatui::{
     widgets::Block,
 };
 
+use crate::theme::Theme;
+
 /// Truncate a string to `max` characters, appending '…' if truncated.
 pub fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
@@ -52,23 +54,23 @@ pub fn render_popup_frame(frame: &mut ratatui::Frame, container: Rect, percent_x
 
 /// Return (icon, color) for a work item based on its kind, workspace status,
 /// and optional session status.
-pub fn work_item_icon(kind: &WorkItemKind, has_workspace: bool, session_status: Option<&SessionStatus>) -> (&'static str, Color) {
+pub fn work_item_icon(kind: &WorkItemKind, has_workspace: bool, session_status: Option<&SessionStatus>, theme: &Theme) -> (&'static str, Color) {
     match kind {
         WorkItemKind::Checkout => {
             if has_workspace {
-                ("●", Color::Green)
+                ("●", theme.checkout)
             } else {
-                ("○", Color::Green)
+                ("○", theme.checkout)
             }
         }
         WorkItemKind::Session => match session_status {
-            Some(SessionStatus::Running) => ("▶", Color::Magenta),
-            Some(SessionStatus::Idle) => ("◆", Color::Magenta),
-            _ => ("○", Color::Magenta),
+            Some(SessionStatus::Running) => ("▶", theme.session),
+            Some(SessionStatus::Idle) => ("◆", theme.session),
+            _ => ("○", theme.session),
         },
-        WorkItemKind::ChangeRequest => ("⊙", Color::Blue),
-        WorkItemKind::RemoteBranch => ("⊶", Color::DarkGray),
-        WorkItemKind::Issue => ("◇", Color::Yellow),
+        WorkItemKind::ChangeRequest => ("⊙", theme.change_request),
+        WorkItemKind::RemoteBranch => ("⊶", theme.remote_branch),
+        WorkItemKind::Issue => ("◇", theme.issue),
     }
 }
 
@@ -217,6 +219,7 @@ mod tests {
     use flotilla_protocol::{AheadBehind, WorkingTreeStatus};
 
     use super::*;
+    use crate::theme::Theme;
 
     #[test]
     fn truncate_empty_max() {
@@ -271,56 +274,56 @@ mod tests {
 
     #[test]
     fn work_item_icon_checkout_with_workspace() {
-        let (icon, color) = work_item_icon(&WorkItemKind::Checkout, true, None);
+        let (icon, color) = work_item_icon(&WorkItemKind::Checkout, true, None, &Theme::classic());
         assert_eq!(icon, "●");
         assert_eq!(color, Color::Green);
     }
 
     #[test]
     fn work_item_icon_checkout_without_workspace() {
-        let (icon, color) = work_item_icon(&WorkItemKind::Checkout, false, None);
+        let (icon, color) = work_item_icon(&WorkItemKind::Checkout, false, None, &Theme::classic());
         assert_eq!(icon, "○");
         assert_eq!(color, Color::Green);
     }
 
     #[test]
     fn work_item_icon_session_running() {
-        let (icon, color) = work_item_icon(&WorkItemKind::Session, false, Some(&SessionStatus::Running));
+        let (icon, color) = work_item_icon(&WorkItemKind::Session, false, Some(&SessionStatus::Running), &Theme::classic());
         assert_eq!(icon, "▶");
         assert_eq!(color, Color::Magenta);
     }
 
     #[test]
     fn work_item_icon_session_idle() {
-        let (icon, color) = work_item_icon(&WorkItemKind::Session, false, Some(&SessionStatus::Idle));
+        let (icon, color) = work_item_icon(&WorkItemKind::Session, false, Some(&SessionStatus::Idle), &Theme::classic());
         assert_eq!(icon, "◆");
         assert_eq!(color, Color::Magenta);
     }
 
     #[test]
     fn work_item_icon_session_none() {
-        let (icon, color) = work_item_icon(&WorkItemKind::Session, false, None);
+        let (icon, color) = work_item_icon(&WorkItemKind::Session, false, None, &Theme::classic());
         assert_eq!(icon, "○");
         assert_eq!(color, Color::Magenta);
     }
 
     #[test]
     fn work_item_icon_change_request() {
-        let (icon, color) = work_item_icon(&WorkItemKind::ChangeRequest, false, None);
+        let (icon, color) = work_item_icon(&WorkItemKind::ChangeRequest, false, None, &Theme::classic());
         assert_eq!(icon, "⊙");
         assert_eq!(color, Color::Blue);
     }
 
     #[test]
     fn work_item_icon_remote_branch() {
-        let (icon, color) = work_item_icon(&WorkItemKind::RemoteBranch, false, None);
+        let (icon, color) = work_item_icon(&WorkItemKind::RemoteBranch, false, None, &Theme::classic());
         assert_eq!(icon, "⊶");
         assert_eq!(color, Color::DarkGray);
     }
 
     #[test]
     fn work_item_icon_issue() {
-        let (icon, color) = work_item_icon(&WorkItemKind::Issue, false, None);
+        let (icon, color) = work_item_icon(&WorkItemKind::Issue, false, None, &Theme::classic());
         assert_eq!(icon, "◇");
         assert_eq!(color, Color::Yellow);
     }
