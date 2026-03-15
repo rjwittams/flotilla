@@ -4,7 +4,7 @@ use clap::Parser;
 use color_eyre::Result;
 use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon};
 use flotilla_protocol::{output::OutputFormat, CheckoutSelector, CheckoutTarget, Command, CommandAction, HostName, RepoSelector};
-use flotilla_tui::{app, event_log};
+use flotilla_tui::{app, event_log, theme::Theme};
 use tracing::info;
 
 /// Flotilla: TUI dashboard for managing development workspaces
@@ -243,7 +243,7 @@ async fn run_tui(cli: Cli) -> Result<()> {
     }
 
     let repos_info = daemon.list_repos().await.unwrap_or_default();
-    let app = app::App::new(daemon.clone(), repos_info, Arc::clone(&config));
+    let app = app::App::new(daemon.clone(), repos_info, Arc::clone(&config), Theme::catppuccin_mocha());
 
     flotilla_tui::run::run_event_loop(terminal, app).await
 }

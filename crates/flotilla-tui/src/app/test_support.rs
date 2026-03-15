@@ -208,5 +208,5 @@ fn stub_app_with_repo_infos(repos_info: Vec<RepoInfo>) -> App {
     let config_base = std::env::temp_dir().join(format!("flotilla-test-{config_id}"));
     let _ = std::fs::remove_dir_all(&config_base);
     let config = Arc::new(ConfigStore::with_base(config_base));
-    App::new(daemon, repos_info, config)
+    App::new(daemon, repos_info, config, crate::theme::Theme::classic())
 }
