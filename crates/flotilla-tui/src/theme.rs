@@ -1,4 +1,5 @@
-use ratatui::style::Color;
+use flotilla_protocol::WorkItemKind;
+use ratatui::style::{Color, Modifier, Style};
 
 // ---------------------------------------------------------------------------
 // Text transform
@@ -216,6 +217,76 @@ impl Theme {
             status_bar: BarSiteStyle { kind: BarKind::Chevron, label_transform: TextTransform::Uppercase },
         }
     }
+
+    // -------------------------------------------------------------------
+    // Style-producing methods
+    // -------------------------------------------------------------------
+
+    pub fn logo_style(&self, config_mode: bool) -> Style {
+        let bg = if config_mode { self.logo_config_bg } else { self.logo_bg };
+        Style::default().fg(self.logo_fg).bg(bg).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn tab_style(&self, active: bool, dragging: bool) -> Style {
+        if active && dragging {
+            Style::default().fg(self.tab_active).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else if active {
+            Style::default().fg(self.tab_active).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(self.tab_inactive)
+        }
+    }
+
+    pub fn work_item_color(&self, kind: &WorkItemKind) -> Color {
+        match kind {
+            WorkItemKind::Checkout => self.checkout,
+            WorkItemKind::Session => self.session,
+            WorkItemKind::ChangeRequest => self.change_request,
+            WorkItemKind::Issue => self.issue,
+            WorkItemKind::RemoteBranch => self.remote_branch,
+        }
+    }
+
+    pub fn header_style(&self) -> Style {
+        Style::default().fg(self.section_header).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn log_level_style(&self, level: &str) -> Style {
+        let color = match level {
+            "ERROR" => self.error,
+            "WARN" => self.warning,
+            "DEBUG" => self.branch,
+            "INFO" => self.info,
+            _ => self.muted,
+        };
+        Style::default().fg(color)
+    }
+
+    pub fn change_request_status_color(&self, status: &str) -> Color {
+        match status {
+            "Merged" => self.status_ok,
+            "Closed" => self.warning,
+            _ => self.error,
+        }
+    }
+
+    pub fn status_style(&self, ok: bool) -> Style {
+        let color = if ok { self.status_ok } else { self.status_error };
+        Style::default().fg(color)
+    }
+
+    pub fn peer_status_color(&self, state: &str) -> Color {
+        match state {
+            "Connected" => self.status_ok,
+            "Disconnected" | "Rejected" => self.error,
+            "Connecting" | "Reconnecting" => self.warning,
+            _ => self.muted,
+        }
+    }
+
+    pub fn transform_label(&self, site: &BarSiteStyle, text: &str) -> String {
+        site.label_transform.apply(text)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -229,11 +300,7 @@ pub fn available_themes() -> &'static [fn() -> Theme] {
 
 /// Looks up a theme by name (case-insensitive). Falls back to `classic`.
 pub fn theme_by_name(name: &str) -> Theme {
-    available_themes()
-        .iter()
-        .map(|ctor| ctor())
-        .find(|t| t.name.eq_ignore_ascii_case(name))
-        .unwrap_or_else(Theme::classic)
+    available_themes().iter().map(|ctor| ctor()).find(|t| t.name.eq_ignore_ascii_case(name)).unwrap_or_else(Theme::classic)
 }
 
 #[cfg(test)]
@@ -369,5 +436,172 @@ mod tests {
     #[test]
     fn theme_by_name_fallback() {
         assert_eq!(theme_by_name("nonexistent").name, "classic");
+    }
+
+    // ---- Style-producing methods ----
+
+    #[test]
+    fn logo_style_normal() {
+        let t = Theme::classic();
+        let s = t.logo_style(false);
+        assert_eq!(s.fg, Some(Color::Black));
+        assert_eq!(s.bg, Some(Color::Cyan));
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn logo_style_config_mode() {
+        let t = Theme::classic();
+        let s = t.logo_style(true);
+        assert_eq!(s.fg, Some(Color::Black));
+        assert_eq!(s.bg, Some(Color::White));
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn tab_style_active() {
+        let t = Theme::classic();
+        let s = t.tab_style(true, false);
+        assert_eq!(s.fg, Some(Color::Cyan));
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+        assert!(!s.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn tab_style_inactive() {
+        let t = Theme::classic();
+        let s = t.tab_style(false, false);
+        assert_eq!(s.fg, Some(Color::DarkGray));
+        assert!(!s.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn tab_style_active_dragging() {
+        let t = Theme::classic();
+        let s = t.tab_style(true, true);
+        assert_eq!(s.fg, Some(Color::Cyan));
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+        assert!(s.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn work_item_color_all_kinds() {
+        let t = Theme::classic();
+        assert_eq!(t.work_item_color(&WorkItemKind::Checkout), Color::Green);
+        assert_eq!(t.work_item_color(&WorkItemKind::Session), Color::Magenta);
+        assert_eq!(t.work_item_color(&WorkItemKind::ChangeRequest), Color::Blue);
+        assert_eq!(t.work_item_color(&WorkItemKind::Issue), Color::Yellow);
+        assert_eq!(t.work_item_color(&WorkItemKind::RemoteBranch), Color::DarkGray);
+    }
+
+    #[test]
+    fn header_style_is_bold_section_header() {
+        let t = Theme::classic();
+        let s = t.header_style();
+        assert_eq!(s.fg, Some(Color::Yellow));
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn log_level_style_error() {
+        let t = Theme::classic();
+        assert_eq!(t.log_level_style("ERROR").fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn log_level_style_warn() {
+        let t = Theme::classic();
+        assert_eq!(t.log_level_style("WARN").fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn log_level_style_debug() {
+        let t = Theme::classic();
+        assert_eq!(t.log_level_style("DEBUG").fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn log_level_style_info() {
+        let t = Theme::classic();
+        assert_eq!(t.log_level_style("INFO").fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn log_level_style_unknown() {
+        let t = Theme::classic();
+        assert_eq!(t.log_level_style("TRACE").fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn change_request_status_merged() {
+        let t = Theme::classic();
+        assert_eq!(t.change_request_status_color("Merged"), Color::Green);
+    }
+
+    #[test]
+    fn change_request_status_closed() {
+        let t = Theme::classic();
+        assert_eq!(t.change_request_status_color("Closed"), Color::Yellow);
+    }
+
+    #[test]
+    fn change_request_status_other() {
+        let t = Theme::classic();
+        assert_eq!(t.change_request_status_color("Open"), Color::Red);
+    }
+
+    #[test]
+    fn status_style_ok() {
+        let t = Theme::classic();
+        assert_eq!(t.status_style(true).fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn status_style_error() {
+        let t = Theme::classic();
+        assert_eq!(t.status_style(false).fg, Some(Color::Indexed(203)));
+    }
+
+    #[test]
+    fn peer_status_connected() {
+        let t = Theme::classic();
+        assert_eq!(t.peer_status_color("Connected"), Color::Green);
+    }
+
+    #[test]
+    fn peer_status_disconnected() {
+        let t = Theme::classic();
+        assert_eq!(t.peer_status_color("Disconnected"), Color::Red);
+    }
+
+    #[test]
+    fn peer_status_rejected() {
+        let t = Theme::classic();
+        assert_eq!(t.peer_status_color("Rejected"), Color::Red);
+    }
+
+    #[test]
+    fn peer_status_connecting() {
+        let t = Theme::classic();
+        assert_eq!(t.peer_status_color("Connecting"), Color::Yellow);
+    }
+
+    #[test]
+    fn peer_status_reconnecting() {
+        let t = Theme::classic();
+        assert_eq!(t.peer_status_color("Reconnecting"), Color::Yellow);
+    }
+
+    #[test]
+    fn peer_status_unknown() {
+        let t = Theme::classic();
+        assert_eq!(t.peer_status_color("SomeOther"), Color::DarkGray);
+    }
+
+    #[test]
+    fn transform_label_uses_site_transform() {
+        let t = Theme::classic();
+        assert_eq!(t.transform_label(&t.status_bar, "hello"), "HELLO");
+        assert_eq!(t.transform_label(&t.tab_bar, "Hello"), "Hello");
     }
 }
