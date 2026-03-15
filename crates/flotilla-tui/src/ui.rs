@@ -1036,7 +1036,7 @@ fn render_close_confirm(model: &TuiModel, ui: &UiState, theme: &Theme, frame: &m
     frame.render_widget(paragraph, area);
 }
 
-fn render_help(model: &TuiModel, ui: &mut UiState, _theme: &Theme, frame: &mut Frame) {
+fn render_help(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame) {
     if !matches!(ui.mode, UiMode::Help) {
         return;
     }
@@ -1089,6 +1089,10 @@ fn render_help(model: &TuiModel, ui: &mut UiState, _theme: &Theme, frame: &mut F
         Line::from(""),
         Line::from(Span::styled("General", Style::default().bold())),
         Line::from("  D                Toggle correlation debug panel"),
+        Line::from(vec![
+            Span::styled("  T", Style::default().bold()),
+            Span::raw(format!("                Cycle theme (current: {})", theme.name)),
+        ]),
         Line::from("  ?                Toggle this help"),
         Line::from("  q / Esc          Quit"),
     ];
