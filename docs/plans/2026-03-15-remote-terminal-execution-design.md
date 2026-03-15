@@ -111,7 +111,7 @@ Future directions (deferred): policy-driven naming, workspace manager styling (i
 - `escape_for_double_quotes` — special characters, empty string, no-op cases.
 - `wrap_remote_attach_commands` with login shell wrapping — verify `$SHELL -l -c` structure.
 - SSH multiplex args — present when enabled, absent when disabled, per-host override.
-- Workspace naming — `host:branch` format for remote, plain `branch` for local.
+- Workspace naming — `branch@host` format for remote, plain `branch` for local.
 
 **Existing tests to extend:**
 - `create_workspace_from_prepared_terminal_wraps_remote_commands_in_ssh` — add assertions for `$SHELL -l -c` wrapping structure (existing `.contains()` assertions remain valid).

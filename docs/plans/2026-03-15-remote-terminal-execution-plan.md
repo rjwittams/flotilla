@@ -576,14 +576,14 @@ async fn create_workspace_from_prepared_terminal_prefixes_name_with_host() {
     assert_ok(result);
     let created = workspace_manager.created_configs.lock().await;
     assert_eq!(created.len(), 1);
-    assert_eq!(created[0].name, "desktop:feat", "workspace name should be host:branch");
+    assert_eq!(created[0].name, "feat@desktop", "workspace name should be branch@host");
 }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p flotilla-core prefixes_name_with_host`
-Expected: FAIL — name is `"feat"`, not `"desktop:feat"`.
+Expected: FAIL — name is `"feat"`, not `"feat@desktop"`.
 
 - [ ] **Step 3: Update `CreateWorkspaceFromPreparedTerminal` to prefix name**
 
