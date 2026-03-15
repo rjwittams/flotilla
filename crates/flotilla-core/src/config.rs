@@ -54,6 +54,8 @@ impl CheckoutsConfig {
 pub struct UiConfig {
     #[serde(default)]
     pub preview: PreviewConfig,
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]

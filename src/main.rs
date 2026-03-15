@@ -4,7 +4,7 @@ use clap::Parser;
 use color_eyre::Result;
 use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon};
 use flotilla_protocol::{output::OutputFormat, CheckoutSelector, CheckoutTarget, Command, CommandAction, HostName, RepoSelector};
-use flotilla_tui::{app, event_log, theme::Theme};
+use flotilla_tui::{app, event_log, theme};
 use tracing::info;
 
 /// Flotilla: TUI dashboard for managing development workspaces
@@ -26,6 +26,10 @@ struct Cli {
     /// Run in embedded mode (no daemon, in-process)
     #[arg(long)]
     embedded: bool,
+
+    /// Theme name (catppuccin-mocha, classic)
+    #[arg(long)]
+    theme: Option<String>,
 
     #[command(subcommand)]
     command: Option<SubCommand>,
@@ -181,6 +185,7 @@ async fn run_tui(cli: Cli) -> Result<()> {
     };
 
     let cli_repo_roots = cli.repo_root.clone();
+    let cli_theme = cli.theme.clone();
 
     // Spawn daemon init on a separate task so it runs concurrently with the splash
     // (show_splash uses blocking crossterm::event::poll calls).
@@ -242,8 +247,13 @@ async fn run_tui(cli: Cli) -> Result<()> {
         }
     }
 
+    let theme_name = cli_theme
+        .or_else(|| config.load_config().ui.theme.clone())
+        .unwrap_or_else(|| "catppuccin-mocha".to_string());
+    let initial_theme = theme::theme_by_name(&theme_name);
+
     let repos_info = daemon.list_repos().await.unwrap_or_default();
-    let app = app::App::new(daemon.clone(), repos_info, Arc::clone(&config), Theme::catppuccin_mocha());
+    let app = app::App::new(daemon.clone(), repos_info, Arc::clone(&config), initial_theme);
 
     flotilla_tui::run::run_event_loop(terminal, app).await
 }
