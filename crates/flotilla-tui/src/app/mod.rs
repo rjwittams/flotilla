@@ -383,7 +383,7 @@ impl App {
                 tracing::info!(%command_id, %description, "command started");
                 self.in_flight.insert(command_id, InFlightCommand { repo_identity, repo, description });
             }
-            DaemonEvent::CommandFinished { command_id, host, repo, result, .. } => {
+            DaemonEvent::CommandFinished { command_id, host, repo_identity, repo: _, result, .. } => {
                 if let Some(_cmd) = self.in_flight.remove(&command_id) {
                     tracing::info!(%command_id, "command finished");
                     let error_message = match &result {
@@ -399,8 +399,9 @@ impl App {
                     };
                     executor::handle_result(result, self);
                     if let Some(checkout_path) = auto_workspace {
-                        self.proto_commands
-                            .push(self.repo_command_for_path(repo, CommandAction::CreateWorkspaceForCheckout { checkout_path }));
+                        self.proto_commands.push(
+                            self.repo_command_for_identity(repo_identity, CommandAction::CreateWorkspaceForCheckout { checkout_path }),
+                        );
                     }
 
                     // Find which repo+identity has this command_id
@@ -1214,19 +1215,20 @@ mod tests {
     #[test]
     fn step_failure_surfaces_error_in_status_message() {
         let mut app = stub_app();
-        let repo = app.model.repo_order[0].clone();
+        let repo_identity = app.model.repo_order[0].clone();
+        let repo_path = app.model.repos[&repo_identity].path.clone();
 
         app.in_flight.insert(42, InFlightCommand {
-            repo_identity: app.model.active_repo_identity().clone(),
-            repo: repo.clone(),
+            repo_identity: repo_identity.clone(),
+            repo: repo_path.clone(),
             description: "Creating checkout...".into(),
         });
 
         app.handle_daemon_event(DaemonEvent::CommandStepUpdate {
             command_id: 42,
             host: HostName::local(),
-            repo_identity: app.model.active_repo_identity().clone(),
-            repo,
+            repo_identity,
+            repo: repo_path,
             step_index: 0,
             step_count: 1,
             description: "Create checkout for branch my-branch".into(),
@@ -1484,24 +1486,26 @@ mod tests {
     fn local_checkout_created_queues_workspace_creation() {
         let mut app = stub_app();
         app.model.my_host = Some(HostName::new("my-desktop"));
-        let repo = app.model.repo_order[0].clone();
+        let repo_identity = app.model.repo_order[0].clone();
+        let repo_path = app.model.repos[&repo_identity].path.clone();
         let checkout_path = PathBuf::from("/tmp/repo/wt-feat");
 
         app.in_flight.insert(42, InFlightCommand {
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo: repo.clone(),
+            repo_identity: repo_identity.clone(),
+            repo: repo_path.clone(),
             description: "test".into(),
         });
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::new("my-desktop"),
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo,
+            repo_identity: repo_identity.clone(),
+            repo: repo_path,
             result: CommandResult::CheckoutCreated { branch: "feat".into(), path: checkout_path.clone() },
         });
 
         let (cmd, _) = app.proto_commands.take_next().expect("should queue workspace creation");
+        assert_eq!(cmd.context_repo, Some(RepoSelector::Identity(repo_identity)));
         match cmd.action {
             CommandAction::CreateWorkspaceForCheckout { checkout_path: p } => assert_eq!(p, checkout_path),
             other => panic!("expected CreateWorkspaceForCheckout, got {other:?}"),
@@ -1512,19 +1516,20 @@ mod tests {
     fn remote_checkout_created_does_not_queue_workspace() {
         let mut app = stub_app();
         app.model.my_host = Some(HostName::new("my-desktop"));
-        let repo = app.model.repo_order[0].clone();
+        let repo_identity = app.model.repo_order[0].clone();
+        let repo_path = app.model.repos[&repo_identity].path.clone();
 
         app.in_flight.insert(42, InFlightCommand {
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo: repo.clone(),
+            repo_identity: repo_identity.clone(),
+            repo: repo_path.clone(),
             description: "test".into(),
         });
 
         app.handle_daemon_event(DaemonEvent::CommandFinished {
             command_id: 42,
             host: HostName::new("remote-a"),
-            repo_identity: RepoIdentity { authority: "local".into(), path: repo.to_string_lossy().into_owned() },
-            repo,
+            repo_identity,
+            repo: repo_path,
             result: CommandResult::CheckoutCreated { branch: "feat".into(), path: PathBuf::from("/remote/wt-feat") },
         });
 
