@@ -915,10 +915,7 @@ fn wrap_remote_attach_commands(
             String::new()
         } else {
             let ctrl_path = ctrl_dir.join("ctrl-%r@%h-%p");
-            format!(
-                " -o ControlMaster=auto -o ControlPath={} -o ControlPersist=60",
-                shell_quote(&ctrl_path.display().to_string()),
-            )
+            format!(" -o ControlMaster=auto -o ControlPath={} -o ControlPersist=60", shell_quote(&ctrl_path.display().to_string()),)
         }
     } else {
         String::new()
@@ -2950,25 +2947,12 @@ content:
         .expect("write hosts config");
 
         let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
-        let result = wrap_remote_attach_commands(
-            &HostName::new("desktop"),
-            &PathBuf::from("/home/dev/project"),
-            &commands,
-            temp.path(),
-        )
-        .unwrap();
+        let result =
+            wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path()).unwrap();
 
         // Default is multiplex=true
-        assert!(
-            result[0].command.contains("ControlMaster=auto"),
-            "expected ControlMaster, got: {}",
-            result[0].command
-        );
-        assert!(
-            result[0].command.contains("ControlPersist=60"),
-            "expected ControlPersist, got: {}",
-            result[0].command
-        );
+        assert!(result[0].command.contains("ControlMaster=auto"), "expected ControlMaster, got: {}", result[0].command);
+        assert!(result[0].command.contains("ControlPersist=60"), "expected ControlPersist, got: {}", result[0].command);
     }
 
     #[test]
@@ -2981,19 +2965,10 @@ content:
         .expect("write hosts config");
 
         let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
-        let result = wrap_remote_attach_commands(
-            &HostName::new("desktop"),
-            &PathBuf::from("/home/dev/project"),
-            &commands,
-            temp.path(),
-        )
-        .unwrap();
+        let result =
+            wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path()).unwrap();
 
-        assert!(
-            !result[0].command.contains("ControlMaster"),
-            "should not have ControlMaster when disabled, got: {}",
-            result[0].command
-        );
+        assert!(!result[0].command.contains("ControlMaster"), "should not have ControlMaster when disabled, got: {}", result[0].command);
     }
 
     #[test]
@@ -3006,18 +2981,9 @@ content:
         .expect("write hosts config");
 
         let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
-        let result = wrap_remote_attach_commands(
-            &HostName::new("desktop"),
-            &PathBuf::from("/home/dev/project"),
-            &commands,
-            temp.path(),
-        )
-        .unwrap();
+        let result =
+            wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path()).unwrap();
 
-        assert!(
-            !result[0].command.contains("ControlMaster"),
-            "per-host override should disable multiplex, got: {}",
-            result[0].command
-        );
+        assert!(!result[0].command.contains("ControlMaster"), "per-host override should disable multiplex, got: {}", result[0].command);
     }
 }
