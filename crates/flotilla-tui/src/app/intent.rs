@@ -102,7 +102,10 @@ impl Intent {
             Intent::CreateWorkspace => item.checkout_key().map(|p| {
                 let label =
                     item.branch.clone().unwrap_or_else(|| p.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-                let command = app.item_host_repo_command(CommandAction::PrepareTerminalForCheckout { checkout_path: p.path.clone() }, item);
+                let command = app.item_host_repo_command(
+                    CommandAction::PrepareTerminalForCheckout { checkout_path: p.path.clone(), commands: app.local_template_commands() },
+                    item,
+                );
                 if command.host.is_some() {
                     command
                 } else {
@@ -609,7 +612,7 @@ mod tests {
         let cmd = Intent::CreateWorkspace.resolve(&item, &app).unwrap();
 
         match cmd {
-            Command { host, action: CommandAction::PrepareTerminalForCheckout { checkout_path }, .. } => {
+            Command { host, action: CommandAction::PrepareTerminalForCheckout { checkout_path, .. }, .. } => {
                 assert_eq!(host, Some(HostName::new("remote-a")));
                 assert_eq!(checkout_path, PathBuf::from("/remote/feat-x"));
             }

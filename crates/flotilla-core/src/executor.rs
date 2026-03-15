@@ -482,7 +482,7 @@ pub async fn execute(
                 // working directory only needs to be a valid local directory.
                 // The wrapped attach commands handle entering the remote checkout path.
                 let working_dir = local_workspace_directory(&repo.root, config_base);
-                let remote_name = format!("{}@{}", target_host, branch);
+                let remote_name = format!("{}@{}", branch, target_host);
                 let mut config = workspace_config(&repo.root, &remote_name, &working_dir, "claude", config_base);
                 config.resolved_commands = Some(wrapped.into_iter().map(|cmd| (cmd.role, cmd.command)).collect());
                 if let Err(e) = ws_mgr.create_workspace(&config).await {
@@ -533,10 +533,10 @@ pub async fn execute(
             }
         }
 
-        CommandAction::PrepareTerminalForCheckout { checkout_path } => {
+        CommandAction::PrepareTerminalForCheckout { checkout_path, commands: requested_commands } => {
             let host_key = HostPath::new(local_host.clone(), checkout_path.clone());
             if let Some(co) = providers_data.checkouts.get(&host_key).cloned() {
-                match prepare_terminal_commands(&repo.root, &co.branch, &checkout_path, registry, config_base).await {
+                match prepare_terminal_commands(&repo.root, &co.branch, &checkout_path, registry, config_base, &requested_commands).await {
                     Ok(commands) => CommandResult::TerminalPrepared {
                         repo_identity: repo.identity.clone(),
                         target_host: local_host.clone(),
@@ -859,7 +859,21 @@ async fn prepare_terminal_commands(
     checkout_path: &Path,
     registry: &ProviderRegistry,
     config_base: &Path,
+    requested_commands: &[PreparedTerminalCommand],
 ) -> Result<Vec<PreparedTerminalCommand>, String> {
+    if !requested_commands.is_empty() {
+        // The requesting host sent its template's role→command mappings.
+        // Use those instead of reading the local template.
+        let mut config = workspace_config(repo_root, branch, checkout_path, "claude", config_base);
+        config.resolved_commands = Some(requested_commands.iter().map(|c| (c.role.clone(), c.command.clone())).collect());
+        if let Some((_, tp)) = &registry.terminal_pool {
+            resolve_terminal_pool(&mut config, tp.as_ref()).await;
+        }
+        let commands = config.resolved_commands.unwrap_or_default();
+        return Ok(commands.into_iter().map(|(role, command)| PreparedTerminalCommand { role, command }).collect());
+    }
+
+    // Fallback: read the local template (for backwards compat or local use)
     let mut config = workspace_config(repo_root, branch, checkout_path, "claude", config_base);
     if let Some((_, tp)) = &registry.terminal_pool {
         resolve_terminal_pool(&mut config, tp.as_ref()).await;
@@ -1485,8 +1499,13 @@ mod tests {
         data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
 
-        let result =
-            run_execute(CommandAction::PrepareTerminalForCheckout { checkout_path: path.clone() }, &registry, &data, &runner).await;
+        let result = run_execute(
+            CommandAction::PrepareTerminalForCheckout { checkout_path: path.clone(), commands: vec![] },
+            &registry,
+            &data,
+            &runner,
+        )
+        .await;
 
         match result {
             CommandResult::TerminalPrepared { repo_identity, target_host, branch, checkout_path, commands } => {
@@ -1587,7 +1606,7 @@ mod tests {
         assert_ok(result);
         let created = workspace_manager.created_configs.lock().await;
         assert_eq!(created.len(), 1);
-        assert_eq!(created[0].name, "desktop@feat", "workspace name should be host@branch");
+        assert_eq!(created[0].name, "feat@desktop", "workspace name should be branch@host");
     }
 
     #[tokio::test]
