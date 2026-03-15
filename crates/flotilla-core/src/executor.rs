@@ -863,9 +863,28 @@ async fn prepare_terminal_commands(
 ) -> Result<Vec<PreparedTerminalCommand>, String> {
     if !requested_commands.is_empty() {
         // The requesting host sent its template's role→command mappings.
-        // Pass them through directly — the terminal pool resolution (which
-        // reads the local template) is skipped because the caller's template
-        // is authoritative. The commands are returned as-is for SSH wrapping.
+        // If a terminal pool is available, wrap each command through it
+        // for persistent sessions. Otherwise return as-is for passthrough.
+        if let Some((_, tp)) = &registry.terminal_pool {
+            let mut resolved = Vec::new();
+            let mut role_index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+            for cmd in requested_commands {
+                let index = role_index.entry(cmd.role.clone()).or_insert(0);
+                let id = ManagedTerminalId { checkout: branch.to_string(), role: cmd.role.clone(), index: *index };
+                *role_index.get_mut(&cmd.role).expect("just inserted") += 1;
+                if let Err(e) = tp.ensure_running(&id, &cmd.command, checkout_path).await {
+                    warn!(%id, err = %e, "failed to ensure terminal");
+                }
+                match tp.attach_command(&id, &cmd.command, checkout_path).await {
+                    Ok(attach_cmd) => resolved.push(PreparedTerminalCommand { role: cmd.role.clone(), command: attach_cmd }),
+                    Err(e) => {
+                        warn!(%id, err = %e, "failed to get attach command, using original");
+                        resolved.push(cmd.clone());
+                    }
+                }
+            }
+            return Ok(resolved);
+        }
         return Ok(requested_commands.to_vec());
     }
 
