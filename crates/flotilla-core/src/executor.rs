@@ -455,26 +455,21 @@ pub async fn execute(
     local_host: &HostName,
 ) -> CommandResult {
     match action {
-        CommandAction::CreateWorkspaceForCheckout { checkout_path } => {
-            let host_key = HostPath::new(local_host.clone(), checkout_path.clone());
-            if let Some(co) = providers_data.checkouts.get(&host_key).cloned() {
-                info!(branch = %co.branch, "entering workspace");
-                if let Some((_, ws_mgr)) = &registry.workspace_manager {
-                    if select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await {
-                        return CommandResult::Ok;
-                    }
-                    let mut config = workspace_config(&repo.root, &co.branch, &checkout_path, "claude", config_base);
-                    if let Some((_, tp)) = &registry.terminal_pool {
-                        resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                    }
-                    if let Err(e) = ws_mgr.create_workspace(&config).await {
-                        return CommandResult::Error { message: e };
-                    }
+        CommandAction::CreateWorkspaceForCheckout { checkout_path, label } => {
+            info!(%label, "entering workspace");
+            if let Some((_, ws_mgr)) = &registry.workspace_manager {
+                if select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await {
+                    return CommandResult::Ok;
                 }
-                CommandResult::Ok
-            } else {
-                CommandResult::Error { message: format!("checkout not found: {}", checkout_path.display()) }
+                let mut config = workspace_config(&repo.root, &label, &checkout_path, "claude", config_base);
+                if let Some((_, tp)) = &registry.terminal_pool {
+                    resolve_terminal_pool(&mut config, tp.as_ref()).await;
+                }
+                if let Err(e) = ws_mgr.create_workspace(&config).await {
+                    return CommandResult::Error { message: e };
+                }
             }
+            CommandResult::Ok
         }
 
         CommandAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, commands } => {
@@ -487,7 +482,8 @@ pub async fn execute(
                 // working directory only needs to be a valid local directory.
                 // The wrapped attach commands handle entering the remote checkout path.
                 let working_dir = local_workspace_directory(&repo.root, config_base);
-                let mut config = workspace_config(&repo.root, &branch, &working_dir, "claude", config_base);
+                let remote_name = format!("{}@{}", branch, target_host);
+                let mut config = workspace_config(&repo.root, &remote_name, &working_dir, "claude", config_base);
                 config.resolved_commands = Some(wrapped.into_iter().map(|cmd| (cmd.role, cmd.command)).collect());
                 if let Err(e) = ws_mgr.create_workspace(&config).await {
                     return CommandResult::Error { message: e };
@@ -537,10 +533,10 @@ pub async fn execute(
             }
         }
 
-        CommandAction::PrepareTerminalForCheckout { checkout_path } => {
+        CommandAction::PrepareTerminalForCheckout { checkout_path, commands: requested_commands } => {
             let host_key = HostPath::new(local_host.clone(), checkout_path.clone());
             if let Some(co) = providers_data.checkouts.get(&host_key).cloned() {
-                match prepare_terminal_commands(&repo.root, &co.branch, &checkout_path, registry, config_base).await {
+                match prepare_terminal_commands(&repo.root, &co.branch, &checkout_path, registry, config_base, &requested_commands).await {
                     Ok(commands) => CommandResult::TerminalPrepared {
                         repo_identity: repo.identity.clone(),
                         target_host: local_host.clone(),
@@ -863,7 +859,36 @@ async fn prepare_terminal_commands(
     checkout_path: &Path,
     registry: &ProviderRegistry,
     config_base: &Path,
+    requested_commands: &[PreparedTerminalCommand],
 ) -> Result<Vec<PreparedTerminalCommand>, String> {
+    if !requested_commands.is_empty() {
+        // The requesting host sent its template's role→command mappings.
+        // If a terminal pool is available, wrap each command through it
+        // for persistent sessions. Otherwise return as-is for passthrough.
+        if let Some((_, tp)) = &registry.terminal_pool {
+            let mut resolved = Vec::new();
+            let mut role_index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+            for cmd in requested_commands {
+                let index = role_index.entry(cmd.role.clone()).or_insert(0);
+                let id = ManagedTerminalId { checkout: branch.to_string(), role: cmd.role.clone(), index: *index };
+                *role_index.get_mut(&cmd.role).expect("just inserted") += 1;
+                if let Err(e) = tp.ensure_running(&id, &cmd.command, checkout_path).await {
+                    warn!(%id, err = %e, "failed to ensure terminal");
+                }
+                match tp.attach_command(&id, &cmd.command, checkout_path).await {
+                    Ok(attach_cmd) => resolved.push(PreparedTerminalCommand { role: cmd.role.clone(), command: attach_cmd }),
+                    Err(e) => {
+                        warn!(%id, err = %e, "failed to get attach command, using original");
+                        resolved.push(cmd.clone());
+                    }
+                }
+            }
+            return Ok(resolved);
+        }
+        return Ok(requested_commands.to_vec());
+    }
+
+    // Fallback: read the local template (for backwards compat or local use)
     let mut config = workspace_config(repo_root, branch, checkout_path, "claude", config_base);
     if let Some((_, tp)) = &registry.terminal_pool {
         resolve_terminal_pool(&mut config, tp.as_ref()).await;
@@ -904,36 +929,77 @@ fn wrap_remote_attach_commands(
     commands: &[PreparedTerminalCommand],
     config_base: &Path,
 ) -> Result<Vec<PreparedTerminalCommand>, String> {
-    let ssh_target = remote_ssh_target(target_host, config_base)?;
-    let remote_dir = shell_quote(&checkout_path.display().to_string());
+    let info = remote_ssh_info(target_host, config_base)?;
+    let remote_dir = checkout_path.display().to_string();
+
+    let multiplex_args = if info.multiplex {
+        let ctrl_dir = config_base.join("ssh");
+        if let Err(e) = std::fs::create_dir_all(&ctrl_dir) {
+            tracing::warn!(err = %e, "failed to create SSH control socket directory, disabling multiplexing");
+            String::new()
+        } else {
+            let ctrl_path = ctrl_dir.join("ctrl-%r@%h-%p");
+            format!(" -o ControlMaster=auto -o ControlPath={} -o ControlPersist=60", shell_quote(&ctrl_path.display().to_string()),)
+        }
+    } else {
+        String::new()
+    };
+
     Ok(commands
         .iter()
         .map(|entry| {
-            let remote_shell = format!("cd {remote_dir} && {}", entry.command);
+            let inner = if entry.command.is_empty() {
+                // Empty command = open a login shell at the remote directory
+                format!("cd {} && exec $SHELL -l", shell_quote(&remote_dir))
+            } else {
+                format!("cd {} && {}", shell_quote(&remote_dir), entry.command)
+            };
+            let login_wrapped = format!("$SHELL -l -c \"{}\"", escape_for_double_quotes(&inner));
             PreparedTerminalCommand {
                 role: entry.role.clone(),
-                command: format!("ssh -t {} {}", shell_quote(&ssh_target), shell_quote(&remote_shell)),
+                command: format!("ssh -t{} {} {}", multiplex_args, shell_quote(&info.target), shell_quote(&login_wrapped)),
             }
         })
         .collect())
 }
 
-fn remote_ssh_target(target_host: &HostName, config_base: &Path) -> Result<String, String> {
+struct RemoteSshInfo {
+    target: String,
+    multiplex: bool,
+}
+
+fn remote_ssh_info(target_host: &HostName, config_base: &Path) -> Result<RemoteSshInfo, String> {
     let config = crate::config::ConfigStore::with_base(config_base);
     let hosts = config.load_hosts()?;
-    let remote = hosts
+    let (label, remote) = hosts
         .hosts
-        .values()
-        .find(|host| host.expected_host_name == target_host.as_str())
+        .iter()
+        .find(|(_, host)| host.expected_host_name == target_host.as_str())
         .ok_or_else(|| format!("unknown remote host: {target_host}"))?;
-    Ok(match &remote.user {
+    let target = match &remote.user {
         Some(user) => format!("{user}@{}", remote.hostname),
         None => remote.hostname.clone(),
-    })
+    };
+    let multiplex = hosts.resolved_ssh_multiplex(label);
+    Ok(RemoteSshInfo { target, multiplex })
 }
 
 fn shell_quote(input: &str) -> String {
     format!("'{}'", input.replace('\'', "'\\''"))
+}
+
+fn escape_for_double_quotes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '"' | '$' | '`' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn session_provider_key<'a>(session: &'a CloudAgentSession, session_id: &str) -> Option<&'a str> {
@@ -1391,12 +1457,13 @@ mod tests {
     #[tokio::test]
     async fn create_workspace_for_checkout_success_without_ws_manager() {
         let registry = empty_registry();
-        let mut data = empty_data();
+        let data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
-        data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
 
-        let result = run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path: path }, &registry, &data, &runner).await;
+        let result =
+            run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path: path, label: "feat".into() }, &registry, &data, &runner)
+                .await;
 
         assert_ok(result);
     }
@@ -1419,43 +1486,28 @@ mod tests {
     async fn create_workspace_for_checkout_success_with_ws_manager() {
         let mut registry = empty_registry();
         registry.workspace_manager = Some((desc("cmux"), Arc::new(MockWorkspaceManager::succeeding())));
-        let mut data = empty_data();
+        let data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
-        data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
 
-        let result = run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path: path }, &registry, &data, &runner).await;
+        let result =
+            run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path: path, label: "feat".into() }, &registry, &data, &runner)
+                .await;
 
         assert_ok(result);
-    }
-
-    #[tokio::test]
-    async fn create_workspace_for_checkout_not_found() {
-        let registry = empty_registry();
-        let data = empty_data();
-        let runner = runner_ok();
-
-        let result = run_execute(
-            CommandAction::CreateWorkspaceForCheckout { checkout_path: PathBuf::from("/nonexistent") },
-            &registry,
-            &data,
-            &runner,
-        )
-        .await;
-
-        assert_error_contains(result, "checkout not found");
     }
 
     #[tokio::test]
     async fn create_workspace_for_checkout_ws_manager_fails() {
         let mut registry = empty_registry();
         registry.workspace_manager = Some((desc("cmux"), Arc::new(MockWorkspaceManager::failing("ws creation failed"))));
-        let mut data = empty_data();
+        let data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
-        data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
 
-        let result = run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path: path }, &registry, &data, &runner).await;
+        let result =
+            run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path: path, label: "feat".into() }, &registry, &data, &runner)
+                .await;
 
         assert_error_eq(result, "ws creation failed");
     }
@@ -1467,8 +1519,13 @@ mod tests {
         data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
 
-        let result =
-            run_execute(CommandAction::PrepareTerminalForCheckout { checkout_path: path.clone() }, &registry, &data, &runner).await;
+        let result = run_execute(
+            CommandAction::PrepareTerminalForCheckout { checkout_path: path.clone(), commands: vec![] },
+            &registry,
+            &data,
+            &runner,
+        )
+        .await;
 
         match result {
             CommandResult::TerminalPrepared { repo_identity, target_host, branch, checkout_path, commands } => {
@@ -1528,6 +1585,48 @@ mod tests {
         assert!(resolved[0].1.contains("desktop.local"));
         assert!(resolved[0].1.contains("/remote/feat"));
         assert!(resolved[0].1.contains("bash -l"));
+        assert!(resolved[0].1.contains("$SHELL -l -c"), "expected login shell wrapper, got: {}", resolved[0].1);
+    }
+
+    #[tokio::test]
+    async fn create_workspace_from_prepared_terminal_prefixes_name_with_host() {
+        let workspace_manager = Arc::new(MockWorkspaceManager::succeeding());
+        let mut registry = empty_registry();
+        registry.workspace_manager = Some((desc("cmux"), Arc::clone(&workspace_manager) as Arc<dyn WorkspaceManager>));
+        let runner = runner_ok();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        std::fs::write(
+            temp.path().join("hosts.toml"),
+            "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
+        )
+        .expect("write hosts config");
+
+        let repo = RepoExecutionContext {
+            identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            root: repo_root,
+        };
+        let result = execute(
+            CommandAction::CreateWorkspaceFromPreparedTerminal {
+                target_host: HostName::new("desktop"),
+                branch: "feat".into(),
+                checkout_path: PathBuf::from("/remote/feat"),
+                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }],
+            },
+            &repo,
+            &registry,
+            &empty_data(),
+            &runner,
+            temp.path(),
+            &local_host(),
+        )
+        .await;
+
+        assert_ok(result);
+        let created = workspace_manager.created_configs.lock().await;
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].name, "feat@desktop", "workspace name should be branch@host");
     }
 
     #[tokio::test]
@@ -1542,7 +1641,8 @@ mod tests {
         data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
 
-        let result = run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path }, &registry, &data, &runner).await;
+        let result =
+            run_execute(CommandAction::CreateWorkspaceForCheckout { checkout_path, label: "feat".into() }, &registry, &data, &runner).await;
 
         assert_ok(result);
         let calls = ws_mgr.calls.lock().await;
@@ -1617,6 +1717,8 @@ mod tests {
         assert_eq!(created.len(), 1);
         assert!(!created[0].working_directory.to_string_lossy().starts_with("<remote>/"));
         assert!(created[0].working_directory.exists(), "fallback working directory should exist");
+        let resolved = created[0].resolved_commands.as_ref().expect("resolved commands");
+        assert!(resolved[0].1.contains("$SHELL -l -c"), "expected login shell wrapper, got: {}", resolved[0].1);
     }
 
     #[tokio::test]
@@ -2818,5 +2920,91 @@ content:
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("branch not found"));
+    }
+
+    #[test]
+    fn wrap_remote_attach_commands_uses_login_shell() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("hosts.toml"),
+            "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
+        )
+        .expect("write hosts config");
+
+        let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "claude".into() }];
+        let result =
+            wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path()).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "main");
+        assert!(result[0].command.contains("$SHELL -l -c"), "expected login shell wrapper, got: {}", result[0].command);
+        assert!(result[0].command.contains("ssh -t"), "expected ssh -t, got: {}", result[0].command);
+        assert!(result[0].command.contains("desktop.local"), "expected host, got: {}", result[0].command);
+        assert!(result[0].command.contains("/home/dev/project"), "expected remote dir, got: {}", result[0].command);
+        assert!(result[0].command.contains("claude"), "expected command, got: {}", result[0].command);
+    }
+
+    #[test]
+    fn escape_for_double_quotes_handles_special_chars() {
+        assert_eq!(escape_for_double_quotes("hello"), "hello");
+        assert_eq!(escape_for_double_quotes(r#"say "hi""#), r#"say \"hi\""#);
+        assert_eq!(escape_for_double_quotes("$HOME"), r"\$HOME");
+        assert_eq!(escape_for_double_quotes("a`cmd`b"), r"a\`cmd\`b");
+        assert_eq!(escape_for_double_quotes(r"back\slash"), r"back\\slash");
+        assert_eq!(escape_for_double_quotes(""), "");
+        assert_eq!(
+            escape_for_double_quotes("shpool --socket /tmp/s.sock attach flotilla/feat/main/0"),
+            "shpool --socket /tmp/s.sock attach flotilla/feat/main/0"
+        );
+    }
+
+    #[test]
+    fn wrap_remote_attach_commands_includes_multiplex_args() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("hosts.toml"),
+            "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
+        )
+        .expect("write hosts config");
+
+        let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
+        let result =
+            wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path()).unwrap();
+
+        // Default is multiplex=true
+        assert!(result[0].command.contains("ControlMaster=auto"), "expected ControlMaster, got: {}", result[0].command);
+        assert!(result[0].command.contains("ControlPersist=60"), "expected ControlPersist, got: {}", result[0].command);
+    }
+
+    #[test]
+    fn wrap_remote_attach_commands_omits_multiplex_when_disabled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("hosts.toml"),
+            "[ssh]\nmultiplex = false\n\n[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
+        )
+        .expect("write hosts config");
+
+        let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
+        let result =
+            wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path()).unwrap();
+
+        assert!(!result[0].command.contains("ControlMaster"), "should not have ControlMaster when disabled, got: {}", result[0].command);
+    }
+
+    #[test]
+    fn wrap_remote_attach_commands_per_host_multiplex_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("hosts.toml"),
+            "[ssh]\nmultiplex = true\n\n[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\nssh_multiplex = false\n",
+        )
+        .expect("write hosts config");
+
+        let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
+        let result =
+            wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path()).unwrap();
+
+        assert!(!result[0].command.contains("ControlMaster"), "per-host override should disable multiplex, got: {}", result[0].command);
     }
 }

@@ -9,6 +9,9 @@ members = [
 exclude = ["lints/long_inline_paths"]
 resolver = "2"
 
+[workspace.package]
+license = "Apache-2.0 OR MIT"
+
 [workspace.metadata.dylint]
 libraries = [{ path = "lints/long_inline_paths" }]
 
@@ -25,6 +28,7 @@ color-eyre = "0.6"
 name = "flotilla"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 flotilla-core = { path = "crates/flotilla-core" }

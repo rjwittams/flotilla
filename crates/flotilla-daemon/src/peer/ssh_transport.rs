@@ -454,6 +454,7 @@ mod tests {
             expected_host_name: "my-server".to_string(),
             user: Some("dev".to_string()),
             daemon_socket: "/run/user/1000/flotilla.sock".to_string(),
+            ssh_multiplex: None,
         };
         let transport = SshTransport::new(HostName::new("local"), ConfigLabel("my-server".to_string()), config, uuid::Uuid::nil())
             .expect("valid host name");
@@ -467,6 +468,7 @@ mod tests {
             expected_host_name: "remote".to_string(),
             user: None,
             daemon_socket: "/tmp/daemon.sock".to_string(),
+            ssh_multiplex: None,
         };
         match SshTransport::new(HostName::new("local"), ConfigLabel("../evil".to_string()), config, uuid::Uuid::nil()) {
             Err(e) => assert!(e.contains("path separators"), "unexpected error: {e}"),
@@ -481,6 +483,7 @@ mod tests {
             expected_host_name: "remote".to_string(),
             user: None,
             daemon_socket: "/tmp/daemon.sock".to_string(),
+            ssh_multiplex: None,
         };
         let transport = SshTransport::new(HostName::new("local"), ConfigLabel("remote".to_string()), config, uuid::Uuid::nil())
             .expect("valid host name");
@@ -531,6 +534,7 @@ mod tests {
             expected_host_name: "remote".to_string(),
             user: None,
             daemon_socket: "/tmp/daemon.sock".to_string(),
+            ssh_multiplex: None,
         };
         let transport = SshTransport::new(HostName::new("local"), ConfigLabel("remote".to_string()), config, uuid::Uuid::nil())
             .expect("valid host name");
@@ -544,6 +548,7 @@ mod tests {
             expected_host_name: "remote".to_string(),
             user: None,
             daemon_socket: "/tmp/daemon.sock".to_string(),
+            ssh_multiplex: None,
         };
         let mut transport = SshTransport::new(HostName::new("local"), ConfigLabel("remote".to_string()), config, uuid::Uuid::nil())
             .expect("valid host name");
@@ -565,6 +570,7 @@ mod tests {
             expected_host_name: "remote".to_string(),
             user: None,
             daemon_socket: "/tmp/daemon.sock".to_string(),
+            ssh_multiplex: None,
         };
         let mut transport = SshTransport::new(HostName::new("local"), ConfigLabel("remote".to_string()), config, uuid::Uuid::nil())
             .expect("valid host name");
@@ -622,6 +628,7 @@ mod tests {
             expected_host_name: "localhost-test".to_string(),
             user: None,
             daemon_socket: "/tmp/flotilla-test-daemon.sock".to_string(),
+            ssh_multiplex: None,
         };
         let mut transport =
             SshTransport::new(HostName::new("local-test"), ConfigLabel("localhost-test".to_string()), config, uuid::Uuid::nil())

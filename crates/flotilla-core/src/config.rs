@@ -103,10 +103,28 @@ pub struct RepoCheckoutsOverride {
     pub provider: Option<String>,
 }
 
+/// Global SSH settings for remote host connections.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SshConfig {
+    #[serde(default = "default_true")]
+    pub multiplex: bool,
+}
+
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self { multiplex: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Remote host configuration for multi-host mode.
 /// Loaded from `~/.config/flotilla/hosts.toml`.
 #[derive(Debug, Default)]
 pub struct HostsConfig {
+    pub ssh: SshConfig,
     pub hosts: HashMap<String, RemoteHostConfig>,
 }
 
@@ -117,10 +135,13 @@ pub struct RemoteHostConfig {
     pub expected_host_name: String,
     pub user: Option<String>,
     pub daemon_socket: String,
+    pub ssh_multiplex: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawHostsConfig {
+    #[serde(default)]
+    ssh: SshConfig,
     #[serde(default)]
     hosts: HashMap<String, RawRemoteHostConfig>,
 }
@@ -131,6 +152,7 @@ struct RawRemoteHostConfig {
     expected_host_name: Option<String>,
     user: Option<String>,
     daemon_socket: String,
+    ssh_multiplex: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for HostsConfig {
@@ -139,6 +161,7 @@ impl<'de> Deserialize<'de> for HostsConfig {
         D: serde::Deserializer<'de>,
     {
         let raw = RawHostsConfig::deserialize(deserializer)?;
+        let ssh = raw.ssh;
         let hosts = raw
             .hosts
             .into_iter()
@@ -149,10 +172,19 @@ impl<'de> Deserialize<'de> for HostsConfig {
                     expected_host_name,
                     user: host.user,
                     daemon_socket: host.daemon_socket,
+                    ssh_multiplex: host.ssh_multiplex,
                 })
             })
             .collect();
-        Ok(Self { hosts })
+        Ok(Self { ssh, hosts })
+    }
+}
+
+impl HostsConfig {
+    /// Resolve SSH multiplex setting for a host label.
+    /// Per-host `ssh_multiplex` overrides global `ssh.multiplex`.
+    pub fn resolved_ssh_multiplex(&self, host_label: &str) -> bool {
+        self.hosts.get(host_label).and_then(|h| h.ssh_multiplex).unwrap_or(self.ssh.multiplex)
     }
 }
 
@@ -820,5 +852,45 @@ host_name = "my-desktop"
         let config = store.load_daemon_config();
         assert!(config.follower);
         assert_eq!(config.host_name, Some("my-host".into()));
+    }
+
+    #[test]
+    fn load_hosts_with_ssh_config() {
+        let dir = tempdir().unwrap();
+        let base = dir.path();
+        std::fs::write(
+            base.join("hosts.toml"),
+            "\
+[ssh]\nmultiplex = false\n\n\
+[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/d.sock\"\n\n\
+[hosts.feta]\nhostname = \"feta.local\"\nexpected_host_name = \"feta\"\ndaemon_socket = \"/tmp/f.sock\"\nssh_multiplex = true\n",
+        )
+        .unwrap();
+        let store = ConfigStore::with_base(base);
+        let config = store.load_hosts().unwrap();
+        // Global default is false
+        assert!(!config.ssh.multiplex);
+        // desktop inherits global (false)
+        assert_eq!(config.hosts["desktop"].ssh_multiplex, None);
+        assert!(!config.resolved_ssh_multiplex("desktop"));
+        // feta overrides to true
+        assert_eq!(config.hosts["feta"].ssh_multiplex, Some(true));
+        assert!(config.resolved_ssh_multiplex("feta"));
+    }
+
+    #[test]
+    fn load_hosts_ssh_defaults_to_multiplex_true() {
+        let dir = tempdir().unwrap();
+        let base = dir.path();
+        std::fs::write(
+            base.join("hosts.toml"),
+            "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/d.sock\"\n",
+        )
+        .unwrap();
+        let store = ConfigStore::with_base(base);
+        let config = store.load_hosts().unwrap();
+        // No [ssh] section — defaults to multiplex=true
+        assert!(config.ssh.multiplex);
+        assert!(config.resolved_ssh_multiplex("desktop"));
     }
 }

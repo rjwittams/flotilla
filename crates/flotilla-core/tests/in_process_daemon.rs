@@ -26,7 +26,8 @@ use flotilla_core::{
 };
 use flotilla_protocol::{
     AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, CorrelationKey, DaemonEvent,
-    HostName, HostPath, Issue, ProviderData, RepoIdentity, RepoSelector,
+    HostEnvironment, HostName, HostPath, HostProviderStatus, HostSummary, Issue, PeerConnectionState, ProviderData, RepoIdentity,
+    RepoSelector, SystemInfo, ToolInventory, TopologyRoute,
 };
 use tokio::sync::Notify;
 
@@ -161,6 +162,22 @@ fn slow_ai_discovery(utility: Arc<SlowAiUtility>) -> DiscoveryRuntime {
     runtime
 }
 
+fn sample_remote_host_summary(name: &str) -> HostSummary {
+    HostSummary {
+        host_name: HostName::new(name),
+        system: SystemInfo {
+            home_dir: Some(PathBuf::from(format!("/home/{name}"))),
+            os: Some("linux".into()),
+            arch: Some("aarch64".into()),
+            cpu_count: Some(4),
+            memory_total_mb: Some(8192),
+            environment: HostEnvironment::Container,
+        },
+        inventory: ToolInventory::default(),
+        providers: vec![HostProviderStatus { category: "vcs".into(), name: "Git".into(), healthy: true }],
+    }
+}
+
 struct FailingCodeReview;
 
 #[async_trait]
@@ -223,6 +240,79 @@ async fn daemon_for_duplicate_git_repos(remote: &str) -> (tempfile::TempDir, Pat
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
     let daemon = InProcessDaemon::new(vec![repo_a.clone(), repo_b.clone()], config, git_process_discovery(false), HostName::local()).await;
     (temp, repo_a, repo_b, daemon)
+}
+
+#[tokio::test]
+async fn list_hosts_includes_local_and_configured_disconnected_peers() {
+    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+
+    daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
+
+    let hosts = daemon.list_hosts().await.expect("list hosts");
+
+    assert!(hosts.hosts.iter().any(|entry| entry.host == HostName::local() && entry.is_local));
+    assert!(hosts.hosts.iter().any(|entry| {
+        entry.host == HostName::new("remote")
+            && entry.configured
+            && !entry.has_summary
+            && entry.connection_status == PeerConnectionState::Disconnected
+    }));
+}
+
+#[tokio::test]
+async fn get_host_providers_returns_local_summary_and_errors_for_unknown_remote_summary() {
+    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+
+    daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
+
+    let local_host = daemon.host_name().to_string();
+    let local = daemon.get_host_providers(&local_host).await.expect("local host providers should resolve");
+    assert_eq!(local.host, *daemon.host_name());
+    assert_eq!(local.summary.host_name, *daemon.host_name());
+
+    let err = daemon.get_host_providers("remote").await.expect_err("remote host without summary should error");
+    assert!(err.contains("summary"), "unexpected error: {err}");
+}
+
+#[tokio::test]
+async fn list_hosts_counts_remote_repo_overlay_and_get_topology_returns_mirrored_routes() {
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+
+    daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
+    daemon.set_peer_host_summaries(HashMap::from([(HostName::new("remote"), sample_remote_host_summary("remote"))])).await;
+    daemon
+        .set_topology_routes(vec![TopologyRoute {
+            target: HostName::new("remote"),
+            next_hop: HostName::new("relay"),
+            direct: false,
+            connected: true,
+            fallbacks: vec![HostName::new("backup-relay")],
+        }])
+        .await;
+
+    let mut peer_data = ProviderData::default();
+    peer_data.checkouts.insert(HostPath::new(HostName::new("remote"), "/srv/remote/repo"), Checkout {
+        branch: "peer-branch".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+    });
+    daemon.send_event(DaemonEvent::PeerStatusChanged { host: HostName::new("remote"), status: PeerConnectionState::Connected });
+    daemon.set_peer_providers(&repo, vec![(HostName::new("remote"), peer_data)], 0).await;
+
+    let hosts = daemon.list_hosts().await.expect("list hosts");
+    let remote = hosts.hosts.iter().find(|entry| entry.host == HostName::new("remote")).expect("remote host entry");
+    assert_eq!(remote.repo_count, 1);
+    assert!(remote.work_item_count >= 1, "remote overlay should contribute work items");
+
+    let topology = daemon.get_topology().await.expect("topology");
+    assert_eq!(topology.routes.len(), 1);
+    assert_eq!(topology.routes[0].target, HostName::new("remote"));
+    assert_eq!(topology.routes[0].next_hop, HostName::new("relay"));
 }
 
 async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>) -> DaemonEvent {
@@ -520,6 +610,63 @@ async fn replay_since_returns_empty_when_up_to_date() {
     assert!(events.is_empty(), "should be empty when up to date");
 }
 
+/// replay_since must include peer provider data, just like get_state and live
+/// broadcasts. A late-subscribing or reconnecting client should see the same
+/// merged view (local + peer checkouts with correct host attribution) as a
+/// client that was connected from the start.
+#[tokio::test]
+async fn replay_since_includes_peer_checkouts_with_correct_host() {
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let mut rx = daemon.subscribe();
+
+    // Initial refresh
+    let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+
+    // Use a peer host name that won't collide with the local hostname
+    let peer_host = HostName::new("remote-peer-host");
+    let peer_checkout_path = HostPath::new(peer_host.clone(), "/srv/remote/repo");
+    let mut peer_data = ProviderData::default();
+    peer_data.checkouts.insert(peer_checkout_path.clone(), Checkout {
+        branch: "peer-feature".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+    });
+
+    daemon.set_peer_providers(&repo, vec![(peer_host.clone(), peer_data)], 0).await;
+    let _ = recv_event(&mut rx).await;
+
+    // Trigger refresh so poll_snapshots stores updated state
+    let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+
+    // Simulate a new client connecting — replay_since with empty last_seen
+    let events = daemon.replay_since(&HashMap::new()).await.expect("replay_since");
+
+    let snap = events
+        .iter()
+        .find_map(|e| match e {
+            DaemonEvent::SnapshotFull(s) if s.repo == repo => Some(s),
+            _ => None,
+        })
+        .expect("should have a SnapshotFull for our repo");
+
+    // Peer checkout must be present, attributed to its real host (not local)
+    assert!(
+        snap.providers.checkouts.contains_key(&peer_checkout_path),
+        "replay snapshot must include peer checkout under remote-peer-host, got keys: {:?}",
+        snap.providers.checkouts.keys().collect::<Vec<_>>()
+    );
+
+    // No ghost checkout under local host
+    let local_host = HostName::local();
+    let ghost = HostPath::new(local_host, PathBuf::from("/srv/remote/repo"));
+    assert!(!snap.providers.checkouts.contains_key(&ghost), "replay snapshot must not re-attribute peer checkout to local host");
+}
+
 #[tokio::test]
 async fn add_and_remove_repo_updates_state_and_emits_events() {
     let temp = tempfile::tempdir().unwrap();
@@ -693,7 +840,7 @@ async fn get_local_providers_excludes_peer_overlay_data() {
         association_keys: vec![],
     });
 
-    daemon.set_peer_providers(&repo, vec![(HostName::new("follower"), peer_data)]).await;
+    daemon.set_peer_providers(&repo, vec![(HostName::new("follower"), peer_data)], 0).await;
 
     let (providers, _) = daemon.get_local_providers(&repo).await.expect("local providers after peer overlay");
     assert!(
@@ -703,6 +850,109 @@ async fn get_local_providers_excludes_peer_overlay_data() {
     assert!(
         !providers.checkouts.values().any(|checkout| checkout.branch == "peer-branch"),
         "peer overlay checkout should be excluded from local replication"
+    );
+}
+
+/// Regression test: after poll_snapshots stores merged (local + peer) data
+/// in last_snapshot, get_state must not re-attribute peer checkouts to the
+/// local host. The bug: normalize_local_provider_hosts stamps ALL checkouts
+/// in the merged base with the local host, then merge_provider_data adds
+/// the real peer checkouts again — duplicating them.
+#[tokio::test]
+async fn get_state_does_not_reattribute_peer_checkouts_after_poll() {
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let mut rx = daemon.subscribe();
+
+    // Initial refresh — populates last_snapshot with local-only data
+    let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+
+    let peer_host = HostName::new("remote-peer-host");
+    let peer_checkout_path = HostPath::new(peer_host.clone(), "/srv/remote/repo");
+    let mut peer_data = ProviderData::default();
+    peer_data.checkouts.insert(peer_checkout_path.clone(), Checkout {
+        branch: "peer-feature".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+    });
+
+    // Set peer providers
+    daemon.set_peer_providers(&repo, vec![(peer_host.clone(), peer_data)], 0).await;
+    let _ = recv_event(&mut rx).await;
+
+    // Trigger refresh so poll_snapshots runs and stores merged data in last_snapshot.
+    // This is the critical step — poll_snapshots merges local + peer into re_snapshot
+    // and stores it in state.last_snapshot.
+    let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+
+    // Now get_state reads last_snapshot (merged) as base, normalizes ALL checkouts
+    // to local host, then merges peers again. With the bug, kiwi's checkout appears
+    // both as local (re-stamped) and as kiwi (re-merged).
+    let snapshot = daemon.get_state(&repo).await.expect("get_state after poll with peers");
+
+    // The peer checkout should appear exactly once, attributed to kiwi
+    let kiwi_checkouts: Vec<_> = snapshot.providers.checkouts.keys().filter(|hp| hp.host == peer_host).collect();
+    assert_eq!(kiwi_checkouts.len(), 1, "peer checkout should appear once under kiwi");
+
+    // The peer checkout must NOT appear re-attributed to the local host
+    let local_host = HostName::local();
+    let ghost_checkout = HostPath::new(local_host, PathBuf::from("/srv/remote/repo"));
+    assert!(!snapshot.providers.checkouts.contains_key(&ghost_checkout), "peer checkout must not be re-stamped as a local checkout");
+}
+
+/// After poll_snapshots stores merged data, a second set_peer_providers call
+/// should not duplicate peer checkouts via the normalize-then-merge path.
+#[tokio::test]
+async fn set_peer_providers_after_poll_does_not_duplicate_checkouts() {
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let mut rx = daemon.subscribe();
+
+    // Initial refresh
+    let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+
+    let peer_host = HostName::new("remote-peer-host");
+    let peer_checkout_path = HostPath::new(peer_host.clone(), "/srv/remote/repo");
+    let make_peer_data = |branch: &str| {
+        let mut pd = ProviderData::default();
+        pd.checkouts.insert(peer_checkout_path.clone(), Checkout {
+            branch: branch.into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![],
+            association_keys: vec![],
+        });
+        pd
+    };
+
+    // First peer update
+    daemon.set_peer_providers(&repo, vec![(peer_host.clone(), make_peer_data("feat-v1"))], 0).await;
+    let _ = recv_event(&mut rx).await;
+
+    // Trigger refresh so poll_snapshots stores merged data in last_snapshot
+    let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+
+    // Second peer update — broadcast_snapshot_inner reads the merged last_snapshot,
+    // normalizes all checkouts to local host, then merges peers again.
+    daemon.set_peer_providers(&repo, vec![(peer_host.clone(), make_peer_data("feat-v2"))], 1).await;
+    let _ = recv_event(&mut rx).await;
+
+    let snapshot = daemon.get_state(&repo).await.expect("get_state after poll + second peer update");
+
+    let peer_count = snapshot.providers.checkouts.keys().filter(|hp| hp.host == peer_host).count();
+    assert_eq!(peer_count, 1, "peer should have exactly 1 checkout, got {peer_count}");
+
+    let local_host = HostName::local();
+    let ghost_checkout = HostPath::new(local_host, PathBuf::from("/srv/remote/repo"));
+    assert!(
+        !snapshot.providers.checkouts.contains_key(&ghost_checkout),
+        "peer path must not appear as a local checkout after poll + repeated peer updates"
     );
 }
 

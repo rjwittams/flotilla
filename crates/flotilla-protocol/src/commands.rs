@@ -46,6 +46,7 @@ pub struct Command {
 pub enum CommandAction {
     CreateWorkspaceForCheckout {
         checkout_path: PathBuf,
+        label: String,
     },
     CreateWorkspaceFromPreparedTerminal {
         target_host: crate::HostName,
@@ -58,6 +59,11 @@ pub enum CommandAction {
     },
     PrepareTerminalForCheckout {
         checkout_path: PathBuf,
+        /// Role→command mappings from the requesting host's template.
+        /// When non-empty, the remote side wraps these through its terminal pool
+        /// instead of reading its own template.
+        #[serde(default)]
+        commands: Vec<PreparedTerminalCommand>,
     },
     Checkout {
         repo: RepoSelector,
@@ -262,7 +268,7 @@ mod tests {
             Command {
                 host: Some(HostName::new("desktop")),
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
-                action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x") },
+                action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x"), commands: vec![] },
             },
             Command {
                 host: None,
@@ -281,7 +287,7 @@ mod tests {
             Command {
                 host: None,
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
-                action: CommandAction::CreateWorkspaceForCheckout { checkout_path: PathBuf::from("/repo/wt") },
+                action: CommandAction::CreateWorkspaceForCheckout { checkout_path: PathBuf::from("/repo/wt"), label: "feat-x".into() },
             },
             Command { host: None, context_repo: None, action: CommandAction::SelectWorkspace { ws_ref: "ws://1".into() } },
             Command {
@@ -447,12 +453,12 @@ mod tests {
             Command {
                 host: None,
                 context_repo: None,
-                action: CommandAction::CreateWorkspaceForCheckout { checkout_path: PathBuf::from("/tmp") },
+                action: CommandAction::CreateWorkspaceForCheckout { checkout_path: PathBuf::from("/tmp"), label: "ws".into() },
             },
             Command {
                 host: Some(HostName::new("desktop")),
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
-                action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x") },
+                action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x"), commands: vec![] },
             },
             Command {
                 host: None,

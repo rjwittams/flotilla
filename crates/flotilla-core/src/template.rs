@@ -88,6 +88,41 @@ impl WorkspaceTemplate {
     }
 }
 
+/// Resolve a workspace template into role→command pairs for remote terminal preparation.
+/// Reads the repo-local template first, falls back to the global template, then the default.
+pub fn resolve_template_commands(
+    repo_root: &std::path::Path,
+    config_base: &std::path::Path,
+) -> Vec<flotilla_protocol::PreparedTerminalCommand> {
+    let tmpl_path = repo_root.join(".flotilla/workspace.yaml");
+    let template_yaml =
+        std::fs::read_to_string(&tmpl_path).ok().or_else(|| std::fs::read_to_string(config_base.join("workspace.yaml")).ok());
+
+    let tmpl = if let Some(ref yaml) = template_yaml {
+        serde_yml::from_str::<WorkspaceTemplate>(yaml).unwrap_or_else(|e| {
+            tracing::warn!(err = %e, "failed to parse workspace template, using default");
+            default_template()
+        })
+    } else {
+        default_template()
+    };
+
+    // Must match the main_command value used in executor::workspace_config.
+    let mut vars = std::collections::HashMap::new();
+    vars.insert("main_command".to_string(), "claude".to_string());
+    let rendered = tmpl.render(&vars);
+
+    rendered
+        .content
+        .iter()
+        .filter(|e| e.content_type == "terminal")
+        .flat_map(|e| {
+            let count = e.count.unwrap_or(1);
+            (0..count).map(move |_| flotilla_protocol::PreparedTerminalCommand { role: e.role.clone(), command: e.command.clone() })
+        })
+        .collect()
+}
+
 /// Returns the default workspace template: a single "main" terminal pane.
 pub fn default_template() -> WorkspaceTemplate {
     WorkspaceTemplate {

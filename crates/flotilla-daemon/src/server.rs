@@ -75,9 +75,13 @@ type PendingRemoteCancelMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<(), 
 /// Notification sent from connection sites to the outbound task when a
 /// peer connects or reconnects. The outbound task responds by sending
 /// current local state for all repos to the specific peer.
-struct PeerConnectedNotice {
-    peer: HostName,
-    generation: u64,
+///
+/// Visibility is promoted to `pub` with the `test-support` feature so
+/// integration tests can construct notices to drive the outbound task.
+#[cfg_attr(feature = "test-support", visibility::make(pub))]
+pub(crate) struct PeerConnectedNotice {
+    pub peer: HostName,
+    pub generation: u64,
 }
 
 fn build_peer_manager(daemon: &Arc<InProcessDaemon>, config: &ConfigStore) -> Result<Arc<Mutex<PeerManager>>, String> {
@@ -113,8 +117,30 @@ fn build_peer_manager(daemon: &Arc<InProcessDaemon>, config: &ConfigStore) -> Re
     Ok(Arc::new(Mutex::new(peer_manager)))
 }
 
+async fn sync_peer_query_state(peer_manager: &Arc<Mutex<PeerManager>>, daemon: &Arc<InProcessDaemon>) {
+    // Keep the PeerManager lock scoped to this snapshot read. Several call sites
+    // invoke this immediately after mutating PeerManager state; holding the lock
+    // across the daemon writes would deadlock if a future refactor re-entered
+    // PeerManager while mirroring query state.
+    let (configured, summaries, routes) = {
+        let pm = peer_manager.lock().await;
+        (pm.configured_peer_names(), pm.get_peer_host_summaries().clone(), pm.topology_routes())
+    };
+
+    daemon.set_configured_peer_names(configured).await;
+    daemon.set_peer_host_summaries(summaries).await;
+    daemon.set_topology_routes(routes).await;
+}
+
 pub fn spawn_embedded_peer_networking(daemon: Arc<InProcessDaemon>, config: &ConfigStore) -> Result<tokio::task::JoinHandle<()>, String> {
     let peer_manager = build_peer_manager(&daemon, config)?;
+    {
+        let daemon = Arc::clone(&daemon);
+        let peer_manager = Arc::clone(&peer_manager);
+        tokio::spawn(async move {
+            sync_peer_query_state(&peer_manager, &daemon).await;
+        });
+    }
     let (peer_data_tx, peer_data_rx) = mpsc::channel(256);
     let pending_remote_commands: PendingRemoteCommandMap = Arc::new(Mutex::new(HashMap::new()));
     let forwarded_commands: ForwardedCommandMap = Arc::new(Mutex::new(HashMap::new()));
@@ -129,6 +155,34 @@ pub fn spawn_embedded_peer_networking(daemon: Arc<InProcessDaemon>, config: &Con
         pending_remote_cancels,
     );
     Ok(handle)
+}
+
+/// Spawn the peer networking runtime with pre-built components.
+///
+/// Test-only entry point: callers provide a PeerManager with pre-configured
+/// senders (e.g. CapturePeerSender). Passes `None` for `peer_data_rx` to skip
+/// the inbound connection task — tests drive the outbound task via the returned
+/// `PeerConnectedNotice` sender.
+#[cfg(feature = "test-support")]
+pub fn spawn_test_peer_networking(
+    daemon: Arc<InProcessDaemon>,
+    peer_manager: Arc<Mutex<PeerManager>>,
+) -> (tokio::task::JoinHandle<()>, mpsc::UnboundedSender<PeerConnectedNotice>) {
+    // Receiver dropped intentionally — None is passed for the inbound task,
+    // so no messages are forwarded; the sender satisfies the runtime signature.
+    let (peer_data_tx, _peer_data_rx) = mpsc::channel(256);
+    let pending_remote_commands: PendingRemoteCommandMap = Arc::new(Mutex::new(HashMap::new()));
+    let forwarded_commands: ForwardedCommandMap = Arc::new(Mutex::new(HashMap::new()));
+    let pending_remote_cancels: PendingRemoteCancelMap = Arc::new(Mutex::new(HashMap::new()));
+    spawn_peer_networking_runtime(
+        daemon,
+        peer_manager,
+        None, // No inbound task — test drives outbound via PeerConnectedNotice
+        peer_data_tx,
+        pending_remote_commands,
+        forwarded_commands,
+        pending_remote_cancels,
+    )
 }
 
 struct DispatchContext<'a> {
@@ -193,6 +247,7 @@ impl DaemonServer {
         let host_name = daemon_config.host_name.map(HostName::new).unwrap_or_else(HostName::local);
         let daemon = InProcessDaemon::new(repo_paths, Arc::clone(&config), discovery, host_name.clone()).await;
         let peer_manager = build_peer_manager(&daemon, &config)?;
+        sync_peer_query_state(&peer_manager, &daemon).await;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (peer_data_tx, peer_data_rx) = mpsc::channel(256);
 
@@ -414,6 +469,7 @@ fn spawn_peer_networking_runtime(
                     if initial_rx_map.contains_key(name) { PeerConnectionState::Connected } else { PeerConnectionState::Disconnected };
                 peer_daemon.send_event(DaemonEvent::PeerStatusChanged { host: name.clone(), status });
             }
+            sync_peer_query_state(&peer_manager_task, &peer_daemon).await;
 
             for peer_name in peer_names {
                 let tx = peer_data_tx_for_ssh.clone();
@@ -487,6 +543,7 @@ fn spawn_peer_networking_runtime(
                                 info!(peer = %peer_name, "reconnected successfully");
                                 last_known_session_id =
                                     handle_remote_restart_if_needed(&pm, &daemon_for_cleanup, &peer_name, last_known_session_id).await;
+                                sync_peer_query_state(&pm, &daemon_for_cleanup).await;
                                 daemon_for_cleanup.send_event(DaemonEvent::PeerStatusChanged {
                                     host: peer_name.clone(),
                                     status: PeerConnectionState::Connected,
@@ -549,9 +606,11 @@ fn spawn_peer_networking_runtime(
                             relay_peer_data(&peer_manager_task, &origin, msg).await;
                         }
 
-                        let mut pm = peer_manager_task.lock().await;
-                        match pm.handle_inbound(env).await {
+                        {
+                            let mut pm = peer_manager_task.lock().await;
+                            match pm.handle_inbound(env).await {
                             HandleResult::Updated(ref updated_repo_id) => {
+                                let overlay_version = pm.overlay_version();
                                 let peers: Vec<(HostName, flotilla_protocol::ProviderData)> = pm
                                     .get_peer_data()
                                     .iter()
@@ -562,7 +621,7 @@ fn spawn_peer_networking_runtime(
                                 drop(pm);
 
                                 if let Some(local_path) = peer_daemon.preferred_local_path_for_identity(updated_repo_id).await {
-                                    peer_daemon.set_peer_providers(&local_path, peers).await;
+                                    peer_daemon.set_peer_providers(&local_path, peers, overlay_version).await;
                                 } else {
                                     let synthetic = crate::peer::synthetic_repo_path(&origin, &repo_path);
                                     let merged = crate::peer::merge_provider_data(
@@ -573,7 +632,7 @@ fn spawn_peer_networking_runtime(
                                     if let Err(e) = peer_daemon.add_virtual_repo(updated_repo_id.clone(), synthetic.clone(), merged).await {
                                         warn!(repo = %updated_repo_id, err = %e, "failed to add virtual repo");
                                     } else {
-                                        peer_daemon.set_peer_providers(&synthetic, peers).await;
+                                        peer_daemon.set_peer_providers(&synthetic, peers, overlay_version).await;
                                         let mut pm2 = peer_manager_task.lock().await;
                                         pm2.register_remote_repo(updated_repo_id.clone(), synthetic);
                                     }
@@ -632,6 +691,13 @@ fn spawn_peer_networking_runtime(
                             }
                             HandleResult::CommandRequested { request_id, requester_host, reply_via, command } => {
                                 drop(pm);
+                                let ready = Arc::new(Notify::new());
+                                forwarded_commands_task.lock().await.insert(
+                                    request_id,
+                                    ForwardedCommand {
+                                        state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) },
+                                    },
+                                );
                                 tokio::spawn(execute_forwarded_command(
                                     Arc::clone(&peer_daemon),
                                     Arc::clone(&peer_manager_task),
@@ -640,6 +706,7 @@ fn spawn_peer_networking_runtime(
                                     requester_host,
                                     reply_via,
                                     command,
+                                    ready,
                                 ));
                             }
                             HandleResult::CommandCancelRequested { cancel_id, requester_host, reply_via, command_request_id } => {
@@ -676,6 +743,8 @@ fn spawn_peer_networking_runtime(
                             }
                             HandleResult::Ignored => {}
                         }
+                        }
+                        sync_peer_query_state(&peer_manager_task, &peer_daemon).await;
                     }
                     _ = resync_sweep.tick() => {
                         let expired_repos = {
@@ -778,6 +847,7 @@ async fn handle_remote_restart_if_needed(
             if !affected_repos.is_empty() {
                 rebuild_peer_overlays(peer_manager, daemon, affected_repos).await;
             }
+            sync_peer_query_state(peer_manager, daemon).await;
         }
     }
 
@@ -819,19 +889,23 @@ async fn rebuild_peer_overlays(
     for repo_id in affected_repos {
         if let Some(local_path) = daemon.preferred_local_path_for_identity(&repo_id).await {
             // Local repo — rebuild its peer overlay from remaining peers
-            let peers: Vec<(HostName, flotilla_protocol::ProviderData)> = {
+            let (peers, overlay_version) = {
                 let pm = peer_manager.lock().await;
-                pm.get_peer_data()
+                let v = pm.overlay_version();
+                let peers = pm
+                    .get_peer_data()
                     .iter()
                     .filter_map(|(host, repos)| repos.get(&repo_id).map(|state| (host.clone(), state.provider_data.clone())))
-                    .collect()
+                    .collect();
+                (peers, v)
             };
-            daemon.set_peer_providers(&local_path, peers).await;
+            daemon.set_peer_providers(&local_path, peers, overlay_version).await;
         } else {
             // Remote-only repo — rebuild or remove depending on remaining peers
             let mut pm = peer_manager.lock().await;
             if pm.has_peer_data_for(&repo_id) {
                 // Still has peer data — re-merge from remaining peers
+                let overlay_version = pm.overlay_version();
                 let peers: Vec<(HostName, flotilla_protocol::ProviderData)> = pm
                     .get_peer_data()
                     .iter()
@@ -840,7 +914,7 @@ async fn rebuild_peer_overlays(
 
                 if let Some(synthetic_path) = pm.known_remote_repos().get(&repo_id).cloned() {
                     drop(pm);
-                    daemon.set_peer_providers(&synthetic_path, peers).await;
+                    daemon.set_peer_providers(&synthetic_path, peers, overlay_version).await;
                 }
             } else if let Some(synthetic_path) = pm.unregister_remote_repo(&repo_id) {
                 // No peers remain — remove the virtual tab
@@ -890,6 +964,7 @@ async fn dispatch_resync_requests(peer_manager: &Arc<Mutex<PeerManager>>, reques
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_forwarded_command(
     daemon: Arc<InProcessDaemon>,
     peer_manager: Arc<Mutex<PeerManager>>,
@@ -898,14 +973,10 @@ async fn execute_forwarded_command(
     requester_host: HostName,
     reply_via: HostName,
     command: Command,
+    ready: Arc<Notify>,
 ) {
     let mut event_rx = daemon.subscribe();
     let responder_host = daemon.host_name().clone();
-    let ready = Arc::new(Notify::new());
-    forwarded_commands
-        .lock()
-        .await
-        .insert(request_id, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
     let command_id = match daemon.execute(command).await {
         Ok(command_id) => command_id,
         Err(message) => {
@@ -1144,30 +1215,23 @@ async fn disconnect_peer_and_rebuild(
     // Identity → path is resolved here at apply time (not at computation time)
     // to avoid TOCTOU with concurrent add_repo/remove_repo.
     //
-    // Note: a residual apply-ordering race exists here. Between releasing
-    // the PM lock above and calling set_peer_providers below, the central
-    // processor can accept fresh inbound data and call set_peer_providers
-    // via the HandleResult::Updated path. Because set_peer_providers is a
-    // blind replace, this apply could overwrite that newer data. This is
-    // the same read-then-apply pattern shared by ALL overlay write paths
-    // (including the central processor itself). The effect is transient:
-    // the next inbound message for the affected repo will re-apply the
-    // correct state. Fully fixing this requires versioned/conditional
-    // set_peer_providers, which is a broader change tracked separately.
+    // Overlay updates carry a version from the PeerManager, so
+    // set_peer_providers will reject stale applies that lost the race
+    // against fresher inbound data.
     for update in &plan.overlay_updates {
         match update {
-            crate::peer::OverlayUpdate::SetProviders { identity, peers } => {
+            crate::peer::OverlayUpdate::SetProviders { identity, peers, overlay_version } => {
                 // Resolve identity to current local path. For remote-only repos,
                 // the path comes from known_remote_repos (already resolved in the plan).
                 // For local repos that were removed concurrently, preferred_local_path_for_identity
                 // returns None and we skip — the repo is gone, no overlay needed.
                 if let Some(local_path) = daemon.preferred_local_path_for_identity(identity).await {
-                    daemon.set_peer_providers(&local_path, peers.clone()).await;
+                    daemon.set_peer_providers(&local_path, peers.clone(), *overlay_version).await;
                 } else if let Some(synthetic_path) = {
                     let pm = peer_manager.lock().await;
                     pm.known_remote_repos().get(identity).cloned()
                 } {
-                    daemon.set_peer_providers(&synthetic_path, peers.clone()).await;
+                    daemon.set_peer_providers(&synthetic_path, peers.clone(), *overlay_version).await;
                 }
             }
             crate::peer::OverlayUpdate::RemoveRepo { identity, path } => {
@@ -1186,6 +1250,8 @@ async fn disconnect_peer_and_rebuild(
             }
         }
     }
+
+    sync_peer_query_state(peer_manager, daemon).await;
 
     let resync_requests = std::mem::take(&mut plan.resync_requests);
     dispatch_resync_requests(peer_manager, resync_requests).await;
@@ -1584,6 +1650,7 @@ async fn handle_client(
                     let _ = displaced.retire(GoodbyeReason::Superseded).await;
                 }
             }
+            sync_peer_query_state(&peer_manager, &daemon).await;
             daemon.send_event(DaemonEvent::PeerStatusChanged { host: host_name.clone(), status: PeerConnectionState::Connected });
             let _ = peer_connected_tx.send(PeerConnectedNotice { peer: host_name.clone(), generation });
 
@@ -1852,6 +1919,38 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, method: &str, para
                 Err(e) => Message::error_response(id, e),
             }
         }
+
+        "list_hosts" => match ctx.daemon.list_hosts().await {
+            Ok(hosts) => Message::ok_response(id, &hosts),
+            Err(e) => Message::error_response(id, e),
+        },
+
+        "get_host_status" => {
+            let host = match extract_str_param(&params, "host") {
+                Ok(s) => s,
+                Err(e) => return Message::error_response(id, e),
+            };
+            match ctx.daemon.get_host_status(&host).await {
+                Ok(status) => Message::ok_response(id, &status),
+                Err(e) => Message::error_response(id, e),
+            }
+        }
+
+        "get_host_providers" => {
+            let host = match extract_str_param(&params, "host") {
+                Ok(s) => s,
+                Err(e) => return Message::error_response(id, e),
+            };
+            match ctx.daemon.get_host_providers(&host).await {
+                Ok(providers) => Message::ok_response(id, &providers),
+                Err(e) => Message::error_response(id, e),
+            }
+        }
+
+        "get_topology" => match ctx.daemon.get_topology().await {
+            Ok(topology) => Message::ok_response(id, &topology),
+            Err(e) => Message::error_response(id, e),
+        },
 
         unknown => Message::error_response(id, format!("unknown method: {unknown}")),
     }
@@ -2125,6 +2224,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_host_query_methods_round_trip() {
+        let (_tmp, daemon) = empty_daemon().await;
+        let local_host = daemon.host_name().to_string();
+        daemon
+            .set_topology_routes(vec![flotilla_protocol::TopologyRoute {
+                target: HostName::new("remote"),
+                next_hop: HostName::new("relay"),
+                direct: false,
+                connected: true,
+                fallbacks: vec![],
+            }])
+            .await;
+
+        let hosts = dispatch_request_test(&daemon, 40, "list_hosts", serde_json::json!({})).await;
+        match hosts {
+            Message::Response { id, ok, data, error } => {
+                assert_eq!(id, 40);
+                assert!(ok, "list_hosts should be ok: {error:?}");
+                let parsed: flotilla_protocol::HostListResponse =
+                    serde_json::from_value(data.expect("host list data")).expect("parse host list");
+                assert!(parsed.hosts.iter().any(|entry| entry.host == HostName::local()));
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+
+        let status = dispatch_request_test(&daemon, 41, "get_host_status", serde_json::json!({ "host": local_host })).await;
+        match status {
+            Message::Response { id, ok, data, error } => {
+                assert_eq!(id, 41);
+                assert!(ok, "get_host_status should be ok: {error:?}");
+                let parsed: flotilla_protocol::HostStatusResponse =
+                    serde_json::from_value(data.expect("host status data")).expect("parse host status");
+                assert!(parsed.is_local);
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+
+        let providers = dispatch_request_test(&daemon, 42, "get_host_providers", serde_json::json!({ "host": daemon.host_name() })).await;
+        match providers {
+            Message::Response { id, ok, data, error } => {
+                assert_eq!(id, 42);
+                assert!(ok, "get_host_providers should be ok: {error:?}");
+                let parsed: flotilla_protocol::HostProvidersResponse =
+                    serde_json::from_value(data.expect("host providers data")).expect("parse host providers");
+                assert_eq!(parsed.summary.host_name, *daemon.host_name());
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+
+        let topology = dispatch_request_test(&daemon, 43, "get_topology", serde_json::json!({})).await;
+        match topology {
+            Message::Response { id, ok, data, error } => {
+                assert_eq!(id, 43);
+                assert!(ok, "get_topology should be ok: {error:?}");
+                let parsed: flotilla_protocol::TopologyResponse =
+                    serde_json::from_value(data.expect("topology data")).expect("parse topology");
+                assert_eq!(parsed.routes.len(), 1);
+                assert_eq!(parsed.routes[0].next_hop, HostName::new("relay"));
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_peer_query_state_mirrors_host_summaries_and_routes_into_daemon() {
+        let (_tmp, daemon) = empty_daemon().await;
+        let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
+
+        {
+            let mut pm = peer_manager.lock().await;
+            pm.store_host_summary(flotilla_protocol::HostSummary {
+                host_name: HostName::new("remote"),
+                system: flotilla_protocol::SystemInfo {
+                    home_dir: Some(PathBuf::from("/home/remote")),
+                    os: Some("linux".into()),
+                    arch: Some("aarch64".into()),
+                    cpu_count: Some(4),
+                    memory_total_mb: Some(8192),
+                    environment: flotilla_protocol::HostEnvironment::Container,
+                },
+                inventory: flotilla_protocol::ToolInventory::default(),
+                providers: vec![],
+            });
+
+            ensure_test_connection_generation(&mut pm, &HostName::new("remote"), || {
+                Arc::new(CapturePeerSender { sent: Arc::new(StdMutex::new(Vec::new())) })
+            });
+        }
+
+        sync_peer_query_state(&peer_manager, &daemon).await;
+
+        let hosts = daemon.list_hosts().await.expect("list hosts after sync");
+        assert!(hosts.hosts.iter().any(|entry| entry.host == HostName::new("remote") && entry.has_summary));
+
+        let topology = daemon.get_topology().await.expect("topology after sync");
+        assert!(topology.routes.iter().any(|route| route.target == HostName::new("remote") && route.next_hop == HostName::new("remote")));
+    }
+
+    #[tokio::test]
     async fn dispatch_request_execute_remote_routes_command_through_peer_manager() {
         let (_tmp, daemon) = empty_daemon().await;
         let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
@@ -2259,7 +2457,7 @@ mod tests {
         let command = Command {
             host: Some(HostName::new("remote")),
             context_repo: Some(RepoSelector::Identity(identity.clone())),
-            action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/tmp/repo.checkout") },
+            action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/tmp/repo.checkout"), commands: vec![] },
         };
 
         assert_eq!(extract_command_repo_identity(&command), Some(identity));
@@ -2326,6 +2524,11 @@ mod tests {
         let sent = Arc::new(StdMutex::new(Vec::new()));
         peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
 
+        let ready = Arc::new(Notify::new());
+        forwarded_commands
+            .lock()
+            .await
+            .insert(7, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
         execute_forwarded_command(
             Arc::clone(&daemon),
             Arc::clone(&peer_manager),
@@ -2334,6 +2537,7 @@ mod tests {
             HostName::new("desktop"),
             HostName::new("relay"),
             Command { host: Some(daemon.host_name().clone()), context_repo: None, action: CommandAction::Refresh { repo: None } },
+            ready,
         )
         .await;
 
@@ -2439,6 +2643,11 @@ mod tests {
         let sent = Arc::new(StdMutex::new(Vec::new()));
         peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
 
+        let ready = Arc::new(Notify::new());
+        forwarded_commands
+            .lock()
+            .await
+            .insert(8, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
         execute_forwarded_command(
             Arc::clone(&daemon),
             Arc::clone(&peer_manager),
@@ -2449,8 +2658,9 @@ mod tests {
             Command {
                 host: Some(daemon.host_name().clone()),
                 context_repo: Some(RepoSelector::Identity(repo_identity.clone())),
-                action: CommandAction::PrepareTerminalForCheckout { checkout_path: checkout_path.clone() },
+                action: CommandAction::PrepareTerminalForCheckout { checkout_path: checkout_path.clone(), commands: vec![] },
             },
+            ready,
         )
         .await;
 
@@ -2548,6 +2758,11 @@ mod tests {
         let sent = Arc::new(StdMutex::new(Vec::new()));
         peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
 
+        let ready = Arc::new(Notify::new());
+        forwarded_commands
+            .lock()
+            .await
+            .insert(9, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
         execute_forwarded_command(
             Arc::clone(&daemon),
             Arc::clone(&peer_manager),
@@ -2564,6 +2779,7 @@ mod tests {
                     issue_ids: vec![],
                 },
             },
+            ready,
         )
         .await;
 
@@ -2901,16 +3117,26 @@ mod tests {
         };
         daemon.add_virtual_repo(repo_identity.clone(), synthetic.clone(), merged).await.expect("add virtual repo");
         daemon
-            .set_peer_providers(&synthetic, vec![
-                (HostName::new("peer-a"), ProviderData {
-                    checkouts: IndexMap::from([(HostPath::new(HostName::new("peer-a"), "/srv/peer-a/remote-only"), checkout("feature-a"))]),
-                    ..Default::default()
-                }),
-                (HostName::new("peer-b"), ProviderData {
-                    checkouts: IndexMap::from([(HostPath::new(HostName::new("peer-b"), "/srv/peer-b/remote-only"), checkout("feature-b"))]),
-                    ..Default::default()
-                }),
-            ])
+            .set_peer_providers(
+                &synthetic,
+                vec![
+                    (HostName::new("peer-a"), ProviderData {
+                        checkouts: IndexMap::from([(
+                            HostPath::new(HostName::new("peer-a"), "/srv/peer-a/remote-only"),
+                            checkout("feature-a"),
+                        )]),
+                        ..Default::default()
+                    }),
+                    (HostName::new("peer-b"), ProviderData {
+                        checkouts: IndexMap::from([(
+                            HostPath::new(HostName::new("peer-b"), "/srv/peer-b/remote-only"),
+                            checkout("feature-b"),
+                        )]),
+                        ..Default::default()
+                    }),
+                ],
+                0,
+            )
             .await;
         let old_session_id = uuid::Uuid::new_v4();
         let new_session_id = uuid::Uuid::new_v4();
@@ -3254,16 +3480,26 @@ mod tests {
         };
         daemon.add_virtual_repo(repo_identity.clone(), synthetic.clone(), merged).await.expect("add virtual repo");
         daemon
-            .set_peer_providers(&synthetic, vec![
-                (HostName::new("peer-a"), ProviderData {
-                    checkouts: IndexMap::from([(HostPath::new(HostName::new("peer-a"), "/srv/peer-a/remote-only"), checkout("feature-a"))]),
-                    ..Default::default()
-                }),
-                (HostName::new("peer-b"), ProviderData {
-                    checkouts: IndexMap::from([(HostPath::new(HostName::new("peer-b"), "/srv/peer-b/remote-only"), checkout("feature-b"))]),
-                    ..Default::default()
-                }),
-            ])
+            .set_peer_providers(
+                &synthetic,
+                vec![
+                    (HostName::new("peer-a"), ProviderData {
+                        checkouts: IndexMap::from([(
+                            HostPath::new(HostName::new("peer-a"), "/srv/peer-a/remote-only"),
+                            checkout("feature-a"),
+                        )]),
+                        ..Default::default()
+                    }),
+                    (HostName::new("peer-b"), ProviderData {
+                        checkouts: IndexMap::from([(
+                            HostPath::new(HostName::new("peer-b"), "/srv/peer-b/remote-only"),
+                            checkout("feature-b"),
+                        )]),
+                        ..Default::default()
+                    }),
+                ],
+                0,
+            )
             .await;
         {
             let mut pm = peer_manager.lock().await;
@@ -3311,5 +3547,86 @@ mod tests {
             }
             other => panic!("expected snapshot event, got {other:?}"),
         }
+    }
+
+    /// Verifies the fix for the cancel race: when the `Launching` entry is
+    /// pre-inserted (as the dispatch loop now does), a cancel that arrives
+    /// before `execute_forwarded_command` transitions to `Running` will wait
+    /// for the transition rather than failing with "remote command not found".
+    #[tokio::test]
+    async fn cancel_before_execute_registration_finds_entry() {
+        let (_tmp, daemon) = empty_daemon().await;
+        let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
+        let forwarded_commands: ForwardedCommandMap = Arc::new(Mutex::new(HashMap::new()));
+        let sent = Arc::new(StdMutex::new(Vec::new()));
+        peer_manager.lock().await.register_sender(HostName::new("relay"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
+
+        // Pre-insert the Launching entry, mirroring the dispatch-loop fix.
+        let ready = Arc::new(Notify::new());
+        forwarded_commands
+            .lock()
+            .await
+            .insert(99, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
+
+        // Spawn cancel — it should wait on the Launching state instead of
+        // returning "remote command not found".
+        let handle = tokio::spawn(cancel_forwarded_command(
+            Arc::clone(&daemon),
+            Arc::clone(&peer_manager),
+            Arc::clone(&forwarded_commands),
+            42,
+            HostName::new("desktop"),
+            HostName::new("relay"),
+            99,
+        ));
+
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+
+        // Transition to Running and notify — cancel should now proceed.
+        if let Some(entry) = forwarded_commands.lock().await.get_mut(&99) {
+            entry.state = ForwardedCommandState::Running { command_id: 456 };
+        }
+        ready.notify_waiters();
+
+        handle.await.expect("cancel task");
+
+        let sent = sent.lock().expect("lock");
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            PeerWireMessage::Routed(RoutedPeerMessage::CommandCancelResponse { error, .. }) => {
+                assert!(
+                    !error.as_deref().unwrap_or("").contains("remote command not found"),
+                    "cancel should not fail with 'not found', got: {error:?}"
+                );
+            }
+            other => panic!("expected cancel response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_peer_providers_rejects_stale_version() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("create .git");
+        let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
+        let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(false), HostName::new("local")).await;
+
+        let fresh_peers = vec![(HostName::new("hostB"), ProviderData {
+            checkouts: IndexMap::from([(HostPath::new(HostName::new("hostB"), "/b/repo"), checkout("fresh"))]),
+            ..Default::default()
+        })];
+        let stale_peers = vec![(HostName::new("hostB"), ProviderData {
+            checkouts: IndexMap::from([(HostPath::new(HostName::new("hostB"), "/b/repo"), checkout("stale"))]),
+            ..Default::default()
+        })];
+
+        // Apply version 5 first, then try to apply version 3 — should be rejected
+        daemon.set_peer_providers(&repo, fresh_peers.clone(), 5).await;
+        daemon.set_peer_providers(&repo, stale_peers, 3).await;
+
+        let identity = daemon.tracked_repo_identity_for_path(&repo).await.expect("identity");
+        let pp = daemon.peer_providers_for_test(&identity).await;
+        let branch = pp[0].1.checkouts.values().next().expect("checkout").branch.as_str();
+        assert_eq!(branch, "fresh", "stale version should have been rejected");
     }
 }
