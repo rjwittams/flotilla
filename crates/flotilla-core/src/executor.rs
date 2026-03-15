@@ -105,6 +105,10 @@ pub async fn build_plan(
 /// Steps:
 /// 1. Create the checkout (skipped if it already exists on the local host)
 /// 2. Link issues to the branch (skipped if no issue_ids)
+///
+/// Workspace creation is NOT included here because this plan may execute on a
+/// remote host.  The TUI handles workspace creation locally when it receives
+/// `CheckoutCreated` from a local command.
 #[allow(clippy::too_many_arguments)]
 async fn build_create_checkout_plan(
     branch: String,
@@ -2419,7 +2423,7 @@ mod tests {
 
         match plan {
             ExecutionPlan::Steps(step_plan) => {
-                assert_eq!(step_plan.steps.len(), 1, "checkout plans should only create the checkout in this batch");
+                assert_eq!(step_plan.steps.len(), 1, "checkout only — workspace creation is handled by the TUI");
                 assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
@@ -2442,7 +2446,7 @@ mod tests {
 
         match plan {
             ExecutionPlan::Steps(step_plan) => {
-                assert_eq!(step_plan.steps.len(), 1, "checkout plans should remain single-step even when the branch already exists");
+                assert_eq!(step_plan.steps.len(), 1, "checkout only — workspace creation is handled by the TUI");
                 assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
