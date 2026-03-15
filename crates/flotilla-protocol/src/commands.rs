@@ -59,6 +59,11 @@ pub enum CommandAction {
     },
     PrepareTerminalForCheckout {
         checkout_path: PathBuf,
+        /// Role→command mappings from the requesting host's template.
+        /// When non-empty, the remote side wraps these through its terminal pool
+        /// instead of reading its own template.
+        #[serde(default)]
+        commands: Vec<PreparedTerminalCommand>,
     },
     Checkout {
         repo: RepoSelector,
@@ -263,7 +268,7 @@ mod tests {
             Command {
                 host: Some(HostName::new("desktop")),
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
-                action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x") },
+                action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x"), commands: vec![] },
             },
             Command {
                 host: None,
@@ -453,7 +458,7 @@ mod tests {
             Command {
                 host: Some(HostName::new("desktop")),
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
-                action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x") },
+                action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x"), commands: vec![] },
             },
             Command {
                 host: None,

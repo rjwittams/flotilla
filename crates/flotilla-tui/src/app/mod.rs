@@ -342,6 +342,12 @@ impl App {
         self.model.repos.get(identity).map(|repo| repo.path.clone())
     }
 
+    /// Resolve the local workspace template into role→command pairs.
+    /// Used to tell the remote host what commands to prepare.
+    pub fn local_template_commands(&self) -> Vec<flotilla_protocol::PreparedTerminalCommand> {
+        flotilla_core::template::resolve_template_commands(self.model.active_repo_root(), self.config.base_path())
+    }
+
     fn item_execution_host(&self, item: &WorkItem) -> Option<HostName> {
         match self.model.my_host.as_ref() {
             Some(my_host) if item.host != *my_host => Some(item.host.clone()),

@@ -2457,7 +2457,7 @@ mod tests {
         let command = Command {
             host: Some(HostName::new("remote")),
             context_repo: Some(RepoSelector::Identity(identity.clone())),
-            action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/tmp/repo.checkout") },
+            action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/tmp/repo.checkout"), commands: vec![] },
         };
 
         assert_eq!(extract_command_repo_identity(&command), Some(identity));
@@ -2658,7 +2658,7 @@ mod tests {
             Command {
                 host: Some(daemon.host_name().clone()),
                 context_repo: Some(RepoSelector::Identity(repo_identity.clone())),
-                action: CommandAction::PrepareTerminalForCheckout { checkout_path: checkout_path.clone() },
+                action: CommandAction::PrepareTerminalForCheckout { checkout_path: checkout_path.clone(), commands: vec![] },
             },
             ready,
         )
