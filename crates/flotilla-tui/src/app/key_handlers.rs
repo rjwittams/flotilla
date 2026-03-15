@@ -29,6 +29,7 @@ enum Action {
     ToggleDebug,
     CycleHost,
     CycleLayout,
+    CycleTheme,
     OpenActionMenu,
     OpenBranchInput,
     OpenIssueSearch,
@@ -85,6 +86,7 @@ impl App {
             KeyCode::Char(' ') if in_work_item_table => Some(Action::ToggleMultiSelect),
             KeyCode::Char('h') if in_work_item_table => Some(Action::CycleHost),
             KeyCode::Char('l') if in_work_item_table => Some(Action::CycleLayout),
+            KeyCode::Char('T') if in_work_item_table => Some(Action::CycleTheme),
             KeyCode::Char('.') if in_work_item_table => Some(Action::OpenActionMenu),
             KeyCode::Char('n') if in_work_item_table => Some(Action::OpenBranchInput),
             KeyCode::Char('/') if in_work_item_table => Some(Action::OpenIssueSearch),
@@ -269,6 +271,13 @@ impl App {
                     self.ui.cycle_layout();
                     self.persist_layout();
                 }
+            }
+            Action::CycleTheme => {
+                let themes = crate::theme::available_themes();
+                let current = self.theme.name;
+                let idx = themes.iter().position(|f| (f)().name == current).unwrap_or(0);
+                let next = (idx + 1) % themes.len();
+                self.theme = (themes[next])();
             }
             Action::OpenActionMenu => {
                 if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
