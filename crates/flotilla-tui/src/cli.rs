@@ -1,10 +1,10 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use comfy_table::{presets::UTF8_FULL_CONDENSED, Cell, Table};
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_protocol::{
     output::OutputFormat, Command, CommandResult, DaemonEvent, HostProvidersResponse, HostStatusResponse, PeerConnectionState,
-    RepoDetailResponse, RepoProvidersResponse, RepoWorkResponse, StatusResponse, TopologyResponse,
+    RepoDetailResponse, RepoIdentity, RepoProvidersResponse, RepoWorkResponse, StatusResponse, TopologyResponse,
 };
 
 use crate::socket::SocketDaemon;
@@ -256,6 +256,15 @@ pub(crate) fn format_event_human(event: &flotilla_protocol::DaemonEvent) -> Stri
     }
 }
 
+/// Extract the (repo_identity, seq) from a snapshot event, if present.
+fn event_seq(event: &DaemonEvent) -> Option<(&RepoIdentity, u64)> {
+    match event {
+        DaemonEvent::SnapshotFull(snap) => Some((&snap.repo_identity, snap.seq)),
+        DaemonEvent::SnapshotDelta(delta) => Some((&delta.repo_identity, delta.seq)),
+        _ => None,
+    }
+}
+
 pub async fn run_status(socket_path: &Path, format: OutputFormat) -> Result<(), String> {
     let daemon = SocketDaemon::connect(socket_path).await.map_err(|e| format!("cannot connect to daemon: {e}"))?;
     let status = daemon.get_status().await?;
@@ -430,7 +439,37 @@ fn format_repo_work_human(resp: &RepoWorkResponse) -> String {
 pub async fn run_watch(socket_path: &Path, format: OutputFormat) -> Result<(), String> {
     let daemon = SocketDaemon::connect(socket_path).await.map_err(|e| format!("cannot connect to daemon: {e}"))?;
 
+    // Subscribe before replay so events emitted between replay and the loop
+    // are buffered rather than silently dropped.
     let mut rx = daemon.subscribe();
+
+    // Replay current state so the user sees an initial snapshot for every
+    // tracked repo, matching how the TUI bootstraps.  Track the seq per repo
+    // so we can skip duplicate events that the broadcast buffer may also deliver.
+    let mut replay_seqs: HashMap<RepoIdentity, u64> = HashMap::new();
+    match daemon.replay_since(&HashMap::new()).await {
+        Ok(events) => {
+            for event in &events {
+                match event {
+                    DaemonEvent::SnapshotFull(snap) => {
+                        replay_seqs.insert(snap.repo_identity.clone(), snap.seq);
+                    }
+                    DaemonEvent::SnapshotDelta(delta) => {
+                        replay_seqs.insert(delta.repo_identity.clone(), delta.seq);
+                    }
+                    _ => {}
+                }
+                let line = match format {
+                    OutputFormat::Human => format_event_human(event),
+                    OutputFormat::Json => flotilla_protocol::output::json_line(event),
+                };
+                println!("{line}");
+            }
+        }
+        Err(e) => {
+            eprintln!("warning: failed to replay initial state: {e}");
+        }
+    }
 
     if matches!(format, OutputFormat::Human) {
         eprintln!("watching events (Ctrl-C to stop)...");
@@ -439,6 +478,14 @@ pub async fn run_watch(socket_path: &Path, format: OutputFormat) -> Result<(), S
     loop {
         match rx.recv().await {
             Ok(event) => {
+                // Skip events already covered by replay to avoid duplicates.
+                if let Some(seq) = event_seq(&event) {
+                    if let Some(&replay_seq) = replay_seqs.get(seq.0) {
+                        if seq.1 <= replay_seq {
+                            continue;
+                        }
+                    }
+                }
                 let line = match format {
                     OutputFormat::Human => format_event_human(&event),
                     OutputFormat::Json => flotilla_protocol::output::json_line(&event),
