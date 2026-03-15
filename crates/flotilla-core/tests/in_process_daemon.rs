@@ -965,7 +965,11 @@ async fn inline_issue_command_returns_zero_and_skips_lifecycle_events() {
     let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
 
     let command_id = daemon
-        .execute(Command { host: None, context_repo: None, action: CommandAction::ClearIssueSearch { repo: repo.clone() } })
+        .execute(Command {
+            host: None,
+            context_repo: None,
+            action: CommandAction::ClearIssueSearch { repo: RepoSelector::Path(repo.clone()) },
+        })
         .await
         .expect("inline command should succeed");
     assert_eq!(command_id, 0, "inline issue commands should return id=0");

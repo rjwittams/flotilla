@@ -536,7 +536,8 @@ impl App {
         if !rm.issue_initial_requested {
             rm.issue_initial_requested = true;
             let visible = self.ui.layout.table_area.height.saturating_sub(2) as usize;
-            self.proto_commands.push(self.command(CommandAction::SetIssueViewport { repo: path, visible_count: visible.max(20) }));
+            self.proto_commands
+                .push(self.command(CommandAction::SetIssueViewport { repo: RepoSelector::Path(path), visible_count: visible.max(20) }));
         }
     }
 
@@ -711,7 +712,7 @@ impl App {
     pub(super) fn clear_active_issue_search(&mut self, dispatch: ClearDispatch) {
         if dispatch == ClearDispatch::Always || self.active_ui().active_search_query.is_some() {
             let repo = self.model.active_repo_root().clone();
-            self.proto_commands.push(self.command(CommandAction::ClearIssueSearch { repo }));
+            self.proto_commands.push(self.command(CommandAction::ClearIssueSearch { repo: RepoSelector::Path(repo) }));
         }
         self.active_ui_mut().active_search_query = None;
     }

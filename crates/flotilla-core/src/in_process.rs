@@ -1510,22 +1510,26 @@ impl DaemonHandle for InProcessDaemon {
         // These are synchronous cache operations that return immediately.
         match &command.action {
             flotilla_protocol::CommandAction::SetIssueViewport { repo, visible_count } => {
-                self.ensure_issues_cached(repo, *visible_count * 2).await;
-                self.broadcast_snapshot(repo).await;
+                let repo_path = self.resolve_repo_selector(repo).await?;
+                self.ensure_issues_cached(&repo_path, *visible_count * 2).await;
+                self.broadcast_snapshot(&repo_path).await;
                 return Ok(INLINE_COMMAND_ID);
             }
             flotilla_protocol::CommandAction::FetchMoreIssues { repo, desired_count } => {
-                self.ensure_issues_cached(repo, *desired_count).await;
-                self.broadcast_snapshot(repo).await;
+                let repo_path = self.resolve_repo_selector(repo).await?;
+                self.ensure_issues_cached(&repo_path, *desired_count).await;
+                self.broadcast_snapshot(&repo_path).await;
                 return Ok(INLINE_COMMAND_ID);
             }
             flotilla_protocol::CommandAction::SearchIssues { repo, query } => {
-                self.search_issues(repo, query).await;
-                self.broadcast_snapshot(repo).await;
+                let repo_path = self.resolve_repo_selector(repo).await?;
+                self.search_issues(&repo_path, query).await;
+                self.broadcast_snapshot(&repo_path).await;
                 return Ok(INLINE_COMMAND_ID);
             }
             flotilla_protocol::CommandAction::ClearIssueSearch { repo } => {
-                let identity = self.tracked_repo_identity_for_path(repo).await;
+                let repo_path = self.resolve_repo_selector(repo).await?;
+                let identity = self.tracked_repo_identity_for_path(&repo_path).await;
                 let mut repos = self.repos.write().await;
                 if let Some(identity) = identity.as_ref() {
                     if let Some(state) = repos.get_mut(identity) {
@@ -1533,7 +1537,7 @@ impl DaemonHandle for InProcessDaemon {
                     }
                 }
                 drop(repos);
-                self.broadcast_snapshot(repo).await;
+                self.broadcast_snapshot(&repo_path).await;
                 return Ok(INLINE_COMMAND_ID);
             }
             _ => {}

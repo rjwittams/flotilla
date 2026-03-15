@@ -2456,10 +2456,10 @@ mod tests {
             CommandAction::TrackRepoPath { path: PathBuf::from("/repo") },
             CommandAction::UntrackRepo { repo: RepoSelector::Path(PathBuf::from("/repo")) },
             CommandAction::Refresh { repo: None },
-            CommandAction::SetIssueViewport { repo: PathBuf::from("/repo"), visible_count: 10 },
-            CommandAction::FetchMoreIssues { repo: PathBuf::from("/repo"), desired_count: 20 },
-            CommandAction::SearchIssues { repo: PathBuf::from("/repo"), query: "bug".to_string() },
-            CommandAction::ClearIssueSearch { repo: PathBuf::from("/repo") },
+            CommandAction::SetIssueViewport { repo: RepoSelector::Path(PathBuf::from("/repo")), visible_count: 10 },
+            CommandAction::FetchMoreIssues { repo: RepoSelector::Path(PathBuf::from("/repo")), desired_count: 20 },
+            CommandAction::SearchIssues { repo: RepoSelector::Path(PathBuf::from("/repo")), query: "bug".to_string() },
+            CommandAction::ClearIssueSearch { repo: RepoSelector::Path(PathBuf::from("/repo")) },
         ];
 
         for cmd in daemon_commands {

@@ -97,7 +97,10 @@ impl App {
             if let Some(rm) = self.model.repos.get_mut(&repo_identity) {
                 rm.issue_fetch_pending = true;
             }
-            self.proto_commands.push(self.command(flotilla_protocol::CommandAction::FetchMoreIssues { repo, desired_count: desired }));
+            self.proto_commands.push(self.command(flotilla_protocol::CommandAction::FetchMoreIssues {
+                repo: flotilla_protocol::RepoSelector::Path(repo),
+                desired_count: desired,
+            }));
         }
     }
 
@@ -374,7 +377,7 @@ mod tests {
                 action: flotilla_protocol::CommandAction::FetchMoreIssues { repo: cmd_repo, desired_count },
                 ..
             } => {
-                assert_eq!(cmd_repo, app.model.repos[&repo].path);
+                assert_eq!(cmd_repo, flotilla_protocol::RepoSelector::Path(app.model.repos[&repo].path.clone()));
                 // providers.issues is empty (default), so desired = 0 + 50
                 assert_eq!(desired_count, 50);
             }

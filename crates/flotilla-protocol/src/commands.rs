@@ -115,19 +115,19 @@ pub enum CommandAction {
         repo: Option<RepoSelector>,
     },
     SetIssueViewport {
-        repo: PathBuf,
+        repo: RepoSelector,
         visible_count: usize,
     },
     FetchMoreIssues {
-        repo: PathBuf,
+        repo: RepoSelector,
         desired_count: usize,
     },
     SearchIssues {
-        repo: PathBuf,
+        repo: RepoSelector,
         query: String,
     },
     ClearIssueSearch {
-        repo: PathBuf,
+        repo: RepoSelector,
     },
 }
 
@@ -337,19 +337,23 @@ mod tests {
             Command {
                 host: None,
                 context_repo: None,
-                action: CommandAction::SetIssueViewport { repo: PathBuf::from("/repo"), visible_count: 25 },
+                action: CommandAction::SetIssueViewport { repo: RepoSelector::Path(PathBuf::from("/repo")), visible_count: 25 },
             },
             Command {
                 host: None,
                 context_repo: None,
-                action: CommandAction::FetchMoreIssues { repo: PathBuf::from("/repo"), desired_count: 50 },
+                action: CommandAction::FetchMoreIssues { repo: RepoSelector::Path(PathBuf::from("/repo")), desired_count: 50 },
             },
             Command {
                 host: None,
                 context_repo: None,
-                action: CommandAction::SearchIssues { repo: PathBuf::from("/repo"), query: "bug".into() },
+                action: CommandAction::SearchIssues { repo: RepoSelector::Path(PathBuf::from("/repo")), query: "bug".into() },
             },
-            Command { host: None, context_repo: None, action: CommandAction::ClearIssueSearch { repo: PathBuf::from("/repo") } },
+            Command {
+                host: None,
+                context_repo: None,
+                action: CommandAction::ClearIssueSearch { repo: RepoSelector::Path(PathBuf::from("/repo")) },
+            },
         ];
 
         for cmd in cases {
@@ -537,19 +541,23 @@ mod tests {
             Command {
                 host: None,
                 context_repo: None,
-                action: CommandAction::SetIssueViewport { repo: PathBuf::from("/tmp"), visible_count: 10 },
+                action: CommandAction::SetIssueViewport { repo: RepoSelector::Path(PathBuf::from("/tmp")), visible_count: 10 },
             },
             Command {
                 host: None,
                 context_repo: None,
-                action: CommandAction::FetchMoreIssues { repo: PathBuf::from("/tmp"), desired_count: 10 },
+                action: CommandAction::FetchMoreIssues { repo: RepoSelector::Path(PathBuf::from("/tmp")), desired_count: 10 },
             },
             Command {
                 host: None,
                 context_repo: None,
-                action: CommandAction::SearchIssues { repo: PathBuf::from("/tmp"), query: "q".into() },
+                action: CommandAction::SearchIssues { repo: RepoSelector::Path(PathBuf::from("/tmp")), query: "q".into() },
             },
-            Command { host: None, context_repo: None, action: CommandAction::ClearIssueSearch { repo: PathBuf::from("/tmp") } },
+            Command {
+                host: None,
+                context_repo: None,
+                action: CommandAction::ClearIssueSearch { repo: RepoSelector::Path(PathBuf::from("/tmp")) },
+            },
         ];
         for cmd in cases {
             let desc = cmd.description();

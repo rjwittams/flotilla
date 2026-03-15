@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use flotilla_core::data::GroupEntry;
-use flotilla_protocol::{CheckoutSelector, CheckoutTarget, Command, CommandAction, WorkItem};
+use flotilla_protocol::{CheckoutSelector, CheckoutTarget, Command, CommandAction, RepoSelector, WorkItem};
 use tui_input::{backend::crossterm::EventHandler as InputEventHandler, Input};
 
 use super::{
@@ -182,7 +182,8 @@ impl App {
                     };
                     if !query.is_empty() {
                         let repo = self.model.active_repo_root().clone();
-                        self.proto_commands.push(self.command(CommandAction::SearchIssues { repo, query: query.clone() }));
+                        self.proto_commands
+                            .push(self.command(CommandAction::SearchIssues { repo: RepoSelector::Path(repo), query: query.clone() }));
                         self.active_ui_mut().active_search_query = Some(query);
                     }
                     self.ui.mode = UiMode::Normal;
@@ -698,7 +699,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use flotilla_protocol::{CheckoutStatus, Command, HostName, HostPath, WorkItemIdentity};
+    use flotilla_protocol::{CheckoutStatus, Command, HostName, HostPath, RepoSelector, WorkItemIdentity};
     use ratatui::layout::Rect;
 
     use super::{
@@ -1436,7 +1437,7 @@ mod tests {
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::ClearIssueSearch { repo }, .. } => {
-                assert_eq!(repo, PathBuf::from("/tmp/test-repo"));
+                assert_eq!(repo, RepoSelector::Path(PathBuf::from("/tmp/test-repo")));
             }
             other => panic!("expected ClearIssueSearch, got {:?}", other),
         }
@@ -1451,7 +1452,7 @@ mod tests {
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::SearchIssues { repo, query }, .. } => {
-                assert_eq!(repo, PathBuf::from("/tmp/test-repo"));
+                assert_eq!(repo, RepoSelector::Path(PathBuf::from("/tmp/test-repo")));
                 assert_eq!(query, "bug fix");
             }
             other => panic!("expected SearchIssues, got {:?}", other),
