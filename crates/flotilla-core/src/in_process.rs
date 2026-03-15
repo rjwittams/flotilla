@@ -1053,7 +1053,7 @@ impl InProcessDaemon {
 
             // Fetch the next page outside any lock
             let page_result = {
-                let (_, tracker) = registry.issue_trackers.values().next().unwrap();
+                let tracker = registry.issue_trackers.preferred().unwrap();
                 tracker.list_issues_page(repo, page_num, 50).await
             };
 
@@ -1093,7 +1093,7 @@ impl InProcessDaemon {
         };
 
         let result = {
-            let Some((_, tracker)) = registry.issue_trackers.values().next() else {
+            let Some(tracker) = registry.issue_trackers.preferred() else {
                 return;
             };
             tracker.search_issues(repo, query, 50).await
@@ -1154,7 +1154,7 @@ impl InProcessDaemon {
                 continue;
             }
 
-            let Some((_, tracker)) = registry.issue_trackers.values().next() else {
+            let Some(tracker) = registry.issue_trackers.preferred() else {
                 continue;
             };
             match tracker.fetch_issues_by_id(&path, &missing).await {
@@ -1211,9 +1211,8 @@ impl InProcessDaemon {
 
         for (identity, path, since, registry, fetch_mutex, prev_count) in tasks {
             let _guard = fetch_mutex.lock().await;
-            let tracker = match registry.issue_trackers.values().next() {
-                Some((_, t)) => t,
-                None => continue,
+            let Some(tracker) = registry.issue_trackers.preferred() else {
+                continue;
             };
 
             // Record timestamp *before* the API call so the next `since`
@@ -1252,7 +1251,7 @@ impl InProcessDaemon {
                                 repos.get(&identity).map(RepoState::registry)
                             };
                             if let Some(reg) = reg {
-                                if let Some((_, t)) = reg.issue_trackers.values().next() {
+                                if let Some(t) = reg.issue_trackers.preferred() {
                                     t.list_issues_page(&path, 1, 50).await.ok()
                                 } else {
                                     None
@@ -1784,7 +1783,7 @@ impl DaemonHandle for InProcessDaemon {
         if prev_count > 0 {
             // Fetch page 1 before resetting, so failures don't wipe the UI.
             let first_page =
-                if let Some((_, t)) = registry.issue_trackers.values().next() { t.list_issues_page(repo, 1, 50).await.ok() } else { None };
+                if let Some(t) = registry.issue_trackers.preferred() { t.list_issues_page(repo, 1, 50).await.ok() } else { None };
 
             if first_page.is_some() {
                 {
@@ -2674,7 +2673,7 @@ mod tests {
         let mut state = make_repo_state();
 
         // New health entry with no prior state
-        let new_health = HashMap::from([("code_review".into(), HashMap::from([("github".into(), true)]))]);
+        let new_health = HashMap::from([("change_request".into(), HashMap::from([("github".into(), true)]))]);
         let entry = state.record_delta(&ProviderData::default(), &new_health, &[], vec![]);
 
         assert!(
@@ -2684,7 +2683,7 @@ mod tests {
                     category,
                     provider,
                     op: flotilla_protocol::EntryOp::Added(true),
-                } if category == "code_review" && provider == "github"
+                } if category == "change_request" && provider == "github"
             )),
             "should have an Added health change: {:?}",
             entry.changes

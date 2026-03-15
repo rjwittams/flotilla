@@ -12,14 +12,14 @@ use flotilla_core::{
     in_process::InProcessDaemon,
     providers::{
         ai_utility::AiUtility,
-        code_review::CodeReview,
+        change_request::ChangeRequestTracker,
         coding_agent::CloudAgentService,
         discovery::{
             test_support::{
                 fake_discovery, fake_discovery_with_providers, git_process_discovery, init_git_repo_with_remote, FakeCheckoutManager,
                 FakeIssueTracker,
             },
-            DiscoveryRuntime, EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement,
+            DiscoveryRuntime, EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement,
         },
         types::{ChangeRequest, CloudAgentSession, RepoCriteria, SessionStatus},
     },
@@ -85,7 +85,7 @@ impl Factory for SlowCloudAgentFactory {
     type Output = dyn CloudAgentService;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("slow-agent", "Slow Agent", "AG", "Sessions", "session")
+        ProviderDescriptor::labeled_simple(ProviderCategory::CloudAgent, "slow-agent", "Slow Agent", "AG", "Sessions", "session")
     }
 
     async fn probe(
@@ -142,7 +142,7 @@ impl Factory for SlowAiUtilityFactory {
     type Output = dyn AiUtility;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::named("slow-ai")
+        ProviderDescriptor::named(ProviderCategory::AiUtility, "slow-ai")
     }
 
     async fn probe(
@@ -178,10 +178,10 @@ fn sample_remote_host_summary(name: &str) -> HostSummary {
     }
 }
 
-struct FailingCodeReview;
+struct FailingChangeRequestTracker;
 
 #[async_trait]
-impl CodeReview for FailingCodeReview {
+impl ChangeRequestTracker for FailingChangeRequestTracker {
     async fn list_change_requests(&self, _: &Path, _: usize) -> Result<Vec<(String, ChangeRequest)>, String> {
         Err("change request listing failed".into())
     }
@@ -1181,7 +1181,7 @@ async fn follower_mode_skips_external_providers() {
     assert!(provider_names.contains_key("checkout_manager"), "follower should have checkout_manager provider");
 
     // External providers should be absent
-    assert!(!provider_names.contains_key("code_review"), "follower should not have code_review provider");
+    assert!(!provider_names.contains_key("change_request"), "follower should not have change_request provider");
     assert!(!provider_names.contains_key("issue_tracker"), "follower should not have issue_tracker provider");
     // cloud_agent and ai_utility depend on Claude/Codex/Cursor being
     // installed, so they may or may not be present in non-follower mode.
@@ -1279,7 +1279,7 @@ async fn get_repo_detail_returns_provider_health_and_errors() {
     let daemon = InProcessDaemon::new(
         vec![repo.clone()],
         config,
-        fake_discovery_with_providers(None, Some(Arc::new(FailingCodeReview)), None),
+        fake_discovery_with_providers(None, Some(Arc::new(FailingChangeRequestTracker)), None),
         HostName::local(),
     )
     .await;
@@ -1290,8 +1290,8 @@ async fn get_repo_detail_returns_provider_health_and_errors() {
     let detail = daemon.get_repo_detail(repo_name).await.expect("get_repo_detail failed");
 
     assert_eq!(detail.path, repo);
-    let code_review_health = detail.provider_health.get("code_review").expect("code_review health should be present");
-    assert!(code_review_health.values().any(|healthy| !healthy), "provider health should reflect refresh errors");
+    let change_request_health = detail.provider_health.get("change_request").expect("change_request health should be present");
+    assert!(change_request_health.values().any(|healthy| !healthy), "provider health should reflect refresh errors");
     assert!(
         detail.errors.iter().any(|err| err.category == "PRs" && err.message == "change request listing failed"),
         "should expose refresh errors from the failing provider"

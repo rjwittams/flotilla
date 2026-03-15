@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use crate::{
     config::ConfigStore,
     providers::{
-        discovery::{EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement},
+        discovery::{EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement},
         workspace::{tmux::TmuxWorkspaceManager, WorkspaceManager},
         CommandRunner,
     },
@@ -20,7 +20,7 @@ impl Factory for TmuxWorkspaceManagerFactory {
     type Output = dyn WorkspaceManager;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("tmux", "tmux Workspaces", "", "", "")
+        ProviderDescriptor::labeled_simple(ProviderCategory::WorkspaceManager, "tmux", "tmux Workspaces", "", "", "")
     }
 
     async fn probe(
@@ -72,7 +72,8 @@ mod tests {
     #[tokio::test]
     async fn tmux_factory_descriptor() {
         let desc = TmuxWorkspaceManagerFactory.descriptor();
-        assert_eq!(desc.name, "tmux");
+        assert_eq!(desc.backend, "tmux");
+        assert_eq!(desc.implementation, "tmux");
         assert_eq!(desc.display_name, "tmux Workspaces");
         assert_eq!(desc.abbreviation, "");
         assert_eq!(desc.section_label, "");

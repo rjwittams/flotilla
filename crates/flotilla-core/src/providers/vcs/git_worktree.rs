@@ -6,10 +6,7 @@ use std::{
 use async_trait::async_trait;
 use tracing::info;
 
-use crate::{
-    config::CheckoutsConfig,
-    providers::{run, types::*, CommandRunner, TaskId},
-};
+use crate::providers::{run, types::*, CommandRunner, TaskId};
 
 /// Resolve `.` and `..` components in-place without touching the filesystem.
 fn normalize_path(path: &Path) -> PathBuf {
@@ -27,16 +24,16 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 pub struct GitCheckoutManager {
-    config: CheckoutsConfig,
+    checkout_path: String,
     env: minijinja::Environment<'static>,
     runner: Arc<dyn CommandRunner>,
 }
 
 impl GitCheckoutManager {
-    pub fn new(config: CheckoutsConfig, runner: Arc<dyn CommandRunner>) -> Self {
+    pub fn new(checkout_path: String, runner: Arc<dyn CommandRunner>) -> Self {
         let mut env = minijinja::Environment::new();
         env.add_filter("sanitize", |value: String| -> String { value.replace(['/', '\\'], "-") });
-        Self { config, env, runner }
+        Self { checkout_path, env, runner }
     }
 
     /// Render the worktree path template for a given repo and branch.
@@ -49,7 +46,7 @@ impl GitCheckoutManager {
 
         let rendered = self
             .env
-            .render_str(&self.config.path, minijinja::context! {
+            .render_str(&self.checkout_path, minijinja::context! {
                 repo_path => repo_root.to_string_lossy(),
                 repo => repo_name,
                 branch => branch,
@@ -341,8 +338,8 @@ branch refs/heads/feature
     #[test]
     fn render_worktree_path_default_template() {
         let runner: Arc<dyn CommandRunner> = Arc::new(MockRunner::new(vec![]));
-        let config = CheckoutsConfig::default();
-        let mgr = GitCheckoutManager::new(config, runner);
+        let checkout_path = crate::config::default_checkout_path();
+        let mgr = GitCheckoutManager::new(checkout_path, runner);
         let repo = Path::new("/home/user/myrepo");
 
         let path = mgr.render_worktree_path(repo, "feature/my-branch").unwrap();
@@ -352,8 +349,7 @@ branch refs/heads/feature
     #[test]
     fn render_worktree_path_absolute_template() {
         let runner: Arc<dyn CommandRunner> = Arc::new(MockRunner::new(vec![]));
-        let config = CheckoutsConfig { path: "/tmp/worktrees/{{ repo }}.{{ branch | sanitize }}".to_string(), ..Default::default() };
-        let mgr = GitCheckoutManager::new(config, runner);
+        let mgr = GitCheckoutManager::new("/tmp/worktrees/{{ repo }}.{{ branch | sanitize }}".to_string(), runner);
         let repo = Path::new("/home/user/myrepo");
 
         let path = mgr.render_worktree_path(repo, "fix\\backslash").unwrap();
@@ -363,8 +359,7 @@ branch refs/heads/feature
     #[test]
     fn render_worktree_path_relative_template() {
         let runner: Arc<dyn CommandRunner> = Arc::new(MockRunner::new(vec![]));
-        let config = CheckoutsConfig { path: "worktrees/{{ branch | sanitize }}".to_string(), ..Default::default() };
-        let mgr = GitCheckoutManager::new(config, runner);
+        let mgr = GitCheckoutManager::new("worktrees/{{ branch | sanitize }}".to_string(), runner);
         let repo = Path::new("/home/user/myrepo");
 
         let path = mgr.render_worktree_path(repo, "dev/thing").unwrap();
@@ -390,8 +385,8 @@ branch refs/heads/feature
         let session = replay::test_session(&fixture("git_create_remote_branch.yaml"), masks);
         let runner = replay::test_runner(&session);
 
-        let config = CheckoutsConfig::default();
-        let mgr = GitCheckoutManager::new(config, runner.clone());
+        let checkout_path = crate::config::default_checkout_path();
+        let mgr = GitCheckoutManager::new(checkout_path, runner.clone());
 
         checkout_test_support::assert_checkout_tracks_remote_branch(&mgr, &runner, &repo_path).await;
 

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use crate::{
     config::ConfigStore,
     providers::{
-        discovery::{EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement},
+        discovery::{EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement},
         terminal::{passthrough::PassthroughTerminalPool, TerminalPool},
         CommandRunner,
     },
@@ -20,7 +20,7 @@ impl Factory for PassthroughTerminalPoolFactory {
     type Output = dyn TerminalPool;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::named("passthrough")
+        ProviderDescriptor::named(ProviderCategory::TerminalPool, "passthrough")
     }
 
     async fn probe(
@@ -57,7 +57,8 @@ mod tests {
     #[tokio::test]
     async fn passthrough_factory_descriptor() {
         let desc = PassthroughTerminalPoolFactory.descriptor();
-        assert_eq!(desc.name, "passthrough");
+        assert_eq!(desc.backend, "passthrough");
+        assert_eq!(desc.implementation, "passthrough");
         assert_eq!(desc.display_name, "passthrough");
         assert_eq!(desc.abbreviation, "");
         assert_eq!(desc.section_label, "");

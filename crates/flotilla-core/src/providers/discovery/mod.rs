@@ -24,10 +24,10 @@ use crate::{
     config::ConfigStore,
     providers::{
         ai_utility::AiUtility,
-        code_review::CodeReview,
+        change_request::ChangeRequestTracker,
         coding_agent::CloudAgentService,
         issue_tracker::IssueTracker,
-        registry::ProviderRegistry,
+        registry::{ProviderRegistry, ProviderSet},
         terminal::TerminalPool,
         vcs::{CheckoutManager, Vcs},
         workspace::WorkspaceManager,
@@ -238,11 +238,58 @@ pub enum UnmetRequirement {
     MissingAuth(String),
     MissingRemoteHost(HostPlatform),
     NoVcsCheckout,
+    /// Config references a backend or implementation that no factory provides.
+    UnknownProviderPreference {
+        category: ProviderCategory,
+        key: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderCategory {
+    Vcs,
+    CheckoutManager,
+    ChangeRequest,
+    IssueTracker,
+    CloudAgent,
+    AiUtility,
+    WorkspaceManager,
+    TerminalPool,
+}
+
+impl ProviderCategory {
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Self::Vcs => "vcs",
+            Self::CheckoutManager => "checkout_manager",
+            Self::ChangeRequest => "change_request",
+            Self::IssueTracker => "issue_tracker",
+            Self::CloudAgent => "cloud_agent",
+            Self::AiUtility => "ai_utility",
+            Self::WorkspaceManager => "workspace_manager",
+            Self::TerminalPool => "terminal_pool",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Vcs => "VCS",
+            Self::CheckoutManager => "Checkout Manager",
+            Self::ChangeRequest => "Change Requests",
+            Self::IssueTracker => "Issue Tracker",
+            Self::CloudAgent => "Cloud Agent",
+            Self::AiUtility => "AI Utility",
+            Self::WorkspaceManager => "Workspace Manager",
+            Self::TerminalPool => "Terminal Pool",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ProviderDescriptor {
-    pub name: String,
+    pub category: ProviderCategory,
+    pub backend: String,
+    pub implementation: String,
     pub display_name: String,
     pub abbreviation: String,
     pub section_label: String,
@@ -250,20 +297,54 @@ pub struct ProviderDescriptor {
 }
 
 impl ProviderDescriptor {
-    pub fn named(name: impl Into<String>) -> Self {
+    pub fn named(category: ProviderCategory, name: impl Into<String>) -> Self {
         let name = name.into();
-        Self { display_name: name.clone(), name, abbreviation: String::new(), section_label: String::new(), item_noun: String::new() }
+        Self {
+            category,
+            backend: name.clone(),
+            implementation: name.clone(),
+            display_name: name,
+            abbreviation: String::new(),
+            section_label: String::new(),
+            item_noun: String::new(),
+        }
     }
 
     pub fn labeled(
-        name: impl Into<String>,
+        category: ProviderCategory,
+        backend: impl Into<String>,
+        implementation: impl Into<String>,
         display_name: impl Into<String>,
         abbreviation: impl Into<String>,
         section_label: impl Into<String>,
         item_noun: impl Into<String>,
     ) -> Self {
         Self {
-            name: name.into(),
+            category,
+            backend: backend.into(),
+            implementation: implementation.into(),
+            display_name: display_name.into(),
+            abbreviation: abbreviation.into(),
+            section_label: section_label.into(),
+            item_noun: item_noun.into(),
+        }
+    }
+
+    /// Shorthand for backends with a single implementation — sets `implementation = backend`.
+    /// Use `labeled()` when a backend has multiple implementations (e.g. claude api vs cli).
+    pub fn labeled_simple(
+        category: ProviderCategory,
+        backend: impl Into<String>,
+        display_name: impl Into<String>,
+        abbreviation: impl Into<String>,
+        section_label: impl Into<String>,
+        item_noun: impl Into<String>,
+    ) -> Self {
+        let backend = backend.into();
+        Self {
+            category,
+            implementation: backend.clone(),
+            backend,
             display_name: display_name.into(),
             abbreviation: abbreviation.into(),
             section_label: section_label.into(),
@@ -307,7 +388,7 @@ pub trait Factory: Send + Sync {
 
 pub type VcsFactory = dyn Factory<Output = dyn Vcs>;
 pub type CheckoutManagerFactory = dyn Factory<Output = dyn CheckoutManager>;
-pub type CodeReviewFactory = dyn Factory<Output = dyn CodeReview>;
+pub type ChangeRequestFactory = dyn Factory<Output = dyn ChangeRequestTracker>;
 pub type IssueTrackerFactory = dyn Factory<Output = dyn IssueTracker>;
 pub type CloudAgentFactory = dyn Factory<Output = dyn CloudAgentService>;
 pub type AiUtilityFactory = dyn Factory<Output = dyn AiUtility>;
@@ -321,7 +402,7 @@ pub type TerminalPoolFactory = dyn Factory<Output = dyn TerminalPool>;
 pub struct FactoryRegistry {
     pub vcs: Vec<Box<VcsFactory>>,
     pub checkout_managers: Vec<Box<CheckoutManagerFactory>>,
-    pub code_review: Vec<Box<CodeReviewFactory>>,
+    pub change_requests: Vec<Box<ChangeRequestFactory>>,
     pub issue_trackers: Vec<Box<IssueTrackerFactory>>,
     pub cloud_agents: Vec<Box<CloudAgentFactory>>,
     pub ai_utilities: Vec<Box<AiUtilityFactory>>,
@@ -353,7 +434,7 @@ impl DiscoveryRuntime {
     /// categories are registered. Update this check if new external-provider
     /// factory categories are added to `FactoryRegistry`.
     pub fn is_follower(&self) -> bool {
-        self.factories.code_review.is_empty()
+        self.factories.change_requests.is_empty()
             && self.factories.issue_trackers.is_empty()
             && self.factories.cloud_agents.is_empty()
             && self.factories.ai_utilities.is_empty()
@@ -411,58 +492,115 @@ pub async fn discover_providers(
             match factory.probe(env, config, repo_root, runner.clone()).await {
                 Ok(provider) => insert(factory.descriptor(), provider),
                 Err(reqs) => {
-                    let name = factory.descriptor().name.clone();
+                    let name = factory.descriptor().implementation.clone();
                     unmet.extend(reqs.into_iter().map(|r| (name.clone(), r)));
                 }
             }
         }
-    }
-
-    async fn probe_first<T: ?Sized + Send + Sync + 'static>(
-        factories: &[Box<dyn Factory<Output = T>>],
-        env: &EnvironmentBag,
-        config: &ConfigStore,
-        repo_root: &Path,
-        runner: &Arc<dyn CommandRunner>,
-        unmet: &mut Vec<(String, UnmetRequirement)>,
-    ) -> Option<(ProviderDescriptor, Arc<T>)> {
-        for factory in factories {
-            match factory.probe(env, config, repo_root, runner.clone()).await {
-                Ok(provider) => return Some((factory.descriptor(), provider)),
-                Err(reqs) => {
-                    let name = factory.descriptor().name.clone();
-                    unmet.extend(reqs.into_iter().map(|r| (name.clone(), r)));
-                }
-            }
-        }
-        None
     }
 
     probe_all(&factories.vcs, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
-        registry.vcs.insert(desc.name.clone(), (desc, provider));
+        registry.vcs.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
-    if let Some((desc, provider)) = probe_first(&factories.checkout_managers, &combined, config, repo_root, &runner, &mut unmet).await {
-        registry.checkout_managers.insert(desc.name.clone(), (desc, provider));
-    }
-    probe_all(&factories.code_review, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
-        registry.code_review.insert(desc.name.clone(), (desc, provider));
+    probe_all(&factories.checkout_managers, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
+        registry.checkout_managers.insert(desc.implementation.clone(), desc, provider);
+    })
+    .await;
+    probe_all(&factories.change_requests, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
+        registry.change_requests.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
     probe_all(&factories.issue_trackers, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
-        registry.issue_trackers.insert(desc.name.clone(), (desc, provider));
+        registry.issue_trackers.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
     probe_all(&factories.cloud_agents, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
-        registry.cloud_agents.insert(desc.name.clone(), (desc, provider));
+        registry.cloud_agents.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
     probe_all(&factories.ai_utilities, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
-        registry.ai_utilities.insert(desc.name.clone(), (desc, provider));
+        registry.ai_utilities.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
-    registry.workspace_manager = probe_first(&factories.workspace_managers, &combined, config, repo_root, &runner, &mut unmet).await;
-    registry.terminal_pool = probe_first(&factories.terminal_pools, &combined, config, repo_root, &runner, &mut unmet).await;
+    probe_all(&factories.workspace_managers, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
+        registry.workspace_managers.insert(desc.implementation.clone(), desc, provider);
+    })
+    .await;
+    probe_all(&factories.terminal_pools, &combined, config, repo_root, &runner, &mut unmet, |desc, provider| {
+        registry.terminal_pools.insert(desc.implementation.clone(), desc, provider);
+    })
+    .await;
+
+    // Apply provider preferences from config, tracking unresolved preferences.
+    let flotilla_config = config.load_config();
+
+    fn apply_backend_pref(
+        set: &mut ProviderSet<impl ?Sized>,
+        category: ProviderCategory,
+        config_backend: Option<&str>,
+        unmet: &mut Vec<(String, UnmetRequirement)>,
+    ) {
+        if let Some(backend) = config_backend {
+            if !set.prefer_by_backend(backend) {
+                unmet.push((category.slug().into(), UnmetRequirement::UnknownProviderPreference { category, key: backend.into() }));
+            }
+        }
+    }
+
+    apply_backend_pref(
+        &mut registry.change_requests,
+        ProviderCategory::ChangeRequest,
+        flotilla_config.change_request.preference.backend.as_deref(),
+        &mut unmet,
+    );
+    apply_backend_pref(
+        &mut registry.issue_trackers,
+        ProviderCategory::IssueTracker,
+        flotilla_config.issue_tracker.preference.backend.as_deref(),
+        &mut unmet,
+    );
+    apply_backend_pref(
+        &mut registry.cloud_agents,
+        ProviderCategory::CloudAgent,
+        flotilla_config.cloud_agent.preference.backend.as_deref(),
+        &mut unmet,
+    );
+    apply_backend_pref(
+        &mut registry.ai_utilities,
+        ProviderCategory::AiUtility,
+        flotilla_config.ai_utility.preference.backend.as_deref(),
+        &mut unmet,
+    );
+    if let Some(impl_name) = flotilla_config.ai_utility.claude.as_ref().and_then(|c| c.implementation.as_deref()) {
+        if !registry.ai_utilities.prefer_by_implementation(impl_name) {
+            unmet.push((ProviderCategory::AiUtility.slug().into(), UnmetRequirement::UnknownProviderPreference {
+                category: ProviderCategory::AiUtility,
+                key: impl_name.into(),
+            }));
+        }
+    }
+    apply_backend_pref(
+        &mut registry.workspace_managers,
+        ProviderCategory::WorkspaceManager,
+        flotilla_config.workspace_manager.preference.backend.as_deref(),
+        &mut unmet,
+    );
+    apply_backend_pref(
+        &mut registry.terminal_pools,
+        ProviderCategory::TerminalPool,
+        flotilla_config.terminal_pool.preference.backend.as_deref(),
+        &mut unmet,
+    );
+
+    // Checkout strategy — resolved per-repo, nested under vcs.git
+    let checkout_config = config.resolve_checkout_config(repo_root);
+    if checkout_config.strategy != "auto" && !registry.checkout_managers.prefer_by_implementation(&checkout_config.strategy) {
+        unmet.push((ProviderCategory::CheckoutManager.slug().into(), UnmetRequirement::UnknownProviderPreference {
+            category: ProviderCategory::CheckoutManager,
+            key: checkout_config.strategy,
+        }));
+    }
 
     let repo_slug = combined.repo_slug();
 
@@ -603,6 +741,7 @@ mod tests {
             UnmetRequirement::MissingAuth("github".into()),
             UnmetRequirement::MissingRemoteHost(HostPlatform::GitHub),
             UnmetRequirement::NoVcsCheckout,
+            UnmetRequirement::UnknownProviderPreference { category: ProviderCategory::AiUtility, key: "nonexistent".into() },
         ];
         assert_eq!(reqs[0], UnmetRequirement::MissingBinary("git".into()));
         assert_ne!(reqs[0], reqs[1]);
@@ -610,8 +749,18 @@ mod tests {
 
     #[test]
     fn provider_descriptor_fields() {
-        let desc = ProviderDescriptor::labeled("github-cr", "GitHub PRs", "PR", "Pull Requests", "pull request");
-        assert_eq!(desc.name, "github-cr");
+        let desc = ProviderDescriptor::labeled(
+            ProviderCategory::ChangeRequest,
+            "github",
+            "github-cr",
+            "GitHub PRs",
+            "PR",
+            "Pull Requests",
+            "pull request",
+        );
+        assert_eq!(desc.category, ProviderCategory::ChangeRequest);
+        assert_eq!(desc.backend, "github");
+        assert_eq!(desc.implementation, "github-cr");
         assert_eq!(desc.display_name, "GitHub PRs");
         assert_eq!(desc.abbreviation, "PR");
         assert_eq!(desc.section_label, "Pull Requests");
@@ -620,12 +769,40 @@ mod tests {
 
     #[test]
     fn provider_descriptor_named_defaults_labels() {
-        let desc = ProviderDescriptor::named("claude");
-        assert_eq!(desc.name, "claude");
+        let desc = ProviderDescriptor::named(ProviderCategory::CloudAgent, "claude");
+        assert_eq!(desc.category, ProviderCategory::CloudAgent);
+        assert_eq!(desc.backend, "claude");
+        assert_eq!(desc.implementation, "claude");
         assert_eq!(desc.display_name, "claude");
         assert!(desc.abbreviation.is_empty());
         assert!(desc.section_label.is_empty());
         assert!(desc.item_noun.is_empty());
+    }
+
+    #[test]
+    fn provider_descriptor_labeled_simple() {
+        let desc = ProviderDescriptor::labeled_simple(ProviderCategory::IssueTracker, "github", "GitHub Issues", "#", "Issues", "issue");
+        assert_eq!(desc.category, ProviderCategory::IssueTracker);
+        assert_eq!(desc.backend, "github");
+        assert_eq!(desc.implementation, "github");
+        assert_eq!(desc.display_name, "GitHub Issues");
+    }
+
+    #[test]
+    fn provider_category_slug_round_trip() {
+        let categories = [
+            (ProviderCategory::Vcs, "vcs"),
+            (ProviderCategory::CheckoutManager, "checkout_manager"),
+            (ProviderCategory::ChangeRequest, "change_request"),
+            (ProviderCategory::IssueTracker, "issue_tracker"),
+            (ProviderCategory::CloudAgent, "cloud_agent"),
+            (ProviderCategory::AiUtility, "ai_utility"),
+            (ProviderCategory::WorkspaceManager, "workspace_manager"),
+            (ProviderCategory::TerminalPool, "terminal_pool"),
+        ];
+        for (cat, expected_slug) in categories {
+            assert_eq!(cat.slug(), expected_slug);
+        }
     }
 
     #[test]
@@ -737,7 +914,7 @@ mod orchestrator_tests {
     }
 
     #[tokio::test]
-    async fn discover_providers_checkout_manager_first_wins() {
+    async fn discover_providers_registers_all_checkout_managers() {
         let dir = tempdir().expect("tempdir");
         let repo_root = dir.path();
         std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
@@ -755,8 +932,8 @@ mod orchestrator_tests {
 
         let result = discover_providers(&host_bag, repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
 
-        // Checkout managers use first-wins: should have exactly one
-        assert_eq!(result.registry.checkout_managers.len(), 1, "checkout managers should be first-wins (at-most-one)");
+        // All checkout managers now register (probe_all); config preferences choose the preferred one
+        assert!(!result.registry.checkout_managers.is_empty(), "at least one checkout manager should be registered");
     }
 
     #[tokio::test]
@@ -797,7 +974,7 @@ mod orchestrator_tests {
         let fact_reg = FactoryRegistry {
             vcs: vec![],
             checkout_managers: vec![],
-            code_review: vec![],
+            change_requests: vec![],
             issue_trackers: vec![],
             cloud_agents: vec![],
             ai_utilities: vec![],
@@ -825,7 +1002,7 @@ mod orchestrator_tests {
         let fact_reg = FactoryRegistry {
             vcs: vec![],
             checkout_managers: vec![],
-            code_review: vec![],
+            change_requests: vec![],
             issue_trackers: vec![],
             cloud_agents: vec![],
             ai_utilities: vec![],
@@ -837,12 +1014,12 @@ mod orchestrator_tests {
 
         assert!(result.registry.vcs.is_empty());
         assert!(result.registry.checkout_managers.is_empty());
-        assert!(result.registry.code_review.is_empty());
+        assert!(result.registry.change_requests.is_empty());
         assert!(result.registry.issue_trackers.is_empty());
         assert!(result.registry.cloud_agents.is_empty());
         assert!(result.registry.ai_utilities.is_empty());
-        assert!(result.registry.workspace_manager.is_none());
-        assert!(result.registry.terminal_pool.is_none());
+        assert!(result.registry.workspace_managers.is_empty());
+        assert!(result.registry.terminal_pools.is_empty());
         assert!(result.unmet.is_empty());
         assert!(result.repo_slug.is_none());
     }

@@ -37,11 +37,11 @@ async fn main() {
     let registry = result.registry;
     let repo_slug = result.repo_slug;
     println!("  checkout_managers: {}", registry.checkout_managers.len());
-    println!("  code_review: {}", registry.code_review.len());
+    println!("  change_requests: {}", registry.change_requests.len());
     println!("  issue_trackers: {}", registry.issue_trackers.len());
     println!("  cloud_agents: {}", registry.cloud_agents.len());
     println!("  vcs: {}", registry.vcs.len());
-    println!("  workspace_manager: {}", registry.workspace_manager.is_some());
+    println!("  workspace_managers: {}", !registry.workspace_managers.is_empty());
 
     // Step 2: Spawn background refresh and wait for first snapshot
     println!("\n=== Step 2: Background refresh ===");

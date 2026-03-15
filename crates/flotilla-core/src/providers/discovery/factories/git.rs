@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use crate::{
     config::ConfigStore,
     providers::{
-        discovery::{EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement, VcsKind},
+        discovery::{EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement, VcsKind},
         vcs::{git::GitVcs, git_worktree::GitCheckoutManager, wt::WtCheckoutManager, CheckoutManager, Vcs},
         CommandRunner,
     },
@@ -24,7 +24,7 @@ impl Factory for GitVcsFactory {
     type Output = dyn Vcs;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("git", "Git", "", "", "")
+        ProviderDescriptor::labeled_simple(ProviderCategory::Vcs, "git", "Git", "", "", "")
     }
 
     async fn probe(
@@ -53,24 +53,16 @@ impl Factory for WtCheckoutManagerFactory {
     type Output = dyn CheckoutManager;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("wt", "wt", "CO", "Checkouts", "checkout")
+        ProviderDescriptor::labeled(ProviderCategory::CheckoutManager, "git", "wt", "wt", "CO", "Checkouts", "checkout")
     }
 
     async fn probe(
         &self,
         env: &EnvironmentBag,
-        config: &ConfigStore,
-        repo_root: &Path,
+        _config: &ConfigStore,
+        _repo_root: &Path,
         runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn CheckoutManager>, Vec<UnmetRequirement>> {
-        let checkouts_config = config.resolve_checkouts_config(repo_root);
-        let provider = checkouts_config.provider.as_str();
-
-        // If config explicitly names a different provider, yield gracefully.
-        if provider != "auto" && provider != "wt" {
-            return Err(vec![]);
-        }
-
         if env.find_binary("wt").is_some() {
             Ok(Arc::new(WtCheckoutManager::new(runner)))
         } else {
@@ -90,7 +82,7 @@ impl Factory for GitCheckoutManagerFactory {
     type Output = dyn CheckoutManager;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("git", "git worktrees", "WT", "Checkouts", "worktree")
+        ProviderDescriptor::labeled(ProviderCategory::CheckoutManager, "git", "git", "git worktrees", "WT", "Checkouts", "worktree")
     }
 
     async fn probe(
@@ -100,16 +92,9 @@ impl Factory for GitCheckoutManagerFactory {
         repo_root: &Path,
         runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn CheckoutManager>, Vec<UnmetRequirement>> {
-        let checkouts_config = config.resolve_checkouts_config(repo_root);
-        let provider = checkouts_config.provider.as_str();
-
-        // If config explicitly names a different provider, yield gracefully.
-        if provider != "auto" && provider != "git" {
-            return Err(vec![]);
-        }
-
         if env.find_binary("git").is_some() {
-            Ok(Arc::new(GitCheckoutManager::new(checkouts_config, runner)))
+            let checkout_config = config.resolve_checkout_config(repo_root);
+            Ok(Arc::new(GitCheckoutManager::new(checkout_config.path, runner)))
         } else {
             Err(vec![UnmetRequirement::MissingBinary("git".into())])
         }
@@ -158,7 +143,8 @@ mod tests {
     #[tokio::test]
     async fn git_vcs_factory_descriptor() {
         let desc = GitVcsFactory.descriptor();
-        assert_eq!(desc.name, "git");
+        assert_eq!(desc.backend, "git");
+        assert_eq!(desc.implementation, "git");
         assert_eq!(desc.display_name, "Git");
     }
 
@@ -186,47 +172,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wt_factory_excluded_by_config_git() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("wt", "/usr/local/bin/wt"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let base = dir.path();
-        // Write config that forces provider = "git"
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\nprovider = \"git\"\n").expect("failed to write config");
-        let config = ConfigStore::with_base(base);
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = WtCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        // Config exclusion returns empty unmet list
-        let unmet = result.err().expect("should be excluded by config");
-        assert!(unmet.is_empty());
-    }
-
-    #[tokio::test]
-    async fn wt_factory_allowed_by_config_auto() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("wt", "/usr/local/bin/wt"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let config = ConfigStore::with_base(dir.path());
-        // Default config has provider = "auto"
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = WtCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn wt_factory_allowed_by_config_wt() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("wt", "/usr/local/bin/wt"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let base = dir.path();
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\nprovider = \"wt\"\n").expect("failed to write config");
-        let config = ConfigStore::with_base(base);
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = WtCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
     async fn wt_factory_descriptor() {
         let desc = WtCheckoutManagerFactory.descriptor();
-        assert_eq!(desc.name, "wt");
+        assert_eq!(desc.backend, "git");
+        assert_eq!(desc.implementation, "wt");
         assert_eq!(desc.display_name, "wt");
         assert_eq!(desc.abbreviation, "CO");
         assert_eq!(desc.section_label, "Checkouts");
@@ -257,46 +206,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn git_checkout_factory_excluded_by_config_wt() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("git", "/usr/bin/git"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let base = dir.path();
-        // Write config that forces provider = "wt"
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\nprovider = \"wt\"\n").expect("failed to write config");
-        let config = ConfigStore::with_base(base);
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        // Config exclusion returns empty unmet list
-        let unmet = result.err().expect("should be excluded by config");
-        assert!(unmet.is_empty());
-    }
-
-    #[tokio::test]
-    async fn git_checkout_factory_allowed_by_config_auto() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("git", "/usr/bin/git"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let config = ConfigStore::with_base(dir.path());
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn git_checkout_factory_allowed_by_config_git() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("git", "/usr/bin/git"));
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let base = dir.path();
-        std::fs::write(base.join("config.toml"), "[vcs.git.checkouts]\nprovider = \"git\"\n").expect("failed to write config");
-        let config = ConfigStore::with_base(base);
-        let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
     async fn git_checkout_factory_descriptor() {
         let desc = GitCheckoutManagerFactory.descriptor();
-        assert_eq!(desc.name, "git");
+        assert_eq!(desc.backend, "git");
+        assert_eq!(desc.implementation, "git");
         assert_eq!(desc.display_name, "git worktrees");
         assert_eq!(desc.abbreviation, "WT");
         assert_eq!(desc.section_label, "Checkouts");

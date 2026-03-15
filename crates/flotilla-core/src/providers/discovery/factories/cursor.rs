@@ -8,7 +8,7 @@ use crate::{
     config::ConfigStore,
     providers::{
         coding_agent::{cursor::CursorCodingAgent, CloudAgentService},
-        discovery::{EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement},
+        discovery::{EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement},
         CommandRunner, ReqwestHttpClient,
     },
 };
@@ -24,7 +24,7 @@ impl Factory for CursorCodingAgentFactory {
     type Output = dyn CloudAgentService;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled("cursor", "Cursor", "S", "Sessions", "session")
+        ProviderDescriptor::labeled_simple(ProviderCategory::CloudAgent, "cursor", "Cursor", "S", "Sessions", "session")
     }
 
     async fn probe(
@@ -122,7 +122,8 @@ mod tests {
     #[tokio::test]
     async fn cursor_factory_descriptor() {
         let desc = CursorCodingAgentFactory.descriptor();
-        assert_eq!(desc.name, "cursor");
+        assert_eq!(desc.backend, "cursor");
+        assert_eq!(desc.implementation, "cursor");
         assert_eq!(desc.display_name, "Cursor");
         assert_eq!(desc.abbreviation, "S");
         assert_eq!(desc.section_label, "Sessions");

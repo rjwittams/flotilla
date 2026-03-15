@@ -6,17 +6,18 @@ use std::{
 };
 
 pub use flotilla_protocol::{CategoryLabels, RepoLabels};
-use indexmap::IndexMap;
 
 use crate::{
     data::DataStore,
-    providers::{discovery::ProviderDescriptor, registry::ProviderRegistry, types::RepoCriteria},
+    providers::{
+        registry::{ProviderRegistry, ProviderSet},
+        types::RepoCriteria,
+    },
     refresh::RepoRefreshHandle,
 };
 pub fn labels_from_registry(registry: &ProviderRegistry) -> RepoLabels {
-    fn labels<T>(map: &IndexMap<String, (ProviderDescriptor, T)>) -> CategoryLabels {
-        map.values()
-            .next()
+    fn labels<T: ?Sized>(set: &ProviderSet<T>) -> CategoryLabels {
+        set.preferred_with_desc()
             .map(|(desc, _)| CategoryLabels {
                 section: desc.section_label.clone(),
                 noun: desc.item_noun.clone(),
@@ -26,7 +27,7 @@ pub fn labels_from_registry(registry: &ProviderRegistry) -> RepoLabels {
     }
     RepoLabels {
         checkouts: labels(&registry.checkout_managers),
-        code_review: labels(&registry.code_review),
+        change_requests: labels(&registry.change_requests),
         issues: labels(&registry.issue_trackers),
         cloud_agents: labels(&registry.cloud_agents),
     }
@@ -35,25 +36,23 @@ pub fn labels_from_registry(registry: &ProviderRegistry) -> RepoLabels {
 pub fn provider_names_from_registry(registry: &ProviderRegistry) -> HashMap<String, Vec<String>> {
     let mut names: HashMap<String, Vec<String>> = HashMap::new();
 
-    fn collect_names<T>(names: &mut HashMap<String, Vec<String>>, key: impl Into<String>, map: &IndexMap<String, (ProviderDescriptor, T)>) {
-        let list: Vec<String> = map.values().map(|(d, _)| d.display_name.clone()).collect();
-        if !list.is_empty() {
-            names.insert(key.into(), list);
+    fn collect_names<T: ?Sized>(names: &mut HashMap<String, Vec<String>>, set: &ProviderSet<T>) {
+        if let Some((first_desc, _)) = set.iter().next() {
+            let slug = first_desc.category.slug().to_string();
+            let list: Vec<String> = set.display_names().map(|s| s.to_string()).collect();
+            if !list.is_empty() {
+                names.insert(slug, list);
+            }
         }
     }
-    collect_names(&mut names, "vcs", &registry.vcs);
-    collect_names(&mut names, "checkout_manager", &registry.checkout_managers);
-    collect_names(&mut names, "code_review", &registry.code_review);
-    collect_names(&mut names, "issue_tracker", &registry.issue_trackers);
-    collect_names(&mut names, "cloud_agent", &registry.cloud_agents);
-    collect_names(&mut names, "ai_utility", &registry.ai_utilities);
-
-    if let Some((desc, _)) = &registry.workspace_manager {
-        names.insert("workspace_manager".into(), vec![desc.display_name.clone()]);
-    }
-    if let Some((desc, _)) = &registry.terminal_pool {
-        names.insert("terminal_pool".into(), vec![desc.display_name.clone()]);
-    }
+    collect_names(&mut names, &registry.vcs);
+    collect_names(&mut names, &registry.checkout_managers);
+    collect_names(&mut names, &registry.change_requests);
+    collect_names(&mut names, &registry.issue_trackers);
+    collect_names(&mut names, &registry.cloud_agents);
+    collect_names(&mut names, &registry.ai_utilities);
+    collect_names(&mut names, &registry.workspace_managers);
+    collect_names(&mut names, &registry.terminal_pools);
     names
 }
 
@@ -88,7 +87,7 @@ impl RepoModel {
         let registry = ProviderRegistry::new();
         let labels = RepoLabels {
             checkouts: CategoryLabels::new("Checkouts", "checkout", "CO"),
-            code_review: CategoryLabels::new("Change Requests", "CR", "CR"),
+            change_requests: CategoryLabels::new("Change Requests", "CR", "CR"),
             issues: CategoryLabels::new("Issues", "issue", "I"),
             cloud_agents: CategoryLabels::new("Sessions", "session", "S"),
         };
@@ -105,9 +104,9 @@ mod tests {
     use super::*;
     use crate::providers::{
         ai_utility::AiUtility,
-        code_review::CodeReview,
+        change_request::ChangeRequestTracker,
         coding_agent::CloudAgentService,
-        discovery::ProviderDescriptor,
+        discovery::{ProviderCategory, ProviderDescriptor},
         issue_tracker::IssueTracker,
         types::{
             AheadBehind, BranchInfo, ChangeRequest, Checkout, CloudAgentSession, CommitInfo, Issue, WorkingTreeStatus, Workspace,
@@ -117,12 +116,19 @@ mod tests {
         workspace::WorkspaceManager,
     };
 
-    fn named_desc(name: &str) -> ProviderDescriptor {
-        ProviderDescriptor::named(name)
+    fn named_desc(category: ProviderCategory, name: &str) -> ProviderDescriptor {
+        ProviderDescriptor::named(category, name)
     }
 
-    fn labeled_desc(name: &str, display_name: &str, abbreviation: &str, section_label: &str, item_noun: &str) -> ProviderDescriptor {
-        ProviderDescriptor::labeled(name, display_name, abbreviation, section_label, item_noun)
+    fn labeled_desc(
+        category: ProviderCategory,
+        name: &str,
+        display_name: &str,
+        abbreviation: &str,
+        section_label: &str,
+        item_noun: &str,
+    ) -> ProviderDescriptor {
+        ProviderDescriptor::labeled_simple(category, name, display_name, abbreviation, section_label, item_noun)
     }
 
     // --- Stub providers for populating ProviderRegistry ---
@@ -164,9 +170,9 @@ mod tests {
         }
     }
 
-    struct StubCodeReview;
+    struct StubChangeRequestTracker;
     #[async_trait]
-    impl CodeReview for StubCodeReview {
+    impl ChangeRequestTracker for StubChangeRequestTracker {
         async fn list_change_requests(&self, _: &Path, _: usize) -> Result<Vec<(String, ChangeRequest)>, String> {
             Ok(vec![])
         }
@@ -234,15 +240,29 @@ mod tests {
     /// Build a ProviderRegistry with all provider slots populated.
     fn full_registry() -> ProviderRegistry {
         let mut reg = ProviderRegistry::new();
-        reg.vcs.insert("vcs".into(), (named_desc("StubVcs"), Arc::new(StubVcs)));
-        reg.checkout_managers
-            .insert("cm".into(), (labeled_desc("cm", "StubCM", "WT", "Checkouts", "worktree"), Arc::new(StubCheckoutManager)));
-        reg.code_review
-            .insert("cr".into(), (labeled_desc("cr", "StubCR", "PR", "Pull Requests", "pull request"), Arc::new(StubCodeReview)));
-        reg.issue_trackers.insert("it".into(), (labeled_desc("it", "StubIT", "#", "GitHub Issues", "issue"), Arc::new(StubIssueTracker)));
-        reg.cloud_agents.insert("ca".into(), (labeled_desc("ca", "StubCA", "CS", "Cloud Agents", "session"), Arc::new(StubCloudAgent)));
-        reg.ai_utilities.insert("ai".into(), (named_desc("StubAI"), Arc::new(StubAiUtility)));
-        reg.workspace_manager = Some((named_desc("StubWM"), Arc::new(StubWorkspaceManager)));
+        reg.vcs.insert("vcs", named_desc(ProviderCategory::Vcs, "StubVcs"), Arc::new(StubVcs));
+        reg.checkout_managers.insert(
+            "cm",
+            labeled_desc(ProviderCategory::CheckoutManager, "cm", "StubCM", "WT", "Checkouts", "worktree"),
+            Arc::new(StubCheckoutManager),
+        );
+        reg.change_requests.insert(
+            "cr",
+            labeled_desc(ProviderCategory::ChangeRequest, "cr", "StubCR", "PR", "Pull Requests", "pull request"),
+            Arc::new(StubChangeRequestTracker),
+        );
+        reg.issue_trackers.insert(
+            "it",
+            labeled_desc(ProviderCategory::IssueTracker, "it", "StubIT", "#", "GitHub Issues", "issue"),
+            Arc::new(StubIssueTracker),
+        );
+        reg.cloud_agents.insert(
+            "ca",
+            labeled_desc(ProviderCategory::CloudAgent, "ca", "StubCA", "CS", "Cloud Agents", "session"),
+            Arc::new(StubCloudAgent),
+        );
+        reg.ai_utilities.insert("ai", named_desc(ProviderCategory::AiUtility, "StubAI"), Arc::new(StubAiUtility));
+        reg.workspace_managers.insert("wm", named_desc(ProviderCategory::WorkspaceManager, "StubWM"), Arc::new(StubWorkspaceManager));
         reg
     }
 
@@ -258,7 +278,7 @@ mod tests {
         // Default CategoryLabels: section="—", noun="item", abbr=""
         assert_eq!(labels.checkouts.section, "\u{2014}");
         assert_eq!(labels.checkouts.noun, "item");
-        assert_eq!(labels.code_review.section, "\u{2014}");
+        assert_eq!(labels.change_requests.section, "\u{2014}");
         assert_eq!(labels.issues.section, "\u{2014}");
         assert_eq!(labels.cloud_agents.section, "\u{2014}");
     }
@@ -272,9 +292,9 @@ mod tests {
         assert_eq!(labels.checkouts.noun, "worktree");
         assert_eq!(labels.checkouts.abbr, "WT");
 
-        assert_eq!(labels.code_review.section, "Pull Requests");
-        assert_eq!(labels.code_review.noun, "pull request");
-        assert_eq!(labels.code_review.abbr, "PR");
+        assert_eq!(labels.change_requests.section, "Pull Requests");
+        assert_eq!(labels.change_requests.noun, "pull request");
+        assert_eq!(labels.change_requests.abbr, "PR");
 
         assert_eq!(labels.issues.section, "GitHub Issues");
         assert_eq!(labels.issues.noun, "issue");
@@ -289,9 +309,16 @@ mod tests {
     fn labels_with_partial_registry() {
         // Only checkout_managers and coding_agents registered.
         let mut reg = ProviderRegistry::new();
-        reg.checkout_managers
-            .insert("cm".into(), (labeled_desc("cm", "StubCM", "WT", "Checkouts", "worktree"), Arc::new(StubCheckoutManager)));
-        reg.cloud_agents.insert("ca".into(), (labeled_desc("ca", "StubCA", "CS", "Cloud Agents", "session"), Arc::new(StubCloudAgent)));
+        reg.checkout_managers.insert(
+            "cm",
+            labeled_desc(ProviderCategory::CheckoutManager, "cm", "StubCM", "WT", "Checkouts", "worktree"),
+            Arc::new(StubCheckoutManager),
+        );
+        reg.cloud_agents.insert(
+            "ca",
+            labeled_desc(ProviderCategory::CloudAgent, "ca", "StubCA", "CS", "Cloud Agents", "session"),
+            Arc::new(StubCloudAgent),
+        );
 
         let labels = labels_from_registry(&reg);
 
@@ -300,7 +327,7 @@ mod tests {
         assert_eq!(labels.cloud_agents.section, "Cloud Agents");
 
         // Missing providers fall back to defaults.
-        assert_eq!(labels.code_review.section, "\u{2014}");
+        assert_eq!(labels.change_requests.section, "\u{2014}");
         assert_eq!(labels.issues.section, "\u{2014}");
     }
 
@@ -322,7 +349,7 @@ mod tests {
 
         assert_eq!(names.get("vcs").unwrap(), &vec!["StubVcs".to_string()]);
         assert_eq!(names.get("checkout_manager").unwrap(), &vec!["StubCM".to_string()]);
-        assert_eq!(names.get("code_review").unwrap(), &vec!["StubCR".to_string()]);
+        assert_eq!(names.get("change_request").unwrap(), &vec!["StubCR".to_string()]);
         assert_eq!(names.get("issue_tracker").unwrap(), &vec!["StubIT".to_string()]);
         assert_eq!(names.get("cloud_agent").unwrap(), &vec!["StubCA".to_string()]);
         assert_eq!(names.get("ai_utility").unwrap(), &vec!["StubAI".to_string()]);
@@ -333,12 +360,15 @@ mod tests {
     #[test]
     fn provider_names_partial_registry() {
         let mut reg = ProviderRegistry::new();
-        reg.code_review
-            .insert("cr".into(), (labeled_desc("cr", "StubCR", "PR", "Pull Requests", "pull request"), Arc::new(StubCodeReview)));
+        reg.change_requests.insert(
+            "cr",
+            labeled_desc(ProviderCategory::ChangeRequest, "cr", "StubCR", "PR", "Pull Requests", "pull request"),
+            Arc::new(StubChangeRequestTracker),
+        );
 
         let names = provider_names_from_registry(&reg);
         assert_eq!(names.len(), 1);
-        assert_eq!(names.get("code_review").unwrap(), &vec!["StubCR".to_string()]);
+        assert_eq!(names.get("change_request").unwrap(), &vec!["StubCR".to_string()]);
         assert!(!names.contains_key("vcs"));
     }
 
@@ -382,7 +412,7 @@ mod tests {
         let model = RepoModel::new(PathBuf::from("/tmp/test-repo"), reg, Some("owner/repo".to_string()));
 
         assert_eq!(model.labels.checkouts.section, "Checkouts");
-        assert_eq!(model.labels.code_review.section, "Pull Requests");
+        assert_eq!(model.labels.change_requests.section, "Pull Requests");
         assert_eq!(model.labels.issues.section, "GitHub Issues");
         assert_eq!(model.labels.cloud_agents.section, "Cloud Agents");
 
@@ -392,7 +422,7 @@ mod tests {
 
         assert!(model.registry.checkout_managers.contains_key("cm"));
         assert!(model.registry.cloud_agents.contains_key("ca"));
-        assert!(model.registry.workspace_manager.is_some());
+        assert!(!model.registry.workspace_managers.is_empty());
         model.refresh_handle.trigger_refresh();
     }
 
@@ -401,7 +431,7 @@ mod tests {
         let reg = ProviderRegistry::new();
         let model = RepoModel::new(PathBuf::from("/tmp/empty"), reg, None);
         assert_eq!(model.labels.checkouts.section, "\u{2014}");
-        assert_eq!(model.labels.code_review.section, "\u{2014}");
+        assert_eq!(model.labels.change_requests.section, "\u{2014}");
         model.refresh_handle.trigger_refresh();
     }
 
@@ -410,72 +440,14 @@ mod tests {
         let model = RepoModel::new_virtual();
         assert!(model.registry.vcs.is_empty());
         assert!(model.registry.checkout_managers.is_empty());
-        assert!(model.registry.code_review.is_empty());
+        assert!(model.registry.change_requests.is_empty());
         assert!(model.registry.issue_trackers.is_empty());
         assert!(model.registry.cloud_agents.is_empty());
-        assert!(model.registry.workspace_manager.is_none());
+        assert!(model.registry.workspace_managers.is_empty());
         assert_eq!(model.labels.checkouts.section, "Checkouts");
-        assert_eq!(model.labels.code_review.section, "Change Requests");
+        assert_eq!(model.labels.change_requests.section, "Change Requests");
         assert_eq!(model.labels.issues.section, "Issues");
         assert_eq!(model.labels.cloud_agents.section, "Sessions");
         assert!(!model.data.loading);
-    }
-
-    // -------------------------------------------------------
-    // strip_external_providers
-    // -------------------------------------------------------
-
-    #[test]
-    fn strip_external_providers_keeps_local_removes_external() {
-        let mut reg = full_registry();
-
-        // Before stripping: everything populated
-        assert!(!reg.vcs.is_empty());
-        assert!(!reg.checkout_managers.is_empty());
-        assert!(!reg.code_review.is_empty());
-        assert!(!reg.issue_trackers.is_empty());
-        assert!(!reg.cloud_agents.is_empty());
-        assert!(!reg.ai_utilities.is_empty());
-        assert!(reg.workspace_manager.is_some());
-
-        reg.strip_external_providers();
-
-        // Local providers are kept
-        assert!(!reg.vcs.is_empty(), "VCS should be kept");
-        assert!(!reg.checkout_managers.is_empty(), "checkout managers should be kept");
-        assert!(reg.workspace_manager.is_some(), "workspace manager should be kept");
-
-        // External providers are removed
-        assert!(reg.code_review.is_empty(), "code review should be removed");
-        assert!(reg.issue_trackers.is_empty(), "issue trackers should be removed");
-        assert!(reg.cloud_agents.is_empty(), "cloud agents should be removed");
-        assert!(reg.ai_utilities.is_empty(), "AI utilities should be removed");
-    }
-
-    #[test]
-    fn strip_external_providers_on_empty_registry_is_noop() {
-        let mut reg = ProviderRegistry::new();
-        reg.strip_external_providers();
-        assert!(reg.vcs.is_empty());
-        assert!(reg.checkout_managers.is_empty());
-        assert!(reg.code_review.is_empty());
-    }
-
-    #[test]
-    fn provider_names_after_strip_omits_external() {
-        let mut reg = full_registry();
-        reg.strip_external_providers();
-        let names = provider_names_from_registry(&reg);
-
-        // Local providers remain
-        assert!(names.contains_key("vcs"));
-        assert!(names.contains_key("checkout_manager"));
-        assert!(names.contains_key("workspace_manager"));
-
-        // External providers gone
-        assert!(!names.contains_key("code_review"));
-        assert!(!names.contains_key("issue_tracker"));
-        assert!(!names.contains_key("cloud_agent"));
-        assert!(!names.contains_key("ai_utility"));
     }
 }
