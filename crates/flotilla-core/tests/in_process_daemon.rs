@@ -16,8 +16,8 @@ use flotilla_core::{
         coding_agent::CloudAgentService,
         discovery::{
             test_support::{
-                fake_discovery, fake_discovery_with_providers, git_process_discovery, init_git_repo_with_remote, FakeCheckoutManager,
-                FakeIssueTracker,
+                fake_discovery, fake_discovery_with_providers, git_process_discovery, init_git_repo, init_git_repo_with_remote,
+                FakeCheckoutManager, FakeIssueTracker,
             },
             DiscoveryRuntime, EnvironmentBag, Factory, ProviderDescriptor, UnmetRequirement,
         },
@@ -783,7 +783,7 @@ async fn adding_local_clone_promotes_remote_only_identity_to_local_execution() {
         .add_virtual_repo(identity.clone(), PathBuf::from("/remote/desktop/owner/repo"), ProviderData::default())
         .await
         .expect("add virtual repo");
-    daemon.add_repo(&local_repo).await.expect("add local repo");
+    daemon.add_repo(&local_repo).await.expect("add local repo should succeed");
 
     let repos = daemon.list_repos().await.expect("list repos");
     assert_eq!(repos.len(), 1);
@@ -1433,4 +1433,88 @@ async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
     let fetched: Vec<Vec<String>> = issue_tracker.fetched_by_id.lock().await.clone();
     assert!(!fetched.is_empty(), "fetch_issues_by_id should have been called");
     assert!(fetched.iter().any(|ids| ids.contains(&"42".to_string())), "fetch_issues_by_id should have been called with id '42'");
+}
+
+#[tokio::test]
+async fn track_repo_path_normalizes_worktree_to_main_repo() {
+    // Skip if git is not available (some minimal sandbox environments).
+    if std::process::Command::new("git").arg("--version").output().is_err() {
+        eprintln!("skipping: git not available");
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("main-repo");
+    init_git_repo(&repo);
+
+    // Create a worktree at a sibling directory.
+    let worktree = temp.path().join("wt-feat");
+    let repo_str = repo.to_str().expect("repo path utf8");
+    let wt_str = worktree.to_str().expect("worktree path utf8");
+
+    // Create a branch and a worktree pointing to it.
+    let status = std::process::Command::new("git").args(["-C", repo_str, "checkout", "-b", "feat"]).status().expect("git checkout -b feat");
+    assert!(status.success(), "git checkout -b feat should succeed");
+
+    let status = std::process::Command::new("git").args(["-C", repo_str, "checkout", "main"]).status().expect("git checkout main");
+    assert!(status.success(), "git checkout main should succeed");
+
+    let status =
+        std::process::Command::new("git").args(["-C", repo_str, "worktree", "add", wt_str, "feat"]).status().expect("git worktree add");
+    assert!(status.success(), "git worktree add should succeed");
+
+    // Set up daemon with no pre-tracked repos.
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![], config, git_process_discovery(false), HostName::local()).await;
+    let mut rx = daemon.subscribe();
+
+    // Track the WORKTREE path — should be normalised to the main repo root.
+    let track_id = daemon
+        .execute(Command { host: None, context_repo: None, action: CommandAction::TrackRepoPath { path: worktree.clone() } })
+        .await
+        .expect("execute TrackRepoPath should return an id");
+
+    // Collect CommandFinished and RepoTracked events.
+    let (finished_result, _repo_info) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut finished = None;
+        let mut tracked = None;
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::CommandFinished { command_id, result, .. }) if command_id == track_id => {
+                    finished = Some(result);
+                }
+                Ok(DaemonEvent::RepoTracked(info)) => {
+                    tracked = Some(*info);
+                }
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+            if let (Some(_), Some(_)) = (&finished, &tracked) {
+                break (finished.take().expect("finished set"), tracked.take().expect("tracked set"));
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for TrackRepoPath events");
+
+    // The result path should be the main repo root, not the worktree.
+    // Canonicalize both for a stable comparison on systems with symlinks (e.g. macOS /var → /private/var).
+    let canonical_repo = std::fs::canonicalize(&repo).expect("canonicalize repo");
+    match &finished_result {
+        CommandResult::RepoTracked { path: tracked_path, resolved_from } => {
+            let canonical_tracked = std::fs::canonicalize(tracked_path).expect("canonicalize tracked path");
+            assert_eq!(canonical_tracked, canonical_repo, "TrackRepoPath should resolve worktree to main repo root; got {tracked_path:?}");
+            let resolved = resolved_from.as_ref().expect("resolved_from should be Some when normalization occurred");
+            let canonical_resolved = std::fs::canonicalize(resolved).expect("canonicalize resolved_from");
+            let canonical_wt = std::fs::canonicalize(&worktree).expect("canonicalize worktree");
+            assert_eq!(canonical_resolved, canonical_wt, "resolved_from should be the original worktree path; got {resolved:?}");
+        }
+        other => panic!("expected RepoTracked result, got {other:?}"),
+    }
+
+    // The repo should be tracked under the main repo root.
+    let repos = daemon.list_repos().await.expect("list_repos");
+    assert_eq!(repos.len(), 1, "exactly one repo should be tracked");
+    let canonical_listed = std::fs::canonicalize(&repos[0].path).expect("canonicalize listed path");
+    assert_eq!(canonical_listed, canonical_repo, "listed repo path should be the main repo root");
 }

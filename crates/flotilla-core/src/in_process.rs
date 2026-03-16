@@ -1492,15 +1492,87 @@ impl InProcessDaemon {
         Ok(())
     }
 
+    /// Attempt to resolve a worktree path to its main repo root.
+    ///
+    /// Runs `git rev-parse --path-format=absolute --git-common-dir` in the given
+    /// directory.  For a normal checkout this returns `<path>/.git`, so the
+    /// parent equals the input path and `None` is returned (no normalization
+    /// needed).  For a worktree the common-dir points to the *main* repo's `.git`
+    /// directory, so its parent is the main repo root — which is returned.
+    ///
+    /// Returns `None` if `git` is unavailable, the path is not a git repo, or
+    /// the result is the same as the input (no normalization required).
+    fn try_resolve_worktree_to_repo_root(path: &Path) -> Option<PathBuf> {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let git_common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+
+        // For a bare repo the common dir IS the repo root — skip parent().
+        let is_bare = std::process::Command::new("git")
+            .args(["rev-parse", "--is-bare-repository"])
+            .current_dir(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+            .unwrap_or(false);
+
+        let repo_root = if is_bare { git_common_dir } else { git_common_dir.parent()?.to_path_buf() };
+
+        // Canonicalize both sides for a reliable comparison.
+        let canonical_root = std::fs::canonicalize(&repo_root).unwrap_or(repo_root);
+        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+        if canonical_root != canonical_path {
+            Some(canonical_root)
+        } else {
+            None
+        }
+    }
+
     /// Add a repo to tracking.
-    pub async fn add_repo(&self, path: &Path) -> Result<(), String> {
-        let path = path.to_path_buf();
+    ///
+    /// If `path` points to a git worktree (rather than the main repo root), it
+    /// is automatically normalised to the main repo root before tracking.
+    /// Returns `Ok((tracked_path, resolved_from))`:
+    /// - `tracked_path` is the path that was actually registered (may differ from
+    ///   `path` when normalisation occurred).
+    /// - `resolved_from` is `Some(original_path)` when normalisation happened,
+    ///   `None` otherwise.
+    pub async fn add_repo(&self, path: &Path) -> Result<(PathBuf, Option<PathBuf>), String> {
+        // Normalise worktree paths to the main repo root.  This is best-effort:
+        // if git is unavailable or the path is not a git repo we fall through
+        // and use the original path unchanged.
+        let (path, resolved_from) = match Self::try_resolve_worktree_to_repo_root(path) {
+            Some(repo_root) => {
+                debug!(
+                    original = %path.display(),
+                    resolved = %repo_root.display(),
+                    "normalised worktree path to main repo root"
+                );
+                (repo_root, Some(path.to_path_buf()))
+            }
+            None => (path.to_path_buf(), None),
+        };
 
         // Check if already tracked (under read lock for fast path)
         {
             let identities = self.path_identities.read().await;
             if identities.contains_key(&path) {
-                return Ok(());
+                return Ok((path, resolved_from));
             }
         }
 
@@ -1539,7 +1611,7 @@ impl InProcessDaemon {
         let mut preferred_changed = false;
         let already_tracked = self.path_identities.read().await.contains_key(&path);
         if already_tracked {
-            return Ok(());
+            return Ok((path, resolved_from));
         }
         {
             let mut repos = self.repos.write().await;
@@ -1570,7 +1642,7 @@ impl InProcessDaemon {
             self.broadcast_snapshot_inner(&path, false).await;
         }
 
-        Ok(())
+        Ok((path, resolved_from))
     }
 
     /// Remove a repo from tracking.
@@ -1737,7 +1809,9 @@ impl DaemonHandle for InProcessDaemon {
                     description,
                 });
                 let result = match self.add_repo(path).await {
-                    Ok(()) => flotilla_protocol::CommandResult::RepoTracked { path: path.clone(), resolved_from: None },
+                    Ok((tracked_path, resolved_from)) => {
+                        flotilla_protocol::CommandResult::RepoTracked { path: tracked_path, resolved_from }
+                    }
                     Err(message) => flotilla_protocol::CommandResult::Error { message },
                 };
                 let _ = self.event_tx.send(DaemonEvent::CommandFinished {
