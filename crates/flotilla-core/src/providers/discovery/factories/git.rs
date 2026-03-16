@@ -27,7 +27,7 @@ impl Factory for GitVcsFactory {
         ProviderDescriptor::labeled_simple(ProviderCategory::Vcs, "git", "Git", "", "", "")
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         env: &EnvironmentBag,
         _config: &ConfigStore,
@@ -57,7 +57,7 @@ impl Factory for WtCheckoutManagerFactory {
         ProviderDescriptor::labeled(ProviderCategory::CheckoutManager, "git", "wt", "wt", "CO", "Checkouts", "checkout")
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         env: &EnvironmentBag,
         _config: &ConfigStore,
@@ -87,7 +87,7 @@ impl Factory for GitCheckoutManagerFactory {
         ProviderDescriptor::labeled(ProviderCategory::CheckoutManager, "git", "git", "git worktrees", "WT", "Checkouts", "worktree")
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         env: &EnvironmentBag,
         config: &ConfigStore,
@@ -116,7 +116,8 @@ mod tests {
     use crate::{
         config::ConfigStore,
         providers::discovery::{
-            test_support::DiscoveryMockRunner, EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement, VcsKind,
+            test_support::{test_attachable_store, DiscoveryMockRunner},
+            EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement, VcsKind,
         },
     };
 
@@ -128,7 +129,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitVcsFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = GitVcsFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_ok());
     }
 
@@ -138,7 +139,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitVcsFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = GitVcsFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         let unmet = result.err().expect("should fail without checkout");
         assert!(unmet.contains(&UnmetRequirement::NoVcsCheckout));
     }
@@ -159,7 +160,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = WtCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = WtCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_ok());
     }
 
@@ -169,7 +170,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = WtCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = WtCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         let unmet = result.err().expect("should fail without wt binary");
         assert!(unmet.contains(&UnmetRequirement::MissingBinary("wt".into())));
     }
@@ -193,7 +194,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_ok());
     }
 
@@ -203,7 +204,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = GitCheckoutManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         let unmet = result.err().expect("should fail without git binary");
         assert!(unmet.contains(&UnmetRequirement::MissingBinary("git".into())));
     }

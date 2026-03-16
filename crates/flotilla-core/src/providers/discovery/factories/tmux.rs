@@ -23,7 +23,7 @@ impl Factory for TmuxWorkspaceManagerFactory {
         ProviderDescriptor::labeled_simple(ProviderCategory::WorkspaceManager, "tmux", "tmux Workspaces", "", "", "")
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         env: &EnvironmentBag,
         _config: &ConfigStore,
@@ -46,7 +46,10 @@ mod tests {
     use super::TmuxWorkspaceManagerFactory;
     use crate::{
         config::ConfigStore,
-        providers::discovery::{test_support::DiscoveryMockRunner, EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement},
+        providers::discovery::{
+            test_support::{test_attachable_store, DiscoveryMockRunner},
+            EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement,
+        },
     };
 
     #[tokio::test]
@@ -55,7 +58,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = TmuxWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = TmuxWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_ok());
     }
 
@@ -65,7 +68,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = TmuxWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = TmuxWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         let unmet = result.err().expect("should fail without TMUX env var");
         assert!(unmet.contains(&UnmetRequirement::MissingEnvVar("TMUX".into())));
     }

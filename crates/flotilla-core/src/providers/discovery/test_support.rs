@@ -17,6 +17,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use super::{DiscoveryRuntime, EnvironmentBag, Factory, FactoryRegistry, ProviderCategory, ProviderDescriptor, UnmetRequirement};
 use crate::{
+    attachable::{AttachableStore, SharedAttachableStore},
     config::ConfigStore,
     providers::{
         change_request::ChangeRequestTracker, discovery::EnvVars, issue_tracker::IssueTracker, vcs::CheckoutManager, ChannelLabel,
@@ -89,6 +90,10 @@ pub fn init_git_repo_with_remote(path: &Path, remote: &str) -> RepoIdentity {
     let status = ProcessCommand::new("git").args(["-C", repo, "remote", "add", "origin", remote]).status().expect("git remote add origin");
     assert!(status.success(), "git remote add origin should succeed");
     RepoIdentity::from_remote_url(remote).expect("remote should produce repo identity")
+}
+
+pub fn test_attachable_store(config: &ConfigStore) -> SharedAttachableStore {
+    Arc::new(Mutex::new(AttachableStore::with_base(config.base_path())))
 }
 
 impl DiscoveryMockRunnerBuilder {
@@ -380,7 +385,7 @@ impl Factory for FakeIssueTrackerFactory {
         ProviderDescriptor::labeled_simple(ProviderCategory::IssueTracker, "fake-issues", "Fake Issues", "#", "Issues", "issue")
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,
@@ -410,7 +415,7 @@ impl Factory for FakeCheckoutManagerFactory {
         )
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,
@@ -433,7 +438,7 @@ impl Factory for FakeChangeRequestFactory {
         ProviderDescriptor::labeled_simple(ProviderCategory::ChangeRequest, "fake-cr", "Fake PRs", "PR", "Pull Requests", "pull request")
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,

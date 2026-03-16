@@ -355,6 +355,8 @@ impl ShpoolTerminalPool {
     }
 
     fn register_attachable(&self, terminal: &ManagedTerminal, session_name: &str) {
+        // TODO(#360): prune stale attachables/bindings when sessions disappear so
+        // the registry does not grow unbounded over time.
         let host = HostName::local();
         let checkout_path = if terminal.working_directory.as_os_str().is_empty() {
             Self::synthetic_checkout_path(&terminal.id)
@@ -420,16 +422,6 @@ impl TerminalPool for ShpoolTerminalPool {
         let socket_path_str = self.socket_path.display().to_string();
         let config_path_str = self.config_path.display().to_string();
         let cwd_str = cwd.display().to_string();
-        self.register_attachable(
-            &ManagedTerminal {
-                id: id.clone(),
-                role: id.role.clone(),
-                command: command.to_string(),
-                working_directory: cwd.to_path_buf(),
-                status: TerminalStatus::Running,
-            },
-            &session_name,
-        );
         fn sq(s: &str) -> String {
             format!("'{}'", s.replace('\'', "'\\''"))
         }
@@ -474,7 +466,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        attachable::{AttachableContent, AttachableStore, BindingObjectKind, SharedAttachableStore},
+        attachable::{AttachableStore, BindingObjectKind, SharedAttachableStore},
         providers::testing::MockRunner,
     };
 
@@ -667,27 +659,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_command_registers_attachable_binding_with_real_cwd() {
+    async fn attach_command_does_not_register_attachable_binding() {
         let (pool, store, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
         let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
 
-        pool.attach_command(&id, "bash", Path::new("/home/dev/project")).await.expect("attach command");
+        let command = pool.attach_command(&id, "bash", Path::new("/home/dev/project")).await.expect("attach command");
+
+        assert!(command.contains(" attach"));
+        assert!(command.contains("flotilla/feat/shell/0"));
 
         let store = store.lock().expect("lock store");
-        let attachable_id = store
-            .lookup_binding("terminal_pool", "shpool", BindingObjectKind::Attachable, "flotilla/feat/shell/0")
-            .expect("binding should exist");
-        let attachable = store
-            .registry()
-            .attachables
-            .values()
-            .find(|attachable| attachable.id.as_str() == attachable_id)
-            .expect("attachable should exist");
-        assert_eq!(
-            match &attachable.content {
-                AttachableContent::Terminal(terminal) => terminal.working_directory.clone(),
-            },
-            PathBuf::from("/home/dev/project")
+        assert!(
+            store.lookup_binding("terminal_pool", "shpool", BindingObjectKind::Attachable, "flotilla/feat/shell/0").is_none(),
+            "attach_command should not register a running attachable before the provider confirms it exists"
         );
     }
 

@@ -34,18 +34,17 @@ async fn main() {
     let factories = FactoryRegistry::default_all();
     let attachable_store = Arc::new(std::sync::Mutex::new(AttachableStore::with_base(config.base_path())));
 
-    let result =
-        discovery::discover_providers(
-            &host_bag,
-            &repo_root,
-            &repo_dets,
-            &factories,
-            &config,
-            Arc::clone(&runner),
-            attachable_store,
-            &ProcessEnvVars,
-        )
-        .await;
+    let result = discovery::discover_providers(
+        &host_bag,
+        &repo_root,
+        &repo_dets,
+        &factories,
+        &config,
+        Arc::clone(&runner),
+        attachable_store,
+        &ProcessEnvVars,
+    )
+    .await;
     let registry = result.registry;
     let repo_slug = result.repo_slug;
     println!("  checkout_managers: {}", registry.checkout_managers.len());

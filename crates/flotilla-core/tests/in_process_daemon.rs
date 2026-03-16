@@ -88,7 +88,7 @@ impl Factory for SlowCloudAgentFactory {
         ProviderDescriptor::labeled_simple(ProviderCategory::CloudAgent, "slow-agent", "Slow Agent", "AG", "Sessions", "session")
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         _: &EnvironmentBag,
         _: &ConfigStore,
@@ -146,7 +146,7 @@ impl Factory for SlowAiUtilityFactory {
         ProviderDescriptor::named(ProviderCategory::AiUtility, "slow-ai")
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         _: &EnvironmentBag,
         _: &ConfigStore,

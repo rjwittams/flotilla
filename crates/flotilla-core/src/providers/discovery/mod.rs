@@ -384,23 +384,6 @@ pub trait Factory: Send + Sync {
         config: &ConfigStore,
         repo_root: &Path,
         runner: Arc<dyn CommandRunner>,
-    ) -> Result<Arc<Self::Output>, Vec<UnmetRequirement>> {
-        self.probe_with_services(
-            env,
-            config,
-            repo_root,
-            runner,
-            Arc::new(std::sync::Mutex::new(AttachableStore::with_base(config.base_path()))),
-        )
-        .await
-    }
-
-    async fn probe_with_services(
-        &self,
-        env: &EnvironmentBag,
-        config: &ConfigStore,
-        repo_root: &Path,
-        runner: Arc<dyn CommandRunner>,
         attachable_store: SharedAttachableStore,
     ) -> Result<Arc<Self::Output>, Vec<UnmetRequirement>>;
 }
@@ -518,7 +501,7 @@ pub async fn discover_providers(
         F: FnMut(ProviderDescriptor, Arc<T>),
     {
         for factory in factories {
-            match factory.probe_with_services(env, config, repo_root, runner.clone(), Arc::clone(attachable_store)).await {
+            match factory.probe(env, config, repo_root, runner.clone(), Arc::clone(attachable_store)).await {
                 Ok(provider) => insert(factory.descriptor(), provider),
                 Err(reqs) => {
                     let name = factory.descriptor().implementation.clone();

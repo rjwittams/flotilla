@@ -23,7 +23,7 @@ impl Factory for PassthroughTerminalPoolFactory {
         ProviderDescriptor::named(ProviderCategory::TerminalPool, "passthrough")
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,
@@ -42,7 +42,10 @@ mod tests {
     use super::PassthroughTerminalPoolFactory;
     use crate::{
         config::ConfigStore,
-        providers::discovery::{test_support::DiscoveryMockRunner, EnvironmentBag, Factory},
+        providers::discovery::{
+            test_support::{test_attachable_store, DiscoveryMockRunner},
+            EnvironmentBag, Factory,
+        },
     };
 
     #[tokio::test]
@@ -51,7 +54,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = PassthroughTerminalPoolFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = PassthroughTerminalPoolFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_ok());
     }
 

@@ -23,7 +23,7 @@ impl Factory for ZellijWorkspaceManagerFactory {
         ProviderDescriptor::labeled_simple(ProviderCategory::WorkspaceManager, "zellij", "zellij Workspaces", "", "", "")
     }
 
-    async fn probe_with_services(
+    async fn probe(
         &self,
         env: &EnvironmentBag,
         _config: &ConfigStore,
@@ -52,7 +52,10 @@ mod tests {
     use super::ZellijWorkspaceManagerFactory;
     use crate::{
         config::ConfigStore,
-        providers::discovery::{test_support::DiscoveryMockRunner, EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement},
+        providers::discovery::{
+            test_support::{test_attachable_store, DiscoveryMockRunner},
+            EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement,
+        },
     };
 
     #[tokio::test]
@@ -61,7 +64,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().on_run("zellij", &["--version"], Ok("zellij 0.42.2".into())).build());
-        let result = ZellijWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = ZellijWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_ok());
     }
 
@@ -71,7 +74,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = ZellijWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = ZellijWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         let unmet = result.err().expect("should fail without ZELLIJ env var");
         assert!(unmet.contains(&UnmetRequirement::MissingEnvVar("ZELLIJ".into())));
     }
@@ -82,7 +85,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().on_run("zellij", &["--version"], Ok("zellij 0.39.0".into())).build());
-        let result = ZellijWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = ZellijWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_err());
     }
 
@@ -92,7 +95,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().on_run("zellij", &["--version"], Err("command not found".into())).build());
-        let result = ZellijWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = ZellijWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_err());
     }
 
@@ -104,7 +107,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().on_run("zellij", &["--version"], Ok("zellij 0.42.2".into())).build());
-        let result = ZellijWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = ZellijWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_ok(), "factory should succeed when ZELLIJ_SESSION_NAME is set");
     }
 
