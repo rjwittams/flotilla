@@ -6,7 +6,7 @@ use crokey::KeyCombination;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use flotilla_core::config::KeysConfig;
 
-use crate::app::intent::Intent;
+use crate::app::{intent::Intent, ui_state::UiMode};
 
 /// An action that can be triggered by a key binding.
 ///
@@ -184,6 +184,22 @@ pub enum ModeId {
     FilePicker,
     BranchInput,
     IssueSearch,
+}
+
+impl From<&UiMode> for ModeId {
+    fn from(mode: &UiMode) -> Self {
+        match mode {
+            UiMode::Normal => ModeId::Normal,
+            UiMode::Help => ModeId::Help,
+            UiMode::Config => ModeId::Config,
+            UiMode::ActionMenu { .. } => ModeId::ActionMenu,
+            UiMode::BranchInput { .. } => ModeId::BranchInput,
+            UiMode::FilePicker { .. } => ModeId::FilePicker,
+            UiMode::DeleteConfirm { .. } => ModeId::DeleteConfirm,
+            UiMode::CloseConfirm { .. } => ModeId::CloseConfirm,
+            UiMode::IssueSearch { .. } => ModeId::IssueSearch,
+        }
+    }
 }
 
 // ── Keymap ──
@@ -624,5 +640,15 @@ mod tests {
         let keymap = Keymap::from_config(&keys);
         assert_eq!(keymap.resolve(ModeId::Normal, kc(KeyCode::Char('j'), KeyModifiers::NONE)), Some(Action::SelectNext));
         assert_eq!(keymap.resolve(ModeId::Normal, kc(KeyCode::Char('q'), KeyModifiers::NONE)), Some(Action::Quit));
+    }
+
+    // ── ModeId from UiMode tests ──
+
+    #[test]
+    fn mode_id_from_ui_mode() {
+        assert_eq!(ModeId::from(&UiMode::Normal), ModeId::Normal);
+        assert_eq!(ModeId::from(&UiMode::Help), ModeId::Help);
+        assert_eq!(ModeId::from(&UiMode::Config), ModeId::Config);
+        assert_eq!(ModeId::from(&UiMode::ActionMenu { items: vec![], index: 0 }), ModeId::ActionMenu);
     }
 }
