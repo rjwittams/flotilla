@@ -536,12 +536,8 @@ fn clear_host_summary(local_host: &HostName, hosts: &mut HashMap<HostName, HostS
     if host_name == local_host {
         return None;
     }
-    let Some(state) = hosts.get_mut(host_name) else {
-        return None;
-    };
-    if state.summary.is_none() {
-        return None;
-    }
+    let state = hosts.get_mut(host_name)?;
+    state.summary.as_ref()?;
     state.summary = None;
     state.removed = false;
     state.seq += 1;
@@ -1663,6 +1659,10 @@ impl InProcessDaemon {
     ///
     /// Mirrors host events into daemon-owned host state so replay/query paths
     /// can use a single authoritative source of truth.
+    ///
+    /// For peer status changes, prefer [`publish_peer_connection_status`](Self::publish_peer_connection_status)
+    /// which emits both a `PeerStatusChanged` and a `HostSnapshot` for live subscribers.
+    /// Calling `send_event(PeerStatusChanged)` directly only updates replay state.
     pub fn send_event(&self, event: DaemonEvent) {
         match &event {
             DaemonEvent::PeerStatusChanged { host, status } => {
