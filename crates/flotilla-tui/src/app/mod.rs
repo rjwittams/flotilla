@@ -470,6 +470,11 @@ impl App {
                 }
                 self.model.peer_hosts.sort_by(|a, b| a.name.cmp(&b.name));
             }
+            DaemonEvent::HostSnapshot(_snap) => {
+                // HostSnapshot events are consumed by future TUI host panels.
+                // For now, no additional processing is needed — peer status
+                // is already handled by PeerStatusChanged events.
+            }
         }
     }
 

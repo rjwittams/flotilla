@@ -253,6 +253,16 @@ pub(crate) fn format_event_human(event: &flotilla_protocol::DaemonEvent) -> Stri
             };
             format!("[peer]     {host}: {state}")
         }
+        DaemonEvent::HostSnapshot(snap) => {
+            let state = match &snap.connection_status {
+                PeerConnectionState::Connected => "connected",
+                PeerConnectionState::Disconnected => "disconnected",
+                PeerConnectionState::Connecting => "connecting",
+                PeerConnectionState::Reconnecting => "reconnecting",
+                PeerConnectionState::Rejected { .. } => "rejected",
+            };
+            format!("[host]     {}: {} (seq {})", snap.host_name, state, snap.seq)
+        }
     }
 }
 
