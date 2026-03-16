@@ -4,7 +4,7 @@ use comfy_table::{presets::UTF8_FULL_CONDENSED, Cell, Table};
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_protocol::{
     output::OutputFormat, Command, CommandResult, DaemonEvent, HostProvidersResponse, HostStatusResponse, PeerConnectionState,
-    RepoDetailResponse, RepoIdentity, RepoProvidersResponse, RepoWorkResponse, StatusResponse, StreamKey, TopologyResponse,
+    RepoDetailResponse, RepoProvidersResponse, RepoWorkResponse, StatusResponse, StreamKey, TopologyResponse,
 };
 
 use crate::socket::SocketDaemon;

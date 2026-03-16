@@ -643,6 +643,7 @@ fn build_header_row(_header: &SectionHeader) -> Row<'static> {
     .height(1)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_item_row<'a>(
     item: &WorkItem,
     providers: &ProviderData,
