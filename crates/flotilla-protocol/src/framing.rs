@@ -20,7 +20,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::{HostName, Request};
+    use crate::{HostName, Message, Request};
 
     #[tokio::test]
     async fn write_message_line_produces_valid_json_line() {

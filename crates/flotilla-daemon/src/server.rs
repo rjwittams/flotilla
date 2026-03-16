@@ -1720,7 +1720,7 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, request: Request) 
         },
 
         Request::GetState { repo } => match ctx.daemon.get_state(&repo).await {
-            Ok(snapshot) => Message::ok_response(id, Response::GetState(snapshot)),
+            Ok(snapshot) => Message::ok_response(id, Response::GetState(Box::new(snapshot))),
             Err(e) => Message::error_response(id, e),
         },
 
@@ -1942,8 +1942,8 @@ mod tests {
         match msg {
             Message::Response { id, response } => {
                 assert_eq!(id, expected_id);
-                match response {
-                    ResponseResult::Ok { response } => response,
+                match *response {
+                    ResponseResult::Ok { response } => *response,
                     ResponseResult::Err { message } => panic!("expected ok response, got error: {message}"),
                 }
             }
@@ -1955,7 +1955,7 @@ mod tests {
         match msg {
             Message::Response { id, response } => {
                 assert_eq!(id, expected_id);
-                match response {
+                match *response {
                     ResponseResult::Err { message } => {
                         assert!(message.contains(needle), "unexpected error payload: {message}");
                     }
@@ -2059,7 +2059,7 @@ mod tests {
         match parsed {
             Message::Response { id, response } => {
                 assert_eq!(id, 9);
-                assert!(matches!(response, ResponseResult::Ok { response: Response::Refresh }));
+                assert!(matches!(*response, ResponseResult::Ok { response } if matches!(*response, Response::Refresh)));
             }
             other => panic!("expected response, got {other:?}"),
         }

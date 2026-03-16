@@ -64,6 +64,9 @@ pub struct ReplayCursor {
     pub seq: u64,
 }
 
+/// Typed client-to-daemon RPC requests.
+///
+/// On the wire, the tagged enum payload is encoded under `params`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "params", rename_all = "snake_case")]
 pub enum Request {
@@ -85,11 +88,14 @@ pub enum Request {
     GetTopology,
 }
 
+/// Typed daemon RPC success payloads.
+///
+/// On the wire, the tagged enum payload is encoded under `data`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum Response {
     ListRepos(Vec<RepoInfo>),
-    GetState(RepoSnapshot),
+    GetState(Box<RepoSnapshot>),
     Execute { command_id: u64 },
     Cancel,
     Refresh,
@@ -109,7 +115,7 @@ pub enum Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ResponseResult {
-    Ok { response: Response },
+    Ok { response: Box<Response> },
     Err { message: String },
 }
 
@@ -120,7 +126,7 @@ pub enum Message {
     #[serde(rename = "request")]
     Request { id: u64, request: Request },
     #[serde(rename = "response")]
-    Response { id: u64, response: ResponseResult },
+    Response { id: u64, response: Box<ResponseResult> },
     #[serde(rename = "event")]
     Event { event: Box<DaemonEvent> },
     #[serde(rename = "hello")]
@@ -137,12 +143,12 @@ pub enum Message {
 impl Message {
     /// Build a success response.
     pub fn ok_response(id: u64, response: Response) -> Self {
-        Message::Response { id, response: ResponseResult::Ok { response } }
+        Message::Response { id, response: Box::new(ResponseResult::Ok { response: Box::new(response) }) }
     }
 
     /// Build an error response.
     pub fn error_response(id: u64, message: impl Into<String>) -> Self {
-        Message::Response { id, response: ResponseResult::Err { message: message.into() } }
+        Message::Response { id, response: Box::new(ResponseResult::Err { message: message.into() }) }
     }
 }
 
@@ -243,41 +249,50 @@ mod tests {
 
     #[test]
     fn message_response_roundtrip() {
-        let msg = Message::Response { id: 1, response: ResponseResult::Ok { response: Response::ListRepos(vec![]) } };
+        let msg = Message::Response { id: 1, response: Box::new(ResponseResult::Ok { response: Box::new(Response::ListRepos(vec![])) }) };
         let json = serde_json::to_string(&msg).expect("serialize");
         let deserialized: Message = serde_json::from_str(&json).expect("deserialize");
         match deserialized {
             Message::Response { id, response } => {
                 assert_eq!(id, 1);
-                match response {
-                    ResponseResult::Ok { response: Response::ListRepos(repos) } => assert!(repos.is_empty()),
+                match *response {
+                    ResponseResult::Ok { response } => match *response {
+                        Response::ListRepos(repos) => assert!(repos.is_empty()),
+                        other => panic!("expected list repos response, got {:?}", other),
+                    },
                     other => panic!("expected list repos response, got {:?}", other),
                 }
             }
             other => panic!("expected Response, got {:?}", other),
         }
 
-        let msg = Message::Response { id: 2, response: ResponseResult::Ok { response: Response::Execute { command_id: 99 } } };
+        let msg = Message::Response {
+            id: 2,
+            response: Box::new(ResponseResult::Ok { response: Box::new(Response::Execute { command_id: 99 }) }),
+        };
         let json = serde_json::to_string(&msg).expect("serialize");
         let deserialized: Message = serde_json::from_str(&json).expect("deserialize");
         match deserialized {
             Message::Response { id, response } => {
                 assert_eq!(id, 2);
-                match response {
-                    ResponseResult::Ok { response: Response::Execute { command_id } } => assert_eq!(command_id, 99),
+                match *response {
+                    ResponseResult::Ok { response } => match *response {
+                        Response::Execute { command_id } => assert_eq!(command_id, 99),
+                        other => panic!("expected execute response, got {:?}", other),
+                    },
                     other => panic!("expected execute response, got {:?}", other),
                 }
             }
             other => panic!("expected Response, got {:?}", other),
         }
 
-        let msg = Message::Response { id: 3, response: ResponseResult::Err { message: "not found".to_string() } };
+        let msg = Message::Response { id: 3, response: Box::new(ResponseResult::Err { message: "not found".to_string() }) };
         let json = serde_json::to_string(&msg).expect("serialize");
         let deserialized: Message = serde_json::from_str(&json).expect("deserialize");
         match deserialized {
             Message::Response { id, response } => {
                 assert_eq!(id, 3);
-                match response {
+                match *response {
                     ResponseResult::Err { message } => assert_eq!(message, "not found"),
                     other => panic!("expected error response, got {:?}", other),
                 }
@@ -411,8 +426,11 @@ mod tests {
         match msg {
             Message::Response { id, response } => {
                 assert_eq!(id, 7);
-                match response {
-                    ResponseResult::Ok { response: Response::Execute { command_id } } => assert_eq!(command_id, 42),
+                match *response {
+                    ResponseResult::Ok { response } => match *response {
+                        Response::Execute { command_id } => assert_eq!(command_id, 42),
+                        other => panic!("expected execute response, got {:?}", other),
+                    },
                     other => panic!("expected execute response, got {:?}", other),
                 }
             }
@@ -426,8 +444,8 @@ mod tests {
         match msg {
             Message::Response { id, response } => {
                 assert_eq!(id, 99);
-                match response {
-                    ResponseResult::Ok { response: Response::Refresh } => {}
+                match *response {
+                    ResponseResult::Ok { response } => assert!(matches!(*response, Response::Refresh)),
                     other => panic!("expected refresh response, got {:?}", other),
                 }
             }
@@ -441,7 +459,7 @@ mod tests {
         match msg {
             Message::Response { id, response } => {
                 assert_eq!(id, 5);
-                match response {
+                match *response {
                     ResponseResult::Err { message } => assert_eq!(message, "something went wrong"),
                     other => panic!("expected error response, got {:?}", other),
                 }

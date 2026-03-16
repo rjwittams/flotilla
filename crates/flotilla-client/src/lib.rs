@@ -117,7 +117,7 @@ impl SocketDaemon {
                             Message::Response { id, response } => {
                                 let mut map = reader_pending.lock().await;
                                 if let Some(tx) = map.remove(&id) {
-                                    let _ = tx.send(response);
+                                    let _ = tx.send(*response);
                                 } else {
                                     warn!(%id, "received response for unknown request id");
                                 }
@@ -387,7 +387,7 @@ fn encode_replay_cursors(last_seen: &HashMap<RepoIdentity, u64>) -> Vec<ReplayCu
 
 fn into_success_response(result: ResponseResult) -> Result<Response, String> {
     match result {
-        ResponseResult::Ok { response } => Ok(response),
+        ResponseResult::Ok { response } => Ok(*response),
         ResponseResult::Err { message } => Err(message),
     }
 }
@@ -565,7 +565,7 @@ impl DaemonHandle for SocketDaemon {
         // Always RPC to server — local state only tracks seqs for gap detection,
         // not full snapshots (work_items can't be materialized client-side).
         match into_success_response(self.request(Request::GetState { repo: repo.to_path_buf() }).await?)? {
-            Response::GetState(snapshot) => Ok(snapshot),
+            Response::GetState(snapshot) => Ok(*snapshot),
             other => Err(format!("unexpected response for get_state: {other:?}")),
         }
     }
@@ -798,10 +798,12 @@ mod tests {
         assert_eq!(request, Request::ListRepos);
 
         let tx = harness.pending.lock().await.remove(&id).expect("pending sender should exist");
-        tx.send(ResponseResult::Ok { response: Response::ListRepos(vec![]) }).expect("send response");
+        tx.send(ResponseResult::Ok { response: Box::new(Response::ListRepos(vec![])) }).expect("send response");
 
         let response = request_task.await.expect("join").expect("send_request");
-        assert!(matches!(response, ResponseResult::Ok { response: Response::ListRepos(repos) } if repos.is_empty()));
+        assert!(
+            matches!(response, ResponseResult::Ok { response } if matches!(&*response, Response::ListRepos(repos) if repos.is_empty()))
+        );
     }
 
     #[tokio::test]
@@ -954,7 +956,7 @@ mod tests {
 
         let replay_events = vec![DaemonEvent::RepoDelta(Box::new(make_delta(&repo, 3, 4)))];
         let tx = harness.pending.lock().await.remove(&id).expect("pending sender for replay");
-        tx.send(ResponseResult::Ok { response: Response::ReplaySince(replay_events) }).expect("send replay response");
+        tx.send(ResponseResult::Ok { response: Box::new(Response::ReplaySince(replay_events)) }).expect("send replay response");
         recover_task.await.expect("join recover");
 
         let event = event_rx.recv().await.expect("forwarded replay event");
@@ -1232,7 +1234,8 @@ mod tests {
 
         // Respond with the wrong success variant.
         let tx = harness.pending.lock().await.remove(&id).expect("pending sender");
-        tx.send(ResponseResult::Ok { response: Response::ListHosts(HostListResponse { hosts: vec![] }) }).expect("send bad response");
+        tx.send(ResponseResult::Ok { response: Box::new(Response::ListHosts(HostListResponse { hosts: vec![] })) })
+            .expect("send bad response");
 
         // Should complete without panic.
         recover_task.await.expect("recover_from_gap should not panic on unexpected response variant");
@@ -1312,7 +1315,7 @@ mod tests {
         // Respond with a full snapshot event.
         let replay_events = vec![DaemonEvent::RepoSnapshot(Box::new(make_snapshot(&repo, 10)))];
         let tx = harness.pending.lock().await.remove(&id).expect("pending sender");
-        tx.send(ResponseResult::Ok { response: Response::ReplaySince(replay_events) }).expect("send replay response");
+        tx.send(ResponseResult::Ok { response: Box::new(Response::ReplaySince(replay_events)) }).expect("send replay response");
 
         recover_task.await.expect("join recover");
 
@@ -1350,7 +1353,7 @@ mod tests {
         // Replay returns events with seq=10, which is behind the live update of 20.
         let replay_events = vec![DaemonEvent::RepoDelta(Box::new(make_delta(&repo, 3, 10)))];
         let tx = harness.pending.lock().await.remove(&id).expect("pending sender");
-        tx.send(ResponseResult::Ok { response: Response::ReplaySince(replay_events) }).expect("send replay response");
+        tx.send(ResponseResult::Ok { response: Box::new(Response::ReplaySince(replay_events)) }).expect("send replay response");
 
         recover_task.await.expect("join recover");
 
@@ -1390,7 +1393,7 @@ mod tests {
             description: "replayed".into(),
         }];
         let tx = harness.pending.lock().await.remove(&id).expect("pending sender");
-        tx.send(ResponseResult::Ok { response: Response::ReplaySince(replay_events) }).expect("send replay response");
+        tx.send(ResponseResult::Ok { response: Box::new(Response::ReplaySince(replay_events)) }).expect("send replay response");
 
         recover_task.await.expect("join recover");
 
@@ -1425,7 +1428,7 @@ mod tests {
         // Respond with empty event list.
         let replay_events: Vec<DaemonEvent> = vec![];
         let tx = harness.pending.lock().await.remove(&id).expect("pending sender");
-        tx.send(ResponseResult::Ok { response: Response::ReplaySince(replay_events) }).expect("send replay response");
+        tx.send(ResponseResult::Ok { response: Box::new(Response::ReplaySince(replay_events)) }).expect("send replay response");
 
         recover_task.await.expect("join recover");
 
@@ -1446,7 +1449,7 @@ mod tests {
     #[test]
     fn into_success_response_returns_response_for_success() {
         let response = into_success_response(ResponseResult::Ok {
-            response: Response::GetTopology(TopologyResponse { local_host: HostName::new("local"), routes: vec![] }),
+            response: Box::new(Response::GetTopology(TopologyResponse { local_host: HostName::new("local"), routes: vec![] })),
         })
         .expect("should succeed");
         assert!(matches!(response, Response::GetTopology(TopologyResponse { routes, .. }) if routes.is_empty()));
