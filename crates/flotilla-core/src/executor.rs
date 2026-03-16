@@ -14,7 +14,7 @@ use flotilla_protocol::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    attachable::{AttachableStore, BindingObjectKind, ProviderBinding},
+    attachable::{BindingObjectKind, ProviderBinding, SharedAttachableStore},
     data,
     provider_data::ProviderData,
     providers::{
@@ -57,6 +57,7 @@ enum CheckoutIntent {
 /// ArchiveSession, GenerateBranchName) return `ExecutionPlan::Steps` with
 /// cancellation points between steps. All other commands delegate to
 /// `execute()` and return `ExecutionPlan::Immediate`.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_plan(
     cmd: Command,
     repo: RepoExecutionContext,
@@ -64,6 +65,7 @@ pub async fn build_plan(
     providers_data: Arc<ProviderData>,
     runner: Arc<dyn CommandRunner>,
     config_base: PathBuf,
+    attachable_store: SharedAttachableStore,
     local_host: HostName,
 ) -> ExecutionPlan {
     let Command { action, .. } = cmd;
@@ -95,7 +97,7 @@ pub async fn build_plan(
         CommandAction::GenerateBranchName { issue_keys } => build_generate_branch_name_plan(issue_keys, registry, providers_data).await,
 
         action => {
-            let result = execute(action, &repo, &registry, &providers_data, &*runner, &config_base, &local_host).await;
+            let result = execute(action, &repo, &registry, &providers_data, &*runner, &config_base, &attachable_store, &local_host).await;
             ExecutionPlan::Immediate(result)
         }
     }
@@ -377,8 +379,17 @@ async fn select_existing_workspace(ws_mgr: &dyn WorkspaceManager, checkout_path:
     false
 }
 
-fn persist_workspace_binding(config_base: &Path, provider_name: &str, workspace_ref: &str, target_host: &HostName, checkout_path: &Path) {
-    let mut store = AttachableStore::with_base(config_base);
+fn persist_workspace_binding(
+    attachable_store: &SharedAttachableStore,
+    provider_name: &str,
+    workspace_ref: &str,
+    target_host: &HostName,
+    checkout_path: &Path,
+) {
+    let Ok(mut store) = attachable_store.lock() else {
+        warn!("attachable store lock poisoned while persisting workspace binding");
+        return;
+    };
     let set_id =
         store.ensure_terminal_set(Some(target_host.clone()), Some(HostPath::new(target_host.clone(), checkout_path.to_path_buf())));
     store.replace_binding(ProviderBinding {
@@ -388,7 +399,9 @@ fn persist_workspace_binding(config_base: &Path, provider_name: &str, workspace_
         object_id: set_id.to_string(),
         external_ref: workspace_ref.to_string(),
     });
-    let _ = store.save();
+    if let Err(err) = store.save() {
+        warn!(err = %err, "failed to persist attachable registry after workspace binding update");
+    }
 }
 
 async fn build_archive_session_plan(
@@ -445,6 +458,7 @@ async fn build_generate_branch_name_plan(
 ///
 /// Commands that are handled at the daemon level (TrackRepoPath, UntrackRepo, Refresh)
 /// should not reach this function — the caller should handle them directly.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     action: CommandAction,
     repo: &RepoExecutionContext,
@@ -452,6 +466,7 @@ pub async fn execute(
     providers_data: &ProviderData,
     runner: &dyn CommandRunner,
     config_base: &Path,
+    attachable_store: &SharedAttachableStore,
     local_host: &HostName,
 ) -> CommandResult {
     match action {
@@ -475,7 +490,7 @@ pub async fn execute(
                 }
                 match ws_mgr.create_workspace(&config).await {
                     Ok((ws_ref, _workspace)) => {
-                        persist_workspace_binding(config_base, &provider_name, &ws_ref, local_host, &checkout_path);
+                        persist_workspace_binding(attachable_store, &provider_name, &ws_ref, local_host, &checkout_path);
                     }
                     Err(e) => return CommandResult::Error { message: e },
                 }
@@ -702,7 +717,7 @@ pub async fn execute(
                     // to the wrong session.
                     match ws_mgr.create_workspace(&config).await {
                         Ok((ws_ref, _workspace)) => {
-                            persist_workspace_binding(config_base, &provider_name, &ws_ref, local_host, &path);
+                            persist_workspace_binding(attachable_store, &provider_name, &ws_ref, local_host, &path);
                         }
                         Err(e) => return CommandResult::Error { message: e },
                     }
@@ -1106,7 +1121,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        attachable::AttachableStore,
+        attachable::{AttachableStore, SharedAttachableStore},
         providers::{
             ai_utility::AiUtility,
             change_request::ChangeRequestTracker,
@@ -1415,6 +1430,10 @@ mod tests {
         CommandAction::RemoveCheckout { checkout: CheckoutSelector::Query(branch.to_string()), terminal_keys }
     }
 
+    fn test_attachable_store(base: &Path) -> SharedAttachableStore {
+        Arc::new(std::sync::Mutex::new(AttachableStore::with_base(base)))
+    }
+
     async fn run_execute(
         action: CommandAction,
         registry: &ProviderRegistry,
@@ -1425,7 +1444,9 @@ mod tests {
             identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
             root: repo_root(),
         };
-        execute(action, &repo, registry, providers_data, runner, &config_base(), &local_host()).await
+        let config_base = config_base();
+        let attachable_store = test_attachable_store(&config_base);
+        execute(action, &repo, registry, providers_data, runner, &config_base, &attachable_store, &local_host()).await
     }
 
     fn assert_error_contains(result: CommandResult, expected_substring: &str) {
@@ -1560,6 +1581,7 @@ mod tests {
         data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
         let temp = tempfile::tempdir().expect("tempdir");
+        let attachable_store = test_attachable_store(temp.path());
         let repo = RepoExecutionContext {
             identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
             root: repo_root(),
@@ -1572,6 +1594,7 @@ mod tests {
             &data,
             &runner,
             temp.path(),
+            &attachable_store,
             &local_host(),
         )
         .await;
@@ -1635,6 +1658,7 @@ mod tests {
         registry.workspace_managers.insert("cmux", desc("cmux"), Arc::clone(&workspace_manager) as Arc<dyn WorkspaceManager>);
         let runner = runner_ok();
         let temp = tempfile::tempdir().expect("tempdir");
+        let attachable_store = test_attachable_store(temp.path());
         let repo_root = temp.path().join("repo");
         std::fs::create_dir_all(&repo_root).expect("create repo root");
         std::fs::write(
@@ -1659,6 +1683,7 @@ mod tests {
             &empty_data(),
             &runner,
             temp.path(),
+            &attachable_store,
             &local_host(),
         )
         .await;
@@ -1684,6 +1709,7 @@ mod tests {
         registry.workspace_managers.insert("cmux", desc("cmux"), Arc::clone(&workspace_manager) as Arc<dyn WorkspaceManager>);
         let runner = runner_ok();
         let temp = tempfile::tempdir().expect("tempdir");
+        let attachable_store = test_attachable_store(temp.path());
         let repo_root = temp.path().join("repo");
         std::fs::create_dir_all(&repo_root).expect("create repo root");
         std::fs::write(
@@ -1708,6 +1734,7 @@ mod tests {
             &empty_data(),
             &runner,
             temp.path(),
+            &attachable_store,
             &local_host(),
         )
         .await;
@@ -1773,6 +1800,7 @@ mod tests {
         registry.workspace_managers.insert("cmux", desc("cmux"), Arc::clone(&workspace_manager) as Arc<dyn WorkspaceManager>);
         let runner = runner_ok();
         let temp = tempfile::tempdir().expect("tempdir");
+        let attachable_store = test_attachable_store(temp.path());
         std::fs::write(
             temp.path().join("hosts.toml"),
             "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
@@ -1795,6 +1823,7 @@ mod tests {
             &empty_data(),
             &runner,
             temp.path(),
+            &attachable_store,
             &local_host(),
         )
         .await;
@@ -1854,6 +1883,7 @@ mod tests {
         data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
         let runner = runner_ok();
         let temp = tempfile::tempdir().expect("tempdir");
+        let attachable_store = test_attachable_store(temp.path());
         let repo = RepoExecutionContext {
             identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
             root: repo_root(),
@@ -1870,6 +1900,7 @@ mod tests {
             &data,
             &runner,
             temp.path(),
+            &attachable_store,
             &local_host(),
         )
         .await;
@@ -2610,6 +2641,7 @@ mod tests {
         providers_data: ProviderData,
         runner: MockRunner,
     ) -> ExecutionPlan {
+        let config_base = config_base();
         build_plan(
             local_command(action),
             RepoExecutionContext {
@@ -2619,7 +2651,8 @@ mod tests {
             Arc::new(registry),
             Arc::new(providers_data),
             Arc::new(runner),
-            config_base(),
+            config_base.clone(),
+            test_attachable_store(&config_base),
             local_host(),
         )
         .await

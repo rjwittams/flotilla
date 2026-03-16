@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::types::{
-    Attachable, AttachableId, AttachableKind, AttachableSet, AttachableSetId, BindingObjectKind, ProviderBinding, TerminalAttachable,
+    Attachable, AttachableContent, AttachableId, AttachableSet, AttachableSetId, BindingObjectKind, ProviderBinding, TerminalAttachable,
     TerminalPurpose,
 };
 use crate::config::flotilla_config_dir;
@@ -46,7 +46,13 @@ impl AttachableStore {
 
     pub fn with_path(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let registry = Self::load_registry(&path).unwrap_or_default();
+        let registry = match Self::load_registry(&path) {
+            Ok(registry) => registry,
+            Err(err) => {
+                tracing::warn!(path = %path.display(), err = %err, "failed to load attachable registry, starting empty");
+                AttachableRegistry::default()
+            }
+        };
         let binding_index = Self::build_binding_index(&registry);
         Self { path, registry, binding_index }
     }
@@ -89,6 +95,7 @@ impl AttachableStore {
         id
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn ensure_terminal_attachable(
         &mut self,
         set_id: &AttachableSetId,
@@ -105,7 +112,7 @@ impl AttachableStore {
             let old_set_id = self.registry.attachables.get(&attachable_id).map(|existing| existing.set_id.clone());
             if let Some(existing) = self.registry.attachables.get_mut(&attachable_id) {
                 existing.set_id = set_id.clone();
-                existing.kind = AttachableKind::Terminal(TerminalAttachable {
+                existing.content = AttachableContent::Terminal(TerminalAttachable {
                     purpose: terminal_purpose,
                     command: command.into(),
                     working_directory,
@@ -123,7 +130,7 @@ impl AttachableStore {
         self.insert_attachable(Attachable {
             id: id.clone(),
             set_id: set_id.clone(),
-            kind: AttachableKind::Terminal(TerminalAttachable {
+            content: AttachableContent::Terminal(TerminalAttachable {
                 purpose: terminal_purpose,
                 command: command.into(),
                 working_directory,
@@ -272,7 +279,7 @@ mod tests {
         store.insert_attachable(Attachable {
             id: attachable_id.clone(),
             set_id: set_id.clone(),
-            kind: AttachableKind::Terminal(TerminalAttachable {
+            content: AttachableContent::Terminal(TerminalAttachable {
                 purpose: TerminalPurpose { checkout: "feat".into(), role: "shell".into(), index: 0 },
                 command: "claude".into(),
                 working_directory: PathBuf::from("/repo/wt-feat"),
@@ -337,8 +344,8 @@ mod tests {
         assert_eq!(store.registry.attachables.len(), 1);
         let attachable = store.registry.attachables.get(&first).expect("attachable");
         assert_eq!(
-            attachable.kind,
-            AttachableKind::Terminal(TerminalAttachable {
+            attachable.content,
+            AttachableContent::Terminal(TerminalAttachable {
                 purpose: TerminalPurpose { checkout: "feat".into(), role: "shell".into(), index: 0 },
                 command: "codex".into(),
                 working_directory: PathBuf::from("/repo/wt-feat"),
@@ -415,8 +422,8 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(store.registry.attachables.len(), 2);
         assert_eq!(
-            store.registry.attachables.get(&second).and_then(|a| match &a.kind {
-                AttachableKind::Terminal(terminal) => Some(terminal.purpose.index),
+            store.registry.attachables.get(&second).map(|a| match &a.content {
+                AttachableContent::Terminal(terminal) => terminal.purpose.index,
             }),
             Some(0)
         );

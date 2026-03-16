@@ -482,6 +482,7 @@ pub async fn run_host_detectors(detectors: &[Box<dyn HostDetector>], runner: &dy
     stream::iter(detectors).fold(EnvironmentBag::new(), |bag, det| async move { bag.extend(det.detect(runner, env).await) }).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn discover_providers(
     host_bag: &EnvironmentBag,
     repo_root: &Path,
@@ -503,6 +504,7 @@ pub async fn discover_providers(
     let mut registry = ProviderRegistry::new();
     let mut unmet = Vec::new();
 
+    #[allow(clippy::too_many_arguments)]
     async fn probe_all<T: ?Sized + Send + Sync + 'static, F>(
         factories: &[Box<dyn Factory<Output = T>>],
         env: &EnvironmentBag,

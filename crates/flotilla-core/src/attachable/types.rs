@@ -24,7 +24,7 @@ impl std::fmt::Display for AttachableId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AttachableKind {
+pub enum AttachableContent {
     Terminal(TerminalAttachable),
 }
 
@@ -61,7 +61,7 @@ pub struct AttachableSet {
 pub struct Attachable {
     pub id: AttachableId,
     pub set_id: AttachableSetId,
-    pub kind: AttachableKind,
+    pub content: AttachableContent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

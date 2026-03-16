@@ -1929,6 +1929,7 @@ impl DaemonHandle for InProcessDaemon {
         // do network I/O (e.g. GenerateBranchName, ArchiveSession).
         let active_ref = Arc::clone(&self.active_command);
         let local_host = self.host_name.clone();
+        let attachable_store = self.discovery.shared_attachable_store(&self.config);
         tokio::spawn(async move {
             let plan = executor::build_plan(
                 command,
@@ -1937,6 +1938,7 @@ impl DaemonHandle for InProcessDaemon {
                 providers_data,
                 runner,
                 config_base,
+                attachable_store,
                 local_host,
             )
             .await;

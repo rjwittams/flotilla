@@ -3,6 +3,6 @@ pub mod types;
 
 pub use store::{AttachableRegistry, AttachableStore, SharedAttachableStore};
 pub use types::{
-    Attachable, AttachableId, AttachableKind, AttachableSet, AttachableSetId, BindingObjectKind, ProviderBinding, TerminalAttachable,
+    Attachable, AttachableContent, AttachableId, AttachableSet, AttachableSetId, BindingObjectKind, ProviderBinding, TerminalAttachable,
     TerminalPurpose,
 };

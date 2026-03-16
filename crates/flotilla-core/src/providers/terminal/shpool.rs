@@ -321,7 +321,13 @@ impl ShpoolTerminalPool {
             let Some((checkout, role)) = before_index.rsplit_once('/') else {
                 continue;
             };
-            let index: u32 = index_str.parse().unwrap_or(0);
+            let index: u32 = match index_str.parse() {
+                Ok(index) => index,
+                Err(err) => {
+                    tracing::warn!(session = name, index = index_str, err = %err, "failed to parse managed terminal index, defaulting to 0");
+                    0
+                }
+            };
 
             let status_str = session["status"].as_str().unwrap_or("").to_ascii_lowercase();
             let status = match status_str.as_str() {
@@ -343,6 +349,8 @@ impl ShpoolTerminalPool {
     }
 
     fn synthetic_checkout_path(id: &ManagedTerminalId) -> PathBuf {
+        // Fallback only when shpool does not report a working directory. This will
+        // not currently join to workspace bindings, which use a real checkout path.
         PathBuf::from(format!(".flotilla/attachable/{}", id.checkout))
     }
 
@@ -355,7 +363,10 @@ impl ShpoolTerminalPool {
         };
 
         let set_checkout = HostPath::new(host.clone(), checkout_path.clone());
-        let mut store = self.attachable_store.lock().expect("attachable store lock poisoned");
+        let Ok(mut store) = self.attachable_store.lock() else {
+            tracing::warn!("attachable store lock poisoned while registering shpool terminal");
+            return;
+        };
         let set_id = store.ensure_terminal_set(Some(host), Some(set_checkout));
         store.ensure_terminal_attachable(
             &set_id,
@@ -367,7 +378,9 @@ impl ShpoolTerminalPool {
             checkout_path,
             terminal.status.clone(),
         );
-        let _ = store.save();
+        if let Err(err) = store.save() {
+            tracing::warn!(err = %err, session = %session_name, "failed to persist attachable registry after shpool update");
+        }
     }
 }
 
@@ -459,7 +472,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        attachable::{AttachableKind, AttachableStore, BindingObjectKind, SharedAttachableStore},
+        attachable::{AttachableContent, AttachableStore, BindingObjectKind, SharedAttachableStore},
         providers::testing::MockRunner,
     };
 
@@ -665,8 +678,8 @@ mod tests {
         let attachable =
             store.registry().attachables.values().find(|attachable| attachable.id.0 == attachable_id).expect("attachable should exist");
         assert_eq!(
-            match &attachable.kind {
-                AttachableKind::Terminal(terminal) => terminal.working_directory.clone(),
+            match &attachable.content {
+                AttachableContent::Terminal(terminal) => terminal.working_directory.clone(),
             },
             PathBuf::from("/home/dev/project")
         );
