@@ -109,7 +109,7 @@ pub fn render(
     render_input_popup(ui, theme, frame);
     render_delete_confirm(model, ui, theme, frame);
     render_close_confirm(model, ui, theme, frame);
-    render_help(model, ui, theme, keymap, frame);
+    render_help(ui, theme, keymap, frame);
     render_file_picker(ui, theme, frame);
 }
 
@@ -1049,7 +1049,7 @@ fn render_close_confirm(model: &TuiModel, ui: &UiState, theme: &Theme, frame: &m
     frame.render_widget(paragraph, area);
 }
 
-fn render_help(_model: &TuiModel, ui: &mut UiState, theme: &Theme, keymap: &Keymap, frame: &mut Frame) {
+fn render_help(ui: &mut UiState, theme: &Theme, keymap: &Keymap, frame: &mut Frame) {
     if !matches!(ui.mode, UiMode::Help) {
         return;
     }

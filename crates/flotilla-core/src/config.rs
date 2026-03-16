@@ -105,9 +105,15 @@ pub fn default_checkout_path() -> String {
 
 /// Raw key binding overrides from config.toml.
 ///
+/// Raw key binding overrides from config.toml.
+///
 /// Keys are key combo strings (parsed by `crokey` in the TUI crate).
 /// Values are action names (parsed by `Action::from_config_str`).
 /// Empty maps mean "use defaults".
+///
+/// Text input modes (branch_input, issue_search, file_picker) are excluded
+/// because they bypass the keymap — unrecognised keys pass through to `tui_input`
+/// for text editing.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct KeysConfig {
     #[serde(default)]

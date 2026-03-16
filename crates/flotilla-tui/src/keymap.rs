@@ -427,7 +427,15 @@ impl Keymap {
             ]),
             ("Multi-select (issues)", &[Action::ToggleMultiSelect]),
             ("Repos", &[Action::PrevTab, Action::NextTab, Action::MoveTabLeft, Action::MoveTabRight]),
-            ("General", &[Action::ToggleDebug, Action::CycleTheme, Action::CycleHost, Action::ToggleHelp, Action::Dismiss, Action::Quit]),
+            ("General", &[
+                Action::ToggleProviders,
+                Action::ToggleDebug,
+                Action::CycleTheme,
+                Action::CycleHost,
+                Action::ToggleHelp,
+                Action::Dismiss,
+                Action::Quit,
+            ]),
         ];
 
         section_defs
