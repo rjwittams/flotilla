@@ -294,7 +294,10 @@ async fn run_tui(cli: Cli) -> Result<()> {
     if !embedded {
         for root in &cli_repo_roots {
             let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-            if let Err(e) = daemon.add_repo(&canonical).await {
+            if let Err(e) = daemon
+                .execute(Command { host: None, context_repo: None, action: CommandAction::TrackRepoPath { path: canonical.clone() } })
+                .await
+            {
                 info!(repo = %canonical.display(), err = %e, "failed to add repo");
             }
         }

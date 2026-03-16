@@ -575,21 +575,6 @@ impl DaemonHandle for SocketDaemon {
         resp.parse_empty()
     }
 
-    async fn refresh(&self, repo: &Path) -> Result<(), String> {
-        let resp = self.request("refresh", serde_json::json!({ "repo": repo })).await?;
-        resp.parse_empty()
-    }
-
-    async fn add_repo(&self, path: &Path) -> Result<(), String> {
-        let resp = self.request("add_repo", serde_json::json!({ "path": path })).await?;
-        resp.parse_empty()
-    }
-
-    async fn remove_repo(&self, path: &Path) -> Result<(), String> {
-        let resp = self.request("remove_repo", serde_json::json!({ "path": path })).await?;
-        resp.parse_empty()
-    }
-
     async fn replay_since(&self, last_seen: &HashMap<RepoIdentity, u64>) -> Result<Vec<DaemonEvent>, String> {
         let last_seen = encode_replay_cursors(last_seen);
         let resp = self.request("replay_since", serde_json::json!({ "last_seen": last_seen })).await?;

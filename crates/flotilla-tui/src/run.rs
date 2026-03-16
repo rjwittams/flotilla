@@ -98,7 +98,14 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
                         let repo = app.model.active_repo_root().clone();
                         let daemon = app.daemon.clone();
                         tokio::spawn(async move {
-                            let _ = daemon.refresh(&repo).await;
+                            use flotilla_protocol::{Command, CommandAction, RepoSelector};
+                            let _ = daemon
+                                .execute(Command {
+                                    host: None,
+                                    context_repo: None,
+                                    action: CommandAction::Refresh { repo: Some(RepoSelector::Path(repo)) },
+                                })
+                                .await;
                         });
                     } else {
                         app.handle_key(k);

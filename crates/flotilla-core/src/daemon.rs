@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use flotilla_protocol::{
@@ -27,15 +27,6 @@ pub trait DaemonHandle: Send + Sync {
     /// Cancel a running command. The command will finish with
     /// `CommandResult::Cancelled` once cancellation takes effect.
     async fn cancel(&self, command_id: u64) -> Result<(), String>;
-
-    /// Trigger an immediate refresh for a repo.
-    async fn refresh(&self, repo: &Path) -> Result<(), String>;
-
-    /// Add a repo to tracking.
-    async fn add_repo(&self, path: &Path) -> Result<(), String>;
-
-    /// Remove a repo from tracking.
-    async fn remove_repo(&self, path: &Path) -> Result<(), String>;
 
     /// Get replay events for repos based on last-seen sequence numbers.
     ///

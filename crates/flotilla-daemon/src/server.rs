@@ -1833,39 +1833,6 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, method: &str, para
             }
         }
 
-        "refresh" => {
-            let repo = match extract_repo_path(&params) {
-                Ok(p) => p,
-                Err(e) => return Message::error_response(id, e),
-            };
-            match ctx.daemon.refresh(&repo).await {
-                Ok(()) => Message::empty_ok_response(id),
-                Err(e) => Message::error_response(id, e),
-            }
-        }
-
-        "add_repo" => {
-            let path = match extract_path_param(&params, "path") {
-                Ok(p) => p,
-                Err(e) => return Message::error_response(id, e),
-            };
-            match ctx.daemon.add_repo(&path).await {
-                Ok(()) => Message::empty_ok_response(id),
-                Err(e) => Message::error_response(id, e),
-            }
-        }
-
-        "remove_repo" => {
-            let path = match extract_path_param(&params, "path") {
-                Ok(p) => p,
-                Err(e) => return Message::error_response(id, e),
-            };
-            match ctx.daemon.remove_repo(&path).await {
-                Ok(()) => Message::empty_ok_response(id),
-                Err(e) => Message::error_response(id, e),
-            }
-        }
-
         "replay_since" => {
             let last_seen = params
                 .get("last_seen")
@@ -1960,16 +1927,6 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, method: &str, para
 fn extract_repo_selector(params: &serde_json::Value) -> Result<RepoSelector, String> {
     let value = params.get("repo").ok_or_else(|| "missing 'repo' parameter".to_string())?;
     serde_json::from_value(value.clone()).map_err(|e| format!("invalid 'repo' parameter: {e}"))
-}
-
-/// Extract the "repo" field from params as a PathBuf.
-fn extract_repo_path(params: &serde_json::Value) -> Result<PathBuf, String> {
-    extract_path_param(params, "repo")
-}
-
-/// Extract a named path field from params as a PathBuf.
-fn extract_path_param(params: &serde_json::Value, field: &str) -> Result<PathBuf, String> {
-    params.get(field).and_then(|v| v.as_str()).map(PathBuf::from).ok_or_else(|| format!("missing '{field}' parameter"))
 }
 
 /// Extract a named string field from params.
@@ -2146,21 +2103,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn extract_path_param_requires_string_field() {
-        let params = serde_json::json!({});
-        let err = extract_path_param(&params, "repo").expect_err("missing field should error");
-        assert!(err.contains("missing 'repo' parameter"));
-
-        let params = serde_json::json!({ "repo": 42 });
-        let err = extract_path_param(&params, "repo").expect_err("non-string field should error");
-        assert!(err.contains("missing 'repo' parameter"));
-
-        let params = serde_json::json!({ "repo": "/tmp/project" });
-        let path = extract_path_param(&params, "repo").expect("valid path string");
-        assert_eq!(path, PathBuf::from("/tmp/project"));
-    }
-
     #[tokio::test]
     async fn dispatch_request_handles_unknown_and_missing_params() {
         let (_tmp, daemon) = empty_daemon().await;
@@ -2194,8 +2136,32 @@ mod tests {
         let repo_path = tmp.path().join("repo-a");
         std::fs::create_dir_all(&repo_path).unwrap();
 
-        let add = dispatch_request_test(&daemon, 10, "add_repo", serde_json::json!({ "path": repo_path })).await;
-        assert_ok_empty_response(add, 10);
+        // Subscribe before executing so events are captured.
+        let mut rx = daemon.subscribe();
+
+        let add_command = Command { host: None, context_repo: None, action: CommandAction::TrackRepoPath { path: repo_path.clone() } };
+        let add = dispatch_request_test(&daemon, 10, "execute", serde_json::json!({ "command": add_command })).await;
+        match add {
+            Message::Response { id, ok, error, .. } => {
+                assert_eq!(id, 10);
+                assert!(ok, "execute add_repo should be ok: {error:?}");
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+
+        // Wait for the async command to actually complete before listing repos.
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(DaemonEvent::RepoTracked(_)) => break,
+                    Ok(DaemonEvent::CommandFinished { .. }) => break,
+                    Ok(_) => {}
+                    Err(e) => panic!("recv error: {e:?}"),
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for repo add");
 
         let list = dispatch_request_test(&daemon, 11, "list_repos", serde_json::json!({})).await;
         let listed: Vec<RepoInfo> = match list {
@@ -2209,8 +2175,19 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].path, repo_path);
 
-        let remove = dispatch_request_test(&daemon, 12, "remove_repo", serde_json::json!({ "path": listed[0].path })).await;
-        assert_ok_empty_response(remove, 12);
+        let remove_command = Command {
+            host: None,
+            context_repo: None,
+            action: CommandAction::UntrackRepo { repo: RepoSelector::Path(listed[0].path.clone()) },
+        };
+        let remove = dispatch_request_test(&daemon, 12, "execute", serde_json::json!({ "command": remove_command })).await;
+        match remove {
+            Message::Response { id, ok, error, .. } => {
+                assert_eq!(id, 12);
+                assert!(ok, "execute remove_repo should be ok: {error:?}");
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
     }
 
     #[tokio::test]
