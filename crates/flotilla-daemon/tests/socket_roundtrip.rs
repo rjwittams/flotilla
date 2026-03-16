@@ -110,10 +110,8 @@ async fn socket_roundtrip() {
         .replay_since(&HashMap::from([(StreamKey::Host { host_name: HostName::local() }, local_host_seq)]))
         .await
         .expect("replay_since");
-    let host_events: Vec<_> = replay
-        .iter()
-        .filter(|event| matches!(event, DaemonEvent::HostSnapshot(snap) if snap.host_name == HostName::local()))
-        .collect();
+    let host_events: Vec<_> =
+        replay.iter().filter(|event| matches!(event, DaemonEvent::HostSnapshot(snap) if snap.host_name == HostName::local())).collect();
     assert!(host_events.is_empty(), "should have no host events when the local host cursor is current");
 
     // replay_since with bogus seq — should return full snapshot

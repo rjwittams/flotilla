@@ -473,15 +473,11 @@ struct HostState {
     connection_status: PeerConnectionState,
     summary: Option<HostSummary>,
     seq: u64,
+    removed: bool,
 }
 
 fn default_host_summary(host_name: &HostName) -> HostSummary {
-    HostSummary {
-        host_name: host_name.clone(),
-        system: SystemInfo::default(),
-        inventory: ToolInventory::default(),
-        providers: vec![],
-    }
+    HostSummary { host_name: host_name.clone(), system: SystemInfo::default(), inventory: ToolInventory::default(), providers: vec![] }
 }
 
 fn ensure_remote_host_state<'a>(hosts: &'a mut HashMap<HostName, HostState>, host_name: &HostName) -> &'a mut HostState {
@@ -489,10 +485,12 @@ fn ensure_remote_host_state<'a>(hosts: &'a mut HashMap<HostName, HostState>, hos
         connection_status: PeerConnectionState::Disconnected,
         summary: None,
         seq: 1,
+        removed: false,
     })
 }
 
 fn build_host_snapshot(local_host: &HostName, host_name: &HostName, state: &HostState) -> HostSnapshot {
+    debug_assert!(!state.removed, "removed hosts should not be materialized as snapshots");
     HostSnapshot {
         seq: state.seq,
         host_name: host_name.clone(),
@@ -509,10 +507,11 @@ fn update_host_status(
     status: PeerConnectionState,
 ) -> Option<HostSnapshot> {
     let state = ensure_remote_host_state(hosts, host_name);
-    if state.connection_status == status {
+    if !state.removed && state.connection_status == status {
         return None;
     }
     state.connection_status = status;
+    state.removed = false;
     state.seq += 1;
     Some(build_host_snapshot(local_host, host_name, state))
 }
@@ -524,10 +523,11 @@ fn update_host_summary(
     summary: HostSummary,
 ) -> Option<HostSnapshot> {
     let state = ensure_remote_host_state(hosts, host_name);
-    if state.summary.as_ref() == Some(&summary) {
+    if !state.removed && state.summary.as_ref() == Some(&summary) {
         return None;
     }
     state.summary = Some(summary);
+    state.removed = false;
     state.seq += 1;
     Some(build_host_snapshot(local_host, host_name, state))
 }
@@ -543,11 +543,12 @@ fn clear_host_summary(local_host: &HostName, hosts: &mut HashMap<HostName, HostS
         return None;
     }
     state.summary = None;
+    state.removed = false;
     state.seq += 1;
     Some(build_host_snapshot(local_host, host_name, state))
 }
 
-fn should_retain_host_state(
+fn should_present_host_state(
     local_host: &HostName,
     configured: &HashSet<HostName>,
     remote_counts: &HashMap<HostName, crate::host_queries::HostCounts>,
@@ -559,6 +560,18 @@ fn should_retain_host_state(
         || state.connection_status != PeerConnectionState::Disconnected
         || state.summary.is_some()
         || remote_counts.contains_key(host_name)
+}
+
+fn mark_host_removed(hosts: &mut HashMap<HostName, HostState>, host_name: &HostName) -> Option<u64> {
+    let state = ensure_remote_host_state(hosts, host_name);
+    if state.removed {
+        return None;
+    }
+    state.connection_status = PeerConnectionState::Disconnected;
+    state.summary = None;
+    state.removed = true;
+    state.seq += 1;
+    Some(state.seq)
 }
 
 pub struct InProcessDaemon {
@@ -679,10 +692,12 @@ impl InProcessDaemon {
             peer_providers: RwLock::new(HashMap::new()),
             peer_overlay_versions: RwLock::new(HashMap::new()),
             path_identities: RwLock::new(path_identities),
-            hosts: RwLock::new(HashMap::from([(
-                host_name.clone(),
-                HostState { connection_status: PeerConnectionState::Connected, summary: Some(local_host_summary.clone()), seq: 1 },
-            )])),
+            hosts: RwLock::new(HashMap::from([(host_name.clone(), HostState {
+                connection_status: PeerConnectionState::Connected,
+                summary: Some(local_host_summary.clone()),
+                seq: 1,
+                removed: false,
+            })])),
             configured_peer_names: RwLock::new(HashSet::new()),
             topology_routes: RwLock::new(Vec::new()),
             host_bag,
@@ -733,6 +748,7 @@ impl InProcessDaemon {
             .read()
             .await
             .get(host)
+            .filter(|state| !state.removed)
             .map(|state| state.connection_status.clone())
             .unwrap_or(PeerConnectionState::Disconnected)
     }
@@ -742,7 +758,7 @@ impl InProcessDaemon {
         *configured = peers.iter().cloned().collect();
         drop(configured);
 
-        self.sync_host_membership().await;
+        self.emit_host_membership_events(self.sync_host_membership().await);
     }
 
     pub async fn set_peer_host_summaries(&self, summaries: HashMap<HostName, HostSummary>) {
@@ -753,25 +769,27 @@ impl InProcessDaemon {
         }
 
         let mut hosts = self.hosts.write().await;
+        let mut events = Vec::new();
         let host_names: Vec<_> = hosts.keys().cloned().collect();
         for host_name in host_names {
             if !normalized.contains_key(&host_name) {
-                let _ = clear_host_summary(&self.host_name, &mut hosts, &host_name);
+                if let Some(snapshot) = clear_host_summary(&self.host_name, &mut hosts, &host_name) {
+                    events.push(DaemonEvent::HostSnapshot(Box::new(snapshot)));
+                }
             }
         }
         for (host_name, summary) in normalized {
-            let _ = update_host_summary(&self.host_name, &mut hosts, &host_name, summary);
+            if let Some(snapshot) = update_host_summary(&self.host_name, &mut hosts, &host_name, summary) {
+                events.push(DaemonEvent::HostSnapshot(Box::new(snapshot)));
+            }
         }
         drop(hosts);
 
-        self.sync_host_membership().await;
+        self.emit_host_membership_events(events);
+        self.emit_host_membership_events(self.sync_host_membership().await);
     }
 
-    pub async fn publish_peer_connection_status(
-        &self,
-        host: &HostName,
-        status: PeerConnectionState,
-    ) -> Option<HostSnapshot> {
+    pub async fn publish_peer_connection_status(&self, host: &HostName, status: PeerConnectionState) -> Option<HostSnapshot> {
         let snapshot = {
             let mut hosts = self.hosts.write().await;
             update_host_status(&self.host_name, &mut hosts, host, status.clone())
@@ -780,7 +798,7 @@ impl InProcessDaemon {
             self.send_event(DaemonEvent::PeerStatusChanged { host: host.clone(), status });
             self.send_event(DaemonEvent::HostSnapshot(Box::new(snapshot.clone())));
         }
-        self.sync_host_membership().await;
+        self.emit_host_membership_events(self.sync_host_membership().await);
         snapshot
     }
 
@@ -797,18 +815,56 @@ impl InProcessDaemon {
         snapshot
     }
 
-    async fn sync_host_membership(&self) {
+    async fn sync_host_membership(&self) -> Vec<DaemonEvent> {
         let configured = self.configured_peer_names.read().await.clone();
         let remote_counts = self.remote_host_counts().await;
         let mut hosts = self.hosts.write().await;
+        let mut events = Vec::new();
 
         for host_name in configured.iter().chain(remote_counts.keys()) {
             if host_name != &self.host_name {
-                ensure_remote_host_state(&mut hosts, host_name);
+                match hosts.entry(host_name.clone()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let state = entry.insert(HostState {
+                            connection_status: PeerConnectionState::Disconnected,
+                            summary: None,
+                            seq: 1,
+                            removed: false,
+                        });
+                        events.push(DaemonEvent::HostSnapshot(Box::new(build_host_snapshot(&self.host_name, host_name, state))));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        let state = entry.get_mut();
+                        if state.removed {
+                            state.removed = false;
+                            state.seq += 1;
+                            events.push(DaemonEvent::HostSnapshot(Box::new(build_host_snapshot(&self.host_name, host_name, state))));
+                        }
+                    }
+                }
             }
         }
 
-        hosts.retain(|host_name, state| should_retain_host_state(&self.host_name, &configured, &remote_counts, host_name, state));
+        let host_names: Vec<_> = hosts.keys().cloned().collect();
+        for host_name in host_names {
+            let Some(state) = hosts.get(&host_name) else {
+                continue;
+            };
+            if should_present_host_state(&self.host_name, &configured, &remote_counts, &host_name, state) {
+                continue;
+            }
+            if let Some(seq) = mark_host_removed(&mut hosts, &host_name) {
+                events.push(DaemonEvent::HostRemoved { host: host_name, seq });
+            }
+        }
+
+        events
+    }
+
+    fn emit_host_membership_events(&self, events: Vec<DaemonEvent>) {
+        for event in events {
+            self.send_event(event);
+        }
     }
 
     pub async fn set_topology_routes(&self, mut routes: Vec<TopologyRoute>) {
@@ -1028,7 +1084,7 @@ impl InProcessDaemon {
                 pp.insert(identity.clone(), peers);
             }
         }
-        self.sync_host_membership().await;
+        self.emit_host_membership_events(self.sync_host_membership().await);
         self.broadcast_snapshot_inner(repo_path, false).await;
     }
 
@@ -1618,13 +1674,39 @@ impl InProcessDaemon {
                 if let Ok(mut hosts) = self.hosts.try_write() {
                     let mut summary = snap.summary.clone();
                     summary.host_name = snap.host_name.clone();
-                    let should_store = hosts.get(&snap.host_name).map(|state| state.seq <= snap.seq).unwrap_or(true);
-                    if should_store {
-                        hosts.insert(snap.host_name.clone(), HostState {
-                            connection_status: snap.connection_status.clone(),
-                            summary: Some(summary),
-                            seq: snap.seq,
-                        });
+                    match hosts.get_mut(&snap.host_name) {
+                        Some(state) if state.seq == snap.seq => {
+                            state.connection_status = snap.connection_status.clone();
+                            state.removed = false;
+                        }
+                        Some(state) if state.seq < snap.seq => {
+                            *state = HostState {
+                                connection_status: snap.connection_status.clone(),
+                                summary: Some(summary),
+                                seq: snap.seq,
+                                removed: false,
+                            };
+                        }
+                        None => {
+                            hosts.insert(snap.host_name.clone(), HostState {
+                                connection_status: snap.connection_status.clone(),
+                                summary: Some(summary),
+                                seq: snap.seq,
+                                removed: false,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            DaemonEvent::HostRemoved { host, seq } => {
+                if let Ok(mut hosts) = self.hosts.try_write() {
+                    let state = ensure_remote_host_state(&mut hosts, host);
+                    if state.seq <= *seq {
+                        state.connection_status = PeerConnectionState::Disconnected;
+                        state.summary = None;
+                        state.seq = *seq;
+                        state.removed = true;
                     }
                 }
             }
@@ -2192,7 +2274,14 @@ impl DaemonHandle for InProcessDaemon {
         for (host_name, state) in self.hosts.read().await.iter() {
             let stream_key = StreamKey::Host { host_name: host_name.clone() };
             let up_to_date = last_seen.get(&stream_key).is_some_and(|seq| *seq == state.seq);
-            if !up_to_date {
+            if up_to_date {
+                continue;
+            }
+            if state.removed {
+                if last_seen.contains_key(&stream_key) {
+                    events.push(DaemonEvent::HostRemoved { host: host_name.clone(), seq: state.seq });
+                }
+            } else {
                 events.push(DaemonEvent::HostSnapshot(Box::new(build_host_snapshot(&self.host_name, host_name, state))));
             }
         }
@@ -2417,12 +2506,10 @@ impl DaemonHandle for InProcessDaemon {
 
     async fn list_hosts(&self) -> Result<HostListResponse, String> {
         let configured = self.configured_peer_names.read().await.clone();
-        let hosts = self.hosts.read().await.clone();
+        let hosts: HashMap<_, _> =
+            self.hosts.read().await.iter().filter(|(_, state)| !state.removed).map(|(host, state)| (host.clone(), state.clone())).collect();
         let statuses = hosts.iter().map(|(host, state)| (host.clone(), state.connection_status.clone())).collect();
-        let summaries = hosts
-            .iter()
-            .filter_map(|(host, state)| state.summary.clone().map(|summary| (host.clone(), summary)))
-            .collect();
+        let summaries = hosts.iter().filter_map(|(host, state)| state.summary.clone().map(|summary| (host.clone(), summary))).collect();
         let local_counts = self.local_host_counts().await;
         let remote_counts = self.remote_host_counts().await;
 
@@ -2446,12 +2533,10 @@ impl DaemonHandle for InProcessDaemon {
 
     async fn get_host_status(&self, host: &str) -> Result<HostStatusResponse, String> {
         let configured = self.configured_peer_names.read().await.clone();
-        let hosts = self.hosts.read().await.clone();
+        let hosts: HashMap<_, _> =
+            self.hosts.read().await.iter().filter(|(_, state)| !state.removed).map(|(host, state)| (host.clone(), state.clone())).collect();
         let statuses = hosts.iter().map(|(host, state)| (host.clone(), state.connection_status.clone())).collect();
-        let summaries = hosts
-            .iter()
-            .filter_map(|(host, state)| state.summary.clone().map(|summary| (host.clone(), summary)))
-            .collect();
+        let summaries = hosts.iter().filter_map(|(host, state)| state.summary.clone().map(|summary| (host.clone(), summary))).collect();
         let local_counts = self.local_host_counts().await;
         let remote_counts = self.remote_host_counts().await;
         let known_hosts = crate::host_queries::known_hosts(&self.host_name, &configured, &statuses, &summaries, &remote_counts);
@@ -2472,12 +2557,10 @@ impl DaemonHandle for InProcessDaemon {
 
     async fn get_host_providers(&self, host: &str) -> Result<HostProvidersResponse, String> {
         let configured = self.configured_peer_names.read().await.clone();
-        let hosts = self.hosts.read().await.clone();
+        let hosts: HashMap<_, _> =
+            self.hosts.read().await.iter().filter(|(_, state)| !state.removed).map(|(host, state)| (host.clone(), state.clone())).collect();
         let statuses = hosts.iter().map(|(host, state)| (host.clone(), state.connection_status.clone())).collect();
-        let summaries = hosts
-            .iter()
-            .filter_map(|(host, state)| state.summary.clone().map(|summary| (host.clone(), summary)))
-            .collect();
+        let summaries = hosts.iter().filter_map(|(host, state)| state.summary.clone().map(|summary| (host.clone(), summary))).collect();
         let remote_counts = self.remote_host_counts().await;
         let known_hosts = crate::host_queries::known_hosts(&self.host_name, &configured, &statuses, &summaries, &remote_counts);
         let resolved =

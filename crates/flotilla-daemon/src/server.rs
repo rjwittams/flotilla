@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::DiscoveryRuntime};
 use flotilla_protocol::{
     Command, CommandAction, CommandPeerEvent, CommandResult, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message,
-    PeerConnectionState, PeerDataMessage, PeerWireMessage, RepoIdentity, RepoSelector, Request, Response, RoutedPeerMessage, PROTOCOL_VERSION,
+    PeerConnectionState, PeerDataMessage, PeerWireMessage, RepoIdentity, RepoSelector, Request, Response, RoutedPeerMessage,
+    PROTOCOL_VERSION,
 };
 use futures::future::join_all;
 use tokio::{
@@ -503,9 +504,7 @@ fn spawn_peer_networking_runtime(
                         }
                         let plan = disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
                         if plan.was_active {
-                            let _ = daemon_for_cleanup
-                                .publish_peer_connection_status(&peer_name, PeerConnectionState::Disconnected)
-                                .await;
+                            let _ = daemon_for_cleanup.publish_peer_connection_status(&peer_name, PeerConnectionState::Disconnected).await;
                         }
                     }
 
@@ -520,9 +519,7 @@ fn spawn_peer_networking_runtime(
                             attempt = 1;
                             continue;
                         }
-                        let _ = daemon_for_cleanup
-                            .publish_peer_connection_status(&peer_name, PeerConnectionState::Reconnecting)
-                            .await;
+                        let _ = daemon_for_cleanup.publish_peer_connection_status(&peer_name, PeerConnectionState::Reconnecting).await;
                         let delay = SshTransport::backoff_delay(attempt);
                         info!(peer = %peer_name, %attempt, delay_secs = delay.as_secs(), "reconnecting after backoff");
                         tokio::time::sleep(delay).await;
@@ -538,9 +535,7 @@ fn spawn_peer_networking_runtime(
                                 last_known_session_id =
                                     handle_remote_restart_if_needed(&pm, &daemon_for_cleanup, &peer_name, last_known_session_id).await;
                                 sync_peer_query_state(&pm, &daemon_for_cleanup).await;
-                                let _ = daemon_for_cleanup
-                                    .publish_peer_connection_status(&peer_name, PeerConnectionState::Connected)
-                                    .await;
+                                let _ = daemon_for_cleanup.publish_peer_connection_status(&peer_name, PeerConnectionState::Connected).await;
                                 let _ = peer_connected_tx_clone.send(PeerConnectedNotice { peer: peer_name.clone(), generation });
                                 attempt = 1;
                                 let sender = {
@@ -2878,16 +2873,15 @@ mod tests {
         let hello_back: Message = serde_json::from_str(&line).expect("parse hello");
         assert!(matches!(hello_back, Message::Hello { .. }), "expected hello response");
 
-        let summary = HostSummary {
-            host_name: remote_host.clone(),
-            system: Default::default(),
-            inventory: Default::default(),
-            providers: vec![],
-        };
+        let summary =
+            HostSummary { host_name: remote_host.clone(), system: Default::default(), inventory: Default::default(), providers: vec![] };
 
-        flotilla_protocol::framing::write_message_line(&mut writer, &Message::Peer(Box::new(PeerWireMessage::HostSummary(summary.clone()))))
-            .await
-            .expect("write first host summary");
+        flotilla_protocol::framing::write_message_line(
+            &mut writer,
+            &Message::Peer(Box::new(PeerWireMessage::HostSummary(summary.clone()))),
+        )
+        .await
+        .expect("write first host summary");
         flotilla_protocol::framing::write_message_line(
             &mut writer,
             &Message::Peer(Box::new(PeerWireMessage::Data(test_peer_msg("remote-host")))),
@@ -2920,10 +2914,7 @@ mod tests {
             .replay_since(&HashMap::from([(StreamKey::Host { host_name: remote_host.clone() }, host_seq)]))
             .await
             .expect("replay_since");
-        assert!(
-            host_seq_for(&replay, &remote_host).is_none(),
-            "duplicate host summary should not advance the host cursor"
-        );
+        assert!(host_seq_for(&replay, &remote_host).is_none(), "duplicate host summary should not advance the host cursor");
 
         drop(writer);
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
@@ -3489,10 +3480,16 @@ mod tests {
 
         disconnect_peer_and_rebuild(&peer_manager, &daemon, &HostName::new("peer-a"), gen_a).await;
 
-        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("timeout waiting for first event")
-            .expect("broadcast channel should stay open");
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match rx.recv().await.expect("broadcast channel should stay open") {
+                    DaemonEvent::HostRemoved { .. } => continue,
+                    other => return other,
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for first repo event");
 
         let stale_key = HostPath::new(HostName::new("peer-a"), "/srv/peer-a/remote-only");
         let remaining_key = HostPath::new(HostName::new("peer-b"), "/srv/peer-b/remote-only");
