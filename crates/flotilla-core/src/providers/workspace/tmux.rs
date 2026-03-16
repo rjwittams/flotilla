@@ -134,7 +134,7 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
                     directories.push(path);
                 }
 
-                (name.to_string(), Workspace { name: name.to_string(), directories, correlation_keys })
+                (name.to_string(), Workspace { name: name.to_string(), directories, correlation_keys, attachable_set_id: None })
             })
             .collect();
 
@@ -241,7 +241,7 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
             .collect();
 
         info!(workspace = %config.name, "tmux: workspace ready");
-        Ok((config.name.clone(), Workspace { name: config.name.clone(), directories, correlation_keys }))
+        Ok((config.name.clone(), Workspace { name: config.name.clone(), directories, correlation_keys, attachable_set_id: None }))
     }
 
     async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {

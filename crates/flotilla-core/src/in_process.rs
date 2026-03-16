@@ -71,6 +71,16 @@ fn normalize_local_provider_hosts(mut providers: ProviderData, host_name: &HostN
         workspace.correlation_keys = normalize_correlation_keys(std::mem::take(&mut workspace.correlation_keys), host_name);
     }
 
+    providers.attachable_sets = providers
+        .attachable_sets
+        .into_iter()
+        .map(|(id, mut set)| {
+            set.host_affinity = set.host_affinity.map(|_| host_name.clone());
+            set.checkout = set.checkout.map(|host_path| HostPath::new(host_name.clone(), host_path.path));
+            (id, set)
+        })
+        .collect();
+
     providers
 }
 
@@ -96,6 +106,9 @@ fn merge_local_provider_data(base: &mut ProviderData, other: &ProviderData) {
     }
     for (name, workspace) in &other.workspaces {
         base.workspaces.entry(name.clone()).or_insert_with(|| workspace.clone());
+    }
+    for (id, set) in &other.attachable_sets {
+        base.attachable_sets.entry(id.clone()).or_insert_with(|| set.clone());
     }
     for (key, cr) in &other.change_requests {
         base.change_requests.entry(key.clone()).or_insert_with(|| cr.clone());
@@ -647,7 +660,7 @@ impl InProcessDaemon {
                 &discovery.factories,
                 &config,
                 Arc::clone(&discovery.runner),
-                attachable_store,
+                Arc::clone(&attachable_store),
                 &*discovery.env,
             )
             .await;
@@ -657,7 +670,7 @@ impl InProcessDaemon {
 
             let identity = repo_identity_from_bag_or_path(&path, &host_repo_bag);
             let slug = repo_slug.clone();
-            let mut model = RepoModel::new(path.clone(), registry, repo_slug);
+            let mut model = RepoModel::new(path.clone(), registry, repo_slug, attachable_store);
             model.data.loading = true;
             let root = RepoRootState { path: path.clone(), model, slug, repo_bag, unmet, is_local: true };
 
@@ -1836,7 +1849,7 @@ impl InProcessDaemon {
         }
         let identity = repo_identity_from_bag_or_path(&path, &host_repo_bag);
         let slug = repo_slug.clone();
-        let mut model = RepoModel::new(path.clone(), registry, repo_slug);
+        let mut model = RepoModel::new(path.clone(), registry, repo_slug, self.discovery.shared_attachable_store(&self.config));
         model.data.loading = true;
         let root = RepoRootState { path: path.clone(), model, slug, repo_bag, unmet, is_local: true };
 

@@ -1239,9 +1239,12 @@ mod tests {
             self.calls.lock().await.push(format!("create_workspace:{}", config.name));
             let result = self.create_result.lock().await;
             match &*result {
-                Ok(()) => {
-                    Ok(("mock-ref".to_string(), Workspace { name: config.name.clone(), directories: vec![], correlation_keys: vec![] }))
-                }
+                Ok(()) => Ok(("mock-ref".to_string(), Workspace {
+                    name: config.name.clone(),
+                    directories: vec![],
+                    correlation_keys: vec![],
+                    attachable_set_id: None,
+                })),
                 Err(e) => Err(e.clone()),
             }
         }
@@ -1742,7 +1745,12 @@ mod tests {
     #[tokio::test]
     async fn create_workspace_for_checkout_selects_existing_workspace() {
         let checkout_path = PathBuf::from("/repo/wt-feat");
-        let existing_workspace = Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
+        let existing_workspace = Workspace {
+            name: "feat".to_string(),
+            directories: vec![checkout_path.clone()],
+            correlation_keys: vec![],
+            attachable_set_id: None,
+        };
         let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:42".to_string(), existing_workspace)]));
 
         let mut registry = empty_registry();
@@ -1768,6 +1776,7 @@ mod tests {
             name: "feat-x".to_string(),
             directories: vec![checkout_path.clone()],
             correlation_keys: vec![],
+            attachable_set_id: None,
         })]));
 
         let mut registry = empty_registry();
@@ -1837,7 +1846,12 @@ mod tests {
         // is session-specific. Reusing an existing workspace would attach to
         // whatever session was there before, not the requested one.
         let checkout_path = PathBuf::from("/repo/wt-feat");
-        let existing_workspace = Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![] };
+        let existing_workspace = Workspace {
+            name: "feat".to_string(),
+            directories: vec![checkout_path.clone()],
+            correlation_keys: vec![],
+            attachable_set_id: None,
+        };
         let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:77".to_string(), existing_workspace)]));
 
         let mut registry = empty_registry();

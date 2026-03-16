@@ -69,7 +69,7 @@ impl CmuxWorkspaceManager {
                     })
                     .collect();
 
-                Some((ws_ref, Workspace { name, directories, correlation_keys }))
+                Some((ws_ref, Workspace { name, directories, correlation_keys, attachable_set_id: None }))
             })
             .collect())
     }
@@ -218,7 +218,7 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
             .collect();
 
         info!(workspace = %config.name, %ws_ref, "cmux: workspace ready");
-        Ok((ws_ref, Workspace { name: config.name.clone(), directories, correlation_keys }))
+        Ok((ws_ref, Workspace { name: config.name.clone(), directories, correlation_keys, attachable_set_id: None }))
     }
 
     async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {

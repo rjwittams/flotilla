@@ -342,6 +342,8 @@ impl ShpoolTerminalPool {
                 command: String::new(),            // shpool doesn't report the original command
                 working_directory: PathBuf::new(), // populated separately if needed
                 status,
+                attachable_id: None,
+                attachable_set_id: None,
             });
         }
 
