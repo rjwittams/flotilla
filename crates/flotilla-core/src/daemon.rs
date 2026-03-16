@@ -15,6 +15,10 @@ pub trait DaemonHandle: Send + Sync {
     fn subscribe(&self) -> broadcast::Receiver<DaemonEvent>;
 
     /// Get full current state for a repo.
+    ///
+    /// Note: the `SocketDaemon` implementation currently requires a
+    /// `RepoSelector::Path` because the wire format sends a raw path.
+    /// `Query` and `Identity` selectors work with `InProcessDaemon`.
     async fn get_state(&self, repo: &RepoSelector) -> Result<RepoSnapshot, String>;
 
     /// List all tracked repos.

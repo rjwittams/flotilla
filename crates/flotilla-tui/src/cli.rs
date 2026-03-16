@@ -200,7 +200,10 @@ fn format_command_result(result: &flotilla_protocol::commands::CommandResult) ->
     use flotilla_protocol::commands::CommandResult;
     match result {
         CommandResult::Ok => "ok".to_string(),
-        CommandResult::RepoTracked { path, .. } => format!("repo tracked: {}", path.display()),
+        CommandResult::RepoTracked { path, resolved_from } => match resolved_from {
+            Some(original) => format!("repo tracked: {} (resolved from {})", path.display(), original.display()),
+            None => format!("repo tracked: {}", path.display()),
+        },
         CommandResult::RepoUntracked { path } => format!("repo untracked: {}", path.display()),
         CommandResult::Refreshed { repos } => format!("refreshed {} repo(s)", repos.len()),
         CommandResult::CheckoutCreated { branch, .. } => format!("checkout created: {branch}"),
@@ -897,6 +900,19 @@ mod tests {
             let output = format_command_result(&result);
             assert!(output.contains("repo tracked"), "should say repo tracked");
             assert!(output.contains("/tmp/my-repo"), "should include path");
+            assert!(!output.contains("resolved from"), "should not mention resolved_from when None");
+        }
+
+        #[test]
+        fn repo_tracked_with_resolved_from() {
+            let result = CommandResult::RepoTracked {
+                path: PathBuf::from("/tmp/my-repo"),
+                resolved_from: Some(PathBuf::from("/tmp/my-repo/wt-feat")),
+            };
+            let output = format_command_result(&result);
+            assert!(output.contains("repo tracked"), "should say repo tracked");
+            assert!(output.contains("/tmp/my-repo/wt-feat"), "should include original path");
+            assert!(output.contains("resolved from"), "should mention resolution");
         }
 
         #[test]

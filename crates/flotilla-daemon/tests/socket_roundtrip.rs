@@ -80,7 +80,7 @@ async fn socket_roundtrip() {
         .await
         .expect("refresh");
     // Wait for a snapshot or delta event (skip command lifecycle events)
-    let snapshot_event = tokio::time::timeout(Duration::from_secs(10), async {
+    let _snapshot_event = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = rx.recv().await.expect("recv");
             if matches!(event, DaemonEvent::RepoSnapshot(_) | DaemonEvent::RepoDelta(_)) {
@@ -90,11 +90,6 @@ async fn socket_roundtrip() {
     })
     .await
     .expect("timeout waiting for snapshot event");
-    assert!(
-        matches!(snapshot_event, DaemonEvent::RepoSnapshot(_) | DaemonEvent::RepoDelta(_)),
-        "expected snapshot event, got {:?}",
-        snapshot_event
-    );
 
     // replay_since with current seq — should return empty (up to date)
     let snapshot = client.get_state(&RepoSelector::Path(repo.clone())).await.expect("get_state");

@@ -387,6 +387,10 @@ fn encode_replay_cursors(last_seen: &HashMap<RepoIdentity, u64>) -> Vec<ReplayCu
 
 /// Convert a `RepoSelector` to a query string for use in RPC requests that
 /// still use `slug: String` on the wire.
+///
+/// `Identity` selectors are converted via `to_string()` and sent as a slug
+/// query. This works when the identity string matches a known slug but may
+/// produce confusing errors if it doesn't.
 fn repo_selector_to_query_string(selector: &flotilla_protocol::RepoSelector) -> String {
     match selector {
         flotilla_protocol::RepoSelector::Path(p) => p.display().to_string(),
