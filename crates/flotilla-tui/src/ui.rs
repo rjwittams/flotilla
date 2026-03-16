@@ -152,7 +152,7 @@ fn render_tab_bar(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut
 
     // Render
     let tab_style: Box<dyn BarStyle> = match theme.tab_bar.kind {
-        BarKind::Pipe => Box::new(ThemedTabBarStyle { theme }),
+        BarKind::Pipe => Box::new(ThemedTabBarStyle { theme, site: &theme.tab_bar }),
         BarKind::Chevron => Box::new(ThemedRibbonStyle { theme, site: &theme.tab_bar }),
     };
     let hits = segment_bar::render(&items, tab_style.as_ref(), area, frame.buffer_mut());
