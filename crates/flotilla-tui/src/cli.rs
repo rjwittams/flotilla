@@ -450,14 +450,8 @@ pub async fn run_watch(socket_path: &Path, format: OutputFormat) -> Result<(), S
     match daemon.replay_since(&HashMap::new()).await {
         Ok(events) => {
             for event in &events {
-                match event {
-                    DaemonEvent::SnapshotFull(snap) => {
-                        replay_seqs.insert(snap.repo_identity.clone(), snap.seq);
-                    }
-                    DaemonEvent::SnapshotDelta(delta) => {
-                        replay_seqs.insert(delta.repo_identity.clone(), delta.seq);
-                    }
-                    _ => {}
+                if let Some((identity, seq)) = event_seq(event) {
+                    replay_seqs.entry(identity.clone()).and_modify(|s| *s = (*s).max(seq)).or_insert(seq);
                 }
                 let line = match format {
                     OutputFormat::Human => format_event_human(event),
@@ -479,9 +473,9 @@ pub async fn run_watch(socket_path: &Path, format: OutputFormat) -> Result<(), S
         match rx.recv().await {
             Ok(event) => {
                 // Skip events already covered by replay to avoid duplicates.
-                if let Some(seq) = event_seq(&event) {
-                    if let Some(&replay_seq) = replay_seqs.get(seq.0) {
-                        if seq.1 <= replay_seq {
+                if let Some((identity, seq)) = event_seq(&event) {
+                    if let Some(&replay_seq) = replay_seqs.get(identity) {
+                        if seq <= replay_seq {
                             continue;
                         }
                     }
