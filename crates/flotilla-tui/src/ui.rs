@@ -1,8 +1,11 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use crossterm::event::KeyCode;
 use flotilla_core::data::{GroupEntry, SectionHeader};
-use flotilla_protocol::{ProviderData, WorkItem};
+use flotilla_protocol::{HostName, ProviderData, WorkItem};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -546,6 +549,21 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame
     // Build rows from active repo (immutable borrows)
     let rm = model.active();
     let rui = active_rui(model, ui);
+
+    // Precompute per-host repo root from main checkouts so remote worktree
+    // paths get the same sibling/child indentation as local ones.
+    let local_repo_root = model.active_repo_root().clone();
+    let mut host_repo_roots: HashMap<HostName, PathBuf> = HashMap::new();
+    for entry in &rui.table_view.table_entries {
+        if let GroupEntry::Item(item) = entry {
+            if item.is_main_checkout {
+                if let Some(co) = item.checkout_key() {
+                    host_repo_roots.insert(co.host.clone(), co.path.clone());
+                }
+            }
+        }
+    }
+
     let mut prev_source: Option<String> = None;
     let rows: Vec<Row> = rui
         .table_view
@@ -568,16 +586,9 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame
                         .and_then(|co| model.hosts.get(&co.host))
                         .and_then(|h| h.summary.system.home_dir.as_deref())
                         .or(local_home.as_deref());
-                    let mut row = build_item_row(
-                        item,
-                        &rm.providers,
-                        &col_widths,
-                        model.active_repo_root(),
-                        prev_source.as_deref(),
-                        pending,
-                        theme,
-                        home_dir,
-                    );
+                    let repo_root = item.checkout_key().and_then(|co| host_repo_roots.get(&co.host)).unwrap_or(&local_repo_root);
+                    let mut row =
+                        build_item_row(item, &rm.providers, &col_widths, repo_root, prev_source.as_deref(), pending, theme, home_dir);
                     prev_source = item.source.clone();
                     if is_multi_selected {
                         row = row.style(Style::default().bg(theme.multi_select_bg));

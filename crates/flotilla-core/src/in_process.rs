@@ -1909,6 +1909,55 @@ impl DaemonHandle for InProcessDaemon {
         let peer_overlay = self.peer_providers.read().await;
         let mut events = Vec::new();
 
+        // Emit HostSnapshot events first so the TUI knows about hosts before
+        // receiving repo data with host-attributed work items.
+        // Use the same "known hosts" union as host_queries::known_hosts so that
+        // late-subscribing clients see the same hosts as list_hosts returns.
+        // Read (don't advance) the current host_seq — replay is idempotent.
+        let current_host_seq = self.host_seq.load(Ordering::Relaxed);
+        let peer_status = self.peer_status.read().await;
+        let peer_summaries = self.peer_host_summaries.read().await;
+        let configured_peers = self.configured_peer_names.read().await;
+        let remote_counts = self.remote_host_counts().await;
+
+        let mut all_hosts: HashSet<HostName> = HashSet::from([self.host_name.clone()]);
+        all_hosts.extend(configured_peers.iter().cloned());
+        all_hosts.extend(peer_status.keys().cloned());
+        all_hosts.extend(peer_summaries.keys().cloned());
+        all_hosts.extend(remote_counts.keys().cloned());
+
+        for host_name in &all_hosts {
+            let is_local = *host_name == self.host_name;
+            let connection_status = if is_local {
+                PeerConnectionState::Connected
+            } else {
+                peer_status.get(host_name).cloned().unwrap_or(PeerConnectionState::Disconnected)
+            };
+            let summary = if is_local {
+                self.local_host_summary.clone()
+            } else {
+                peer_summaries.get(host_name).cloned().unwrap_or_else(|| HostSummary {
+                    host_name: host_name.clone(),
+                    system: SystemInfo::default(),
+                    inventory: ToolInventory::default(),
+                    providers: vec![],
+                })
+            };
+            events.push(DaemonEvent::HostSnapshot(Box::new(HostSnapshot {
+                seq: current_host_seq,
+                host_name: host_name.clone(),
+                is_local,
+                connection_status,
+                summary,
+            })));
+        }
+
+        // Drop locks before the repo snapshot iteration (which may need remote_host_counts again)
+        drop(peer_status);
+        drop(peer_summaries);
+        drop(configured_peers);
+
+        // Emit repo events
         for identity in order.iter() {
             let Some(state) = repos.get(identity) else {
                 continue;
@@ -1971,36 +2020,6 @@ impl DaemonHandle for InProcessDaemon {
                     events.push(DaemonEvent::RepoSnapshot(Box::new(snapshot())));
                 }
             }
-        }
-
-        // Emit HostSnapshot for the local host
-        let peer_status = self.peer_status.read().await;
-        events.push(DaemonEvent::HostSnapshot(Box::new(HostSnapshot {
-            seq: self.next_host_seq(),
-            host_name: self.host_name.clone(),
-            is_local: true,
-            connection_status: PeerConnectionState::Connected,
-            summary: self.local_host_summary.clone(),
-        })));
-
-        // Emit HostSnapshot for each known peer
-        let peer_summaries = self.peer_host_summaries.read().await;
-        let configured_peers = self.configured_peer_names.read().await;
-        for peer_name in configured_peers.iter() {
-            let status = peer_status.get(peer_name).cloned().unwrap_or(PeerConnectionState::Disconnected);
-            let summary = peer_summaries.get(peer_name).cloned().unwrap_or_else(|| HostSummary {
-                host_name: peer_name.clone(),
-                system: SystemInfo::default(),
-                inventory: ToolInventory::default(),
-                providers: vec![],
-            });
-            events.push(DaemonEvent::HostSnapshot(Box::new(HostSnapshot {
-                seq: self.next_host_seq(),
-                host_name: peer_name.clone(),
-                is_local: false,
-                connection_status: status,
-                summary,
-            })));
         }
 
         Ok(events)
