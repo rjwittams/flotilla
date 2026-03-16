@@ -124,7 +124,7 @@ Recommendation:
 
 - [ ] **Step 5: Hook the module into the crate**
 
-Update [`lib.rs`](/home/robert/dev/flotilla.terminal-stuff/crates/flotilla-core/src/lib.rs) and add any small config-path helpers in [`config.rs`](/home/robert/dev/flotilla.terminal-stuff/crates/flotilla-core/src/config.rs) if the store should not duplicate path logic.
+Update `crates/flotilla-core/src/lib.rs` and add any small config-path helpers in `crates/flotilla-core/src/config.rs` if the store should not duplicate path logic.
 
 - [ ] **Step 6: Run targeted tests**
 
@@ -248,7 +248,7 @@ Keep this simple:
 
 - [ ] **Step 4: Register discovered sessions on list**
 
-In [`shpool.rs`](/home/robert/dev/flotilla.terminal-stuff/crates/flotilla-core/src/providers/terminal/shpool.rs):
+In `crates/flotilla-core/src/providers/terminal/shpool.rs`:
 - after parsing `shpool list --json`, upsert attachable sets and members
 - bind the shpool session name as the provider ref
 - infer first-pass set grouping from host affinity + checkout name

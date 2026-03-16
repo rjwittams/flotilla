@@ -70,11 +70,11 @@ impl AttachableStore {
     }
 
     pub fn allocate_set_id(&self) -> AttachableSetId {
-        AttachableSetId(Uuid::new_v4().to_string())
+        AttachableSetId::new(Uuid::new_v4().to_string())
     }
 
     pub fn allocate_attachable_id(&self) -> AttachableId {
-        AttachableId(Uuid::new_v4().to_string())
+        AttachableId::new(Uuid::new_v4().to_string())
     }
 
     pub fn insert_set(&mut self, set: AttachableSet) {
@@ -86,13 +86,7 @@ impl AttachableStore {
     }
 
     pub fn ensure_terminal_set(&mut self, host_affinity: Option<HostName>, checkout: Option<HostPath>) -> AttachableSetId {
-        if let Some(existing) = self.registry.sets.values().find(|set| set.host_affinity == host_affinity && set.checkout == checkout) {
-            return existing.id.clone();
-        }
-
-        let id = self.allocate_set_id();
-        self.insert_set(AttachableSet { id: id.clone(), host_affinity, checkout, template_identity: None, members: Vec::new() });
-        id
+        self.ensure_terminal_set_with_change(host_affinity, checkout).0
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -107,48 +101,90 @@ impl AttachableStore {
         working_directory: PathBuf,
         status: TerminalStatus,
     ) -> AttachableId {
+        self.ensure_terminal_attachable_with_change(
+            set_id,
+            provider_category,
+            provider_name,
+            external_ref,
+            terminal_purpose,
+            command,
+            working_directory,
+            status,
+        )
+        .0
+    }
+
+    pub fn ensure_terminal_set_with_change(
+        &mut self,
+        host_affinity: Option<HostName>,
+        checkout: Option<HostPath>,
+    ) -> (AttachableSetId, bool) {
+        if let Some(existing) = self.registry.sets.values().find(|set| set.host_affinity == host_affinity && set.checkout == checkout) {
+            return (existing.id.clone(), false);
+        }
+
+        let id = self.allocate_set_id();
+        self.insert_set(AttachableSet { id: id.clone(), host_affinity, checkout, template_identity: None, members: Vec::new() });
+        (id, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn ensure_terminal_attachable_with_change(
+        &mut self,
+        set_id: &AttachableSetId,
+        provider_category: &str,
+        provider_name: &str,
+        external_ref: &str,
+        terminal_purpose: TerminalPurpose,
+        command: impl Into<String>,
+        working_directory: PathBuf,
+        status: TerminalStatus,
+    ) -> (AttachableId, bool) {
+        let new_content = AttachableContent::Terminal(TerminalAttachable {
+            purpose: terminal_purpose,
+            command: command.into(),
+            working_directory,
+            status,
+        });
         if let Some(existing_id) = self.lookup_binding(provider_category, provider_name, BindingObjectKind::Attachable, external_ref) {
-            let attachable_id = AttachableId(existing_id.to_string());
+            let attachable_id = AttachableId::new(existing_id.to_string());
             let old_set_id = self.registry.attachables.get(&attachable_id).map(|existing| existing.set_id.clone());
+            let mut changed = false;
             if let Some(existing) = self.registry.attachables.get_mut(&attachable_id) {
-                existing.set_id = set_id.clone();
-                existing.content = AttachableContent::Terminal(TerminalAttachable {
-                    purpose: terminal_purpose,
-                    command: command.into(),
-                    working_directory,
-                    status,
-                });
+                if existing.set_id != *set_id {
+                    existing.set_id = set_id.clone();
+                    changed = true;
+                }
+                if existing.content != new_content {
+                    existing.content = new_content;
+                    changed = true;
+                }
             }
             if let Some(old_set_id) = old_set_id.filter(|old| old != set_id) {
-                self.remove_member_link(&old_set_id, &attachable_id);
+                changed |= self.remove_member_link(&old_set_id, &attachable_id);
             }
-            self.ensure_member_link(set_id, &attachable_id);
-            return attachable_id;
+            changed |= self.ensure_member_link(set_id, &attachable_id);
+            return (attachable_id, changed);
         }
 
         let id = self.allocate_attachable_id();
-        self.insert_attachable(Attachable {
-            id: id.clone(),
-            set_id: set_id.clone(),
-            content: AttachableContent::Terminal(TerminalAttachable {
-                purpose: terminal_purpose,
-                command: command.into(),
-                working_directory,
-                status,
-            }),
-        });
-        self.ensure_member_link(set_id, &id);
-        self.replace_binding(ProviderBinding {
+        self.insert_attachable(Attachable { id: id.clone(), set_id: set_id.clone(), content: new_content });
+        let mut changed = true;
+        changed |= self.ensure_member_link(set_id, &id);
+        changed |= self.replace_binding(ProviderBinding {
             provider_category: provider_category.to_string(),
             provider_name: provider_name.to_string(),
             object_kind: BindingObjectKind::Attachable,
             object_id: id.to_string(),
             external_ref: external_ref.to_string(),
         });
-        id
+        (id, changed)
     }
 
-    pub fn replace_binding(&mut self, binding: ProviderBinding) {
+    pub fn replace_binding(&mut self, binding: ProviderBinding) -> bool {
+        if self.registry.bindings.iter().any(|existing| existing == &binding) {
+            return false;
+        }
         let key = Self::binding_key(&binding.provider_category, &binding.provider_name, &binding.object_kind, &binding.external_ref);
         self.binding_index.insert(key, binding.object_id.clone());
         self.registry.bindings.retain(|existing| {
@@ -158,6 +194,7 @@ impl AttachableStore {
                 && existing.external_ref == binding.external_ref)
         });
         self.registry.bindings.push(binding);
+        true
     }
 
     pub fn lookup_binding(
@@ -206,18 +243,23 @@ impl AttachableStore {
         (provider_category.to_string(), provider_name.to_string(), object_kind.clone(), external_ref.to_string())
     }
 
-    fn ensure_member_link(&mut self, set_id: &AttachableSetId, attachable_id: &AttachableId) {
+    fn ensure_member_link(&mut self, set_id: &AttachableSetId, attachable_id: &AttachableId) -> bool {
         if let Some(set) = self.registry.sets.get_mut(set_id) {
             if !set.members.contains(attachable_id) {
                 set.members.push(attachable_id.clone());
+                return true;
             }
         }
+        false
     }
 
-    fn remove_member_link(&mut self, set_id: &AttachableSetId, attachable_id: &AttachableId) {
+    fn remove_member_link(&mut self, set_id: &AttachableSetId, attachable_id: &AttachableId) -> bool {
         if let Some(set) = self.registry.sets.get_mut(set_id) {
+            let original_len = set.members.len();
             set.members.retain(|member| member != attachable_id);
+            return set.members.len() != original_len;
         }
+        false
     }
 }
 
@@ -236,8 +278,8 @@ mod tests {
 
     #[test]
     fn opaque_ids_roundtrip_as_strings() {
-        let set_id = AttachableSetId("set-123".into());
-        let attachable_id = AttachableId("att-456".into());
+        let set_id = AttachableSetId::new("set-123");
+        let attachable_id = AttachableId::new("att-456");
 
         let set_json = serde_json::to_string(&set_id).expect("serialize set id");
         let attachable_json = serde_json::to_string(&attachable_id).expect("serialize attachable id");
@@ -266,8 +308,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut store = AttachableStore::with_base(dir.path());
 
-        let set_id = AttachableSetId("set-1".into());
-        let attachable_id = AttachableId("att-1".into());
+        let set_id = AttachableSetId::new("set-1");
+        let attachable_id = AttachableId::new("att-1");
 
         store.insert_set(AttachableSet {
             id: set_id.clone(),
@@ -526,7 +568,7 @@ mod tests {
         let store = AttachableStore::with_base(dir.path());
         assert_ne!(
             store.lookup_binding("terminal_pool", "shpool", BindingObjectKind::Attachable, "flotilla/feat/shell/0"),
-            Some(attachable_id.0.as_str())
+            Some(attachable_id.as_str())
         );
         assert!(store.registry().attachables.is_empty());
     }

@@ -367,8 +367,8 @@ impl ShpoolTerminalPool {
             tracing::warn!("attachable store lock poisoned while registering shpool terminal");
             return;
         };
-        let set_id = store.ensure_terminal_set(Some(host), Some(set_checkout));
-        store.ensure_terminal_attachable(
+        let (set_id, changed_set) = store.ensure_terminal_set_with_change(Some(host), Some(set_checkout));
+        let (_, changed_attachable) = store.ensure_terminal_attachable_with_change(
             &set_id,
             "terminal_pool",
             "shpool",
@@ -378,8 +378,10 @@ impl ShpoolTerminalPool {
             checkout_path,
             terminal.status.clone(),
         );
-        if let Err(err) = store.save() {
-            tracing::warn!(err = %err, session = %session_name, "failed to persist attachable registry after shpool update");
+        if changed_set || changed_attachable {
+            if let Err(err) = store.save() {
+                tracing::warn!(err = %err, session = %session_name, "failed to persist attachable registry after shpool update");
+            }
         }
     }
 }
@@ -675,8 +677,12 @@ mod tests {
         let attachable_id = store
             .lookup_binding("terminal_pool", "shpool", BindingObjectKind::Attachable, "flotilla/feat/shell/0")
             .expect("binding should exist");
-        let attachable =
-            store.registry().attachables.values().find(|attachable| attachable.id.0 == attachable_id).expect("attachable should exist");
+        let attachable = store
+            .registry()
+            .attachables
+            .values()
+            .find(|attachable| attachable.id.as_str() == attachable_id)
+            .expect("attachable should exist");
         assert_eq!(
             match &attachable.content {
                 AttachableContent::Terminal(terminal) => terminal.working_directory.clone(),

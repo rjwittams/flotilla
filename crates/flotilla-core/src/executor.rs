@@ -390,17 +390,19 @@ fn persist_workspace_binding(
         warn!("attachable store lock poisoned while persisting workspace binding");
         return;
     };
-    let set_id =
-        store.ensure_terminal_set(Some(target_host.clone()), Some(HostPath::new(target_host.clone(), checkout_path.to_path_buf())));
-    store.replace_binding(ProviderBinding {
+    let (set_id, changed_set) = store
+        .ensure_terminal_set_with_change(Some(target_host.clone()), Some(HostPath::new(target_host.clone(), checkout_path.to_path_buf())));
+    let changed_binding = store.replace_binding(ProviderBinding {
         provider_category: "workspace_manager".into(),
         provider_name: provider_name.to_string(),
         object_kind: BindingObjectKind::AttachableSet,
         object_id: set_id.to_string(),
         external_ref: workspace_ref.to_string(),
     });
-    if let Err(err) = store.save() {
-        warn!(err = %err, "failed to persist attachable registry after workspace binding update");
+    if changed_set || changed_binding {
+        if let Err(err) = store.save() {
+            warn!(err = %err, "failed to persist attachable registry after workspace binding update");
+        }
     }
 }
 
@@ -1596,7 +1598,7 @@ mod tests {
         let object_id = store
             .lookup_binding("workspace_manager", "cmux", BindingObjectKind::AttachableSet, "mock-ref")
             .expect("workspace binding should exist");
-        let set = store.registry().sets.values().find(|set| set.id.0 == object_id).expect("set should exist");
+        let set = store.registry().sets.values().find(|set| set.id.as_str() == object_id).expect("set should exist");
         assert_eq!(set.checkout, Some(HostPath::new(local_host(), checkout_path)));
     }
 
@@ -1902,7 +1904,7 @@ mod tests {
         let object_id = store
             .lookup_binding("workspace_manager", "cmux", BindingObjectKind::AttachableSet, "mock-ref")
             .expect("workspace binding should exist");
-        let set = store.registry().sets.values().find(|set| set.id.0 == object_id).expect("set should exist");
+        let set = store.registry().sets.values().find(|set| set.id.as_str() == object_id).expect("set should exist");
         assert_eq!(set.checkout, Some(HostPath::new(local_host(), PathBuf::from("/repo/wt-feat"))));
     }
     // -----------------------------------------------------------------------
