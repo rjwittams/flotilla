@@ -406,6 +406,8 @@ impl TerminalPool for ShpoolTerminalPool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::providers::testing::MockRunner;
 
@@ -651,6 +653,19 @@ mod tests {
             .spawn()
             .expect("spawn sleep process");
         let pid = child.id();
+
+        // Wait until sysinfo can see the process name — avoids flakiness
+        // where is_expected_process returns false because /proc/<pid>/stat
+        // isn't fully populated yet under load.
+        let mut visible = false;
+        for _ in 0..50 {
+            if ShpoolTerminalPool::is_expected_process(pid as i32, "sleep") {
+                visible = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(visible, "sleep process should be visible to sysinfo before testing stop_daemon");
 
         std::fs::write(&socket_path, b"").expect("create fake socket");
         std::fs::write(&pid_path, pid.to_string()).expect("write pid file");

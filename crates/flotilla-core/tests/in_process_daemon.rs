@@ -324,7 +324,7 @@ async fn trigger_refresh_and_recv(
     repo: &Path,
     rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>,
 ) -> DaemonEvent {
-    daemon.refresh(repo).await.expect("refresh should succeed");
+    daemon.refresh(&RepoSelector::Path(repo.to_path_buf())).await.expect("refresh should succeed");
     recv_event(rx).await
 }
 
@@ -506,7 +506,7 @@ async fn generate_branch_name_can_be_cancelled_while_provider_call_is_in_flight(
     let daemon = InProcessDaemon::new(vec![repo.clone()], config, slow_ai_discovery(Arc::clone(&utility)), HostName::local()).await;
     let mut rx = daemon.subscribe();
 
-    daemon.refresh(&repo).await.expect("refresh should succeed");
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh should succeed");
 
     let command = Command {
         host: None,
@@ -686,7 +686,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     let mut rx = daemon.subscribe();
 
     let add_id = daemon
-        .execute(Command { host: None, context_repo: None, action: CommandAction::AddRepo { path: repo.clone() } })
+        .execute(Command { host: None, context_repo: None, action: CommandAction::TrackRepoPath { path: repo.clone() } })
         .await
         .expect("add_repo command should return an id");
 
@@ -700,7 +700,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
                 Ok(DaemonEvent::CommandFinished { command_id, repo_identity, result, .. }) if command_id == add_id => {
                     finished = Some((repo_identity, result));
                 }
-                Ok(DaemonEvent::RepoAdded(info)) => added = Some(*info),
+                Ok(DaemonEvent::RepoTracked(info)) => added = Some(*info),
                 Ok(_) => {}
                 Err(e) => panic!("unexpected recv error: {e:?}"),
             }
@@ -712,7 +712,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     .await
     .expect("timeout waiting for add command events");
     let (finished_identity, finished_result) = finished_add;
-    assert!(matches!(finished_result, CommandResult::RepoAdded { path } if path == repo));
+    assert!(matches!(finished_result, CommandResult::RepoTracked { ref path, .. } if *path == repo));
     assert_eq!(finished_identity, added.identity, "CommandFinished should use the tracked repo identity");
     assert_eq!(started_add, added.identity, "CommandStarted should use the tracked repo identity");
     assert_eq!(added.path, repo);
@@ -725,7 +725,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
         .execute(Command {
             host: None,
             context_repo: None,
-            action: CommandAction::RemoveRepo { repo: RepoSelector::Query("new-repo".into()) },
+            action: CommandAction::UntrackRepo { repo: RepoSelector::Query("new-repo".into()) },
         })
         .await
         .expect("remove_repo command should return an id");
@@ -735,7 +735,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
         loop {
             match rx.recv().await {
                 Ok(DaemonEvent::CommandFinished { command_id, result, .. }) if command_id == remove_id => finished = Some(result),
-                Ok(DaemonEvent::RepoRemoved { path, .. }) => removed = Some(path),
+                Ok(DaemonEvent::RepoUntracked { path, .. }) => removed = Some(path),
                 Ok(_) => {}
                 Err(e) => panic!("unexpected recv error: {e:?}"),
             }
@@ -746,7 +746,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     })
     .await
     .expect("timeout waiting for remove command events");
-    assert!(matches!(finished_remove, CommandResult::RepoRemoved { path } if path == repo));
+    assert!(matches!(finished_remove, CommandResult::RepoUntracked { ref path } if *path == repo));
     assert_eq!(removed, repo);
 
     let repos = daemon.list_repos().await.expect("list_repos after remove");
@@ -791,15 +791,18 @@ async fn adding_local_clone_promotes_remote_only_identity_to_local_execution() {
         .add_virtual_repo(identity.clone(), PathBuf::from("/remote/desktop/owner/repo"), ProviderData::default())
         .await
         .expect("add virtual repo");
-    daemon.add_repo(&local_repo).await.expect("add local repo");
+    let (tracked_path, _) = daemon.add_repo(&local_repo).await.expect("add local repo");
+    // Path may be canonicalized (e.g. /var -> /private/var on macOS)
+    let canonical_repo = std::fs::canonicalize(&local_repo).unwrap_or_else(|_| local_repo.clone());
 
     let repos = daemon.list_repos().await.expect("list repos");
     assert_eq!(repos.len(), 1);
     assert_eq!(repos[0].identity, identity);
-    assert_eq!(repos[0].path, local_repo, "local clone should become the preferred executable path");
-    assert_eq!(daemon.preferred_local_path_for_identity(&identity).await, Some(local_repo.clone()));
-    assert!(daemon.get_local_providers(&local_repo).await.is_some(), "local providers should now resolve for the identity");
-    assert_eq!(daemon.tracked_repo_paths().await, vec![local_repo]);
+    assert_eq!(repos[0].path, canonical_repo, "local clone should become the preferred executable path");
+    assert_eq!(tracked_path, canonical_repo);
+    assert_eq!(daemon.preferred_local_path_for_identity(&identity).await, Some(canonical_repo.clone()));
+    assert!(daemon.get_local_providers(&canonical_repo).await.is_some(), "local providers should now resolve for the identity");
+    assert_eq!(daemon.tracked_repo_paths().await, vec![canonical_repo]);
 }
 
 #[tokio::test]
@@ -807,7 +810,7 @@ async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
     let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_git_repos("git@github.com:owner/repo.git").await;
     let mut rx = daemon.subscribe();
 
-    daemon.refresh(&repo_a).await.expect("refresh first repo");
+    daemon.refresh(&RepoSelector::Path(repo_a.clone())).await.expect("refresh first repo");
     let _ = recv_event(&mut rx).await;
 
     daemon.remove_repo(&repo_a).await.expect("remove preferred root");
@@ -833,7 +836,7 @@ async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
 async fn get_local_providers_excludes_peer_overlay_data() {
     let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
 
-    daemon.refresh(&repo).await.expect("refresh local repo");
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh local repo");
 
     let peer_checkout = HostPath::new(HostName::new("follower"), "/srv/follower/repo");
     let mut peer_data = ProviderData::default();
@@ -900,7 +903,7 @@ async fn get_state_does_not_reattribute_peer_checkouts_after_poll() {
     // Now get_state reads last_snapshot (merged) as base, normalizes ALL checkouts
     // to local host, then merges peers again. With the bug, kiwi's checkout appears
     // both as local (re-stamped) and as kiwi (re-merged).
-    let snapshot = daemon.get_state(&repo).await.expect("get_state after poll with peers");
+    let snapshot = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("get_state after poll with peers");
 
     // The peer checkout should appear exactly once, attributed to kiwi
     let kiwi_checkouts: Vec<_> = snapshot.providers.checkouts.keys().filter(|hp| hp.host == peer_host).collect();
@@ -951,7 +954,7 @@ async fn set_peer_providers_after_poll_does_not_duplicate_checkouts() {
     daemon.set_peer_providers(&repo, vec![(peer_host.clone(), make_peer_data("feat-v2"))], 1).await;
     let _ = recv_event(&mut rx).await;
 
-    let snapshot = daemon.get_state(&repo).await.expect("get_state after poll + second peer update");
+    let snapshot = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("get_state after poll + second peer update");
 
     let peer_count = snapshot.providers.checkouts.keys().filter(|hp| hp.host == peer_host).count();
     assert_eq!(peer_count, 1, "peer should have exactly 1 checkout, got {peer_count}");
@@ -973,7 +976,11 @@ async fn inline_issue_command_returns_zero_and_skips_lifecycle_events() {
     let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
 
     let command_id = daemon
-        .execute(Command { host: None, context_repo: None, action: CommandAction::ClearIssueSearch { repo: repo.clone() } })
+        .execute(Command {
+            host: None,
+            context_repo: None,
+            action: CommandAction::ClearIssueSearch { repo: RepoSelector::Path(repo.clone()) },
+        })
         .await
         .expect("inline command should succeed");
     assert_eq!(command_id, 0, "inline issue commands should return id=0");
@@ -1211,18 +1218,18 @@ async fn add_virtual_repo_emits_repo_added_and_appears_in_list() {
         .await
         .expect("add_virtual_repo should succeed");
 
-    // Should receive a RepoAdded event
+    // Should receive a RepoTracked event
     let added = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             match rx.recv().await {
-                Ok(DaemonEvent::RepoAdded(info)) => break *info,
+                Ok(DaemonEvent::RepoTracked(info)) => break *info,
                 Ok(_) => {}
                 Err(e) => panic!("unexpected recv error: {e:?}"),
             }
         }
     })
     .await
-    .expect("timeout waiting for RepoAdded");
+    .expect("timeout waiting for RepoTracked");
     assert_eq!(added.identity, identity);
     assert_eq!(added.path, synthetic_path);
     assert!(!added.loading, "virtual repos should not be in loading state");
@@ -1273,7 +1280,7 @@ async fn get_repo_work_returns_work_items() {
     trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
 
     let repo_name = repo.file_name().expect("repo should have a file name").to_str().expect("repo name should be valid UTF-8");
-    let work = daemon.get_repo_work(repo_name).await.expect("get_repo_work failed");
+    let work = daemon.get_repo_work(&RepoSelector::Query(repo_name.to_string())).await.expect("get_repo_work failed");
     assert_eq!(work.path, repo);
     // Work items may or may not be present depending on repo state, but the call should succeed
 }
@@ -1295,7 +1302,7 @@ async fn get_repo_detail_returns_provider_health_and_errors() {
     trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
 
     let repo_name = repo.file_name().expect("repo should have a file name").to_str().expect("repo name should be valid UTF-8");
-    let detail = daemon.get_repo_detail(repo_name).await.expect("get_repo_detail failed");
+    let detail = daemon.get_repo_detail(&RepoSelector::Query(repo_name.to_string())).await.expect("get_repo_detail failed");
 
     assert_eq!(detail.path, repo);
     let change_request_health = detail.provider_health.get("change_request").expect("change_request health should be present");
@@ -1311,7 +1318,7 @@ async fn get_repo_providers_returns_structured_unmet_requirements_and_discovery(
     let (_temp, repo, daemon) = daemon_for_plain_dir().await;
 
     let repo_name = repo.file_name().expect("repo should have a file name").to_str().expect("repo name should be valid UTF-8");
-    let providers = daemon.get_repo_providers(repo_name).await.expect("get_repo_providers failed");
+    let providers = daemon.get_repo_providers(&RepoSelector::Query(repo_name.to_string())).await.expect("get_repo_providers failed");
 
     assert_eq!(providers.path, repo);
     assert!(
@@ -1391,7 +1398,7 @@ async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
     // 2. Broadcast initial snapshot (no issues yet)
     // 3. Call fetch_missing_linked_issues → finds "42" missing → calls fetch_issues_by_id
     // 4. Broadcast updated snapshot with pinned issue
-    daemon.refresh(&repo).await.expect("refresh should succeed");
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh should succeed");
 
     // --- Assert ---
     // Collect snapshot events until we see one containing issue "42".

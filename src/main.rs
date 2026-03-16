@@ -300,7 +300,14 @@ async fn run_tui(cli: Cli) -> Result<()> {
     if !embedded {
         for root in &cli_repo_roots {
             let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-            if let Err(e) = daemon.add_repo(&canonical).await {
+            if let Err(e) = daemon
+                .execute(flotilla_protocol::Command {
+                    host: None,
+                    context_repo: None,
+                    action: flotilla_protocol::CommandAction::TrackRepoPath { path: canonical.clone() },
+                })
+                .await
+            {
                 info!(repo = %canonical.display(), err = %e, "failed to add repo");
             }
         }
@@ -376,12 +383,12 @@ fn parse_repo_command(args: &[String]) -> Result<RepoCommand, String> {
         "add" if args.len() == 2 => Ok(RepoCommand::Control(Command {
             host: None,
             context_repo: None,
-            action: CommandAction::AddRepo { path: PathBuf::from(&args[1]) },
+            action: CommandAction::TrackRepoPath { path: PathBuf::from(&args[1]) },
         })),
         "remove" if args.len() == 2 => Ok(RepoCommand::Control(Command {
             host: None,
             context_repo: None,
-            action: CommandAction::RemoveRepo { repo: RepoSelector::Query(args[1].clone()) },
+            action: CommandAction::UntrackRepo { repo: RepoSelector::Query(args[1].clone()) },
         })),
         slug => {
             if args.len() == 1 {
@@ -427,7 +434,7 @@ fn parse_host_control_command(host: &str, args: &[String]) -> Result<Command, St
     }
 
     let mut command = match args[0].as_str() {
-        "refresh" => Command {
+        "refresh" if args.len() <= 2 => Command {
             host: None,
             context_repo: None,
             action: CommandAction::Refresh { repo: args.get(1).cloned().map(RepoSelector::Query) },
@@ -567,7 +574,7 @@ mod tests {
             parsed,
             HostCommand::Control(command)
                 if command.host.as_ref().map(|host| host.as_str()) == Some("alpha")
-                    && matches!(command.action, CommandAction::RemoveRepo { repo: RepoSelector::Query(ref value) } if value == "owner/repo")
+                    && matches!(command.action, CommandAction::UntrackRepo { repo: RepoSelector::Query(ref value) } if value == "owner/repo")
         ));
 
         let parsed = parse_host_command(&["alpha".into(), "checkout".into(), "/tmp/wt".into(), "remove".into()])
@@ -610,6 +617,23 @@ mod tests {
             cli.command,
             Some(SubCommand::Host { args, json: true }) if args == vec!["alpha", "providers"]
         ));
+    }
+
+    #[test]
+    fn parse_host_refresh_accepts_bare_and_repo() {
+        let parsed = parse_host_command(&["alpha".into(), "refresh".into()]).expect("bare refresh should parse");
+        assert!(matches!(parsed, HostCommand::Control(cmd) if matches!(cmd.action, CommandAction::Refresh { repo: None })));
+
+        let parsed = parse_host_command(&["alpha".into(), "refresh".into(), "my-repo".into()]).expect("refresh with repo should parse");
+        assert!(
+            matches!(parsed, HostCommand::Control(cmd) if matches!(cmd.action, CommandAction::Refresh { repo: Some(RepoSelector::Query(ref q)) } if q == "my-repo"))
+        );
+    }
+
+    #[test]
+    fn parse_host_refresh_rejects_extra_args() {
+        let result = parse_host_command(&["alpha".into(), "refresh".into(), "my-repo".into(), "garbage".into()]);
+        assert!(result.is_err(), "extra args after refresh repo should be rejected");
     }
 
     #[test]

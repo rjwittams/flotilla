@@ -143,7 +143,7 @@ async fn wait_for_command_result(rx: &mut tokio::sync::broadcast::Receiver<Daemo
 async fn wait_for_local_checkout(daemon: &Arc<InProcessDaemon>, repo: &std::path::Path, branch: &str) -> ProviderData {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            daemon.refresh(repo).await.expect("refresh");
+            daemon.refresh(&RepoSelector::Path(repo.to_path_buf())).await.expect("refresh");
             if let Some((providers, _)) = daemon.get_local_providers(repo).await {
                 if providers.checkouts.values().any(|checkout| checkout.branch == branch) {
                     return providers;
@@ -284,14 +284,14 @@ async fn daemon_snapshot_has_correct_host_attribution() {
 
     // Subscribe first, then trigger a refresh so the snapshot cannot race ahead.
     let mut rx = daemon.subscribe();
-    daemon.refresh(&repo).await.expect("refresh");
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh");
     let snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             match rx.recv().await {
                 Ok(flotilla_protocol::DaemonEvent::RepoSnapshot(snap)) => return *snap,
                 Ok(flotilla_protocol::DaemonEvent::RepoDelta(_)) => {
                     // Get full state instead
-                    return daemon.get_state(&repo).await.expect("get_state");
+                    return daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("get_state");
                 }
                 Ok(_) => continue,
                 Err(e) => panic!("recv error: {e:?}"),
@@ -334,7 +334,7 @@ async fn remote_checkout_replication_attributes_checkout_to_follower_host() {
     )
     .await;
 
-    leader.refresh(&leader_repo).await.expect("refresh leader");
+    leader.refresh(&RepoSelector::Path(leader_repo.clone())).await.expect("refresh leader");
 
     let mut follower_rx = follower.subscribe();
     let command_id = follower
@@ -360,7 +360,7 @@ async fn remote_checkout_replication_attributes_checkout_to_follower_host() {
 
     leader.set_peer_providers(&leader_repo, vec![(HostName::new("follower"), follower_providers)], 0).await;
 
-    let snapshot = leader.get_state(&leader_repo).await.expect("leader state");
+    let snapshot = leader.get_state(&RepoSelector::Path(leader_repo.clone())).await.expect("leader state");
     assert!(
         snapshot
             .providers
@@ -396,8 +396,8 @@ async fn daemon_snapshot_includes_follower_checkout_overlay() {
     let follower_host = HostName::new("follower");
     let follower_checkout = HostPath::new(follower_host.clone(), "/remote/repo");
 
-    daemon.refresh(&repo).await.expect("refresh");
-    let baseline = daemon.get_state(&repo).await.expect("baseline get_state");
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh");
+    let baseline = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("baseline get_state");
     assert!(
         baseline.work_items.iter().all(|item| item.checkout_key() != Some(&follower_checkout)),
         "baseline snapshot should not already contain follower overlay data"
@@ -410,7 +410,7 @@ async fn daemon_snapshot_includes_follower_checkout_overlay() {
     // so `get_state` can assert on the merged view immediately.
     daemon.set_peer_providers(&repo, vec![(follower_host.clone(), follower_data)], 0).await;
 
-    let snapshot = daemon.get_state(&repo).await.expect("get_state");
+    let snapshot = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("get_state");
 
     assert!(
         snapshot.providers.checkouts.contains_key(&follower_checkout),
