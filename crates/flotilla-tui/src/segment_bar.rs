@@ -1,4 +1,9 @@
-use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::Span};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Modifier, Style},
+    text::Span,
+};
 use unicode_width::UnicodeWidthStr;
 
 use crate::theme::{BarSiteStyle, Theme};
@@ -10,6 +15,17 @@ pub struct SegmentItem {
     pub active: bool,
     pub dragging: bool,
     pub style_override: Option<Style>,
+}
+
+impl SegmentItem {
+    /// Resolve the visual emphasis: override wins, then active/dragging, then inactive.
+    fn resolve_style(&self, theme: &Theme) -> Style {
+        if let Some(ov) = self.style_override {
+            ov
+        } else {
+            theme.tab_style(self.active, self.dragging)
+        }
+    }
 }
 
 /// Bundles rendered spans with their computed display width.
@@ -95,20 +111,24 @@ const CHEVRON: &str = "\u{e0b0}";
 /// Theme-aware tab bar style: reads colours from a `Theme`.
 pub struct ThemedTabBarStyle<'a> {
     pub theme: &'a Theme,
+    pub site: &'a BarSiteStyle,
 }
 
 impl BarStyle for ThemedTabBarStyle<'_> {
     fn render_item(&self, item: &SegmentItem) -> RenderedItem {
-        let style = if let Some(override_style) = item.style_override {
-            override_style
-        } else if item.active && item.dragging {
-            self.theme.tab_style(true, true)
-        } else if item.active {
-            self.theme.tab_style(true, false)
-        } else {
-            self.theme.tab_style(false, false)
-        };
-        RenderedItem::from_spans(vec![Span::styled(item.label.clone(), style)])
+        let style = item.resolve_style(self.theme);
+        let label = self.site.transform_label(&item.label);
+
+        let mut spans = Vec::new();
+        if let Some(key) = &item.key_hint {
+            let key_style = Style::default().fg(self.theme.key_hint).add_modifier(style.add_modifier);
+            spans.push(Span::styled("<", style));
+            spans.push(Span::styled(key.clone(), key_style));
+            spans.push(Span::styled("> ", style));
+        }
+        spans.push(Span::styled(label, style));
+
+        RenderedItem::from_spans(spans)
     }
 
     fn separator(&self) -> RenderedItem {
@@ -128,17 +148,36 @@ pub struct ThemedRibbonStyle<'a> {
 
 impl BarStyle for ThemedRibbonStyle<'_> {
     fn render_item(&self, item: &SegmentItem) -> RenderedItem {
-        let key = item.key_hint.as_deref().unwrap_or("");
         let label = self.site.transform_label(&item.label);
-        RenderedItem::from_spans(vec![
-            Span::styled(CHEVRON, Style::default().fg(self.theme.bar_bg).bg(self.theme.key_chip_bg)),
-            Span::styled(" ", Style::default().fg(self.theme.key_chip_fg).bg(self.theme.key_chip_bg)),
-            Span::styled("<", Style::default().fg(self.theme.key_chip_fg).bg(self.theme.key_chip_bg).bold()),
-            Span::styled(key.to_string(), Style::default().fg(self.theme.key_hint).bg(self.theme.key_chip_bg).bold()),
-            Span::styled(">", Style::default().fg(self.theme.key_chip_fg).bg(self.theme.key_chip_bg).bold()),
-            Span::styled(format!(" {label} "), Style::default().fg(self.theme.key_chip_fg).bg(self.theme.key_chip_bg).bold()),
-            Span::styled(CHEVRON, Style::default().fg(self.theme.key_chip_bg).bg(self.theme.bar_bg)),
-        ])
+
+        // Resolve chip colours: override > active+dragging > active > inactive.
+        let (chip_bg, chip_fg, modifiers) = if let Some(ov) = item.style_override {
+            (ov.bg.unwrap_or(self.theme.key_chip_bg), ov.fg.unwrap_or(self.theme.key_chip_fg), ov.add_modifier)
+        } else if item.active {
+            let mods = if item.dragging { Modifier::BOLD | Modifier::UNDERLINED } else { Modifier::BOLD };
+            (self.theme.tab_active, self.theme.key_chip_fg, mods)
+        } else {
+            (self.theme.key_chip_bg, self.theme.key_chip_fg, Modifier::BOLD)
+        };
+
+        let chip_style = Style::default().fg(chip_fg).bg(chip_bg).add_modifier(modifiers);
+        let key_style = Style::default().fg(self.theme.key_hint).bg(chip_bg).add_modifier(modifiers);
+
+        let mut spans = vec![Span::styled(CHEVRON, Style::default().fg(self.theme.bar_bg).bg(chip_bg))];
+
+        if let Some(key) = &item.key_hint {
+            spans.push(Span::styled(" ", chip_style));
+            spans.push(Span::styled("<", chip_style));
+            spans.push(Span::styled(key.clone(), key_style));
+            spans.push(Span::styled(">", chip_style));
+            spans.push(Span::styled(format!(" {label} "), chip_style));
+        } else {
+            spans.push(Span::styled(format!(" {label} "), chip_style));
+        }
+
+        spans.push(Span::styled(CHEVRON, Style::default().fg(chip_bg).bg(self.theme.bar_bg)));
+
+        RenderedItem::from_spans(spans)
     }
 
     fn separator(&self) -> RenderedItem {
@@ -207,7 +246,7 @@ mod tests {
     #[test]
     fn tab_style_renders_active_and_inactive() {
         let theme = crate::theme::Theme::classic();
-        let style = ThemedTabBarStyle { theme: &theme };
+        let style = ThemedTabBarStyle { theme: &theme, site: &theme.tab_bar };
         let active = SegmentItem { label: "active".into(), key_hint: None, active: true, dragging: false, style_override: None };
         let inactive = SegmentItem { label: "inactive".into(), key_hint: None, active: false, dragging: false, style_override: None };
 
@@ -222,7 +261,7 @@ mod tests {
     #[test]
     fn tab_style_applies_style_override() {
         let theme = crate::theme::Theme::classic();
-        let style = ThemedTabBarStyle { theme: &theme };
+        let style = ThemedTabBarStyle { theme: &theme, site: &theme.tab_bar };
         let item = SegmentItem {
             label: "[+]".into(),
             key_hint: None,
@@ -237,8 +276,45 @@ mod tests {
     #[test]
     fn tab_style_separator_width() {
         let theme = crate::theme::Theme::classic();
-        let sep = ThemedTabBarStyle { theme: &theme }.separator();
+        let sep = ThemedTabBarStyle { theme: &theme, site: &theme.tab_bar }.separator();
         assert_eq!(sep.width, 3);
+    }
+
+    #[test]
+    fn tab_style_renders_key_hint() {
+        let theme = crate::theme::Theme::classic();
+        let style = ThemedTabBarStyle { theme: &theme, site: &theme.tab_bar };
+        let item = SegmentItem { label: "open".into(), key_hint: Some("ENT".into()), active: true, dragging: false, style_override: None };
+        let rendered = style.render_item(&item);
+        let text: String = rendered.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(text.contains("<"));
+        assert!(text.contains("ENT"));
+        assert!(text.contains(">"));
+        assert!(text.contains("open"));
+    }
+
+    #[test]
+    fn tab_style_no_key_hint_no_brackets() {
+        let theme = crate::theme::Theme::classic();
+        let style = ThemedTabBarStyle { theme: &theme, site: &theme.tab_bar };
+        let item = SegmentItem { label: "repo".into(), key_hint: None, active: false, dragging: false, style_override: None };
+        let rendered = style.render_item(&item);
+        assert_eq!(rendered.spans.len(), 1);
+        let text: String = rendered.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(!text.contains("<"));
+        assert!(!text.contains(">"));
+    }
+
+    #[test]
+    fn tab_style_applies_label_transform() {
+        let theme = crate::theme::Theme::classic();
+        let site =
+            crate::theme::BarSiteStyle { kind: crate::theme::BarKind::Pipe, label_transform: crate::theme::TextTransform::Uppercase };
+        let style = ThemedTabBarStyle { theme: &theme, site: &site };
+        let item = SegmentItem { label: "hello".into(), key_hint: None, active: false, dragging: false, style_override: None };
+        let rendered = style.render_item(&item);
+        let text: String = rendered.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert_eq!(text, "HELLO");
     }
 
     #[test]
@@ -275,6 +351,60 @@ mod tests {
         let text: String = rendered.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
         assert!(text.contains("ENT"));
         assert!(text.contains("OPEN")); // label is uppercased by status_bar transform
+    }
+
+    #[test]
+    fn ribbon_style_elides_brackets_without_key_hint() {
+        let theme = crate::theme::Theme::classic();
+        let style = ThemedRibbonStyle { theme: &theme, site: &theme.status_bar };
+        let item = SegmentItem { label: "repo".into(), key_hint: None, active: false, dragging: false, style_override: None };
+        let rendered = style.render_item(&item);
+        let text: String = rendered.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(!text.contains("<"));
+        assert!(!text.contains(">"));
+        // Chevron + " REPO " + chevron = 3 spans
+        assert_eq!(rendered.spans.len(), 3);
+    }
+
+    #[test]
+    fn ribbon_style_active_uses_tab_active_bg() {
+        let theme = crate::theme::Theme::classic();
+        let style = ThemedRibbonStyle { theme: &theme, site: &theme.tab_bar };
+        let item = SegmentItem { label: "repo".into(), key_hint: None, active: true, dragging: false, style_override: None };
+        let rendered = style.render_item(&item);
+        // The label span (middle) should use tab_active as bg
+        let label_span = &rendered.spans[1];
+        assert_eq!(label_span.style.bg, Some(theme.tab_active));
+        assert!(label_span.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn ribbon_style_dragging_adds_underline() {
+        let theme = crate::theme::Theme::classic();
+        let style = ThemedRibbonStyle { theme: &theme, site: &theme.tab_bar };
+        let item = SegmentItem { label: "repo".into(), key_hint: None, active: true, dragging: true, style_override: None };
+        let rendered = style.render_item(&item);
+        let label_span = &rendered.spans[1];
+        assert!(label_span.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn ribbon_style_applies_style_override() {
+        let theme = crate::theme::Theme::classic();
+        let style = ThemedRibbonStyle { theme: &theme, site: &theme.tab_bar };
+        let item = SegmentItem {
+            label: "logo".into(),
+            key_hint: None,
+            active: false,
+            dragging: false,
+            style_override: Some(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        };
+        let rendered = style.render_item(&item);
+        let label_span = &rendered.spans[1];
+        assert_eq!(label_span.style.fg, Some(Color::Black));
+        assert_eq!(label_span.style.bg, Some(Color::Cyan));
+        // Left chevron transitions to override bg
+        assert_eq!(rendered.spans[0].style.bg, Some(Color::Cyan));
     }
 
     #[test]
