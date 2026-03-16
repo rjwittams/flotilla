@@ -29,6 +29,7 @@ impl Factory for TmuxWorkspaceManagerFactory {
         _config: &ConfigStore,
         _repo_root: &Path,
         runner: Arc<dyn CommandRunner>,
+        _attachable_store: crate::attachable::SharedAttachableStore,
     ) -> Result<Arc<dyn WorkspaceManager>, Vec<UnmetRequirement>> {
         if env.find_env_var("TMUX").is_some() {
             Ok(Arc::new(TmuxWorkspaceManager::new(runner)))
@@ -45,7 +46,10 @@ mod tests {
     use super::TmuxWorkspaceManagerFactory;
     use crate::{
         config::ConfigStore,
-        providers::discovery::{test_support::DiscoveryMockRunner, EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement},
+        providers::discovery::{
+            test_support::{test_attachable_store, DiscoveryMockRunner},
+            EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement,
+        },
     };
 
     #[tokio::test]
@@ -54,7 +58,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = TmuxWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = TmuxWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_ok());
     }
 
@@ -64,7 +68,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = TmuxWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = TmuxWorkspaceManagerFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         let unmet = result.err().expect("should fail without TMUX env var");
         assert!(unmet.contains(&UnmetRequirement::MissingEnvVar("TMUX".into())));
     }

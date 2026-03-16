@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use async_trait::async_trait;
@@ -17,6 +17,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use super::{DiscoveryRuntime, EnvironmentBag, Factory, FactoryRegistry, ProviderCategory, ProviderDescriptor, UnmetRequirement};
 use crate::{
+    attachable::{AttachableStore, SharedAttachableStore},
     config::ConfigStore,
     providers::{
         change_request::ChangeRequestTracker, discovery::EnvVars, issue_tracker::IssueTracker, vcs::CheckoutManager, ChannelLabel,
@@ -89,6 +90,10 @@ pub fn init_git_repo_with_remote(path: &Path, remote: &str) -> RepoIdentity {
     let status = ProcessCommand::new("git").args(["-C", repo, "remote", "add", "origin", remote]).status().expect("git remote add origin");
     assert!(status.success(), "git remote add origin should succeed");
     RepoIdentity::from_remote_url(remote).expect("remote should produce repo identity")
+}
+
+pub fn test_attachable_store(config: &ConfigStore) -> SharedAttachableStore {
+    Arc::new(Mutex::new(AttachableStore::with_base(config.base_path())))
 }
 
 impl DiscoveryMockRunnerBuilder {
@@ -183,6 +188,7 @@ fn minimal_discovery_runtime(follower: bool, runner: std::sync::Arc<dyn CommandR
         ))],
         repo_detectors: super::detectors::default_repo_detectors(),
         factories,
+        attachable_store: OnceLock::new(),
     }
 }
 // ---------------------------------------------------------------------------
@@ -385,6 +391,7 @@ impl Factory for FakeIssueTrackerFactory {
         _config: &ConfigStore,
         _repo_root: &Path,
         _runner: Arc<dyn CommandRunner>,
+        _attachable_store: crate::attachable::SharedAttachableStore,
     ) -> Result<Arc<dyn IssueTracker>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.0))
     }
@@ -414,6 +421,7 @@ impl Factory for FakeCheckoutManagerFactory {
         _config: &ConfigStore,
         _repo_root: &Path,
         _runner: Arc<dyn CommandRunner>,
+        _attachable_store: crate::attachable::SharedAttachableStore,
     ) -> Result<Arc<dyn CheckoutManager>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.0))
     }
@@ -436,6 +444,7 @@ impl Factory for FakeChangeRequestFactory {
         _config: &ConfigStore,
         _repo_root: &Path,
         _runner: Arc<dyn CommandRunner>,
+        _attachable_store: crate::attachable::SharedAttachableStore,
     ) -> Result<Arc<dyn ChangeRequestTracker>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.0))
     }
@@ -485,6 +494,7 @@ pub fn fake_discovery_with_providers(
             workspace_managers: vec![],
             terminal_pools: vec![],
         },
+        attachable_store: OnceLock::new(),
     }
 }
 

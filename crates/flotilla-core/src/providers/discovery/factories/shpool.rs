@@ -29,10 +29,11 @@ impl Factory for ShpoolTerminalPoolFactory {
         _config: &ConfigStore,
         _repo_root: &Path,
         runner: Arc<dyn CommandRunner>,
+        attachable_store: crate::attachable::SharedAttachableStore,
     ) -> Result<Arc<dyn TerminalPool>, Vec<UnmetRequirement>> {
         if env.find_binary("shpool").is_some() {
             let socket_path = flotilla_config_dir().join("shpool/shpool.socket");
-            let pool = ShpoolTerminalPool::create(runner, socket_path).await;
+            let pool = ShpoolTerminalPool::create(runner, socket_path, attachable_store).await;
             Ok(Arc::new(pool))
         } else {
             Err(vec![UnmetRequirement::MissingBinary("shpool".into())])
@@ -46,6 +47,7 @@ mod tests {
 
     use super::ShpoolTerminalPoolFactory;
     use crate::{
+        attachable::AttachableStore,
         config::ConfigStore,
         providers::discovery::{test_support::DiscoveryMockRunner, EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement},
     };
@@ -56,7 +58,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = ShpoolTerminalPoolFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let attachable_store = Arc::new(std::sync::Mutex::new(AttachableStore::with_base(config.base_path())));
+        let result = ShpoolTerminalPoolFactory.probe(&bag, &config, Path::new("/repo"), runner, attachable_store).await;
         assert!(result.is_ok());
     }
 
@@ -66,7 +69,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = ShpoolTerminalPoolFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let attachable_store = Arc::new(std::sync::Mutex::new(AttachableStore::with_base(config.base_path())));
+        let result = ShpoolTerminalPoolFactory.probe(&bag, &config, Path::new("/repo"), runner, attachable_store).await;
         let unmet = result.err().expect("should fail without shpool binary");
         assert!(unmet.contains(&UnmetRequirement::MissingBinary("shpool".into())));
     }

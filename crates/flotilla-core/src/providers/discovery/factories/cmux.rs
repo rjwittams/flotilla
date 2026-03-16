@@ -40,6 +40,7 @@ impl Factory for CmuxInsideFactory {
         _config: &ConfigStore,
         _repo_root: &Path,
         runner: Arc<dyn CommandRunner>,
+        _attachable_store: crate::attachable::SharedAttachableStore,
     ) -> Result<Arc<dyn WorkspaceManager>, Vec<UnmetRequirement>> {
         if env.find_env_var("CMUX_SOCKET_PATH").is_some() {
             Ok(Arc::new(CmuxWorkspaceManager::new(runner)))
@@ -67,6 +68,7 @@ impl Factory for CmuxBinaryFallbackFactory {
         _config: &ConfigStore,
         _repo_root: &Path,
         runner: Arc<dyn CommandRunner>,
+        _attachable_store: crate::attachable::SharedAttachableStore,
     ) -> Result<Arc<dyn WorkspaceManager>, Vec<UnmetRequirement>> {
         if env.find_binary("cmux").is_some() {
             Ok(Arc::new(CmuxWorkspaceManager::new(runner)))
@@ -83,7 +85,10 @@ mod tests {
     use super::{CmuxBinaryFallbackFactory, CmuxInsideFactory};
     use crate::{
         config::ConfigStore,
-        providers::discovery::{test_support::DiscoveryMockRunner, EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement},
+        providers::discovery::{
+            test_support::{test_attachable_store, DiscoveryMockRunner},
+            EnvironmentAssertion, EnvironmentBag, Factory, UnmetRequirement,
+        },
     };
 
     // --- CmuxInsideFactory tests ---
@@ -94,7 +99,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = CmuxInsideFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = CmuxInsideFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_ok());
     }
 
@@ -104,7 +109,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = CmuxInsideFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = CmuxInsideFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_err());
     }
 
@@ -114,7 +119,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = CmuxInsideFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = CmuxInsideFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         let unmet = result.err().expect("should fail without env var");
         assert!(unmet.contains(&UnmetRequirement::MissingEnvVar("CMUX_SOCKET_PATH".into())));
     }
@@ -127,7 +132,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = CmuxBinaryFallbackFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = CmuxBinaryFallbackFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         assert!(result.is_ok());
     }
 
@@ -137,7 +142,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = CmuxBinaryFallbackFactory.probe(&bag, &config, Path::new("/repo"), runner).await;
+        let result = CmuxBinaryFallbackFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         let unmet = result.err().expect("should fail without cmux binary");
         assert!(unmet.contains(&UnmetRequirement::MissingBinary("cmux".into())));
     }
