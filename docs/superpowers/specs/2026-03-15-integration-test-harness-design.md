@@ -393,20 +393,33 @@ All tests share the same session-scoped containers and daemon state. The initial
 ### Dev Workflow
 
 ```bash
-# Build flotilla on host (Linux only, or cross-compile)
+# Build flotilla on host
 cargo build --release
 
 # Use dev compose override (copies host binary instead of building in Docker)
 cd tests/integration
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
-# Run tests
-pytest -v
+# Run tests (use uv to manage the Python venv)
+uv run pytest -v
 
-# Full build (works on any platform, slower)
+# Full build (works on any platform, slower — builds Rust inside Docker)
 docker compose up -d --build
-pytest -v
+uv run pytest -v
 ```
+
+### Implementation Notes
+
+Lessons learned during implementation:
+
+- **Debian trixie, not bookworm.** The container base image uses `debian:trixie-slim` (glibc 2.41) instead of bookworm (glibc 2.36). This allows the dev target to use host-built binaries from recent distros (Arch, Fedora 41+, Ubuntu 25.04+) without static linking. The binary needs up to GLIBC_2.39.
+- **`docker compose exec` must run as the `flotilla` user** (`-u flotilla`). SSH keys are created by the entrypoint as the `flotilla` user, so running as root gets "permission denied" on SSH.
+- **`.dockerignore` must allow `target/release/flotilla`** through for the dev build target. Add `!target/release/flotilla` after the `target/` exclusion.
+- **`mkdir -p /run/sshd`** (not `mkdir`) — trixie's openssh-server creates this directory during package installation, so a bare `mkdir` fails.
+- **`libssl3t64`** replaces `libssl3` in trixie (Debian's 64-bit time_t transition).
+- **`pyproject.toml` needs a `version` field** for uv compatibility.
+- **Docker buildx is required.** Docker Compose v5+ needs the buildx plugin to properly honor `target:` in compose files. Without it, the legacy builder runs all stages regardless of the target.
+- **Role Dockerfiles** (`workstation/`, `follower-codex/`, etc.) still reference `rust:slim-bookworm` and `FROM flotilla-base`. These need updating when topology 2+ (#287/#288) work begins.
 
 ### What's Deferred
 
@@ -414,3 +427,4 @@ pytest -v
 - **Remote control command tests** (e.g., `host node-b repo add`) — remote command routing works in socket daemon mode but can be added incrementally
 - **Hub-spoke topology** (#287) and **jump box topology** (#288) — separate issues, same harness
 - **CI integration** — add to GitHub Actions once the harness is stable locally
+- **Role Dockerfiles** — need trixie migration when topology 2+ work begins
