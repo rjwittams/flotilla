@@ -4,7 +4,7 @@
 //! and broadcasts events — all within the same process.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -559,7 +559,7 @@ fn should_present_host_state(
 }
 
 fn mark_host_removed(hosts: &mut HashMap<HostName, HostState>, host_name: &HostName) -> Option<u64> {
-    let state = ensure_remote_host_state(hosts, host_name);
+    let state = hosts.get_mut(host_name)?;
     if state.removed {
         return None;
     }
@@ -820,7 +820,7 @@ impl InProcessDaemon {
         for host_name in configured.iter().chain(remote_counts.keys()) {
             if host_name != &self.host_name {
                 match hosts.entry(host_name.clone()) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
+                    Entry::Vacant(entry) => {
                         let state = entry.insert(HostState {
                             connection_status: PeerConnectionState::Disconnected,
                             summary: None,
@@ -829,7 +829,7 @@ impl InProcessDaemon {
                         });
                         events.push(DaemonEvent::HostSnapshot(Box::new(build_host_snapshot(&self.host_name, host_name, state))));
                     }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    Entry::Occupied(mut entry) => {
                         let state = entry.get_mut();
                         if state.removed {
                             state.removed = false;
@@ -1701,12 +1701,13 @@ impl InProcessDaemon {
             }
             DaemonEvent::HostRemoved { host, seq } => {
                 if let Ok(mut hosts) = self.hosts.try_write() {
-                    let state = ensure_remote_host_state(&mut hosts, host);
-                    if state.seq <= *seq {
-                        state.connection_status = PeerConnectionState::Disconnected;
-                        state.summary = None;
-                        state.seq = *seq;
-                        state.removed = true;
+                    if let Some(state) = hosts.get_mut(host) {
+                        if state.seq <= *seq {
+                            state.connection_status = PeerConnectionState::Disconnected;
+                            state.summary = None;
+                            state.seq = *seq;
+                            state.removed = true;
+                        }
                     }
                 }
             }
