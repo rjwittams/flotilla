@@ -442,24 +442,24 @@ fn persist_workspace_binding_for_set(
     }
 }
 
-fn resolve_attachable_set_for_checkout(
-    providers_data: &ProviderData,
+fn ensure_attachable_set_for_checkout(
+    attachable_store: &SharedAttachableStore,
     target_host: &HostName,
     checkout_path: &Path,
 ) -> Option<AttachableSetId> {
+    let Ok(mut store) = attachable_store.lock() else {
+        warn!("attachable store lock poisoned while ensuring attachable set for checkout");
+        return None;
+    };
+
     let checkout = HostPath::new(target_host.clone(), checkout_path.to_path_buf());
-    providers_data
-        .attachable_sets
-        .values()
-        .find(|set| set.checkout.as_ref() == Some(&checkout))
-        .map(|set| set.id.clone())
-        .or_else(|| {
-            providers_data
-                .managed_terminals
-                .values()
-                .find(|terminal| terminal.working_directory == checkout_path && terminal.attachable_set_id.is_some())
-                .and_then(|terminal| terminal.attachable_set_id.clone())
-        })
+    let (set_id, changed) = store.ensure_terminal_set_with_change(Some(target_host.clone()), Some(checkout));
+    if changed {
+        if let Err(err) = store.save() {
+            warn!(err = %err, "failed to persist attachable registry after ensuring attachable set");
+        }
+    }
+    Some(set_id)
 }
 
 fn preferred_workspace_manager(registry: &ProviderRegistry) -> Option<(&str, &Arc<dyn WorkspaceManager>)> {
@@ -632,7 +632,7 @@ pub async fn execute(
         CommandAction::PrepareTerminalForCheckout { checkout_path, commands: requested_commands } => {
             let host_key = HostPath::new(local_host.clone(), checkout_path.clone());
             if let Some(co) = providers_data.checkouts.get(&host_key).cloned() {
-                let attachable_set_id = resolve_attachable_set_for_checkout(providers_data, local_host, &checkout_path);
+                let attachable_set_id = ensure_attachable_set_for_checkout(attachable_store, local_host, &checkout_path);
                 match prepare_terminal_commands(&repo.root, &co.branch, &checkout_path, registry, config_base, &requested_commands).await {
                     Ok(commands) => CommandResult::TerminalPrepared {
                         repo_identity: repo.identity.clone(),
@@ -1707,7 +1707,7 @@ mod tests {
                 assert_eq!(target_host, HostName::local());
                 assert_eq!(branch, "feat");
                 assert_eq!(checkout_path, path);
-                assert_eq!(attachable_set_id, None);
+                assert!(attachable_set_id.is_some(), "prepare should allocate an attachable set");
                 assert_eq!(commands, vec![PreparedTerminalCommand { role: "main".into(), command: "claude".into() }]);
             }
             other => panic!("expected TerminalPrepared, got {other:?}"),
@@ -1719,34 +1719,80 @@ mod tests {
         let registry = empty_registry();
         let mut data = empty_data();
         let path = PathBuf::from("/repo/wt-feat");
-        let set_id = flotilla_protocol::AttachableSetId::new("set-remote");
         data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
-        data.attachable_sets.insert(
-            set_id.clone(),
-            flotilla_protocol::AttachableSet {
-                id: set_id.clone(),
-                host_affinity: Some(local_host()),
-                checkout: Some(HostPath::new(local_host(), path.clone())),
-                template_identity: None,
-                members: vec![],
-            },
-        );
         let runner = runner_ok();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let attachable_store = test_attachable_store(temp.path());
+        {
+            let mut store = attachable_store.lock().expect("store lock");
+            let ensured_set_id =
+                store.ensure_terminal_set(Some(local_host()), Some(HostPath::new(local_host(), path.clone())));
+            store.save().expect("save attachable store");
+            assert_eq!(store.registry().sets.get(&ensured_set_id).and_then(|set| set.checkout.clone()), Some(HostPath::new(local_host(), path.clone())));
+        }
 
-        let result = run_execute(
+        let repo = RepoExecutionContext {
+            identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            root: repo_root(),
+        };
+
+        let result = execute(
             CommandAction::PrepareTerminalForCheckout { checkout_path: path.clone(), commands: vec![] },
+            &repo,
             &registry,
             &data,
             &runner,
+            temp.path(),
+            &attachable_store,
+            &local_host(),
         )
         .await;
 
         match result {
             CommandResult::TerminalPrepared { attachable_set_id, .. } => {
-                assert_eq!(attachable_set_id, Some(set_id));
+                let set_id = attachable_set_id.expect("attachable set id");
+                let store = AttachableStore::with_base(temp.path());
+                assert!(store.registry().sets.contains_key(&set_id), "prepare should reuse persisted set");
             }
             other => panic!("expected TerminalPrepared, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn prepare_terminal_for_checkout_creates_and_persists_attachable_set() {
+        let registry = empty_registry();
+        let mut data = empty_data();
+        let path = PathBuf::from("/repo/wt-feat");
+        data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
+        let runner = runner_ok();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let attachable_store = test_attachable_store(temp.path());
+        let repo = RepoExecutionContext {
+            identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            root: repo_root(),
+        };
+
+        let result = execute(
+            CommandAction::PrepareTerminalForCheckout { checkout_path: path.clone(), commands: vec![] },
+            &repo,
+            &registry,
+            &data,
+            &runner,
+            temp.path(),
+            &attachable_store,
+            &local_host(),
+        )
+        .await;
+
+        let set_id = match result {
+            CommandResult::TerminalPrepared { attachable_set_id, .. } => attachable_set_id.expect("attachable set id"),
+            other => panic!("expected TerminalPrepared, got {other:?}"),
+        };
+
+        let store = AttachableStore::with_base(temp.path());
+        let set = store.registry().sets.get(&set_id).expect("set should exist");
+        assert_eq!(set.checkout, Some(HostPath::new(local_host(), path)));
+        assert!(temp.path().join("attachables").join("registry.json").exists(), "registry should be written");
     }
 
     #[tokio::test]
