@@ -427,7 +427,7 @@ fn parse_host_control_command(host: &str, args: &[String]) -> Result<Command, St
     }
 
     let mut command = match args[0].as_str() {
-        "refresh" => Command {
+        "refresh" if args.len() <= 2 => Command {
             host: None,
             context_repo: None,
             action: CommandAction::Refresh { repo: args.get(1).cloned().map(RepoSelector::Query) },
@@ -610,6 +610,23 @@ mod tests {
             cli.command,
             Some(SubCommand::Host { args, json: true }) if args == vec!["alpha", "providers"]
         ));
+    }
+
+    #[test]
+    fn parse_host_refresh_accepts_bare_and_repo() {
+        let parsed = parse_host_command(&["alpha".into(), "refresh".into()]).expect("bare refresh should parse");
+        assert!(matches!(parsed, HostCommand::Control(cmd) if matches!(cmd.action, CommandAction::Refresh { repo: None })));
+
+        let parsed = parse_host_command(&["alpha".into(), "refresh".into(), "my-repo".into()]).expect("refresh with repo should parse");
+        assert!(
+            matches!(parsed, HostCommand::Control(cmd) if matches!(cmd.action, CommandAction::Refresh { repo: Some(RepoSelector::Query(ref q)) } if q == "my-repo"))
+        );
+    }
+
+    #[test]
+    fn parse_host_refresh_rejects_extra_args() {
+        let result = parse_host_command(&["alpha".into(), "refresh".into(), "my-repo".into(), "garbage".into()]);
+        assert!(result.is_err(), "extra args after refresh repo should be rejected");
     }
 
     #[test]
