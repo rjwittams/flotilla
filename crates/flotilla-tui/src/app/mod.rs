@@ -387,8 +387,8 @@ impl App {
         match event {
             DaemonEvent::RepoSnapshot(snap) => self.apply_snapshot(*snap),
             DaemonEvent::RepoDelta(delta) => self.apply_delta(*delta),
-            DaemonEvent::RepoAdded(info) => self.handle_repo_added(*info),
-            DaemonEvent::RepoRemoved { repo_identity, .. } => self.handle_repo_removed(&repo_identity),
+            DaemonEvent::RepoTracked(info) => self.handle_repo_added(*info),
+            DaemonEvent::RepoUntracked { repo_identity, .. } => self.handle_repo_removed(&repo_identity),
             DaemonEvent::CommandStarted { command_id, repo_identity, repo, description, .. } => {
                 tracing::info!(%command_id, %description, "command started");
                 self.in_flight.insert(command_id, InFlightCommand { repo_identity, repo, description });
@@ -540,7 +540,10 @@ impl App {
         if !rm.issue_initial_requested {
             rm.issue_initial_requested = true;
             let visible = self.ui.layout.table_area.height.saturating_sub(2) as usize;
-            self.proto_commands.push(self.command(CommandAction::SetIssueViewport { repo: path, visible_count: visible.max(20) }));
+            self.proto_commands.push(self.command(CommandAction::SetIssueViewport {
+                repo: flotilla_protocol::RepoSelector::Path(path),
+                visible_count: visible.max(20),
+            }));
         }
     }
 
@@ -715,7 +718,7 @@ impl App {
     pub(super) fn clear_active_issue_search(&mut self, dispatch: ClearDispatch) {
         if dispatch == ClearDispatch::Always || self.active_ui().active_search_query.is_some() {
             let repo = self.model.active_repo_root().clone();
-            self.proto_commands.push(self.command(CommandAction::ClearIssueSearch { repo }));
+            self.proto_commands.push(self.command(CommandAction::ClearIssueSearch { repo: flotilla_protocol::RepoSelector::Path(repo) }));
         }
         self.active_ui_mut().active_search_query = None;
     }

@@ -385,6 +385,20 @@ fn encode_replay_cursors(last_seen: &HashMap<RepoIdentity, u64>) -> Vec<ReplayCu
     last_seen.iter().map(|(repo_identity, &seq)| ReplayCursor { repo_identity: repo_identity.clone(), seq }).collect()
 }
 
+/// Convert a `RepoSelector` to a query string for use in RPC requests that
+/// still use `slug: String` on the wire.
+///
+/// `Identity` selectors are converted via `to_string()` and sent as a slug
+/// query. This works when the identity string matches a known slug but may
+/// produce confusing errors if it doesn't.
+fn repo_selector_to_query_string(selector: &flotilla_protocol::RepoSelector) -> String {
+    match selector {
+        flotilla_protocol::RepoSelector::Path(p) => p.display().to_string(),
+        flotilla_protocol::RepoSelector::Query(q) => q.clone(),
+        flotilla_protocol::RepoSelector::Identity(id) => id.to_string(),
+    }
+}
+
 fn into_success_response(result: ResponseResult) -> Result<Response, String> {
     match result {
         ResponseResult::Ok { response } => Ok(*response),
@@ -480,12 +494,12 @@ fn handle_event(
                 }
             }
         }
-        DaemonEvent::RepoRemoved { repo_identity, .. } => {
+        DaemonEvent::RepoUntracked { repo_identity, .. } => {
             // Sync lock: evict before dispatching
             local_seqs.write().unwrap().remove(repo_identity);
             let _ = event_tx.send(event);
         }
-        DaemonEvent::RepoAdded(_)
+        DaemonEvent::RepoTracked(_)
         | DaemonEvent::CommandStarted { .. }
         | DaemonEvent::CommandFinished { .. }
         | DaemonEvent::CommandStepUpdate { .. }
@@ -561,10 +575,14 @@ impl DaemonHandle for SocketDaemon {
         self.event_tx.subscribe()
     }
 
-    async fn get_state(&self, repo: &Path) -> Result<RepoSnapshot, String> {
+    async fn get_state(&self, repo: &flotilla_protocol::RepoSelector) -> Result<RepoSnapshot, String> {
         // Always RPC to server — local state only tracks seqs for gap detection,
         // not full snapshots (work_items can't be materialized client-side).
-        match into_success_response(self.request(Request::GetState { repo: repo.to_path_buf() }).await?)? {
+        let repo_path = match repo {
+            flotilla_protocol::RepoSelector::Path(p) => p.clone(),
+            other => return Err(format!("get_state requires a path selector, got: {other:?}")),
+        };
+        match into_success_response(self.request(Request::GetState { repo: repo_path }).await?)? {
             Response::GetState(snapshot) => Ok(*snapshot),
             other => Err(format!("unexpected response for get_state: {other:?}")),
         }
@@ -588,27 +606,6 @@ impl DaemonHandle for SocketDaemon {
         match into_success_response(self.request(Request::Cancel { command_id }).await?)? {
             Response::Cancel => Ok(()),
             other => Err(format!("unexpected response for cancel: {other:?}")),
-        }
-    }
-
-    async fn refresh(&self, repo: &Path) -> Result<(), String> {
-        match into_success_response(self.request(Request::Refresh { repo: repo.to_path_buf() }).await?)? {
-            Response::Refresh => Ok(()),
-            other => Err(format!("unexpected response for refresh: {other:?}")),
-        }
-    }
-
-    async fn add_repo(&self, path: &Path) -> Result<(), String> {
-        match into_success_response(self.request(Request::AddRepo { path: path.to_path_buf() }).await?)? {
-            Response::AddRepo => Ok(()),
-            other => Err(format!("unexpected response for add_repo: {other:?}")),
-        }
-    }
-
-    async fn remove_repo(&self, path: &Path) -> Result<(), String> {
-        match into_success_response(self.request(Request::RemoveRepo { path: path.to_path_buf() }).await?)? {
-            Response::RemoveRepo => Ok(()),
-            other => Err(format!("unexpected response for remove_repo: {other:?}")),
         }
     }
 
@@ -645,22 +642,25 @@ impl DaemonHandle for SocketDaemon {
         }
     }
 
-    async fn get_repo_detail(&self, slug: &str) -> Result<RepoDetailResponse, String> {
-        match into_success_response(self.request(Request::GetRepoDetail { slug: slug.to_string() }).await?)? {
+    async fn get_repo_detail(&self, repo: &flotilla_protocol::RepoSelector) -> Result<RepoDetailResponse, String> {
+        let slug = repo_selector_to_query_string(repo);
+        match into_success_response(self.request(Request::GetRepoDetail { slug }).await?)? {
             Response::GetRepoDetail(detail) => Ok(detail),
             other => Err(format!("unexpected response for get_repo_detail: {other:?}")),
         }
     }
 
-    async fn get_repo_providers(&self, slug: &str) -> Result<RepoProvidersResponse, String> {
-        match into_success_response(self.request(Request::GetRepoProviders { slug: slug.to_string() }).await?)? {
+    async fn get_repo_providers(&self, repo: &flotilla_protocol::RepoSelector) -> Result<RepoProvidersResponse, String> {
+        let slug = repo_selector_to_query_string(repo);
+        match into_success_response(self.request(Request::GetRepoProviders { slug }).await?)? {
             Response::GetRepoProviders(providers) => Ok(providers),
             other => Err(format!("unexpected response for get_repo_providers: {other:?}")),
         }
     }
 
-    async fn get_repo_work(&self, slug: &str) -> Result<RepoWorkResponse, String> {
-        match into_success_response(self.request(Request::GetRepoWork { slug: slug.to_string() }).await?)? {
+    async fn get_repo_work(&self, repo: &flotilla_protocol::RepoSelector) -> Result<RepoWorkResponse, String> {
+        let slug = repo_selector_to_query_string(repo);
+        match into_success_response(self.request(Request::GetRepoWork { slug }).await?)? {
             Response::GetRepoWork(work) => Ok(work),
             other => Err(format!("unexpected response for get_repo_work: {other:?}")),
         }
@@ -1067,10 +1067,10 @@ mod tests {
             provider_health: HashMap::new(),
             loading: false,
         };
-        handle_event(DaemonEvent::RepoAdded(Box::new(repo_info)), &local_seqs, &recovering, &event_tx, &writer, &pending, &next_id);
+        handle_event(DaemonEvent::RepoTracked(Box::new(repo_info)), &local_seqs, &recovering, &event_tx, &writer, &pending, &next_id);
 
-        let event = event_rx.try_recv().expect("should receive RepoAdded");
-        assert!(matches!(event, DaemonEvent::RepoAdded(_)));
+        let event = event_rx.try_recv().expect("should receive RepoTracked");
+        assert!(matches!(event, DaemonEvent::RepoTracked(_)));
     }
 
     #[tokio::test]
@@ -1193,7 +1193,7 @@ mod tests {
         let (writer, pending, next_id, _server) = event_harness();
 
         handle_event(
-            DaemonEvent::RepoRemoved { path: repo.clone(), repo_identity: repo_identity() },
+            DaemonEvent::RepoUntracked { path: repo.clone(), repo_identity: repo_identity() },
             &local_seqs,
             &recovering,
             &event_tx,
@@ -1203,10 +1203,13 @@ mod tests {
         );
 
         // Seq should be evicted.
-        assert!(local_seqs.read().expect("local_seqs read lock").get(&repo_identity()).is_none(), "seq should be evicted for removed repo");
+        assert!(
+            local_seqs.read().expect("local_seqs read lock").get(&repo_identity()).is_none(),
+            "seq should be evicted for untracked repo"
+        );
         // Event should be forwarded.
-        let event = event_rx.try_recv().expect("should receive RepoRemoved");
-        assert!(matches!(event, DaemonEvent::RepoRemoved { .. }));
+        let event = event_rx.try_recv().expect("should receive RepoUntracked");
+        assert!(matches!(event, DaemonEvent::RepoUntracked { .. }));
     }
 
     // --- recover_from_gap: parse error in replay response ---
