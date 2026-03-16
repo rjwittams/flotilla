@@ -33,19 +33,31 @@ def flotilla_json(service: str, args: str, timeout: int = 30) -> dict | list:
         f"flotilla {args} failed (rc={result.returncode}):\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    return json.loads(result.stdout)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(
+            f"flotilla {args} returned non-JSON output:\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        ) from e
 
 
 def wait_for(
     predicate, description: str, timeout: int = 60, interval: float = 2.0
 ):
-    """Poll until predicate returns True or timeout."""
+    """Poll until predicate returns True or timeout.
+
+    AssertionError is re-raised immediately (hard failure, not transient).
+    Other exceptions are retried until timeout.
+    """
     deadline = time.monotonic() + timeout
     last_err = None
     while time.monotonic() < deadline:
         try:
             if predicate():
                 return
+        except AssertionError:
+            raise
         except Exception as e:
             last_err = e
         time.sleep(interval)
@@ -59,7 +71,8 @@ def wait_for(
 def topology():
     """Spin up 2-node topology, wait for peering, yield, tear down."""
     subprocess.run(
-        ["docker", "compose", "-f", COMPOSE_FILE, "up", "-d", "--build"],
+        ["docker", "compose", "-f", COMPOSE_FILE, "up", "-d", "--build",
+         "--force-recreate"],
         check=True,
         timeout=600,
     )
@@ -160,10 +173,15 @@ def topology():
             if result.stderr:
                 print(f"\n=== {node} daemon stderr ===\n{result.stderr}")
 
-        subprocess.run(
+        result = subprocess.run(
             [
                 "docker", "compose", "-f", COMPOSE_FILE,
                 "down", "-v", "--remove-orphans",
             ],
+            capture_output=True,
+            text=True,
             timeout=60,
         )
+        if result.returncode != 0:
+            print(f"\n=== teardown failed (rc={result.returncode}) ===")
+            print(result.stderr)
