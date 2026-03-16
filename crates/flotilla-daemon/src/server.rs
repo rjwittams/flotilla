@@ -925,7 +925,7 @@ async fn rebuild_peer_overlays(
                     path = %synthetic_path.display(),
                     "removing virtual repo — no peers remaining"
                 );
-                if let Err(e) = daemon.remove_repo(&synthetic_path).await {
+                if let Err(e) = daemon.remove_repo(&flotilla_protocol::RepoSelector::Path(synthetic_path)).await {
                     warn!(
                         repo = %repo_id,
                         err = %e,
@@ -1241,7 +1241,7 @@ async fn disconnect_peer_and_rebuild(
                     path = %path.display(),
                     "removing virtual repo — no peers remaining"
                 );
-                if let Err(e) = daemon.remove_repo(path).await {
+                if let Err(e) = daemon.remove_repo(&flotilla_protocol::RepoSelector::Path(path.clone())).await {
                     warn!(
                         repo = %identity,
                         err = %e,
@@ -1719,7 +1719,7 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, request: Request) 
             Err(e) => Message::error_response(id, e),
         },
 
-        Request::GetState { repo } => match ctx.daemon.get_state(&repo).await {
+        Request::GetState { repo } => match ctx.daemon.get_state(&flotilla_protocol::RepoSelector::Path(repo)).await {
             Ok(snapshot) => Message::ok_response(id, Response::GetState(Box::new(snapshot))),
             Err(e) => Message::error_response(id, e),
         },
@@ -1814,17 +1814,17 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, request: Request) 
             }
         }
 
-        Request::Refresh { repo } => match ctx.daemon.refresh(&repo).await {
+        Request::Refresh { repo } => match ctx.daemon.refresh(&flotilla_protocol::RepoSelector::Path(repo)).await {
             Ok(()) => Message::ok_response(id, Response::Refresh),
             Err(e) => Message::error_response(id, e),
         },
 
-        Request::AddRepo { path } => match ctx.daemon.add_repo(&path).await {
+        Request::AddRepo { path } => match ctx.daemon.add_repo(&flotilla_protocol::RepoSelector::Path(path)).await {
             Ok(()) => Message::ok_response(id, Response::AddRepo),
             Err(e) => Message::error_response(id, e),
         },
 
-        Request::RemoveRepo { path } => match ctx.daemon.remove_repo(&path).await {
+        Request::RemoveRepo { path } => match ctx.daemon.remove_repo(&flotilla_protocol::RepoSelector::Path(path)).await {
             Ok(()) => Message::ok_response(id, Response::RemoveRepo),
             Err(e) => Message::error_response(id, e),
         },
@@ -1842,17 +1842,17 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, request: Request) 
             Err(e) => Message::error_response(id, e),
         },
 
-        Request::GetRepoDetail { slug } => match ctx.daemon.get_repo_detail(&slug).await {
+        Request::GetRepoDetail { slug } => match ctx.daemon.get_repo_detail(&flotilla_protocol::RepoSelector::Query(slug)).await {
             Ok(detail) => Message::ok_response(id, Response::GetRepoDetail(detail)),
             Err(e) => Message::error_response(id, e),
         },
 
-        Request::GetRepoProviders { slug } => match ctx.daemon.get_repo_providers(&slug).await {
+        Request::GetRepoProviders { slug } => match ctx.daemon.get_repo_providers(&flotilla_protocol::RepoSelector::Query(slug)).await {
             Ok(providers) => Message::ok_response(id, Response::GetRepoProviders(providers)),
             Err(e) => Message::error_response(id, e),
         },
 
-        Request::GetRepoWork { slug } => match ctx.daemon.get_repo_work(&slug).await {
+        Request::GetRepoWork { slug } => match ctx.daemon.get_repo_work(&flotilla_protocol::RepoSelector::Query(slug)).await {
             Ok(work) => Message::ok_response(id, Response::GetRepoWork(work)),
             Err(e) => Message::error_response(id, e),
         },
@@ -2449,7 +2449,7 @@ mod tests {
         let repo_identity = init_git_repo_with_remote(&repo, "git@github.com:owner/repo.git");
         let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
         let daemon = InProcessDaemon::new(vec![repo.clone()], config, git_process_discovery(false), HostName::new("local")).await;
-        daemon.refresh(&repo).await.expect("refresh repo");
+        daemon.refresh(&flotilla_protocol::RepoSelector::Path(repo.clone())).await.expect("refresh repo");
 
         let mut setup_rx = daemon.subscribe();
         let checkout_id = daemon
@@ -2474,7 +2474,7 @@ mod tests {
         };
         let checkout_path = tokio::time::timeout(StdDuration::from_secs(5), async {
             loop {
-                let snapshot = daemon.get_state(&repo).await.expect("get state");
+                let snapshot = daemon.get_state(&flotilla_protocol::RepoSelector::Path(repo.clone())).await.expect("get state");
                 if let Some((path, _checkout)) = snapshot.providers.checkouts.iter().find(|(_, checkout)| checkout.branch == "feat-remote")
                 {
                     return path.path.clone();
@@ -2598,7 +2598,7 @@ mod tests {
 
         let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
         let daemon = InProcessDaemon::new(vec![remote_repo.clone()], config, git_process_discovery(false), HostName::new("local")).await;
-        daemon.refresh(&remote_repo).await.expect("refresh repo");
+        daemon.refresh(&flotilla_protocol::RepoSelector::Path(remote_repo.clone())).await.expect("refresh repo");
 
         let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
         let forwarded_commands = Arc::new(Mutex::new(HashMap::new()));
@@ -3015,7 +3015,7 @@ mod tests {
             handle_remote_restart_if_needed(&peer_manager, &daemon, &HostName::new("peer-a"), Some(old_session_id)).await;
 
         assert_eq!(current_session_id, Some(new_session_id), "current session id should update to the reconnected peer session");
-        let snapshot = daemon.get_state(&synthetic).await.expect("remote-only repo should remain");
+        let snapshot = daemon.get_state(&flotilla_protocol::RepoSelector::Path(synthetic.clone())).await.expect("remote-only repo should remain");
         assert!(
             !snapshot.providers.checkouts.contains_key(&HostPath::new(HostName::new("peer-a"), "/srv/peer-a/remote-only")),
             "restart cleanup should remove stale peer-a checkout"

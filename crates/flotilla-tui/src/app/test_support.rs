@@ -44,7 +44,7 @@ impl DaemonHandle for StubDaemon {
         self.tx.subscribe()
     }
 
-    async fn get_state(&self, _repo: &Path) -> Result<RepoSnapshot, String> {
+    async fn get_state(&self, _repo: &flotilla_protocol::RepoSelector) -> Result<RepoSnapshot, String> {
         Err("stub".into())
     }
 
@@ -60,15 +60,15 @@ impl DaemonHandle for StubDaemon {
         Ok(())
     }
 
-    async fn refresh(&self, _repo: &Path) -> Result<(), String> {
+    async fn refresh(&self, _repo: &flotilla_protocol::RepoSelector) -> Result<(), String> {
         Ok(())
     }
 
-    async fn add_repo(&self, _path: &Path) -> Result<(), String> {
+    async fn add_repo(&self, _selector: &flotilla_protocol::RepoSelector) -> Result<(), String> {
         Ok(())
     }
 
-    async fn remove_repo(&self, _path: &Path) -> Result<(), String> {
+    async fn remove_repo(&self, _selector: &flotilla_protocol::RepoSelector) -> Result<(), String> {
         Ok(())
     }
 
@@ -80,15 +80,15 @@ impl DaemonHandle for StubDaemon {
         Ok(StatusResponse { repos: vec![] })
     }
 
-    async fn get_repo_detail(&self, _slug: &str) -> Result<RepoDetailResponse, String> {
+    async fn get_repo_detail(&self, _repo: &flotilla_protocol::RepoSelector) -> Result<RepoDetailResponse, String> {
         Err("stub".into())
     }
 
-    async fn get_repo_providers(&self, _slug: &str) -> Result<RepoProvidersResponse, String> {
+    async fn get_repo_providers(&self, _repo: &flotilla_protocol::RepoSelector) -> Result<RepoProvidersResponse, String> {
         Err("stub".into())
     }
 
-    async fn get_repo_work(&self, _slug: &str) -> Result<RepoWorkResponse, String> {
+    async fn get_repo_work(&self, _repo: &flotilla_protocol::RepoSelector) -> Result<RepoWorkResponse, String> {
         Err("stub".into())
     }
 

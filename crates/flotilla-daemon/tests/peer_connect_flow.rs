@@ -19,7 +19,7 @@ use flotilla_daemon::{
     peer::{test_support::ensure_test_connection_generation, PeerManager, PeerSender},
     server::PeerConnectedNotice,
 };
-use flotilla_protocol::{GoodbyeReason, HostName, PeerWireMessage};
+use flotilla_protocol::{GoodbyeReason, HostName, PeerWireMessage, RepoSelector};
 use tokio::sync::{Mutex, Notify};
 
 /// Peer sender that captures messages and signals a `Notify` on each send,
@@ -72,7 +72,7 @@ async fn peer_connect_triggers_local_state_send() {
     let host_b = HostName::new("host-b");
 
     let daemon = InProcessDaemon::new(vec![repo_path.clone()], config, fake_discovery(false), host_a.clone()).await;
-    daemon.refresh(&repo_path).await.expect("refresh");
+    daemon.refresh(&RepoSelector::Path(repo_path.clone())).await.expect("refresh");
 
     let sent = Arc::new(StdMutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -111,7 +111,7 @@ async fn peer_reconnect_resends_local_state() {
     let host_b = HostName::new("host-b");
 
     let daemon = InProcessDaemon::new(vec![repo_path.clone()], config, fake_discovery(false), host_a.clone()).await;
-    daemon.refresh(&repo_path).await.expect("refresh");
+    daemon.refresh(&RepoSelector::Path(repo_path.clone())).await.expect("refresh");
 
     let sent = Arc::new(StdMutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());

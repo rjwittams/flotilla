@@ -1,9 +1,9 @@
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use flotilla_protocol::{
     Command, DaemonEvent, HostListResponse, HostProvidersResponse, HostStatusResponse, RepoDetailResponse, RepoIdentity, RepoInfo,
-    RepoProvidersResponse, RepoSnapshot, RepoWorkResponse, StatusResponse, TopologyResponse,
+    RepoProvidersResponse, RepoSelector, RepoSnapshot, RepoWorkResponse, StatusResponse, TopologyResponse,
 };
 use tokio::sync::broadcast;
 
@@ -15,7 +15,7 @@ pub trait DaemonHandle: Send + Sync {
     fn subscribe(&self) -> broadcast::Receiver<DaemonEvent>;
 
     /// Get full current state for a repo.
-    async fn get_state(&self, repo: &Path) -> Result<RepoSnapshot, String>;
+    async fn get_state(&self, repo: &RepoSelector) -> Result<RepoSnapshot, String>;
 
     /// List all tracked repos.
     async fn list_repos(&self) -> Result<Vec<RepoInfo>, String>;
@@ -29,13 +29,13 @@ pub trait DaemonHandle: Send + Sync {
     async fn cancel(&self, command_id: u64) -> Result<(), String>;
 
     /// Trigger an immediate refresh for a repo.
-    async fn refresh(&self, repo: &Path) -> Result<(), String>;
+    async fn refresh(&self, repo: &RepoSelector) -> Result<(), String>;
 
     /// Add a repo to tracking.
-    async fn add_repo(&self, path: &Path) -> Result<(), String>;
+    async fn add_repo(&self, path: &RepoSelector) -> Result<(), String>;
 
     /// Remove a repo from tracking.
-    async fn remove_repo(&self, path: &Path) -> Result<(), String>;
+    async fn remove_repo(&self, path: &RepoSelector) -> Result<(), String>;
 
     /// Get replay events for repos based on last-seen sequence numbers.
     ///
@@ -50,13 +50,13 @@ pub trait DaemonHandle: Send + Sync {
     async fn get_status(&self) -> Result<StatusResponse, String>;
 
     /// Repo detail: work items, provider health, errors.
-    async fn get_repo_detail(&self, slug: &str) -> Result<RepoDetailResponse, String>;
+    async fn get_repo_detail(&self, repo: &RepoSelector) -> Result<RepoDetailResponse, String>;
 
     /// Repo discovery: host/repo assertions, providers, unmet requirements.
-    async fn get_repo_providers(&self, slug: &str) -> Result<RepoProvidersResponse, String>;
+    async fn get_repo_providers(&self, repo: &RepoSelector) -> Result<RepoProvidersResponse, String>;
 
     /// Repo work items.
-    async fn get_repo_work(&self, slug: &str) -> Result<RepoWorkResponse, String>;
+    async fn get_repo_work(&self, repo: &RepoSelector) -> Result<RepoWorkResponse, String>;
 
     /// Host list with connection and summary data.
     async fn list_hosts(&self) -> Result<HostListResponse, String>;

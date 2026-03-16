@@ -324,7 +324,7 @@ async fn trigger_refresh_and_recv(
     repo: &Path,
     rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>,
 ) -> DaemonEvent {
-    daemon.refresh(repo).await.expect("refresh should succeed");
+    daemon.refresh(&RepoSelector::Path(repo.to_path_buf())).await.expect("refresh should succeed");
     recv_event(rx).await
 }
 
@@ -506,7 +506,7 @@ async fn generate_branch_name_can_be_cancelled_while_provider_call_is_in_flight(
     let daemon = InProcessDaemon::new(vec![repo.clone()], config, slow_ai_discovery(Arc::clone(&utility)), HostName::local()).await;
     let mut rx = daemon.subscribe();
 
-    daemon.refresh(&repo).await.expect("refresh should succeed");
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh should succeed");
 
     let command = Command {
         host: None,
@@ -762,7 +762,7 @@ async fn duplicate_local_roots_share_identity_but_remain_tracked() {
     assert_eq!(repos[0].identity, identity_a);
     assert_eq!(repos[0].path, repo_a, "first tracked root should remain the deterministic preferred path");
 
-    daemon.remove_repo(&repo_a).await.expect("remove preferred root");
+    daemon.remove_repo(&RepoSelector::Path(repo_a.clone())).await.expect("remove preferred root");
     let repos = daemon.list_repos().await.expect("list_repos after removing preferred root");
     assert_eq!(repos.len(), 1);
     assert_eq!(repos[0].identity, identity_b);
@@ -783,7 +783,7 @@ async fn adding_local_clone_promotes_remote_only_identity_to_local_execution() {
         .add_virtual_repo(identity.clone(), PathBuf::from("/remote/desktop/owner/repo"), ProviderData::default())
         .await
         .expect("add virtual repo");
-    daemon.add_repo(&local_repo).await.expect("add local repo");
+    daemon.add_repo(&RepoSelector::Path(local_repo.clone())).await.expect("add local repo");
 
     let repos = daemon.list_repos().await.expect("list repos");
     assert_eq!(repos.len(), 1);
@@ -799,10 +799,10 @@ async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
     let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_git_repos("git@github.com:owner/repo.git").await;
     let mut rx = daemon.subscribe();
 
-    daemon.refresh(&repo_a).await.expect("refresh first repo");
+    daemon.refresh(&RepoSelector::Path(repo_a.clone())).await.expect("refresh first repo");
     let _ = recv_event(&mut rx).await;
 
-    daemon.remove_repo(&repo_a).await.expect("remove preferred root");
+    daemon.remove_repo(&RepoSelector::Path(repo_a.clone())).await.expect("remove preferred root");
 
     let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -825,7 +825,7 @@ async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
 async fn get_local_providers_excludes_peer_overlay_data() {
     let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
 
-    daemon.refresh(&repo).await.expect("refresh local repo");
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh local repo");
 
     let peer_checkout = HostPath::new(HostName::new("follower"), "/srv/follower/repo");
     let mut peer_data = ProviderData::default();
@@ -892,7 +892,7 @@ async fn get_state_does_not_reattribute_peer_checkouts_after_poll() {
     // Now get_state reads last_snapshot (merged) as base, normalizes ALL checkouts
     // to local host, then merges peers again. With the bug, kiwi's checkout appears
     // both as local (re-stamped) and as kiwi (re-merged).
-    let snapshot = daemon.get_state(&repo).await.expect("get_state after poll with peers");
+    let snapshot = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("get_state after poll with peers");
 
     // The peer checkout should appear exactly once, attributed to kiwi
     let kiwi_checkouts: Vec<_> = snapshot.providers.checkouts.keys().filter(|hp| hp.host == peer_host).collect();
@@ -943,7 +943,7 @@ async fn set_peer_providers_after_poll_does_not_duplicate_checkouts() {
     daemon.set_peer_providers(&repo, vec![(peer_host.clone(), make_peer_data("feat-v2"))], 1).await;
     let _ = recv_event(&mut rx).await;
 
-    let snapshot = daemon.get_state(&repo).await.expect("get_state after poll + second peer update");
+    let snapshot = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("get_state after poll + second peer update");
 
     let peer_count = snapshot.providers.checkouts.keys().filter(|hp| hp.host == peer_host).count();
     assert_eq!(peer_count, 1, "peer should have exactly 1 checkout, got {peer_count}");
@@ -1269,7 +1269,7 @@ async fn get_repo_work_returns_work_items() {
     trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
 
     let repo_name = repo.file_name().expect("repo should have a file name").to_str().expect("repo name should be valid UTF-8");
-    let work = daemon.get_repo_work(repo_name).await.expect("get_repo_work failed");
+    let work = daemon.get_repo_work(&RepoSelector::Query(repo_name.to_string())).await.expect("get_repo_work failed");
     assert_eq!(work.path, repo);
     // Work items may or may not be present depending on repo state, but the call should succeed
 }
@@ -1291,7 +1291,7 @@ async fn get_repo_detail_returns_provider_health_and_errors() {
     trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
 
     let repo_name = repo.file_name().expect("repo should have a file name").to_str().expect("repo name should be valid UTF-8");
-    let detail = daemon.get_repo_detail(repo_name).await.expect("get_repo_detail failed");
+    let detail = daemon.get_repo_detail(&RepoSelector::Query(repo_name.to_string())).await.expect("get_repo_detail failed");
 
     assert_eq!(detail.path, repo);
     let change_request_health = detail.provider_health.get("change_request").expect("change_request health should be present");
@@ -1307,7 +1307,7 @@ async fn get_repo_providers_returns_structured_unmet_requirements_and_discovery(
     let (_temp, repo, daemon) = daemon_for_plain_dir().await;
 
     let repo_name = repo.file_name().expect("repo should have a file name").to_str().expect("repo name should be valid UTF-8");
-    let providers = daemon.get_repo_providers(repo_name).await.expect("get_repo_providers failed");
+    let providers = daemon.get_repo_providers(&RepoSelector::Query(repo_name.to_string())).await.expect("get_repo_providers failed");
 
     assert_eq!(providers.path, repo);
     assert!(
@@ -1387,7 +1387,7 @@ async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
     // 2. Broadcast initial snapshot (no issues yet)
     // 3. Call fetch_missing_linked_issues → finds "42" missing → calls fetch_issues_by_id
     // 4. Broadcast updated snapshot with pinned issue
-    daemon.refresh(&repo).await.expect("refresh should succeed");
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh should succeed");
 
     // --- Assert ---
     // Collect snapshot events until we see one containing issue "42".
