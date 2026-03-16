@@ -580,7 +580,13 @@ fn render_unified_table(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame
                 }
                 GroupEntry::Item(item) => {
                     let pending = rui.pending_actions.get(&item.identity);
-                    let local_home = dirs::home_dir();
+                    // Look up home_dir from the checkout's host summary. Only fall
+                    // back to dirs::home_dir() for local-host items — using the local
+                    // home for a remote host would incorrectly shorten unrelated paths.
+                    let is_local_item = item
+                        .checkout_key()
+                        .is_none_or(|co| model.my_host().is_some_and(|my| *my == co.host) || !model.hosts.contains_key(&co.host));
+                    let local_home = if is_local_item { dirs::home_dir() } else { None };
                     let home_dir = item
                         .checkout_key()
                         .and_then(|co| model.hosts.get(&co.host))
