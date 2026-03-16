@@ -1,6 +1,9 @@
 // Keymap module: configurable key bindings for the TUI.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+};
 
 use crokey::KeyCombination;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -37,6 +40,15 @@ pub enum Action {
     OpenIssueSearch,
     OpenFilePicker,
     Dispatch(Intent),
+}
+
+impl Hash for Action {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        if let Action::Dispatch(intent) = self {
+            std::mem::discriminant(intent).hash(state);
+        }
+    }
 }
 
 impl Action {
@@ -168,6 +180,22 @@ impl Action {
             },
         }
     }
+}
+
+// ── Help display types ──
+
+/// A key binding entry for help display.
+#[derive(Debug, Clone)]
+pub struct HelpBinding {
+    pub key_display: String,
+    pub description: &'static str,
+}
+
+/// A section of help text for display.
+#[derive(Debug, Clone)]
+pub struct HelpSection {
+    pub title: &'static str,
+    pub bindings: Vec<HelpBinding>,
 }
 
 // ── ModeId ──
@@ -348,6 +376,67 @@ impl Keymap {
         }
 
         keymap
+    }
+
+    /// Generate help sections from the active keymap bindings for Normal mode.
+    ///
+    /// Collects effective bindings (mode-specific + shared fallback), groups them
+    /// by action, and organises into display sections with combined key names.
+    pub fn help_sections(&self) -> Vec<HelpSection> {
+        // Collect all effective bindings for Normal mode: mode-specific first, then shared fallback.
+        let mut action_keys: HashMap<Action, Vec<String>> = HashMap::new();
+
+        // Add shared bindings first (they serve as fallback).
+        for (key, action) in &self.shared {
+            action_keys.entry(*action).or_default().push(key.to_string());
+        }
+
+        // Normal mode-specific bindings override shared for the same key, but we
+        // collect by action so we just add them (they may introduce new actions).
+        if let Some(normal_bindings) = self.modes.get(&ModeId::Normal) {
+            for (key, action) in normal_bindings {
+                action_keys.entry(*action).or_default().push(key.to_string());
+            }
+        }
+
+        // Sort keys within each action for stable display order.
+        for keys in action_keys.values_mut() {
+            keys.sort();
+            keys.dedup();
+        }
+
+        // Build a HelpBinding for a given action from the collected keys.
+        let make_binding = |action: &Action| -> Option<HelpBinding> {
+            action_keys.get(action).map(|keys| HelpBinding { key_display: keys.join(" / "), description: action.description() })
+        };
+
+        // Define sections and their actions in display order.
+        let section_defs: &[(&str, &[Action])] = &[
+            ("Navigation", &[Action::SelectNext, Action::SelectPrev]),
+            ("Actions", &[
+                Action::Confirm,
+                Action::OpenActionMenu,
+                Action::OpenBranchInput,
+                Action::Dispatch(Intent::RemoveCheckout),
+                Action::Dispatch(Intent::OpenChangeRequest),
+                Action::OpenIssueSearch,
+                Action::OpenFilePicker,
+                Action::CycleLayout,
+                Action::Refresh,
+                Action::ToggleStatusBarKeys,
+            ]),
+            ("Multi-select (issues)", &[Action::ToggleMultiSelect]),
+            ("Repos", &[Action::PrevTab, Action::NextTab, Action::MoveTabLeft, Action::MoveTabRight]),
+            ("General", &[Action::ToggleDebug, Action::CycleTheme, Action::CycleHost, Action::ToggleHelp, Action::Dismiss, Action::Quit]),
+        ];
+
+        section_defs
+            .iter()
+            .map(|(title, actions)| {
+                let bindings = actions.iter().filter_map(&make_binding).collect();
+                HelpSection { title, bindings }
+            })
+            .collect()
     }
 
     fn parse_binding(key_str: &str, action_str: &str) -> Option<(KeyCombination, Action)> {
@@ -650,5 +739,36 @@ mod tests {
         assert_eq!(ModeId::from(&UiMode::Help), ModeId::Help);
         assert_eq!(ModeId::from(&UiMode::Config), ModeId::Config);
         assert_eq!(ModeId::from(&UiMode::ActionMenu { items: vec![], index: 0 }), ModeId::ActionMenu);
+    }
+
+    // ── help_sections tests ──
+
+    #[test]
+    fn help_sections_include_all_categories() {
+        let keymap = Keymap::defaults();
+        let sections = keymap.help_sections();
+        let titles: Vec<&str> = sections.iter().map(|s| s.title).collect();
+        assert_eq!(titles, vec!["Navigation", "Actions", "Multi-select (issues)", "Repos", "General"]);
+    }
+
+    #[test]
+    fn help_sections_navigation_has_bindings() {
+        let keymap = Keymap::defaults();
+        let sections = keymap.help_sections();
+        let nav = &sections[0];
+        assert_eq!(nav.title, "Navigation");
+        assert!(!nav.bindings.is_empty());
+    }
+
+    #[test]
+    fn help_sections_bindings_have_descriptions() {
+        let keymap = Keymap::defaults();
+        let sections = keymap.help_sections();
+        for section in &sections {
+            for binding in &section.bindings {
+                assert!(!binding.description.is_empty(), "empty description in section {}", section.title);
+                assert!(!binding.key_display.is_empty(), "empty key_display in section {}", section.title);
+            }
+        }
     }
 }
