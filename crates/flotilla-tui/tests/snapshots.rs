@@ -358,6 +358,7 @@ fn delete_confirm_safe_to_delete() {
         loading: false,
         terminal_keys: vec![],
         identity: WorkItemIdentity::Checkout(HostPath::new(HostName::local(), PathBuf::from("/tmp/my-project/feat-cleanup"))),
+        remote_host: None,
     });
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
@@ -378,6 +379,7 @@ fn delete_confirm_with_uncommitted_files() {
         loading: false,
         terminal_keys: vec![],
         identity: WorkItemIdentity::Checkout(HostPath::new(HostName::local(), PathBuf::from("/tmp/my-project/feat-wip"))),
+        remote_host: None,
     });
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
@@ -399,6 +401,28 @@ fn delete_confirm_with_many_uncommitted_files() {
         loading: false,
         identity: WorkItemIdentity::Checkout(HostPath::new(HostName::local(), PathBuf::from("/tmp/my-project/feat-big-wip"))),
         terminal_keys: vec![],
+        remote_host: None,
+    });
+    let output = harness.render_to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn delete_confirm_remote_host() {
+    let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::DeleteConfirm {
+        info: Some(flotilla_protocol::CheckoutStatus {
+            branch: "feat-remote".into(),
+            change_request_status: Some("MERGED".into()),
+            merge_commit_sha: Some("def5678".into()),
+            unpushed_commits: vec![],
+            has_uncommitted: false,
+            uncommitted_files: vec![],
+            base_detection_warning: None,
+        }),
+        loading: false,
+        terminal_keys: vec![],
+        identity: WorkItemIdentity::Checkout(HostPath::new(HostName::new("feta"), PathBuf::from("/home/dev/my-project/feat-remote"))),
+        remote_host: Some(HostName::new("feta")),
     });
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
