@@ -32,6 +32,15 @@ pub struct ShpoolTerminalPool {
 /// not when reattaching to existing ones (shpool limitation).
 const FLOTILLA_SHPOOL_CONFIG: &str = include_str!("shpool_config.toml");
 const MAX_MISSED_SHPOOL_SCANS_BEFORE_REAP: u32 = 1;
+const SHPOOL_DAEMON_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShpoolDaemonState {
+    Missing,
+    HealthyWithPid,
+    HealthyWithoutPid,
+    Stale,
+}
 
 impl ShpoolTerminalPool {
     /// Create a new ShpoolTerminalPool, cleaning up stale sockets and
@@ -39,8 +48,19 @@ impl ShpoolTerminalPool {
     pub async fn create(runner: Arc<dyn CommandRunner>, socket_path: PathBuf, attachable_store: SharedAttachableStore) -> Self {
         let config_path = socket_path.parent().unwrap_or(Path::new(".")).join("config.toml");
         let config_stale = Self::config_needs_update(&config_path);
-        Self::clean_stale_socket(&socket_path);
-        if config_stale && socket_path.exists() {
+        let mut daemon_state = Self::detect_daemon_state(Arc::clone(&runner), &socket_path, &config_path).await;
+
+        if daemon_state == ShpoolDaemonState::Stale {
+            let pid_path = socket_path.with_file_name("daemonized-shpool.pid");
+            if pid_path.exists() {
+                let _ = Self::stop_daemon(&socket_path, "shpool").await;
+            } else {
+                Self::clean_stale_socket(&socket_path);
+            }
+            daemon_state = ShpoolDaemonState::Missing;
+        }
+
+        if config_stale && daemon_state == ShpoolDaemonState::HealthyWithPid {
             // Daemon is alive but config changed. Validate we can persist
             // the new config BEFORE killing the daemon, so a write failure
             // doesn't tear down sessions for nothing.
@@ -57,6 +77,9 @@ impl ShpoolTerminalPool {
                     let _ = std::fs::remove_file(&tmp_path);
                 }
             }
+        } else if config_stale && daemon_state == ShpoolDaemonState::HealthyWithoutPid {
+            tracing::warn!("shpool config changed but daemon has no pid file; writing config for future restart");
+            Self::write_config(&config_path);
         } else if config_stale {
             // No daemon running, safe to write config directly.
             Self::write_config(&config_path);
@@ -136,6 +159,81 @@ impl ShpoolTerminalPool {
         // Unix sockets don't exist on non-Unix platforms
     }
 
+    #[cfg(unix)]
+    async fn detect_daemon_state(
+        runner: Arc<dyn CommandRunner>,
+        socket_path: &Path,
+        config_path: &Path,
+    ) -> ShpoolDaemonState {
+        if !socket_path.exists() {
+            return ShpoolDaemonState::Missing;
+        }
+
+        let pid_path = socket_path.with_file_name("daemonized-shpool.pid");
+        match std::fs::read_to_string(&pid_path) {
+            Ok(contents) => {
+                let Some(pid) = contents.trim().parse::<i32>().ok().filter(|&p| p > 0) else {
+                    return ShpoolDaemonState::Stale;
+                };
+                if Self::is_process_alive(pid) && Self::is_expected_process(pid, "shpool") {
+                    ShpoolDaemonState::HealthyWithPid
+                } else {
+                    ShpoolDaemonState::Stale
+                }
+            }
+            Err(_) => {
+                if Self::probe_daemon_without_pid_file(runner, socket_path, config_path).await {
+                    ShpoolDaemonState::HealthyWithoutPid
+                } else {
+                    ShpoolDaemonState::Stale
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn detect_daemon_state(
+        _runner: Arc<dyn CommandRunner>,
+        socket_path: &Path,
+        _config_path: &Path,
+    ) -> ShpoolDaemonState {
+        if socket_path.exists() {
+            ShpoolDaemonState::HealthyWithoutPid
+        } else {
+            ShpoolDaemonState::Missing
+        }
+    }
+
+    #[cfg(unix)]
+    async fn probe_daemon_without_pid_file(
+        runner: Arc<dyn CommandRunner>,
+        socket_path: &Path,
+        config_path: &Path,
+    ) -> bool {
+        let socket_path_str = socket_path.display().to_string();
+        let config_path_str = config_path.display().to_string();
+        let args = ["--no-daemonize", "--socket", &socket_path_str, "-c", &config_path_str, "list", "--json"];
+        let label = crate::providers::command_channel_label("shpool", &args);
+
+        matches!(
+            tokio::time::timeout(
+                SHPOOL_DAEMON_PROBE_TIMEOUT,
+                runner.run_output("shpool", &args, Path::new("/"), &label),
+            )
+            .await,
+            Ok(Ok(output)) if output.success
+        )
+    }
+
+    #[cfg(not(unix))]
+    async fn probe_daemon_without_pid_file(
+        _runner: Arc<dyn CommandRunner>,
+        _socket_path: &Path,
+        _config_path: &Path,
+    ) -> bool {
+        false
+    }
+
     /// Spawn the shpool daemon if one isn't already running.
     ///
     /// `clean_stale_socket` must be called first — it removes sockets for dead
@@ -154,6 +252,7 @@ impl ShpoolTerminalPool {
         let socket_str = socket_path.display().to_string();
         let config_str = config_path.display().to_string();
         let log_path = socket_path.with_file_name("daemonized-shpool.log");
+        let pid_path = socket_path.with_file_name("daemonized-shpool.pid");
 
         match std::fs::File::create(&log_path) {
             Ok(log_file) => {
@@ -170,7 +269,14 @@ impl ShpoolTerminalPool {
                     .spawn();
 
                 match result {
-                    Ok(_child) => {
+                    Ok(child) => {
+                        if let Some(pid) = child.id() {
+                            if let Err(e) = std::fs::write(&pid_path, pid.to_string()) {
+                                tracing::warn!(err = %e, path = %pid_path.display(), "failed to write shpool pid file");
+                            }
+                        } else {
+                            tracing::warn!("shpool daemon spawned without a pid");
+                        }
                         // Child handle is intentionally dropped — tokio does not
                         // kill on drop, so the daemon outlives this handle.
                         tracing::info!("spawned shpool daemon");
@@ -968,6 +1074,30 @@ mod tests {
 
         // Nothing exists — should not panic
         ShpoolTerminalPool::clean_stale_socket(&socket_path);
+    }
+
+    #[tokio::test]
+    async fn detect_daemon_state_without_pid_file_is_healthy_when_probe_succeeds() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let socket_path = dir.path().join("shpool.socket");
+        std::fs::write(&socket_path, b"").expect("create fake socket");
+
+        let runner = Arc::new(MockRunner::new(vec![Ok("{\"sessions\":[]}".into())]));
+        let state = ShpoolTerminalPool::detect_daemon_state(runner, &socket_path, &dir.path().join("config.toml")).await;
+
+        assert_eq!(state, ShpoolDaemonState::HealthyWithoutPid);
+    }
+
+    #[tokio::test]
+    async fn detect_daemon_state_without_pid_file_is_stale_when_probe_fails() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let socket_path = dir.path().join("shpool.socket");
+        std::fs::write(&socket_path, b"").expect("create fake socket");
+
+        let runner = Arc::new(MockRunner::new(vec![Err("connection failed".into())]));
+        let state = ShpoolTerminalPool::detect_daemon_state(runner, &socket_path, &dir.path().join("config.toml")).await;
+
+        assert_eq!(state, ShpoolDaemonState::Stale);
     }
 
     #[tokio::test]
