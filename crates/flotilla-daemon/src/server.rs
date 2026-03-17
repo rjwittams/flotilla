@@ -256,7 +256,7 @@ impl DaemonServer {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (peer_data_tx, peer_data_rx) = mpsc::channel(256);
 
-        let agent_state_store = flotilla_core::agents::shared_file_backed_agent_state_store(flotilla_core::config::flotilla_config_dir());
+        let agent_state_store = Arc::clone(daemon.agent_state_store());
 
         Ok(Self {
             daemon,
