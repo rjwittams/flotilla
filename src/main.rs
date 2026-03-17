@@ -553,7 +553,7 @@ async fn run_topology_command(cli: &Cli, format: OutputFormat) -> Result<()> {
     flotilla_tui::cli::run_topology(&*daemon, format).await.map_err(|e| color_eyre::eyre::eyre!(e))
 }
 
-async fn run_hook(_cli: &Cli, harness: &str, event_type: &str) -> Result<()> {
+async fn run_hook(cli: &Cli, harness: &str, event_type: &str) -> Result<()> {
     use std::io::Read;
 
     // 1. Resolve harness parser
@@ -586,9 +586,8 @@ async fn run_hook(_cli: &Cli, harness: &str, event_type: &str) -> Result<()> {
 
     // 6. Send to daemon via socket. The daemon owns agent state as a single
     // actor — no file-level races between concurrent hook processes.
-    let socket_path = std::env::var("FLOTILLA_DAEMON_SOCKET")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| flotilla_core::config::flotilla_config_dir().join("flotilla.sock"));
+    // Priority: FLOTILLA_DAEMON_SOCKET env > --socket CLI flag > global default.
+    let socket_path = std::env::var("FLOTILLA_DAEMON_SOCKET").map(std::path::PathBuf::from).unwrap_or_else(|_| cli.socket_path());
 
     send_hook_event(&socket_path, event).await
 }
