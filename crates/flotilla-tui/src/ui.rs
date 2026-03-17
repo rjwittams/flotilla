@@ -492,7 +492,6 @@ fn normal_mode_key_chips() -> Vec<KeyChip> {
     vec![
         key_chip(ENTER_KEY_GLYPH, "Open", KeyCode::Enter),
         key_chip(".", "Menu", KeyCode::Char('.')),
-        key_chip("/", "Search", KeyCode::Char('/')),
         key_chip("n", "New", KeyCode::Char('n')),
         key_chip("?", "Help", KeyCode::Char('?')),
         key_chip("q", "Quit", KeyCode::Char('q')),
