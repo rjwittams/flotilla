@@ -226,6 +226,11 @@ impl App {
                             let query = query.trim().to_string();
                             self.ui.mode = UiMode::Normal;
                             if !query.is_empty() {
+                                let repo = self.model.active_repo_root().clone();
+                                self.proto_commands.push(self.command(CommandAction::SearchIssues {
+                                    repo: flotilla_protocol::RepoSelector::Path(repo),
+                                    query: query.clone(),
+                                }));
                                 self.active_ui_mut().active_search_query = Some(query);
                             }
                             return;

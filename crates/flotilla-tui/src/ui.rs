@@ -101,21 +101,27 @@ pub fn render(
     keymap: &Keymap,
     frame: &mut Frame,
 ) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
-        .split(frame.area());
+    let palette_open = matches!(ui.mode, UiMode::CommandPalette { .. });
+    let constraints = if palette_open {
+        // tab bar | content | status bar (with input) | 8 completion rows
+        vec![Constraint::Length(1), Constraint::Min(0), Constraint::Length(1), Constraint::Length(MAX_PALETTE_ROWS as u16)]
+    } else {
+        vec![Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]
+    };
+    let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(frame.area());
 
     render_tab_bar(model, ui, theme, frame, chunks[0]);
     render_content(model, ui, theme, frame, chunks[1]);
     render_status_bar(model, ui, in_flight, theme, frame, chunks[2]);
+    if palette_open {
+        render_command_palette(ui, theme, frame, chunks[3]);
+    }
     render_action_menu(model, ui, theme, frame);
     render_input_popup(ui, theme, frame);
     render_delete_confirm(model, ui, theme, frame);
     render_close_confirm(model, ui, theme, frame);
     render_help(ui, theme, keymap, frame);
     render_file_picker(ui, theme, frame);
-    render_command_palette(ui, theme, frame);
 }
 
 fn render_tab_bar(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
@@ -448,7 +454,7 @@ fn status_bar_content(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, I
             mode_indicators: vec![],
         },
         UiMode::CommandPalette { ref input, .. } => {
-            let status_text = format!("/ {}", input.value());
+            let status_text = format!("/{}", input.value());
             StatusBarContent {
                 status: StatusSection::plain(&status_text),
                 keys: vec![
@@ -1264,20 +1270,12 @@ fn render_file_picker(ui: &mut UiState, theme: &Theme, frame: &mut Frame) {
 
 const MAX_PALETTE_ROWS: usize = 8;
 
-fn render_command_palette(ui: &UiState, theme: &Theme, frame: &mut Frame) {
+fn render_command_palette(ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
     let UiMode::CommandPalette { ref input, ref entries, selected, scroll_top } = ui.mode else {
         return;
     };
 
-    let frame_area = frame.area();
-    if frame_area.height < (MAX_PALETTE_ROWS as u16) + 2 {
-        return;
-    }
-
-    // Completion area: fixed 8 rows directly above the status bar.
-    let completions_y = frame_area.y + frame_area.height - 1 - MAX_PALETTE_ROWS as u16;
-    let area = Rect::new(frame_area.x, completions_y, frame_area.width, MAX_PALETTE_ROWS as u16);
-    frame.render_widget(Clear, area);
+    // Fill the entire completion area with background
     frame.render_widget(Block::default().style(Style::default().bg(theme.bar_bg)), area);
 
     let filtered: Vec<&crate::palette::PaletteEntry> = crate::palette::filter_entries(entries, input.value());
@@ -1311,9 +1309,9 @@ fn render_command_palette(ui: &UiState, theme: &Theme, frame: &mut Frame) {
         }
     }
 
-    // Cursor on status bar row where "/ {input}" is rendered
-    let status_bar_y = frame_area.y + frame_area.height - 1;
-    let cursor_x = frame_area.x + 2 + input.visual_cursor() as u16;
+    // Cursor on the status bar row (one row above the completion area)
+    let status_bar_y = area.y.saturating_sub(1);
+    let cursor_x = area.x + 1 + input.visual_cursor() as u16;
     frame.set_cursor_position((cursor_x, status_bar_y));
 }
 

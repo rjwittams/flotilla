@@ -22,7 +22,8 @@ expression: output
 │                                                                      ││                                              │
 │                                                                      ││                                              │
 │                                                                      ││                                              │
-│                                                                      ││                                              │
+└──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘
+/                            <ENT> RUN  <TAB> FILL  <esc> CLOSE    ◫ auto   @local
   search     filter items in view                                                                                 /
   refresh    refresh active repo                                                                                  r
   branch     create a new branch                                                                                  n
@@ -31,4 +32,3 @@ expression: output
   layout     cycle view layout                                                                                    l
   host       cycle target host                                                                                    h
   theme      cycle color theme
-/                            <ENT> RUN  <TAB> FILL  <esc> CLOSE    ◫ auto   @local
