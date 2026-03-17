@@ -365,7 +365,7 @@ fn status_bar_content(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, I
             } else if !rui.multi_selected.is_empty() {
                 StatusSection::plain(&format!("{} SELECTED", rui.multi_selected.len()))
             } else {
-                StatusSection::plain("")
+                StatusSection::plain("/ for commands")
             };
 
             let task = active_task(model, in_flight).map(|(description, spinner_index)| TaskSection::new(&description, spinner_index));
@@ -447,8 +447,18 @@ fn status_bar_content(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, I
             task: None,
             mode_indicators: vec![],
         },
-        UiMode::CommandPalette { .. } => {
-            StatusBarContent { status: StatusSection::plain(""), keys: vec![], task: None, mode_indicators: vec![] }
+        UiMode::CommandPalette { ref input, .. } => {
+            let status_text = format!("/ {}", input.value());
+            StatusBarContent {
+                status: StatusSection::plain(&status_text),
+                keys: vec![
+                    key_chip(ENTER_KEY_GLYPH, "Run", KeyCode::Enter),
+                    key_chip("TAB", "Fill", KeyCode::Tab),
+                    key_chip("esc", "Close", KeyCode::Esc),
+                ],
+                task: None,
+                mode_indicators: normal_mode_indicators(ui),
+            }
         }
     }
 }
@@ -1259,21 +1269,18 @@ fn render_command_palette(ui: &UiState, theme: &Theme, frame: &mut Frame) {
         return;
     };
 
-    let filtered: Vec<&crate::palette::PaletteEntry> = crate::palette::filter_entries(entries, input.value());
-    let visible_count = filtered.len().min(MAX_PALETTE_ROWS);
-    let total_height = visible_count as u16 + 1; // completions + input row
-
     let frame_area = frame.area();
-    if frame_area.height < total_height + 2 {
+    if frame_area.height < (MAX_PALETTE_ROWS as u16) + 2 {
         return;
     }
 
-    // Bottom-anchored area
-    let area = Rect::new(frame_area.x, frame_area.y + frame_area.height - total_height, frame_area.width, total_height);
+    // Completion area: fixed 8 rows directly above the status bar.
+    let completions_y = frame_area.y + frame_area.height - 1 - MAX_PALETTE_ROWS as u16;
+    let area = Rect::new(frame_area.x, completions_y, frame_area.width, MAX_PALETTE_ROWS as u16);
     frame.render_widget(Clear, area);
     frame.render_widget(Block::default().style(Style::default().bg(theme.bar_bg)), area);
 
-    // Compute column widths
+    let filtered: Vec<&crate::palette::PaletteEntry> = crate::palette::filter_entries(entries, input.value());
     let name_width = filtered.iter().map(|e| e.name.len()).max().unwrap_or(0).min(20);
     let hint_width: u16 = 7;
 
@@ -1287,20 +1294,15 @@ fn render_command_palette(ui: &UiState, theme: &Theme, frame: &mut Frame) {
             Style::default().bg(theme.bar_bg)
         };
 
-        // Fill the row with background
         let row_area = Rect::new(area.x, row_y, area.width, 1);
         frame.render_widget(Block::default().style(row_style), row_area);
 
-        // Name column
         let name_span = Span::styled(format!("  {:<width$}", entry.name, width = name_width), row_style.fg(theme.text));
-
-        // Description column
         let desc_span = Span::styled(format!("  {}", entry.description), row_style.fg(theme.muted));
 
         let line = Line::from(vec![name_span, desc_span]);
         frame.render_widget(Paragraph::new(line), Rect::new(area.x, row_y, area.width.saturating_sub(hint_width), 1));
 
-        // Key hint right-aligned
         let hint_text = entry.key_hint.unwrap_or("");
         if !hint_text.is_empty() {
             let hint_span = Span::styled(format!(" {} ", hint_text), row_style.fg(theme.key_hint));
@@ -1309,16 +1311,10 @@ fn render_command_palette(ui: &UiState, theme: &Theme, frame: &mut Frame) {
         }
     }
 
-    // Input row (bottom of area)
-    let input_y = area.y + visible_count as u16;
-    let input_area = Rect::new(area.x, input_y, area.width, 1);
-    let input_style = Style::default().fg(theme.input_text).bg(theme.bar_bg);
-    let display = format!("/ {}", input.value());
-    frame.render_widget(Paragraph::new(display).style(input_style), input_area);
-
-    // Position cursor
-    let cursor_x = area.x + 2 + input.visual_cursor() as u16;
-    frame.set_cursor_position((cursor_x, input_y));
+    // Cursor on status bar row where "/ {input}" is rendered
+    let status_bar_y = frame_area.y + frame_area.height - 1;
+    let cursor_x = frame_area.x + 2 + input.visual_cursor() as u16;
+    frame.set_cursor_position((cursor_x, status_bar_y));
 }
 
 fn render_config_screen(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
