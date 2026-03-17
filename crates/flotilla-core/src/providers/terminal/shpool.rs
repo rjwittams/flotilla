@@ -39,6 +39,14 @@ enum ShpoolDaemonState {
     Missing,
     HealthyWithPid,
     HealthyWithoutPid,
+    InconclusiveWithoutPid,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShpoolNoPidProbe {
+    Healthy,
+    Inconclusive,
     Stale,
 }
 
@@ -80,6 +88,8 @@ impl ShpoolTerminalPool {
         } else if config_stale && daemon_state == ShpoolDaemonState::HealthyWithoutPid {
             tracing::warn!("shpool config changed but daemon has no pid file; writing config for future restart");
             Self::write_config(&config_path);
+        } else if config_stale && daemon_state == ShpoolDaemonState::InconclusiveWithoutPid {
+            tracing::warn!("shpool probe was inconclusive without a pid file; leaving socket and config untouched");
         } else if config_stale {
             // No daemon running, safe to write config directly.
             Self::write_config(&config_path);
@@ -178,10 +188,10 @@ impl ShpoolTerminalPool {
                 }
             }
             Err(_) => {
-                if Self::probe_daemon_without_pid_file(runner, socket_path, config_path).await {
-                    ShpoolDaemonState::HealthyWithoutPid
-                } else {
-                    ShpoolDaemonState::Stale
+                match Self::probe_daemon_without_pid_file(runner, socket_path, config_path).await {
+                    ShpoolNoPidProbe::Healthy => ShpoolDaemonState::HealthyWithoutPid,
+                    ShpoolNoPidProbe::Inconclusive => ShpoolDaemonState::InconclusiveWithoutPid,
+                    ShpoolNoPidProbe::Stale => ShpoolDaemonState::Stale,
                 }
             }
         }
@@ -197,25 +207,57 @@ impl ShpoolTerminalPool {
     }
 
     #[cfg(unix)]
-    async fn probe_daemon_without_pid_file(runner: Arc<dyn CommandRunner>, socket_path: &Path, config_path: &Path) -> bool {
+    async fn probe_daemon_without_pid_file(
+        runner: Arc<dyn CommandRunner>,
+        socket_path: &Path,
+        config_path: &Path,
+    ) -> ShpoolNoPidProbe {
         let socket_path_str = socket_path.display().to_string();
         let config_path_str = config_path.display().to_string();
         let args = ["--no-daemonize", "--socket", &socket_path_str, "-c", &config_path_str, "list", "--json"];
         let label = crate::providers::command_channel_label("shpool", &args);
 
-        matches!(
-            tokio::time::timeout(
-                SHPOOL_DAEMON_PROBE_TIMEOUT,
-                runner.run_output("shpool", &args, Path::new("/"), &label),
-            )
-            .await,
-            Ok(Ok(output)) if output.success
+        match tokio::time::timeout(
+            SHPOOL_DAEMON_PROBE_TIMEOUT,
+            runner.run_output("shpool", &args, Path::new("/"), &label),
         )
+        .await
+        {
+            Ok(Ok(output)) if output.success => ShpoolNoPidProbe::Healthy,
+            Ok(Ok(output)) => {
+                if Self::probe_failure_is_definitely_stale(&output.stderr) {
+                    ShpoolNoPidProbe::Stale
+                } else {
+                    ShpoolNoPidProbe::Inconclusive
+                }
+            }
+            Ok(Err(err)) => {
+                if Self::probe_failure_is_definitely_stale(&err) {
+                    ShpoolNoPidProbe::Stale
+                } else {
+                    ShpoolNoPidProbe::Inconclusive
+                }
+            }
+            Err(_) => ShpoolNoPidProbe::Inconclusive,
+        }
     }
 
     #[cfg(not(unix))]
-    async fn probe_daemon_without_pid_file(_runner: Arc<dyn CommandRunner>, _socket_path: &Path, _config_path: &Path) -> bool {
-        false
+    async fn probe_daemon_without_pid_file(
+        _runner: Arc<dyn CommandRunner>,
+        _socket_path: &Path,
+        _config_path: &Path,
+    ) -> ShpoolNoPidProbe {
+        ShpoolNoPidProbe::Inconclusive
+    }
+
+    fn probe_failure_is_definitely_stale(message: &str) -> bool {
+        let lower = message.to_ascii_lowercase();
+        lower.contains("connection refused")
+            || lower.contains("no such file")
+            || lower.contains("not found")
+            || lower.contains("enoent")
+            || lower.contains("does not exist")
     }
 
     /// Spawn the shpool daemon if one isn't already running.
@@ -679,13 +721,39 @@ impl TerminalPool for ShpoolTerminalPool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::Duration;
+
+    use async_trait::async_trait;
 
     use super::*;
     use crate::{
         attachable::{BindingObjectKind, SharedAttachableStore},
-        providers::testing::MockRunner,
+        providers::{testing::MockRunner, ChannelLabel, CommandOutput, CommandRunner},
     };
+
+    struct DelayedRunner {
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl CommandRunner for DelayedRunner {
+        async fn run(&self, _cmd: &str, _args: &[&str], _cwd: &Path, _label: &ChannelLabel) -> Result<String, String> {
+            tokio::time::sleep(self.delay).await;
+            Ok("{\"sessions\":[]}".into())
+        }
+
+        async fn run_output(&self, cmd: &str, args: &[&str], cwd: &Path, label: &ChannelLabel) -> Result<CommandOutput, String> {
+            match self.run(cmd, args, cwd, label).await {
+                Ok(stdout) => Ok(CommandOutput { stdout, stderr: String::new(), success: true }),
+                Err(stderr) => Ok(CommandOutput { stdout: String::new(), stderr, success: false }),
+            }
+        }
+
+        async fn exists(&self, _cmd: &str, _args: &[&str]) -> bool {
+            true
+        }
+    }
 
     /// Create a ShpoolTerminalPool in a temp dir so config writes succeed.
     fn test_store(dir: &tempfile::TempDir) -> SharedAttachableStore {
@@ -1073,12 +1141,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_daemon_state_without_pid_file_is_stale_when_probe_fails() {
+    async fn detect_daemon_state_without_pid_file_is_inconclusive_when_probe_fails() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let socket_path = dir.path().join("shpool.socket");
         std::fs::write(&socket_path, b"").expect("create fake socket");
 
         let runner = Arc::new(MockRunner::new(vec![Err("connection failed".into())]));
+        let state = ShpoolTerminalPool::detect_daemon_state(runner, &socket_path, &dir.path().join("config.toml")).await;
+
+        assert_eq!(state, ShpoolDaemonState::InconclusiveWithoutPid);
+    }
+
+    #[tokio::test]
+    async fn detect_daemon_state_without_pid_file_is_inconclusive_when_probe_times_out() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let socket_path = dir.path().join("shpool.socket");
+        std::fs::write(&socket_path, b"").expect("create fake socket");
+
+        let runner = Arc::new(DelayedRunner { delay: SHPOOL_DAEMON_PROBE_TIMEOUT + Duration::from_millis(50) });
+        let state = ShpoolTerminalPool::detect_daemon_state(runner, &socket_path, &dir.path().join("config.toml")).await;
+
+        assert_eq!(state, ShpoolDaemonState::InconclusiveWithoutPid);
+    }
+
+    #[tokio::test]
+    async fn detect_daemon_state_without_pid_file_is_stale_when_probe_reports_connection_refused() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let socket_path = dir.path().join("shpool.socket");
+        std::fs::write(&socket_path, b"").expect("create fake socket");
+
+        let runner = Arc::new(MockRunner::new(vec![Err("connection refused".into())]));
         let state = ShpoolTerminalPool::detect_daemon_state(runner, &socket_path, &dir.path().join("config.toml")).await;
 
         assert_eq!(state, ShpoolDaemonState::Stale);

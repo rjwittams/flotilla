@@ -3061,6 +3061,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkout_plan_preserves_checkout_created_when_workspace_step_fails() {
+        use tokio::sync::broadcast;
+        use tokio_util::sync::CancellationToken;
+
+        use crate::step::run_step_plan;
+
+        let ws_mgr = Arc::new(MockWorkspaceManager::failing("ws failed"));
+        let mut registry = ProviderRegistry::new();
+        registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
+        registry.workspace_managers.insert("cmux", desc("cmux"), Arc::clone(&ws_mgr) as Arc<dyn WorkspaceManager>);
+        let registry = Arc::new(registry);
+        let runner = Arc::new(MockRunner::new(vec![Err("missing".into()), Err("missing".into())]));
+        let cb = config_base();
+        let attachable = test_attachable_store(&cb);
+        let lh = local_host();
+        let repo = RepoExecutionContext { identity: repo_identity(), root: repo_root() };
+
+        let plan = build_plan(
+            local_command(fresh_checkout_action("feat-x")),
+            RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+            Arc::clone(&registry),
+            Arc::new(empty_data()),
+            runner,
+            cb.clone(),
+            attachable.clone(),
+            lh.clone(),
+            None,
+        )
+        .await;
+
+        let (cancel, tx) = (CancellationToken::new(), broadcast::channel(64).0);
+        let resolver = ExecutorStepResolver { repo, registry, config_base: cb, attachable_store: attachable, local_host: lh.clone() };
+
+        let result = match plan {
+            ExecutionPlan::Steps(step_plan) => {
+                run_step_plan(step_plan, 1, lh, repo_identity(), repo_root(), cancel, tx, Some(&resolver)).await
+            }
+            _ => panic!("expected steps"),
+        };
+
+        assert_eq!(
+            result,
+            CommandResult::CheckoutCreated { branch: "feat-x".into(), path: PathBuf::from("/repo/wt-feat-x") }
+        );
+    }
+
+    #[tokio::test]
     async fn build_plan_teleport_session_returns_steps() {
         let mut registry = empty_registry();
         registry.cloud_agents.insert("claude", desc("claude"), Arc::new(MockCloudAgent::succeeding()));
