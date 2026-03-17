@@ -104,7 +104,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        attachable::AttachableStore,
         providers::{
             ai_utility::AiUtility,
             change_request::ChangeRequestTracker,
@@ -417,7 +416,7 @@ mod tests {
             PathBuf::from("/tmp/test-repo"),
             reg,
             Some("owner/repo".to_string()),
-            Arc::new(std::sync::Mutex::new(AttachableStore::with_base("/tmp"))),
+            crate::attachable::shared_file_backed_attachable_store("/tmp"),
         );
 
         assert_eq!(model.labels.checkouts.section, "Checkouts");
@@ -439,7 +438,7 @@ mod tests {
     async fn repo_model_new_with_empty_registry_uses_default_labels() {
         let reg = ProviderRegistry::new();
         let model =
-            RepoModel::new(PathBuf::from("/tmp/empty"), reg, None, Arc::new(std::sync::Mutex::new(AttachableStore::with_base("/tmp"))));
+            RepoModel::new(PathBuf::from("/tmp/empty"), reg, None, crate::attachable::shared_file_backed_attachable_store("/tmp"));
         assert_eq!(model.labels.checkouts.section, "\u{2014}");
         assert_eq!(model.labels.change_requests.section, "\u{2014}");
         model.refresh_handle.trigger_refresh();

@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     fn test_attachable_store(base: &Path) -> SharedAttachableStore {
-        Arc::new(std::sync::Mutex::new(AttachableStore::with_base(base)))
+        crate::attachable::shared_file_backed_attachable_store(base)
     }
 
     async fn run_execute(

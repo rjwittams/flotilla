@@ -30,6 +30,15 @@ Package-local `flotilla-core` daemon integration coverage uses shared discovery 
 cargo test -p flotilla-core --locked --features test-support --test in_process_daemon
 ```
 
+## Testing Philosophy
+
+- Prefer behavior tests that run through injected collaborators over tests that depend on real filesystem state, subprocess orchestration, sockets, or live multi-host setup.
+- When a subsystem has multiple storage or transport implementations, specify the behavior once and run the same contract tests against each implementation.
+- Use in-memory implementations for most logical scenario tests when they make setup clearer and failures easier to reason about.
+- Keep real-backed implementations covered too, but verify them against the same behavioral contract instead of forcing all behavior tests through the real backing store.
+- Favor reusable test harnesses over ad hoc setup. The goal is to make new multi-step scenarios cheap to express and debug.
+- For multi-host orchestration logic, prefer `InProcessDaemon`-level tests unless the bug specifically depends on real process or transport boundaries.
+
 ## Claude Code Web (changedirection/flotilla fork)
 
 This fork exists for Claude Code Web sessions. Two things to be aware of:

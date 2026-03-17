@@ -9,6 +9,15 @@
 Use the sandbox-safe command when `CODEX_SANDBOX` is set or socket-bind tests are expected to fail with `Operation not permitted`. The repo-local `TMPDIR` avoids native build failures from crates like `aws-lc-sys` under the sandbox.
 The `flotilla-core` integration test above intentionally depends on shared discovery test helpers behind the `test-support` feature.
 
+## Testing Philosophy
+
+- Prefer behavior tests that exercise domain logic through injected collaborators rather than real filesystem, socket, process, or multi-host orchestration.
+- When a component has multiple backing implementations, define the behavior once and run the same contract/specification tests against each implementation.
+- For persistence-backed components, favor an in-memory implementation for most scenario tests, then separately verify that the real file-backed implementation matches the same contract.
+- Do not minimize test infrastructure just to avoid refactoring. Optimize for making new logical scenarios easy, clear, and concise to express.
+- In-process daemon tests are the default seam for multi-step orchestration bugs that do not inherently require real subprocesses or transport boundaries.
+- This does not mean "never test the real implementation". It means separate behavior specification from implementation choice wherever practical.
+
 ## Cursor Cloud specific instructions
 
 ### Overview

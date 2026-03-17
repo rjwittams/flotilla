@@ -8,7 +8,7 @@ use flotilla_protocol::{HostName, HostPath, ManagedTerminal, ManagedTerminalId, 
 
 use super::TerminalPool;
 use crate::{
-    attachable::{AttachableStore, SharedAttachableStore, TerminalPurpose},
+    attachable::{AttachableStoreApi, SharedAttachableStore, TerminalPurpose},
     providers::{run, CommandRunner},
 };
 
@@ -356,7 +356,7 @@ impl ShpoolTerminalPool {
         PathBuf::from(format!(".flotilla/attachable/{}", id.checkout))
     }
 
-    fn register_attachable(store: &mut AttachableStore, terminal: &ManagedTerminal, session_name: &str) -> bool {
+    fn register_attachable(store: &mut dyn AttachableStoreApi, terminal: &ManagedTerminal, session_name: &str) -> bool {
         // TODO(#360): prune stale attachables/bindings when sessions disappear so
         // the registry does not grow unbounded over time.
         let host = HostName::local();
@@ -374,7 +374,7 @@ impl ShpoolTerminalPool {
             "shpool",
             session_name,
             TerminalPurpose { checkout: terminal.id.checkout.clone(), role: terminal.id.role.clone(), index: terminal.id.index },
-            terminal.command.clone(),
+            &terminal.command,
             checkout_path,
             terminal.status.clone(),
         );
@@ -399,7 +399,7 @@ impl TerminalPool for ShpoolTerminalPool {
                 let mut any_changed = false;
                 for terminal in &terminals {
                     let session_name = format!("flotilla/{}", terminal.id);
-                    any_changed |= Self::register_attachable(&mut store, terminal, &session_name);
+                    any_changed |= Self::register_attachable(store.as_mut(), terminal, &session_name);
                 }
                 if any_changed {
                     if let Err(err) = store.save() {
@@ -470,13 +470,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        attachable::{AttachableStore, BindingObjectKind, SharedAttachableStore},
+        attachable::{BindingObjectKind, SharedAttachableStore},
         providers::testing::MockRunner,
     };
 
     /// Create a ShpoolTerminalPool in a temp dir so config writes succeed.
     fn test_store(dir: &tempfile::TempDir) -> SharedAttachableStore {
-        Arc::new(std::sync::Mutex::new(AttachableStore::with_base(dir.path())))
+        crate::attachable::shared_file_backed_attachable_store(dir.path())
     }
 
     /// Create a ShpoolTerminalPool in a temp dir so config writes succeed.

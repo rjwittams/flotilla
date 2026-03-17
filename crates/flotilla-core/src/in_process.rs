@@ -71,16 +71,6 @@ fn normalize_local_provider_hosts(mut providers: ProviderData, host_name: &HostN
         workspace.correlation_keys = normalize_correlation_keys(std::mem::take(&mut workspace.correlation_keys), host_name);
     }
 
-    providers.attachable_sets = providers
-        .attachable_sets
-        .into_iter()
-        .map(|(id, mut set)| {
-            set.host_affinity = set.host_affinity.map(|_| host_name.clone());
-            set.checkout = set.checkout.map(|host_path| HostPath::new(host_name.clone(), host_path.path));
-            (id, set)
-        })
-        .collect();
-
     providers
 }
 
@@ -2940,6 +2930,88 @@ mod tests {
             2,
             "should have exactly 2 checkouts (1 local + 1 peer), got {}",
             second_snap.providers.checkouts.len()
+        );
+    }
+
+    #[test]
+    fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_workspace_binding() {
+        let cache = IssueCache::new();
+        let local_host = HostName::new("kiwi");
+        let remote_host = HostName::new("feta");
+        let remote_checkout = HostPath::new(remote_host.clone(), PathBuf::from("/home/robert/dev/flotilla.terminal-stuff"));
+        let set_id = flotilla_protocol::AttachableSetId::new("set-remote");
+
+        let mut local_providers = ProviderData::default();
+        local_providers.workspaces.insert("workspace:9".into(), flotilla_protocol::Workspace {
+            name: "attachable-correlation@feta".into(),
+            directories: vec![PathBuf::from("/Users/robert/dev/flotilla")],
+            correlation_keys: vec![],
+            attachable_set_id: Some(set_id.clone()),
+        });
+        local_providers.attachable_sets.insert(
+            set_id.clone(),
+            flotilla_protocol::AttachableSet {
+                id: set_id.clone(),
+                host_affinity: Some(remote_host.clone()),
+                checkout: Some(remote_checkout.clone()),
+                template_identity: None,
+                members: vec![],
+            },
+        );
+
+        let mut peer_data = ProviderData::default();
+        peer_data.checkouts.insert(remote_checkout.clone(), Checkout {
+            branch: "attachable-correlation".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![
+                CorrelationKey::Branch("attachable-correlation".into()),
+                CorrelationKey::CheckoutPath(remote_checkout.clone()),
+            ],
+            association_keys: vec![],
+        });
+
+        let peers = vec![(remote_host.clone(), peer_data)];
+        let default_snap = RefreshSnapshot::default();
+        let snapshot = build_repo_snapshot_with_peers(
+            SnapshotBuildContext {
+                repo_identity: fallback_repo_identity(Path::new("/Users/robert/dev/flotilla")),
+                path: Path::new("/Users/robert/dev/flotilla"),
+                seq: 1,
+                local_providers: &local_providers,
+                errors: &default_snap.errors,
+                provider_health: &default_snap.provider_health,
+                cache: &cache,
+                search_results: &None,
+                host_name: &local_host,
+            },
+            Some(&peers),
+        );
+
+        let set = snapshot.providers.attachable_sets.get(&set_id).expect("attachable set should remain projected");
+        assert_eq!(set.host_affinity.as_ref(), Some(&remote_host), "remote attachable set host affinity should stay on feta");
+        assert_eq!(set.checkout.as_ref(), Some(&remote_checkout), "remote attachable set checkout should stay on feta");
+
+        let set_item = snapshot
+            .work_items
+            .iter()
+            .find(|item| item.attachable_set_id.as_ref() == Some(&set_id))
+            .expect("work item for attachable set");
+        assert_eq!(set_item.host, remote_host, "correlated work item should be anchored to feta");
+        assert_eq!(
+            set_item.checkout.as_ref().map(|checkout| &checkout.key),
+            Some(&remote_checkout),
+            "correlated work item should point at the remote checkout"
+        );
+        assert_eq!(set_item.workspace_refs, vec!["workspace:9".to_string()]);
+
+        let ghost_checkout = HostPath::new(local_host, PathBuf::from("/home/robert/dev/flotilla.terminal-stuff"));
+        assert!(
+            !snapshot.providers.checkouts.contains_key(&ghost_checkout),
+            "remote checkout path must not be duplicated under the local host"
         );
     }
 

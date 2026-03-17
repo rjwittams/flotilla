@@ -628,7 +628,7 @@ mod tests {
 
     fn test_attachable_store() -> SharedAttachableStore {
         let dir = tempfile::tempdir().expect("tempdir");
-        Arc::new(std::sync::Mutex::new(crate::attachable::AttachableStore::with_base(dir.path())))
+        crate::attachable::shared_file_backed_attachable_store(dir.path())
     }
 
     fn refresh_error(category: &'static str) -> RefreshError {
@@ -759,7 +759,7 @@ mod tests {
         registry.terminal_pools.insert("shpool", desc("shpool"), Arc::new(MockTerminalPool::ok(vec![])));
 
         let store_dir = tempfile::tempdir().expect("tempdir");
-        let attachable_store = Arc::new(std::sync::Mutex::new(crate::attachable::AttachableStore::with_base(store_dir.path())));
+        let attachable_store = crate::attachable::shared_file_backed_attachable_store(store_dir.path());
         let set_id = {
             let mut store = attachable_store.lock().expect("lock store");
             let set_id = store.ensure_terminal_set(
