@@ -2198,6 +2198,7 @@ impl DaemonHandle for InProcessDaemon {
                 config_base,
                 attachable_store,
                 local_host,
+                None,
             )
             .await;
 
@@ -2242,6 +2243,7 @@ impl DaemonHandle for InProcessDaemon {
                         repo_path.clone(),
                         token,
                         event_tx.clone(),
+                        None,
                     )
                     .await;
                     refresh_trigger.notify_one();

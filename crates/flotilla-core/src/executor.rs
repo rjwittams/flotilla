@@ -26,7 +26,7 @@ use crate::{
         workspace::WorkspaceManager,
         CommandRunner,
     },
-    step::{Step, StepOutcome, StepPlan},
+    step::{Step, StepAction, StepHost, StepOutcome, StepPlan},
     template::{
         WorkspaceTemplate, {self},
     },
@@ -68,6 +68,7 @@ pub async fn build_plan(
     config_base: PathBuf,
     attachable_store: SharedAttachableStore,
     local_host: HostName,
+    _originating_host: Option<HostName>,
 ) -> ExecutionPlan {
     let Command { action, .. } = cmd;
 
@@ -148,7 +149,8 @@ async fn build_create_checkout_plan(
         let runner = Arc::clone(&runner);
         steps.push(Step {
             description: format!("Create checkout for branch {branch}"),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move || {
                 Box::pin(async move {
                     validate_checkout_target(&repo_root, &branch, intent, &*runner).await?;
                     // Skip if checkout already exists
@@ -164,7 +166,7 @@ async fn build_create_checkout_plan(
                     *slot.lock().await = Some(path.clone());
                     Ok(StepOutcome::CompletedWith(CommandResult::CheckoutCreated { branch, path }))
                 })
-            }),
+            })),
         });
     }
 
@@ -175,12 +177,13 @@ async fn build_create_checkout_plan(
         let runner = Arc::clone(&runner);
         steps.push(Step {
             description: "Link issues to branch".to_string(),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move || {
                 Box::pin(async move {
                     write_branch_issue_links(&repo_root, &branch, &issue_ids, &*runner).await;
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -226,13 +229,14 @@ async fn build_teleport_session_plan(
         let providers_data = Arc::clone(&providers_data);
         steps.push(Step {
             description: format!("Resolve attach command for session {session_id}"),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move || {
                 Box::pin(async move {
                     let cmd = resolve_attach_command(&session_id, &registry, &providers_data).await?;
                     *slot.lock().await = Some(cmd);
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -245,7 +249,8 @@ async fn build_teleport_session_plan(
         let registry = Arc::clone(&registry);
         steps.push(Step {
             description: "Ensure checkout for teleport".to_string(),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move || {
                 Box::pin(async move {
                     // Already have a checkout path — skip
                     if slot.lock().await.is_some() {
@@ -260,7 +265,7 @@ async fn build_teleport_session_plan(
                     *slot.lock().await = Some(path);
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -274,7 +279,8 @@ async fn build_teleport_session_plan(
         let config_base = config_base.clone();
         steps.push(Step {
             description: "Create workspace with teleport command".to_string(),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move || {
                 Box::pin(async move {
                     let path =
                         path_slot.lock().await.clone().ok_or_else(|| "Could not determine checkout path for teleport".to_string())?;
@@ -292,7 +298,7 @@ async fn build_teleport_session_plan(
                     }
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -319,13 +325,14 @@ fn build_remove_checkout_plan(
         let registry = Arc::clone(&registry);
         steps.push(Step {
             description: format!("Remove checkout for branch {branch}"),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move || {
                 Box::pin(async move {
                     let cm = registry.checkout_managers.preferred().cloned().ok_or_else(|| "No checkout manager available".to_string())?;
                     cm.remove_checkout(&repo_root, &branch).await?;
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -334,7 +341,8 @@ fn build_remove_checkout_plan(
         let registry = Arc::clone(&registry);
         steps.push(Step {
             description: "Clean up terminal sessions".to_string(),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move || {
                 Box::pin(async move {
                     if let Some(tp) = registry.terminal_pools.preferred() {
                         for terminal_id in &terminal_keys {
@@ -349,7 +357,7 @@ fn build_remove_checkout_plan(
                     }
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -484,14 +492,15 @@ async fn build_archive_session_plan(
 
     ExecutionPlan::Steps(StepPlan::new(vec![Step {
         description: format!("Archive session {session_id}"),
-        action: Box::new(move || {
+        host: StepHost::Local,
+        action: StepAction::Closure(Box::new(move || {
             Box::pin(async move {
                 match archive_session_result(&session_id, &registry, &providers_data).await {
                     CommandResult::Error { message } => Err(message),
                     result => Ok(StepOutcome::CompletedWith(result)),
                 }
             })
-        }),
+        })),
     }]))
 }
 
@@ -506,14 +515,15 @@ async fn build_generate_branch_name_plan(
 
     ExecutionPlan::Steps(StepPlan::new(vec![Step {
         description: "Generate branch name".to_string(),
-        action: Box::new(move || {
+        host: StepHost::Local,
+        action: StepAction::Closure(Box::new(move || {
             Box::pin(async move {
                 match generate_branch_name_result(&issue_keys, &registry, &providers_data).await {
                     CommandResult::Error { message } => Err(message),
                     result => Ok(StepOutcome::CompletedWith(result)),
                 }
             })
-        }),
+        })),
     }]))
 }
 /// Execute a `Command` against the given repo context.
@@ -2863,6 +2873,7 @@ mod tests {
             config_base.clone(),
             test_attachable_store(&config_base),
             local_host(),
+            None,
         )
         .await
     }

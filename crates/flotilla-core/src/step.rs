@@ -1,4 +1,4 @@
-use std::{future::Future, path::PathBuf, pin::Pin};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 use flotilla_protocol::{CommandResult, DaemonEvent, HostName, RepoIdentity, StepStatus};
 use tokio::sync::broadcast;
@@ -17,10 +17,38 @@ pub enum StepOutcome {
 /// The future returned by a step's action closure.
 pub type StepFuture = Pin<Box<dyn Future<Output = Result<StepOutcome, String>> + Send>>;
 
+/// Which host a step should execute on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepHost {
+    /// Run on the same host as the stepper (the daemon executing the plan).
+    Local,
+    /// Run on a specific named remote host.
+    Remote(HostName),
+}
+
+/// A symbolic action that the step runner resolves at execution time.
+pub enum StepAction {
+    /// An opaque async closure (existing pattern).
+    Closure(Box<dyn FnOnce() -> StepFuture + Send>),
+    /// Create a workspace for a checkout path produced by a prior step.
+    CreateWorkspaceForCheckout {
+        /// Shared slot populated by the checkout creation step.
+        checkout_path: Arc<tokio::sync::Mutex<Option<PathBuf>>>,
+        label: String,
+    },
+}
+
+/// Resolves symbolic step actions into outcomes.
+#[async_trait::async_trait]
+pub trait StepResolver: Send + Sync {
+    async fn resolve(&self, description: &str, action: StepAction) -> Result<StepOutcome, String>;
+}
+
 /// A single step in a multi-step command.
 pub struct Step {
     pub description: String,
-    pub action: Box<dyn FnOnce() -> StepFuture + Send>,
+    pub host: StepHost,
+    pub action: StepAction,
 }
 
 /// A plan of steps to execute for a command.
@@ -35,6 +63,7 @@ impl StepPlan {
 }
 
 /// Execute a step plan, emitting progress events and checking cancellation between steps.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_step_plan(
     plan: StepPlan,
     command_id: u64,
@@ -43,6 +72,7 @@ pub async fn run_step_plan(
     repo: PathBuf,
     cancel: CancellationToken,
     event_tx: broadcast::Sender<DaemonEvent>,
+    resolver: Option<&dyn StepResolver>,
 ) -> CommandResult {
     let step_count = plan.steps.len();
     let mut final_result = CommandResult::Ok;
@@ -63,7 +93,13 @@ pub async fn run_step_plan(
             status: StepStatus::Started,
         });
 
-        let outcome = (step.action)().await;
+        let outcome = match step.action {
+            StepAction::Closure(f) => f().await,
+            symbolic => match resolver {
+                Some(r) => r.resolve(&step.description, symbolic).await,
+                None => Err(format!("no resolver for symbolic step: {}", step.description)),
+            },
+        };
         // Cancellation wins over a successful in-flight step, but provider
         // errors still surface so we don't hide the underlying failure.
         if cancel.is_cancelled() && outcome.is_ok() {
@@ -139,10 +175,11 @@ mod tests {
         let outcome = Arc::new(tokio::sync::Mutex::new(Some(outcome)));
         Step {
             description: desc.to_string(),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move || {
                 let outcome = Arc::clone(&outcome);
                 Box::pin(async move { outcome.lock().await.take().expect("step called twice") })
-            }),
+            })),
         }
     }
 
@@ -165,6 +202,7 @@ mod tests {
             PathBuf::from("/repo"),
             cancel,
             tx,
+            None,
         )
         .await;
         assert_eq!(result, CommandResult::Ok);
@@ -194,6 +232,7 @@ mod tests {
             PathBuf::from("/repo"),
             cancel,
             tx,
+            None,
         )
         .await;
         assert_eq!(result, CommandResult::Error { message: "boom".into() });
@@ -213,6 +252,7 @@ mod tests {
             PathBuf::from("/repo"),
             cancel,
             tx,
+            None,
         )
         .await;
         assert_eq!(result, CommandResult::Cancelled);
@@ -225,7 +265,8 @@ mod tests {
         let release = Arc::new(Notify::new());
         let plan = StepPlan::new(vec![Step {
             description: "step-a".to_string(),
-            action: Box::new({
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new({
                 let started = Arc::clone(&started);
                 let release = Arc::clone(&release);
                 move || {
@@ -235,7 +276,7 @@ mod tests {
                         Ok(StepOutcome::Completed)
                     })
                 }
-            }),
+            })),
         }]);
 
         let task = tokio::spawn(run_step_plan(
@@ -246,6 +287,7 @@ mod tests {
             PathBuf::from("/repo"),
             cancel.clone(),
             tx,
+            None,
         ));
         started.notified().await;
         cancel.cancel();
@@ -268,6 +310,7 @@ mod tests {
             PathBuf::from("/repo"),
             cancel,
             tx,
+            None,
         )
         .await;
         assert_eq!(result, CommandResult::Ok);
@@ -295,6 +338,7 @@ mod tests {
             PathBuf::from("/repo"),
             cancel,
             tx,
+            None,
         )
         .await;
         assert_eq!(result, CommandResult::CheckoutCreated { branch: "feat/x".into(), path: PathBuf::from("/repo/wt-feat-x") });
@@ -313,6 +357,30 @@ mod tests {
             PathBuf::from("/repo"),
             cancel,
             tx,
+            None,
+        )
+        .await;
+        assert_eq!(result, CommandResult::Ok);
+    }
+
+    #[tokio::test]
+    async fn closure_step_action_succeeds() {
+        let (cancel, tx) = setup();
+        let plan = StepPlan::new(vec![Step {
+            description: "closure step".to_string(),
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(|| Box::pin(async { Ok(StepOutcome::Completed) }))),
+        }]);
+
+        let result = run_step_plan(
+            plan,
+            1,
+            HostName::local(),
+            RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            PathBuf::from("/repo"),
+            cancel,
+            tx,
+            None,
         )
         .await;
         assert_eq!(result, CommandResult::Ok);
