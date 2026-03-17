@@ -26,7 +26,7 @@ use crate::{
         workspace::WorkspaceManager,
         CommandRunner,
     },
-    step::{Step, StepOutcome, StepPlan},
+    step::{Step, StepAction, StepHost, StepOutcome, StepPlan, StepResolver},
     template::{
         WorkspaceTemplate, {self},
     },
@@ -68,6 +68,11 @@ pub async fn build_plan(
     config_base: PathBuf,
     attachable_store: SharedAttachableStore,
     local_host: HostName,
+    // TODO(multi-host): When a command is forwarded from another host, this carries
+    // the requester's hostname so plan builders can stamp `StepHost::Remote(originator)`
+    // on steps that need to run back on the presentation host (e.g. workspace creation
+    // after a remote checkout). Passed by `execute_forwarded_command` in server.rs.
+    _originating_host: Option<HostName>,
 ) -> ExecutionPlan {
     let Command { action, .. } = cmd;
 
@@ -109,10 +114,11 @@ pub async fn build_plan(
 /// Steps:
 /// 1. Create the checkout (skipped if it already exists on the local host)
 /// 2. Link issues to the branch (skipped if no issue_ids)
+/// 3. Create a workspace for the new checkout
 ///
-/// Workspace creation is NOT included here because this plan may execute on a
-/// remote host.  The TUI handles workspace creation locally when it receives
-/// `CheckoutCreated` from a local command.
+/// The final step creates a workspace for the new checkout. This is a symbolic
+/// step resolved by the `ExecutorStepResolver` at execution time, so it has
+/// access to the registry and config without needing pre-refreshed provider data.
 #[allow(clippy::too_many_arguments)]
 async fn build_create_checkout_plan(
     branch: String,
@@ -125,46 +131,47 @@ async fn build_create_checkout_plan(
     runner: Arc<dyn CommandRunner>,
     local_host: flotilla_protocol::HostName,
 ) -> ExecutionPlan {
-    // Shared slot for the checkout path — pre-populated if the checkout already exists.
-    let checkout_path_slot: Arc<tokio::sync::Mutex<Option<PathBuf>>> = {
-        let existing = providers_data.checkouts.iter().find_map(|(hp, co)| {
-            if hp.host == local_host && co.branch == branch {
-                Some(hp.path.clone())
-            } else {
-                None
-            }
-        });
-        Arc::new(tokio::sync::Mutex::new(existing))
-    };
+    // Check if checkout already exists for this branch on the local host.
+    let existing_checkout_path: Option<PathBuf> =
+        providers_data.checkouts.iter().find_map(
+            |(hp, co)| {
+                if hp.host == local_host && co.branch == branch {
+                    Some(hp.path.clone())
+                } else {
+                    None
+                }
+            },
+        );
 
     let mut steps = Vec::new();
 
     // Step 1: Create checkout
     {
-        let slot = Arc::clone(&checkout_path_slot);
         let branch = branch.clone();
         let repo_root = repo_root.clone();
         let registry = Arc::clone(&registry);
         let runner = Arc::clone(&runner);
+        let existing = existing_checkout_path.clone();
         steps.push(Step {
             description: format!("Create checkout for branch {branch}"),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move |_prior| {
                 Box::pin(async move {
                     validate_checkout_target(&repo_root, &branch, intent, &*runner).await?;
-                    // Skip if checkout already exists
-                    if slot.lock().await.is_some() {
+                    // If checkout already exists, emit CheckoutCreated so the workspace
+                    // step can find the path in prior outcomes.
+                    if let Some(path) = existing {
                         if matches!(intent, CheckoutIntent::FreshBranch) {
                             return Err(format!("branch already exists: {branch}"));
                         }
-                        return Ok(StepOutcome::Skipped);
+                        return Ok(StepOutcome::CompletedWith(CommandResult::CheckoutCreated { branch, path }));
                     }
                     let cm = registry.checkout_managers.preferred().cloned().ok_or_else(|| "No checkout manager available".to_string())?;
                     let (path, _checkout) = cm.create_checkout(&repo_root, &branch, create_branch).await?;
                     info!(checkout_path = %path.display(), "created checkout");
-                    *slot.lock().await = Some(path.clone());
                     Ok(StepOutcome::CompletedWith(CommandResult::CheckoutCreated { branch, path }))
                 })
-            }),
+            })),
         });
     }
 
@@ -175,14 +182,22 @@ async fn build_create_checkout_plan(
         let runner = Arc::clone(&runner);
         steps.push(Step {
             description: "Link issues to branch".to_string(),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move |_prior| {
                 Box::pin(async move {
                     write_branch_issue_links(&repo_root, &branch, &issue_ids, &*runner).await;
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
+
+    // Final step: create workspace for the new checkout.
+    steps.push(Step {
+        description: "Create workspace".to_string(),
+        host: StepHost::Local,
+        action: StepAction::CreateWorkspaceForCheckout { label: branch.clone() },
+    });
 
     ExecutionPlan::Steps(StepPlan::new(steps))
 }
@@ -226,13 +241,14 @@ async fn build_teleport_session_plan(
         let providers_data = Arc::clone(&providers_data);
         steps.push(Step {
             description: format!("Resolve attach command for session {session_id}"),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move |_prior| {
                 Box::pin(async move {
                     let cmd = resolve_attach_command(&session_id, &registry, &providers_data).await?;
                     *slot.lock().await = Some(cmd);
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -245,7 +261,8 @@ async fn build_teleport_session_plan(
         let registry = Arc::clone(&registry);
         steps.push(Step {
             description: "Ensure checkout for teleport".to_string(),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move |_prior| {
                 Box::pin(async move {
                     // Already have a checkout path — skip
                     if slot.lock().await.is_some() {
@@ -260,7 +277,7 @@ async fn build_teleport_session_plan(
                     *slot.lock().await = Some(path);
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -274,7 +291,8 @@ async fn build_teleport_session_plan(
         let config_base = config_base.clone();
         steps.push(Step {
             description: "Create workspace with teleport command".to_string(),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move |_prior| {
                 Box::pin(async move {
                     let path =
                         path_slot.lock().await.clone().ok_or_else(|| "Could not determine checkout path for teleport".to_string())?;
@@ -292,7 +310,7 @@ async fn build_teleport_session_plan(
                     }
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -319,13 +337,14 @@ fn build_remove_checkout_plan(
         let registry = Arc::clone(&registry);
         steps.push(Step {
             description: format!("Remove checkout for branch {branch}"),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move |_prior| {
                 Box::pin(async move {
                     let cm = registry.checkout_managers.preferred().cloned().ok_or_else(|| "No checkout manager available".to_string())?;
                     cm.remove_checkout(&repo_root, &branch).await?;
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -334,7 +353,8 @@ fn build_remove_checkout_plan(
         let registry = Arc::clone(&registry);
         steps.push(Step {
             description: "Clean up terminal sessions".to_string(),
-            action: Box::new(move || {
+            host: StepHost::Local,
+            action: StepAction::Closure(Box::new(move |_prior| {
                 Box::pin(async move {
                     if let Some(tp) = registry.terminal_pools.preferred() {
                         for terminal_id in &terminal_keys {
@@ -349,7 +369,7 @@ fn build_remove_checkout_plan(
                     }
                     Ok(StepOutcome::Completed)
                 })
-            }),
+            })),
         });
     }
 
@@ -466,6 +486,76 @@ fn preferred_workspace_manager(registry: &ProviderRegistry) -> Option<(&str, &Ar
     registry.workspace_managers.preferred_with_desc().map(|(desc, provider)| (desc.implementation.as_str(), provider))
 }
 
+/// Core workspace creation logic, shared by the step resolver and the
+/// standalone `CreateWorkspaceForCheckout` command.
+async fn create_workspace_for_checkout_impl(
+    checkout_path: &Path,
+    label: &str,
+    repo: &RepoExecutionContext,
+    registry: &ProviderRegistry,
+    config_base: &Path,
+    attachable_store: &SharedAttachableStore,
+    local_host: &HostName,
+) -> Result<StepOutcome, String> {
+    if let Some((provider_name, ws_mgr)) = preferred_workspace_manager(registry) {
+        if select_existing_workspace(ws_mgr.as_ref(), checkout_path).await {
+            return Ok(StepOutcome::Completed);
+        }
+        let mut config = workspace_config(&repo.root, label, checkout_path, "claude", config_base);
+        if let Some(tp) = registry.terminal_pools.preferred() {
+            resolve_terminal_pool(&mut config, tp.as_ref()).await;
+        }
+        match ws_mgr.create_workspace(&config).await {
+            Ok((ws_ref, _workspace)) => {
+                persist_workspace_binding(attachable_store, provider_name, &ws_ref, local_host, checkout_path);
+                Ok(StepOutcome::Completed)
+            }
+            Err(e) => Err(e),
+        }
+    } else {
+        Ok(StepOutcome::Skipped)
+    }
+}
+
+/// Resolves symbolic `StepAction` variants using executor infrastructure.
+pub(crate) struct ExecutorStepResolver {
+    pub repo: RepoExecutionContext,
+    pub registry: Arc<ProviderRegistry>,
+    pub config_base: PathBuf,
+    pub attachable_store: SharedAttachableStore,
+    pub local_host: HostName,
+}
+
+#[async_trait::async_trait]
+impl StepResolver for ExecutorStepResolver {
+    async fn resolve(&self, _description: &str, action: StepAction, prior: &[StepOutcome]) -> Result<StepOutcome, String> {
+        match action {
+            StepAction::Closure(_) => unreachable!("closures handled by stepper directly"),
+            StepAction::CreateWorkspaceForCheckout { label } => {
+                let path = prior.iter().find_map(|o| match o {
+                    StepOutcome::CompletedWith(CommandResult::CheckoutCreated { path, .. }) => Some(path.clone()),
+                    _ => None,
+                });
+                match path {
+                    Some(p) => {
+                        create_workspace_for_checkout_impl(
+                            &p,
+                            &label,
+                            &self.repo,
+                            &self.registry,
+                            &self.config_base,
+                            &self.attachable_store,
+                            &self.local_host,
+                        )
+                        .await
+                    }
+                    None => Ok(StepOutcome::Skipped),
+                }
+            }
+        }
+    }
+}
+
 async fn build_archive_session_plan(
     session_id: String,
     registry: Arc<ProviderRegistry>,
@@ -484,14 +574,15 @@ async fn build_archive_session_plan(
 
     ExecutionPlan::Steps(StepPlan::new(vec![Step {
         description: format!("Archive session {session_id}"),
-        action: Box::new(move || {
+        host: StepHost::Local,
+        action: StepAction::Closure(Box::new(move |_prior| {
             Box::pin(async move {
                 match archive_session_result(&session_id, &registry, &providers_data).await {
                     CommandResult::Error { message } => Err(message),
                     result => Ok(StepOutcome::CompletedWith(result)),
                 }
             })
-        }),
+        })),
     }]))
 }
 
@@ -506,14 +597,15 @@ async fn build_generate_branch_name_plan(
 
     ExecutionPlan::Steps(StepPlan::new(vec![Step {
         description: "Generate branch name".to_string(),
-        action: Box::new(move || {
+        host: StepHost::Local,
+        action: StepAction::Closure(Box::new(move |_prior| {
             Box::pin(async move {
                 match generate_branch_name_result(&issue_keys, &registry, &providers_data).await {
                     CommandResult::Error { message } => Err(message),
                     result => Ok(StepOutcome::CompletedWith(result)),
                 }
             })
-        }),
+        })),
     }]))
 }
 /// Execute a `Command` against the given repo context.
@@ -538,22 +630,12 @@ pub async fn execute(
                 return CommandResult::Error { message: format!("checkout not found: {}", checkout_path.display()) };
             }
             info!(%label, "entering workspace");
-            if let Some((provider_name, ws_mgr)) = preferred_workspace_manager(registry) {
-                if select_existing_workspace(ws_mgr.as_ref(), &checkout_path).await {
-                    return CommandResult::Ok;
-                }
-                let mut config = workspace_config(&repo.root, &label, &checkout_path, "claude", config_base);
-                if let Some(tp) = registry.terminal_pools.preferred() {
-                    resolve_terminal_pool(&mut config, tp.as_ref()).await;
-                }
-                match ws_mgr.create_workspace(&config).await {
-                    Ok((ws_ref, _workspace)) => {
-                        persist_workspace_binding(attachable_store, provider_name, &ws_ref, local_host, &checkout_path);
-                    }
-                    Err(e) => return CommandResult::Error { message: e },
-                }
+            match create_workspace_for_checkout_impl(&checkout_path, &label, repo, registry, config_base, attachable_store, local_host)
+                .await
+            {
+                Ok(_) => CommandResult::Ok,
+                Err(e) => CommandResult::Error { message: e },
             }
-            CommandResult::Ok
         }
 
         CommandAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, attachable_set_id, commands } => {
@@ -1487,8 +1569,16 @@ mod tests {
         HostName::local()
     }
 
+    fn repo_identity() -> flotilla_protocol::RepoIdentity {
+        flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() }
+    }
+
     fn fresh_checkout_action(branch: &str) -> CommandAction {
         CommandAction::Checkout { repo: repo_selector(), target: CheckoutTarget::FreshBranch(branch.to_string()), issue_ids: vec![] }
+    }
+
+    fn existing_branch_checkout_action(branch: &str) -> CommandAction {
+        CommandAction::Checkout { repo: repo_selector(), target: CheckoutTarget::Branch(branch.to_string()), issue_ids: vec![] }
     }
 
     fn remove_checkout_action(branch: &str, terminal_keys: Vec<ManagedTerminalId>) -> CommandAction {
@@ -2872,6 +2962,7 @@ mod tests {
             config_base.clone(),
             test_attachable_store(&config_base),
             local_host(),
+            None,
         )
         .await
     }
@@ -2892,8 +2983,9 @@ mod tests {
 
         match plan {
             ExecutionPlan::Steps(step_plan) => {
-                assert_eq!(step_plan.steps.len(), 1, "checkout only — workspace creation is handled by the TUI");
+                assert_eq!(step_plan.steps.len(), 2, "checkout + workspace steps");
                 assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
+                assert_eq!(step_plan.steps[1].description, "Create workspace");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
         }
@@ -2913,11 +3005,173 @@ mod tests {
 
         match plan {
             ExecutionPlan::Steps(step_plan) => {
-                assert_eq!(step_plan.steps.len(), 1, "checkout only — workspace creation is handled by the TUI");
+                assert_eq!(step_plan.steps.len(), 2, "checkout + workspace steps");
                 assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
+                assert_eq!(step_plan.steps[1].description, "Create workspace");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
         }
+    }
+
+    #[tokio::test]
+    async fn checkout_plan_includes_workspace_step() {
+        let mut registry = empty_registry();
+        registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
+        registry.workspace_managers.insert("cmux", desc("cmux"), Arc::new(MockWorkspaceManager::succeeding()));
+
+        let plan = run_build_plan(fresh_checkout_action("feat-x"), registry, empty_data(), runner_ok()).await;
+
+        match plan {
+            ExecutionPlan::Steps(step_plan) => {
+                assert_eq!(step_plan.steps.len(), 2, "expected checkout + workspace steps");
+                assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
+                assert_eq!(step_plan.steps[1].description, "Create workspace");
+            }
+            ExecutionPlan::Immediate(_) => panic!("expected Steps"),
+        }
+    }
+
+    #[tokio::test]
+    async fn checkout_plan_end_to_end_creates_workspace() {
+        use tokio::sync::broadcast;
+        use tokio_util::sync::CancellationToken;
+
+        use crate::step::run_step_plan;
+
+        let ws_mgr = Arc::new(MockWorkspaceManager::succeeding());
+        let mut registry = ProviderRegistry::new();
+        registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
+        registry.workspace_managers.insert("cmux", desc("cmux"), Arc::clone(&ws_mgr) as Arc<dyn WorkspaceManager>);
+        let registry = Arc::new(registry);
+        let runner = Arc::new(MockRunner::new(vec![Err("missing".into()), Err("missing".into())]));
+        let cb = config_base();
+        let attachable = test_attachable_store(&cb);
+        let lh = local_host();
+        let repo = RepoExecutionContext { identity: repo_identity(), root: repo_root() };
+
+        let plan = build_plan(
+            local_command(fresh_checkout_action("feat-x")),
+            RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+            Arc::clone(&registry),
+            Arc::new(empty_data()),
+            runner,
+            cb.clone(),
+            attachable.clone(),
+            lh.clone(),
+            None,
+        )
+        .await;
+
+        let (cancel, tx) = (CancellationToken::new(), broadcast::channel(64).0);
+        let resolver = ExecutorStepResolver { repo, registry, config_base: cb, attachable_store: attachable, local_host: lh.clone() };
+
+        let result = match plan {
+            ExecutionPlan::Steps(step_plan) => {
+                run_step_plan(step_plan, 1, lh, repo_identity(), repo_root(), cancel, tx, Some(&resolver)).await
+            }
+            _ => panic!("expected steps"),
+        };
+
+        assert!(matches!(result, CommandResult::CheckoutCreated { .. }));
+
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should create workspace from prior outcome: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn checkout_plan_creates_workspace_for_preexisting_checkout() {
+        use tokio::sync::broadcast;
+        use tokio_util::sync::CancellationToken;
+
+        use crate::step::run_step_plan;
+
+        let ws_mgr = Arc::new(MockWorkspaceManager::succeeding());
+        let mut registry = ProviderRegistry::new();
+        // No checkout manager needed — checkout already exists
+        registry.workspace_managers.insert("cmux", desc("cmux"), Arc::clone(&ws_mgr) as Arc<dyn WorkspaceManager>);
+        let registry = Arc::new(registry);
+        // validate_checkout_target needs 2 responses: local ref check (Ok), remote ref check
+        let runner = Arc::new(MockRunner::new(vec![Ok("".into()), Err("missing".into())]));
+        let mut data = empty_data();
+        data.checkouts.insert(hp("/repo/wt-feat-x"), make_checkout("feat-x", "/repo/wt-feat-x"));
+        let cb = config_base();
+        let attachable = test_attachable_store(&cb);
+        let lh = local_host();
+        let repo = RepoExecutionContext { identity: repo_identity(), root: repo_root() };
+
+        let plan = build_plan(
+            local_command(existing_branch_checkout_action("feat-x")),
+            RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+            Arc::clone(&registry),
+            Arc::new(data),
+            runner,
+            cb.clone(),
+            attachable.clone(),
+            lh.clone(),
+            None,
+        )
+        .await;
+
+        let (cancel, tx) = (CancellationToken::new(), broadcast::channel(64).0);
+        let resolver = ExecutorStepResolver { repo, registry, config_base: cb, attachable_store: attachable, local_host: lh.clone() };
+
+        let result = match plan {
+            ExecutionPlan::Steps(step_plan) => {
+                run_step_plan(step_plan, 1, lh, repo_identity(), repo_root(), cancel, tx, Some(&resolver)).await
+            }
+            _ => panic!("expected steps"),
+        };
+
+        assert!(
+            matches!(result, CommandResult::CheckoutCreated { ref branch, .. } if branch == "feat-x"),
+            "should return CheckoutCreated for pre-existing checkout, got: {result:?}"
+        );
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should create workspace for pre-existing checkout: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn checkout_plan_preserves_checkout_created_when_workspace_step_fails() {
+        use tokio::sync::broadcast;
+        use tokio_util::sync::CancellationToken;
+
+        use crate::step::run_step_plan;
+
+        let ws_mgr = Arc::new(MockWorkspaceManager::failing("ws failed"));
+        let mut registry = ProviderRegistry::new();
+        registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
+        registry.workspace_managers.insert("cmux", desc("cmux"), Arc::clone(&ws_mgr) as Arc<dyn WorkspaceManager>);
+        let registry = Arc::new(registry);
+        let runner = Arc::new(MockRunner::new(vec![Err("missing".into()), Err("missing".into())]));
+        let cb = config_base();
+        let attachable = test_attachable_store(&cb);
+        let lh = local_host();
+        let repo = RepoExecutionContext { identity: repo_identity(), root: repo_root() };
+
+        let plan = build_plan(
+            local_command(fresh_checkout_action("feat-x")),
+            RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+            Arc::clone(&registry),
+            Arc::new(empty_data()),
+            runner,
+            cb.clone(),
+            attachable.clone(),
+            lh.clone(),
+            None,
+        )
+        .await;
+
+        let (cancel, tx) = (CancellationToken::new(), broadcast::channel(64).0);
+        let resolver = ExecutorStepResolver { repo, registry, config_base: cb, attachable_store: attachable, local_host: lh.clone() };
+
+        let result = match plan {
+            ExecutionPlan::Steps(step_plan) => {
+                run_step_plan(step_plan, 1, lh, repo_identity(), repo_root(), cancel, tx, Some(&resolver)).await
+            }
+            _ => panic!("expected steps"),
+        };
+
+        assert_eq!(result, CommandResult::CheckoutCreated { branch: "feat-x".into(), path: PathBuf::from("/repo/wt-feat-x") });
     }
 
     #[tokio::test]
@@ -3371,5 +3625,59 @@ content:
             wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path()).unwrap();
 
         assert!(!result[0].command.contains("ControlMaster"), "per-host override should disable multiplex, got: {}", result[0].command);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests: ExecutorStepResolver
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn executor_step_resolver_creates_workspace() {
+        let ws_mgr = Arc::new(MockWorkspaceManager::succeeding());
+        let mut registry = empty_registry();
+        registry.workspace_managers.insert("cmux", desc("cmux"), Arc::clone(&ws_mgr) as Arc<dyn WorkspaceManager>);
+
+        let config_base = config_base();
+        let resolver = ExecutorStepResolver {
+            repo: RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+            registry: Arc::new(registry),
+            config_base: config_base.clone(),
+            attachable_store: test_attachable_store(&config_base),
+            local_host: local_host(),
+        };
+
+        let prior = vec![StepOutcome::CompletedWith(CommandResult::CheckoutCreated {
+            branch: "feat".into(),
+            path: PathBuf::from("/repo/wt-feat"),
+        })];
+        let action = StepAction::CreateWorkspaceForCheckout { label: "feat".into() };
+        let outcome = resolver.resolve("create workspace", action, &prior).await;
+        assert!(outcome.is_ok(), "resolve should succeed: {outcome:?}");
+
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should call create_workspace, got: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn executor_step_resolver_skips_when_no_checkout_path() {
+        let ws_mgr = Arc::new(MockWorkspaceManager::succeeding());
+        let mut registry = empty_registry();
+        registry.workspace_managers.insert("cmux", desc("cmux"), Arc::clone(&ws_mgr) as Arc<dyn WorkspaceManager>);
+
+        let config_base = config_base();
+        let resolver = ExecutorStepResolver {
+            repo: RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+            registry: Arc::new(registry),
+            config_base: config_base.clone(),
+            attachable_store: test_attachable_store(&config_base),
+            local_host: local_host(),
+        };
+
+        let action = StepAction::CreateWorkspaceForCheckout { label: "feat".into() };
+        let outcome = resolver.resolve("create workspace", action, &[]).await;
+        assert!(matches!(outcome, Ok(StepOutcome::Skipped)), "should skip when no prior CheckoutCreated outcome: {outcome:?}");
+
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.is_empty(), "should not call workspace manager when no checkout path in prior outcomes, got: {calls:?}");
     }
 }
