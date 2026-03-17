@@ -251,6 +251,7 @@ impl Theme {
             WorkItemKind::ChangeRequest => self.change_request,
             WorkItemKind::Issue => self.issue,
             WorkItemKind::RemoteBranch => self.remote_branch,
+            WorkItemKind::Agent => self.session,
         }
     }
 

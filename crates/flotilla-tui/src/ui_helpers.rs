@@ -84,6 +84,7 @@ pub fn work_item_icon(
         WorkItemKind::ChangeRequest => ("⊙", theme.change_request),
         WorkItemKind::RemoteBranch => ("⊶", theme.remote_branch),
         WorkItemKind::Issue => ("◇", theme.issue),
+        WorkItemKind::Agent => ("⚙", theme.session),
     }
 }
 
