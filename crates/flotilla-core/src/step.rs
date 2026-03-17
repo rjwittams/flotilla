@@ -5,6 +5,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 /// Outcome of a single step execution.
+#[derive(Debug)]
 pub enum StepOutcome {
     /// Step completed successfully, no specific result to report.
     Completed,

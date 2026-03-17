@@ -2189,6 +2189,13 @@ impl DaemonHandle for InProcessDaemon {
         let local_host = self.host_name.clone();
         let attachable_store = self.discovery.shared_attachable_store(&self.config);
         tokio::spawn(async move {
+            // Clone values the resolver needs before build_plan consumes them.
+            let resolver_registry = Arc::clone(&registry);
+            let resolver_config_base = config_base.clone();
+            let resolver_attachable_store = attachable_store.clone();
+            let resolver_local_host = local_host.clone();
+            let resolver_repo = executor::RepoExecutionContext { identity: repo_identity.clone(), root: repo_path.clone() };
+
             let plan = executor::build_plan(
                 command,
                 executor::RepoExecutionContext { identity: repo_identity.clone(), root: repo_path.clone() },
@@ -2235,6 +2242,13 @@ impl DaemonHandle for InProcessDaemon {
                         *guard = Some(ActiveCommand { command_id: id, token: token.clone() });
                     }
 
+                    let resolver = executor::ExecutorStepResolver {
+                        repo: resolver_repo,
+                        registry: resolver_registry,
+                        config_base: resolver_config_base,
+                        attachable_store: resolver_attachable_store,
+                        local_host: resolver_local_host,
+                    };
                     let result = run_step_plan(
                         step_plan,
                         id,
@@ -2243,7 +2257,7 @@ impl DaemonHandle for InProcessDaemon {
                         repo_path.clone(),
                         token,
                         event_tx.clone(),
-                        None,
+                        Some(&resolver),
                     )
                     .await;
                     refresh_trigger.notify_one();

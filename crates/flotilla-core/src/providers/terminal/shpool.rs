@@ -160,11 +160,7 @@ impl ShpoolTerminalPool {
     }
 
     #[cfg(unix)]
-    async fn detect_daemon_state(
-        runner: Arc<dyn CommandRunner>,
-        socket_path: &Path,
-        config_path: &Path,
-    ) -> ShpoolDaemonState {
+    async fn detect_daemon_state(runner: Arc<dyn CommandRunner>, socket_path: &Path, config_path: &Path) -> ShpoolDaemonState {
         if !socket_path.exists() {
             return ShpoolDaemonState::Missing;
         }
@@ -192,11 +188,7 @@ impl ShpoolTerminalPool {
     }
 
     #[cfg(not(unix))]
-    async fn detect_daemon_state(
-        _runner: Arc<dyn CommandRunner>,
-        socket_path: &Path,
-        _config_path: &Path,
-    ) -> ShpoolDaemonState {
+    async fn detect_daemon_state(_runner: Arc<dyn CommandRunner>, socket_path: &Path, _config_path: &Path) -> ShpoolDaemonState {
         if socket_path.exists() {
             ShpoolDaemonState::HealthyWithoutPid
         } else {
@@ -205,11 +197,7 @@ impl ShpoolTerminalPool {
     }
 
     #[cfg(unix)]
-    async fn probe_daemon_without_pid_file(
-        runner: Arc<dyn CommandRunner>,
-        socket_path: &Path,
-        config_path: &Path,
-    ) -> bool {
+    async fn probe_daemon_without_pid_file(runner: Arc<dyn CommandRunner>, socket_path: &Path, config_path: &Path) -> bool {
         let socket_path_str = socket_path.display().to_string();
         let config_path_str = config_path.display().to_string();
         let args = ["--no-daemonize", "--socket", &socket_path_str, "-c", &config_path_str, "list", "--json"];
@@ -226,11 +214,7 @@ impl ShpoolTerminalPool {
     }
 
     #[cfg(not(unix))]
-    async fn probe_daemon_without_pid_file(
-        _runner: Arc<dyn CommandRunner>,
-        _socket_path: &Path,
-        _config_path: &Path,
-    ) -> bool {
+    async fn probe_daemon_without_pid_file(_runner: Arc<dyn CommandRunner>, _socket_path: &Path, _config_path: &Path) -> bool {
         false
     }
 
