@@ -115,6 +115,7 @@ pub fn render(
     render_close_confirm(model, ui, theme, frame);
     render_help(ui, theme, keymap, frame);
     render_file_picker(ui, theme, frame);
+    render_command_palette(ui, theme, frame);
 }
 
 fn render_tab_bar(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
@@ -1249,6 +1250,75 @@ fn render_file_picker(ui: &mut UiState, theme: &Theme, frame: &mut Frame) {
         state.select(Some(selected));
     }
     frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+const MAX_PALETTE_ROWS: usize = 8;
+
+fn render_command_palette(ui: &UiState, theme: &Theme, frame: &mut Frame) {
+    let UiMode::CommandPalette { ref input, ref entries, selected, scroll_top } = ui.mode else {
+        return;
+    };
+
+    let filtered: Vec<&crate::palette::PaletteEntry> = crate::palette::filter_entries(entries, input.value());
+    let visible_count = filtered.len().min(MAX_PALETTE_ROWS);
+    let total_height = visible_count as u16 + 1; // completions + input row
+
+    let frame_area = frame.area();
+    if frame_area.height < total_height + 2 {
+        return;
+    }
+
+    // Bottom-anchored area
+    let area = Rect::new(frame_area.x, frame_area.y + frame_area.height - total_height, frame_area.width, total_height);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(Style::default().bg(theme.bar_bg)), area);
+
+    // Compute column widths
+    let name_width = filtered.iter().map(|e| e.name.len()).max().unwrap_or(0).min(20);
+    let hint_width: u16 = 7;
+
+    for (i, entry) in filtered.iter().skip(scroll_top).take(MAX_PALETTE_ROWS).enumerate() {
+        let row_y = area.y + i as u16;
+        let is_selected = scroll_top + i == selected;
+
+        let row_style = if is_selected {
+            Style::default().bg(theme.action_highlight).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().bg(theme.bar_bg)
+        };
+
+        // Fill the row with background
+        let row_area = Rect::new(area.x, row_y, area.width, 1);
+        frame.render_widget(Block::default().style(row_style), row_area);
+
+        // Name column
+        let name_span = Span::styled(format!("  {:<width$}", entry.name, width = name_width), row_style.fg(theme.text));
+
+        // Description column
+        let desc_span = Span::styled(format!("  {}", entry.description), row_style.fg(theme.muted));
+
+        let line = Line::from(vec![name_span, desc_span]);
+        frame.render_widget(Paragraph::new(line), Rect::new(area.x, row_y, area.width.saturating_sub(hint_width), 1));
+
+        // Key hint right-aligned
+        let hint_text = entry.key_hint.unwrap_or("");
+        if !hint_text.is_empty() {
+            let hint_span = Span::styled(format!(" {} ", hint_text), row_style.fg(theme.key_hint));
+            let hint_x = area.x + area.width.saturating_sub(hint_width);
+            frame.render_widget(Paragraph::new(Line::from(hint_span)), Rect::new(hint_x, row_y, hint_width, 1));
+        }
+    }
+
+    // Input row (bottom of area)
+    let input_y = area.y + visible_count as u16;
+    let input_area = Rect::new(area.x, input_y, area.width, 1);
+    let input_style = Style::default().fg(theme.input_text).bg(theme.bar_bg);
+    let display = format!("/ {}", input.value());
+    frame.render_widget(Paragraph::new(display).style(input_style), input_area);
+
+    // Position cursor
+    let cursor_x = area.x + 2 + input.visual_cursor() as u16;
+    frame.set_cursor_position((cursor_x, input_y));
 }
 
 fn render_config_screen(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
