@@ -2,8 +2,10 @@ use std::{ffi::OsString, path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use color_eyre::Result;
-use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon};
-use flotilla_protocol::{output::OutputFormat, CheckoutSelector, CheckoutTarget, Command, CommandAction, HostName, RepoSelector};
+use flotilla_core::{agents, config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon};
+use flotilla_protocol::{
+    output::OutputFormat, AgentHookEvent, AttachableId, CheckoutSelector, CheckoutTarget, Command, CommandAction, HostName, RepoSelector,
+};
 use flotilla_tui::{app, event_log, theme};
 use tracing::info;
 
@@ -98,6 +100,13 @@ enum SubCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Receive agent hook events (called by agent hook systems)
+    Hook {
+        /// Agent harness name (e.g. claude-code, codex, gemini)
+        harness: String,
+        /// Event type (e.g. session-start, stop, notification)
+        event_type: String,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -151,6 +160,7 @@ async fn main() -> Result<()> {
         }
         Some(SubCommand::Host { args, json }) => run_host(&cli, args, OutputFormat::from_json_flag(*json)).await,
         Some(SubCommand::Topology { json }) => run_topology_command(&cli, OutputFormat::from_json_flag(*json)).await,
+        Some(SubCommand::Hook { harness, event_type }) => run_hook(&cli, harness, event_type).await,
         None => run_tui(cli).await,
     }
 }
@@ -541,6 +551,78 @@ async fn run_topology_command(cli: &Cli, format: OutputFormat) -> Result<()> {
     reset_sigpipe();
     let daemon = connect_daemon(cli).await?;
     flotilla_tui::cli::run_topology(&*daemon, format).await.map_err(|e| color_eyre::eyre::eyre!(e))
+}
+
+async fn run_hook(cli: &Cli, harness: &str, event_type: &str) -> Result<()> {
+    use std::io::Read;
+
+    // 1. Resolve harness parser
+    let (harness_enum, parser) = agents::parser_for_harness(harness).map_err(|e| color_eyre::eyre::eyre!("unknown harness: {e}"))?;
+
+    // 2. Read native payload from stdin
+    let mut payload = Vec::new();
+    std::io::stdin().read_to_end(&mut payload).map_err(|e| color_eyre::eyre::eyre!("failed to read stdin: {e}"))?;
+
+    // 3. Parse the event
+    let parsed = parser.parse_event(event_type, &payload).map_err(|e| color_eyre::eyre::eyre!("parse error: {e}"))?;
+
+    // 4. Resolve attachable_id from env, or allocate a fresh one.
+    // When the daemon receives the event it handles session_id → attachable_id
+    // mapping and persistence.
+    let attachable_id = match std::env::var("FLOTILLA_ATTACHABLE_ID") {
+        Ok(id) if !id.is_empty() => AttachableId::new(id),
+        _ => agents::allocate_attachable_id(),
+    };
+
+    // 5. Build the event
+    let event = AgentHookEvent {
+        attachable_id,
+        harness: harness_enum,
+        event_type: parsed.event_type,
+        session_id: parsed.session_id,
+        model: parsed.model,
+        cwd: parsed.cwd,
+    };
+
+    // 6. Send to daemon via socket. The daemon owns agent state as a single
+    // actor — no file-level races between concurrent hook processes.
+    // Priority: FLOTILLA_DAEMON_SOCKET env > --socket CLI flag > global default.
+    let socket_path = std::env::var("FLOTILLA_DAEMON_SOCKET").map(std::path::PathBuf::from).unwrap_or_else(|_| cli.socket_path());
+
+    send_hook_event(&socket_path, event).await
+}
+
+/// One-shot client: connect to daemon, send an AgentHook request, read one response, exit.
+async fn send_hook_event(socket_path: &std::path::Path, event: AgentHookEvent) -> Result<()> {
+    use flotilla_protocol::{framing, Message, Request, ResponseResult};
+    use tokio::{
+        io::{AsyncBufReadExt, BufReader},
+        net::UnixStream,
+    };
+
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("failed to connect to daemon at {}: {e}", socket_path.display()))?;
+
+    let (reader, mut writer) = stream.into_split();
+
+    // Send request
+    let msg = Message::Request { id: 1, request: Request::AgentHook { event } };
+    framing::write_message_line(&mut writer, &msg).await.map_err(|e| color_eyre::eyre::eyre!("write error: {e}"))?;
+
+    // Read response
+    let mut buf_reader = BufReader::new(reader);
+    let mut line = String::new();
+    buf_reader.read_line(&mut line).await.map_err(|e| color_eyre::eyre::eyre!("read error: {e}"))?;
+
+    let response: Message = serde_json::from_str(line.trim()).map_err(|e| color_eyre::eyre::eyre!("parse response: {e}"))?;
+    match response {
+        Message::Response { response, .. } => match *response {
+            ResponseResult::Ok { .. } => Ok(()),
+            ResponseResult::Err { message } => Err(color_eyre::eyre::eyre!("daemon error: {message}")),
+        },
+        other => Err(color_eyre::eyre::eyre!("unexpected response: {other:?}")),
+    }
 }
 
 #[cfg(test)]

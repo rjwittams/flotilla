@@ -9,7 +9,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use flotilla_core::{config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::DiscoveryRuntime};
+use flotilla_core::{
+    agents::{AgentEntry, SharedAgentStateStore},
+    config::ConfigStore,
+    daemon::DaemonHandle,
+    in_process::InProcessDaemon,
+    providers::discovery::DiscoveryRuntime,
+};
 use flotilla_protocol::{
     Command, CommandAction, CommandPeerEvent, CommandResult, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message,
     PeerConnectionState, PeerDataMessage, PeerWireMessage, RepoIdentity, RepoSelector, Request, Response, RoutedPeerMessage,
@@ -188,6 +194,7 @@ struct DispatchContext<'a> {
     pending_remote_commands: &'a PendingRemoteCommandMap,
     pending_remote_cancels: &'a PendingRemoteCancelMap,
     next_remote_command_id: &'a Arc<AtomicU64>,
+    agent_state_store: &'a SharedAgentStateStore,
 }
 
 fn extract_command_repo_identity(command: &Command) -> Option<RepoIdentity> {
@@ -223,6 +230,7 @@ pub struct DaemonServer {
     forwarded_commands: ForwardedCommandMap,
     pending_remote_cancels: PendingRemoteCancelMap,
     next_remote_command_id: Arc<AtomicU64>,
+    agent_state_store: SharedAgentStateStore,
 }
 
 impl DaemonServer {
@@ -248,6 +256,8 @@ impl DaemonServer {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (peer_data_tx, peer_data_rx) = mpsc::channel(256);
 
+        let agent_state_store = flotilla_core::agents::shared_file_backed_agent_state_store(flotilla_core::config::flotilla_config_dir());
+
         Ok(Self {
             daemon,
             socket_path,
@@ -264,6 +274,7 @@ impl DaemonServer {
             forwarded_commands: Arc::new(Mutex::new(HashMap::new())),
             pending_remote_cancels: Arc::new(Mutex::new(HashMap::new())),
             next_remote_command_id: Arc::new(AtomicU64::new(1 << 62)),
+            agent_state_store,
         })
     }
 
@@ -306,6 +317,7 @@ impl DaemonServer {
         let forwarded_commands = self.forwarded_commands;
         let pending_remote_cancels = self.pending_remote_cancels;
         let next_remote_command_id = self.next_remote_command_id;
+        let agent_state_store = self.agent_state_store;
 
         // Spawn idle timeout watcher (disabled for follower-mode daemons
         // which serve peer connections and should stay up indefinitely)
@@ -376,6 +388,7 @@ impl DaemonServer {
                             let pending_remote_cancels = Arc::clone(&pending_remote_cancels);
                             let next_remote_command_id = Arc::clone(&next_remote_command_id);
                             let peer_connected_tx = peer_connected_tx.clone();
+                            let agent_state_store = Arc::clone(&agent_state_store);
 
                             tokio::spawn(async move {
                                 handle_client(
@@ -390,6 +403,7 @@ impl DaemonServer {
                                     client_count,
                                     client_notify,
                                     peer_connected_tx,
+                                    agent_state_store,
                                 )
                                 .await;
                             });
@@ -1468,6 +1482,7 @@ async fn handle_client(
     client_count: Arc<AtomicUsize>,
     client_notify: Arc<Notify>,
     peer_connected_tx: mpsc::UnboundedSender<PeerConnectedNotice>,
+    agent_state_store: SharedAgentStateStore,
 ) {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
@@ -1528,6 +1543,7 @@ async fn handle_client(
                 pending_remote_commands: &pending_remote_commands,
                 pending_remote_cancels: &pending_remote_cancels,
                 next_remote_command_id: &next_remote_command_id,
+                agent_state_store: &agent_state_store,
             };
             let first_response = dispatch_request(&dispatch_ctx, id, request).await;
             if write_message(&writer, &first_response).await.is_ok() {
@@ -1876,6 +1892,69 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, request: Request) 
             Ok(topology) => Message::ok_response(id, Response::GetTopology(topology)),
             Err(e) => Message::error_response(id, e),
         },
+
+        Request::AgentHook { event } => {
+            use flotilla_protocol::AgentEventType;
+
+            tracing::info!(
+                harness = ?event.harness,
+                event_type = ?event.event_type,
+                attachable_id = %event.attachable_id,
+                session_id = ?event.session_id,
+                "received agent hook event"
+            );
+
+            let result = (|| {
+                let mut store = ctx.agent_state_store.lock().map_err(|_| "agent state store lock poisoned".to_string())?;
+
+                // Resolve attachable_id: if the hook didn't have one from env, check
+                // session_id index for a previously allocated one.
+                let attachable_id = if let Some(ref sid) = event.session_id {
+                    if let Some(existing) = store.lookup_by_session_id(sid) {
+                        existing.clone()
+                    } else {
+                        event.attachable_id.clone()
+                    }
+                } else {
+                    event.attachable_id.clone()
+                };
+
+                let changed = if event.event_type == AgentEventType::Ended {
+                    store.remove(&attachable_id);
+                    true
+                } else if let Some(status) = event.event_type.to_status() {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let existing = store.get(&attachable_id);
+                    // TODO(#393): persist event.cwd for CliAgentProvider correlation
+                    let entry = AgentEntry {
+                        harness: event.harness.clone(),
+                        status,
+                        model: event.model.clone().or_else(|| existing.and_then(|e| e.model.clone())),
+                        session_title: existing.and_then(|e| e.session_title.clone()),
+                        session_id: event.session_id.clone(),
+                        last_event_epoch_secs: now,
+                    };
+                    store.upsert(attachable_id, entry);
+                    true
+                } else {
+                    false // NoChange events skip the store
+                };
+
+                if changed {
+                    store.save()
+                } else {
+                    Ok(())
+                }
+            })();
+
+            match result {
+                Ok(()) => Message::ok_response(id, Response::AgentHook),
+                Err(e) => {
+                    warn!(err = %e, "failed to process agent hook event");
+                    Message::error_response(id, e)
+                }
+            }
+        }
     }
 }
 
@@ -1995,12 +2074,14 @@ mod tests {
 
     async fn dispatch_request_test(daemon: &Arc<InProcessDaemon>, id: u64, request: Request) -> Message {
         let (peer_manager, pending_remote_commands, pending_remote_cancels, next_remote_command_id) = empty_routing_state();
+        let agent_state_store = flotilla_core::agents::shared_in_memory_agent_state_store();
         let ctx = DispatchContext {
             daemon,
             peer_manager: &peer_manager,
             pending_remote_commands: &pending_remote_commands,
             pending_remote_cancels: &pending_remote_cancels,
             next_remote_command_id: &next_remote_command_id,
+            agent_state_store: &agent_state_store,
         };
         dispatch_request(&ctx, id, request).await
     }
@@ -2202,12 +2283,14 @@ mod tests {
         let next_remote_command_id = Arc::new(AtomicU64::new(1 << 62));
         let sent = Arc::new(StdMutex::new(Vec::new()));
         peer_manager.lock().await.register_sender(HostName::new("feta"), Arc::new(CapturePeerSender { sent: Arc::clone(&sent) }));
+        let agent_state_store = flotilla_core::agents::shared_in_memory_agent_state_store();
         let ctx = DispatchContext {
             daemon: &daemon,
             peer_manager: &peer_manager,
             pending_remote_commands: &pending_remote_commands,
             pending_remote_cancels: &pending_remote_cancels,
             next_remote_command_id: &next_remote_command_id,
+            agent_state_store: &agent_state_store,
         };
 
         let response = dispatch_request(&ctx, 40, Request::Execute {
@@ -2262,6 +2345,7 @@ mod tests {
         let pending_remote_commands_for_task = Arc::clone(&pending_remote_commands);
         let pending_remote_cancels_for_task = Arc::clone(&pending_remote_cancels);
         let next_remote_command_id_for_task = Arc::clone(&next_remote_command_id);
+        let agent_state_store_for_task = flotilla_core::agents::shared_in_memory_agent_state_store();
         let response = tokio::spawn(async move {
             let ctx = DispatchContext {
                 daemon: &daemon_for_task,
@@ -2269,6 +2353,7 @@ mod tests {
                 pending_remote_commands: &pending_remote_commands_for_task,
                 pending_remote_cancels: &pending_remote_cancels_for_task,
                 next_remote_command_id: &next_remote_command_id_for_task,
+                agent_state_store: &agent_state_store_for_task,
             };
             dispatch_request(&ctx, 41, Request::Cancel { command_id: 1u64 << 62 }).await
         });
@@ -2750,6 +2835,7 @@ mod tests {
                 count_ref,
                 notify_ref,
                 peer_connected_tx,
+                flotilla_core::agents::shared_in_memory_agent_state_store(),
             )
             .await;
         });
@@ -2867,6 +2953,7 @@ mod tests {
                 count_ref,
                 notify_ref,
                 peer_connected_tx,
+                flotilla_core::agents::shared_in_memory_agent_state_store(),
             )
             .await;
         });
@@ -3249,6 +3336,7 @@ mod tests {
                 count_ref,
                 notify_ref,
                 peer_connected_tx,
+                flotilla_core::agents::shared_in_memory_agent_state_store(),
             )
             .await;
         });
@@ -3338,6 +3426,7 @@ mod tests {
                 count_a,
                 notify_a,
                 peer_connected_tx_a,
+                flotilla_core::agents::shared_in_memory_agent_state_store(),
             )
             .await;
         });
@@ -3357,6 +3446,7 @@ mod tests {
                 count_b,
                 notify_b,
                 peer_connected_tx_b,
+                flotilla_core::agents::shared_in_memory_agent_state_store(),
             )
             .await;
         });

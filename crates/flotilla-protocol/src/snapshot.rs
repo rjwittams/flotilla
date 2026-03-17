@@ -122,6 +122,7 @@ pub enum WorkItemKind {
     ChangeRequest,
     RemoteBranch,
     Issue,
+    Agent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -132,6 +133,7 @@ pub enum WorkItemIdentity {
     Session(String),
     Issue(String),
     RemoteBranch(String),
+    Agent(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,6 +401,7 @@ mod tests {
             WorkItemKind::ChangeRequest,
             WorkItemKind::RemoteBranch,
             WorkItemKind::Issue,
+            WorkItemKind::Agent,
         ] {
             assert_json_roundtrip(&kind);
         }
@@ -410,6 +413,7 @@ mod tests {
             WorkItemIdentity::Session("sess-abc".into()),
             WorkItemIdentity::Issue("GH-42".into()),
             WorkItemIdentity::RemoteBranch("origin/main".into()),
+            WorkItemIdentity::Agent("att-123".into()),
         ];
         for identity in &identities {
             assert_json_roundtrip(identity);

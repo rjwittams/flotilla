@@ -105,6 +105,118 @@ pub struct IssueChangeset {
     pub has_more: bool,
 }
 
+/// Which CLI tool / runtime is running the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AgentHarness {
+    ClaudeCode,
+    Codex,
+    Gemini,
+    OpenCode,
+}
+
+/// Fine-grained agent lifecycle status, richer than cloud session status.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AgentStatus {
+    Idle,
+    Active,
+    WaitingForInput,
+    WaitingForPermission,
+    Errored,
+}
+
+/// Where the agent lives — local CLI process or cloud-provisioned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AgentContext {
+    Local {
+        attachable_id: AttachableId,
+    },
+    Cloud {
+        provider_name: String,
+        session_id: String,
+        #[serde(default)]
+        branch: Option<String>,
+        #[serde(default)]
+        repo: Option<String>,
+    },
+}
+
+/// A running coding agent — local CLI or cloud-provisioned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Agent {
+    pub harness: AgentHarness,
+    pub status: AgentStatus,
+    pub model: Option<String>,
+    pub context: AgentContext,
+    pub correlation_keys: Vec<CorrelationKey>,
+    #[serde(default)]
+    pub provider_name: String,
+    #[serde(default)]
+    pub provider_display_name: String,
+    #[serde(default)]
+    pub item_noun: String,
+}
+
+/// How a remote access point can be reached.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RemoteAccessType {
+    Web,
+    Ssh,
+}
+
+/// A remote access wrapper around an agent (e.g., Claude Code Web session).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAccessPoint {
+    pub provider_name: String,
+    pub access_point_id: String,
+    pub access_type: RemoteAccessType,
+    pub url: Option<String>,
+    pub correlation_keys: Vec<CorrelationKey>,
+}
+
+/// Normalized event types across all harnesses.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AgentEventType {
+    Started,
+    Ended,
+    Active,
+    Idle,
+    WaitingForPermission,
+    /// The event was informational and should not change agent status.
+    NoChange,
+}
+
+impl AgentEventType {
+    /// Returns the agent status this event implies, or None for NoChange.
+    pub fn to_status(&self) -> Option<AgentStatus> {
+        match self {
+            AgentEventType::Started => Some(AgentStatus::Idle),
+            AgentEventType::Ended => None, // caller should remove the entry
+            AgentEventType::Active => Some(AgentStatus::Active),
+            AgentEventType::Idle => Some(AgentStatus::Idle),
+            AgentEventType::WaitingForPermission => Some(AgentStatus::WaitingForPermission),
+            AgentEventType::NoChange => None,
+        }
+    }
+}
+
+/// A normalized agent hook event sent from the hook CLI to the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHookEvent {
+    /// Which terminal this agent lives in (from env or allocated).
+    pub attachable_id: AttachableId,
+    /// Which harness produced this event.
+    pub harness: AgentHarness,
+    /// What happened.
+    pub event_type: AgentEventType,
+    /// The agent's native session ID (if available).
+    pub session_id: Option<String>,
+    /// Model being used (if reported).
+    pub model: Option<String>,
+    /// Current working directory (if reported).
+    pub cwd: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudAgentSession {
     pub title: String,
@@ -238,6 +350,8 @@ pub struct ProviderData {
     pub workspaces: IndexMap<String, Workspace>,
     pub managed_terminals: IndexMap<String, ManagedTerminal>,
     pub attachable_sets: IndexMap<AttachableSetId, AttachableSet>,
+    #[serde(default)]
+    pub agents: IndexMap<String, Agent>,
 }
 
 #[cfg(test)]
@@ -505,5 +619,99 @@ mod tests {
         let decoded: ProviderData = serde_json::from_str(&json).expect("deserialize");
         let keys: Vec<&str> = decoded.change_requests.keys().map(|k| k.as_str()).collect();
         assert_eq!(keys, vec!["3", "1"]);
+    }
+
+    #[test]
+    fn agent_harness_roundtrip_all_variants() {
+        for harness in [AgentHarness::ClaudeCode, AgentHarness::Codex, AgentHarness::Gemini, AgentHarness::OpenCode] {
+            assert_roundtrip(&harness);
+        }
+    }
+
+    #[test]
+    fn agent_status_roundtrip_all_variants() {
+        for status in
+            [AgentStatus::Idle, AgentStatus::Active, AgentStatus::WaitingForInput, AgentStatus::WaitingForPermission, AgentStatus::Errored]
+        {
+            assert_roundtrip(&status);
+        }
+    }
+
+    #[test]
+    fn agent_context_local_roundtrip() {
+        let ctx = AgentContext::Local { attachable_id: AttachableId::new("att-123") };
+        assert_roundtrip(&ctx);
+    }
+
+    #[test]
+    fn agent_context_cloud_roundtrip() {
+        let ctx = AgentContext::Cloud {
+            provider_name: "claude".into(),
+            session_id: "sess-abc".into(),
+            branch: Some("feat-x".into()),
+            repo: Some("owner/repo".into()),
+        };
+        assert_roundtrip(&ctx);
+
+        let minimal = AgentContext::Cloud {
+            provider_name: "codex".into(),
+            session_id: "sess-def".into(),
+            branch: None,
+            repo: Some("owner/repo".into()),
+        };
+        assert_roundtrip(&minimal);
+    }
+
+    #[test]
+    fn agent_roundtrip_local() {
+        let agent = Agent {
+            harness: AgentHarness::ClaudeCode,
+            status: AgentStatus::Active,
+            model: Some("opus-4".into()),
+            context: AgentContext::Local { attachable_id: AttachableId::new("att-456") },
+            correlation_keys: vec![CorrelationKey::AttachableSet(AttachableSetId::new("set-1"))],
+            provider_name: "cli-agent".into(),
+            provider_display_name: "CLI Agent".into(),
+            item_noun: "agent".into(),
+        };
+        assert_roundtrip(&agent);
+    }
+
+    #[test]
+    fn agent_roundtrip_cloud() {
+        let agent = Agent {
+            harness: AgentHarness::Codex,
+            status: AgentStatus::Idle,
+            model: None,
+            context: AgentContext::Cloud {
+                provider_name: "codex".into(),
+                session_id: "sess-xyz".into(),
+                branch: None,
+                repo: Some("owner/repo".into()),
+            },
+            correlation_keys: vec![],
+            provider_name: "codex-cloud".into(),
+            provider_display_name: "Codex".into(),
+            item_noun: "task".into(),
+        };
+        assert_roundtrip(&agent);
+    }
+
+    #[test]
+    fn remote_access_point_roundtrip() {
+        let rap = RemoteAccessPoint {
+            provider_name: "claude-web".into(),
+            access_point_id: "session_01ABC".into(),
+            access_type: RemoteAccessType::Web,
+            url: Some("https://claude.ai/code/session_01ABC".into()),
+            correlation_keys: vec![CorrelationKey::SessionRef("claude".into(), "sess-local".into())],
+        };
+        assert_roundtrip(&rap);
+    }
+
+    #[test]
+    fn provider_data_agents_field_defaults_empty() {
+        let pd = ProviderData::default();
+        assert!(pd.agents.is_empty());
     }
 }

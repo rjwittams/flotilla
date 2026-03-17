@@ -619,6 +619,7 @@ pub fn group_work_items(
             WorkItemKind::ChangeRequest => pr_items.push(item),
             WorkItemKind::RemoteBranch => remote_items.push(item),
             WorkItemKind::Issue => issue_items.push(item),
+            WorkItemKind::Agent => session_items.push(item),
         }
     }
 
