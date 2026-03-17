@@ -513,7 +513,6 @@ async fn create_workspace_for_checkout_impl(
 }
 
 /// Resolves symbolic `StepAction` variants using executor infrastructure.
-#[allow(dead_code)] // Fields will be used once prior-outcome wiring is added.
 pub(crate) struct ExecutorStepResolver {
     pub repo: RepoExecutionContext,
     pub registry: Arc<ProviderRegistry>,
@@ -524,12 +523,29 @@ pub(crate) struct ExecutorStepResolver {
 
 #[async_trait::async_trait]
 impl StepResolver for ExecutorStepResolver {
-    async fn resolve(&self, _description: &str, action: StepAction, _prior: &[StepOutcome]) -> Result<StepOutcome, String> {
+    async fn resolve(&self, _description: &str, action: StepAction, prior: &[StepOutcome]) -> Result<StepOutcome, String> {
         match action {
             StepAction::Closure(_) => unreachable!("closures handled by stepper directly"),
-            StepAction::CreateWorkspaceForCheckout { label: _ } => {
-                // TODO: read checkout_path from prior outcomes instead of shared slot
-                Ok(StepOutcome::Skipped)
+            StepAction::CreateWorkspaceForCheckout { label } => {
+                let path = prior.iter().find_map(|o| match o {
+                    StepOutcome::CompletedWith(CommandResult::CheckoutCreated { path, .. }) => Some(path.clone()),
+                    _ => None,
+                });
+                match path {
+                    Some(p) => {
+                        create_workspace_for_checkout_impl(
+                            &p,
+                            &label,
+                            &self.repo,
+                            &self.registry,
+                            &self.config_base,
+                            &self.attachable_store,
+                            &self.local_host,
+                        )
+                        .await
+                    }
+                    None => Ok(StepOutcome::Skipped),
+                }
             }
         }
     }
@@ -3039,7 +3055,9 @@ mod tests {
         };
 
         assert!(matches!(result, CommandResult::CheckoutCreated { .. }));
-        // Workspace creation is temporarily skipped (pending prior-outcome wiring in executor resolver).
+
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should create workspace from prior outcome: {calls:?}");
     }
 
     #[tokio::test]
@@ -3514,9 +3532,16 @@ content:
             local_host: local_host(),
         };
 
+        let prior = vec![StepOutcome::CompletedWith(CommandResult::CheckoutCreated {
+            branch: "feat".into(),
+            path: PathBuf::from("/repo/wt-feat"),
+        })];
         let action = StepAction::CreateWorkspaceForCheckout { label: "feat".into() };
-        let outcome = resolver.resolve("create workspace", action, &[]).await;
-        assert!(matches!(outcome, Ok(StepOutcome::Skipped)), "resolve should skip (pending prior-outcome wiring): {outcome:?}");
+        let outcome = resolver.resolve("create workspace", action, &prior).await;
+        assert!(outcome.is_ok(), "resolve should succeed: {outcome:?}");
+
+        let calls = ws_mgr.calls.lock().await;
+        assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should call create_workspace, got: {calls:?}");
     }
 
     #[tokio::test]
@@ -3536,9 +3561,9 @@ content:
 
         let action = StepAction::CreateWorkspaceForCheckout { label: "feat".into() };
         let outcome = resolver.resolve("create workspace", action, &[]).await;
-        assert!(matches!(outcome, Ok(StepOutcome::Skipped)), "should skip when no checkout path: {outcome:?}");
+        assert!(matches!(outcome, Ok(StepOutcome::Skipped)), "should skip when no prior CheckoutCreated outcome: {outcome:?}");
 
         let calls = ws_mgr.calls.lock().await;
-        assert!(calls.is_empty(), "should not call workspace manager, got: {calls:?}");
+        assert!(calls.is_empty(), "should not call workspace manager when no checkout path in prior outcomes, got: {calls:?}");
     }
 }
