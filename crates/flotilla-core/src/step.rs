@@ -1,11 +1,11 @@
-use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
+use std::{future::Future, path::PathBuf, pin::Pin};
 
 use flotilla_protocol::{CommandResult, DaemonEvent, HostName, RepoIdentity, StepStatus};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 /// Outcome of a single step execution.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StepOutcome {
     /// Step completed successfully, no specific result to report.
     Completed,
@@ -30,19 +30,15 @@ pub enum StepHost {
 /// A symbolic action that the step runner resolves at execution time.
 pub enum StepAction {
     /// An opaque async closure (existing pattern).
-    Closure(Box<dyn FnOnce() -> StepFuture + Send>),
+    Closure(Box<dyn FnOnce(Vec<StepOutcome>) -> StepFuture + Send>),
     /// Create a workspace for a checkout path produced by a prior step.
-    CreateWorkspaceForCheckout {
-        /// Shared slot populated by the checkout creation step.
-        checkout_path: Arc<tokio::sync::Mutex<Option<PathBuf>>>,
-        label: String,
-    },
+    CreateWorkspaceForCheckout { label: String },
 }
 
 /// Resolves symbolic step actions into outcomes.
 #[async_trait::async_trait]
 pub trait StepResolver: Send + Sync {
-    async fn resolve(&self, description: &str, action: StepAction) -> Result<StepOutcome, String>;
+    async fn resolve(&self, description: &str, action: StepAction, prior: &[StepOutcome]) -> Result<StepOutcome, String>;
 }
 
 /// A single step in a multi-step command.
@@ -76,7 +72,7 @@ pub async fn run_step_plan(
     resolver: Option<&dyn StepResolver>,
 ) -> CommandResult {
     let step_count = plan.steps.len();
-    let mut final_result = CommandResult::Ok;
+    let mut outcomes: Vec<StepOutcome> = Vec::new();
 
     for (i, step) in plan.steps.into_iter().enumerate() {
         if cancel.is_cancelled() {
@@ -95,12 +91,13 @@ pub async fn run_step_plan(
         });
 
         let outcome = match step.action {
-            StepAction::Closure(f) => f().await,
+            StepAction::Closure(f) => f(outcomes.clone()).await,
             symbolic => match resolver {
-                Some(r) => r.resolve(&step.description, symbolic).await,
+                Some(r) => r.resolve(&step.description, symbolic, &outcomes).await,
                 None => Err(format!("no resolver for symbolic step: {}", step.description)),
             },
         };
+
         // Cancellation wins over a successful in-flight step, but provider
         // errors still surface so we don't hide the underlying failure.
         if cancel.is_cancelled() && outcome.is_ok() {
@@ -108,7 +105,11 @@ pub async fn run_step_plan(
         }
 
         match outcome {
-            Ok(StepOutcome::Completed) => {
+            Ok(step_outcome) => {
+                let status = match &step_outcome {
+                    StepOutcome::Skipped => StepStatus::Skipped,
+                    _ => StepStatus::Succeeded,
+                };
                 let _ = event_tx.send(DaemonEvent::CommandStepUpdate {
                     command_id,
                     host: host.clone(),
@@ -117,33 +118,9 @@ pub async fn run_step_plan(
                     step_index: i,
                     step_count,
                     description: step.description.clone(),
-                    status: StepStatus::Succeeded,
+                    status,
                 });
-            }
-            Ok(StepOutcome::CompletedWith(result)) => {
-                final_result = result;
-                let _ = event_tx.send(DaemonEvent::CommandStepUpdate {
-                    command_id,
-                    host: host.clone(),
-                    repo_identity: repo_identity.clone(),
-                    repo: repo.clone(),
-                    step_index: i,
-                    step_count,
-                    description: step.description.clone(),
-                    status: StepStatus::Succeeded,
-                });
-            }
-            Ok(StepOutcome::Skipped) => {
-                let _ = event_tx.send(DaemonEvent::CommandStepUpdate {
-                    command_id,
-                    host: host.clone(),
-                    repo_identity: repo_identity.clone(),
-                    repo: repo.clone(),
-                    step_index: i,
-                    step_count,
-                    description: step.description.clone(),
-                    status: StepStatus::Skipped,
-                });
+                outcomes.push(step_outcome);
             }
             Err(e) => {
                 let _ = event_tx.send(DaemonEvent::CommandStepUpdate {
@@ -156,12 +133,26 @@ pub async fn run_step_plan(
                     description: step.description.clone(),
                     status: StepStatus::Failed { message: e.clone() },
                 });
-                return CommandResult::Error { message: e };
+                // If a prior step produced a meaningful result, preserve it.
+                // The failure is already reported via the StepFailed event.
+                let prior_result = outcomes.iter().rev().find_map(|o| match o {
+                    StepOutcome::CompletedWith(r) => Some(r.clone()),
+                    _ => None,
+                });
+                return prior_result.unwrap_or(CommandResult::Error { message: e });
             }
         }
     }
 
-    final_result
+    // Return the last meaningful result, or Ok if no step produced one
+    outcomes
+        .into_iter()
+        .rev()
+        .find_map(|o| match o {
+            StepOutcome::CompletedWith(r) => Some(r),
+            _ => None,
+        })
+        .unwrap_or(CommandResult::Ok)
 }
 
 #[cfg(test)]
@@ -177,7 +168,7 @@ mod tests {
         Step {
             description: desc.to_string(),
             host: StepHost::Local,
-            action: StepAction::Closure(Box::new(move || {
+            action: StepAction::Closure(Box::new(move |_prior: Vec<StepOutcome>| {
                 let outcome = Arc::clone(&outcome);
                 Box::pin(async move { outcome.lock().await.take().expect("step called twice") })
             })),
@@ -270,7 +261,7 @@ mod tests {
             action: StepAction::Closure(Box::new({
                 let started = Arc::clone(&started);
                 let release = Arc::clone(&release);
-                move || {
+                move |_prior: Vec<StepOutcome>| {
                     Box::pin(async move {
                         started.notify_waiters();
                         release.notified().await;
@@ -370,7 +361,7 @@ mod tests {
         let plan = StepPlan::new(vec![Step {
             description: "closure step".to_string(),
             host: StepHost::Local,
-            action: StepAction::Closure(Box::new(|| Box::pin(async { Ok(StepOutcome::Completed) }))),
+            action: StepAction::Closure(Box::new(|_prior: Vec<StepOutcome>| Box::pin(async { Ok(StepOutcome::Completed) }))),
         }]);
 
         let result = run_step_plan(
@@ -385,5 +376,33 @@ mod tests {
         )
         .await;
         assert_eq!(result, CommandResult::Ok);
+    }
+
+    #[tokio::test]
+    async fn later_failure_preserves_earlier_completed_with() {
+        let (cancel, tx) = setup();
+        let plan = StepPlan::new(vec![
+            make_step(
+                "step-a",
+                Ok(StepOutcome::CompletedWith(CommandResult::CheckoutCreated {
+                    branch: "feat/x".into(),
+                    path: PathBuf::from("/repo/wt-feat-x"),
+                })),
+            ),
+            make_step("step-b", Err("workspace failed".into())),
+        ]);
+
+        let result = run_step_plan(
+            plan,
+            1,
+            HostName::local(),
+            RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            PathBuf::from("/repo"),
+            cancel,
+            tx,
+            None,
+        )
+        .await;
+        assert_eq!(result, CommandResult::CheckoutCreated { branch: "feat/x".into(), path: PathBuf::from("/repo/wt-feat-x") });
     }
 }
