@@ -187,13 +187,11 @@ impl ShpoolTerminalPool {
                     ShpoolDaemonState::Stale
                 }
             }
-            Err(_) => {
-                match Self::probe_daemon_without_pid_file(runner, socket_path, config_path).await {
-                    ShpoolNoPidProbe::Healthy => ShpoolDaemonState::HealthyWithoutPid,
-                    ShpoolNoPidProbe::Inconclusive => ShpoolDaemonState::InconclusiveWithoutPid,
-                    ShpoolNoPidProbe::Stale => ShpoolDaemonState::Stale,
-                }
-            }
+            Err(_) => match Self::probe_daemon_without_pid_file(runner, socket_path, config_path).await {
+                ShpoolNoPidProbe::Healthy => ShpoolDaemonState::HealthyWithoutPid,
+                ShpoolNoPidProbe::Inconclusive => ShpoolDaemonState::InconclusiveWithoutPid,
+                ShpoolNoPidProbe::Stale => ShpoolDaemonState::Stale,
+            },
         }
     }
 
@@ -207,22 +205,13 @@ impl ShpoolTerminalPool {
     }
 
     #[cfg(unix)]
-    async fn probe_daemon_without_pid_file(
-        runner: Arc<dyn CommandRunner>,
-        socket_path: &Path,
-        config_path: &Path,
-    ) -> ShpoolNoPidProbe {
+    async fn probe_daemon_without_pid_file(runner: Arc<dyn CommandRunner>, socket_path: &Path, config_path: &Path) -> ShpoolNoPidProbe {
         let socket_path_str = socket_path.display().to_string();
         let config_path_str = config_path.display().to_string();
         let args = ["--no-daemonize", "--socket", &socket_path_str, "-c", &config_path_str, "list", "--json"];
         let label = crate::providers::command_channel_label("shpool", &args);
 
-        match tokio::time::timeout(
-            SHPOOL_DAEMON_PROBE_TIMEOUT,
-            runner.run_output("shpool", &args, Path::new("/"), &label),
-        )
-        .await
-        {
+        match tokio::time::timeout(SHPOOL_DAEMON_PROBE_TIMEOUT, runner.run_output("shpool", &args, Path::new("/"), &label)).await {
             Ok(Ok(output)) if output.success => ShpoolNoPidProbe::Healthy,
             Ok(Ok(output)) => {
                 if Self::probe_failure_is_definitely_stale(&output.stderr) {
@@ -243,11 +232,7 @@ impl ShpoolTerminalPool {
     }
 
     #[cfg(not(unix))]
-    async fn probe_daemon_without_pid_file(
-        _runner: Arc<dyn CommandRunner>,
-        _socket_path: &Path,
-        _config_path: &Path,
-    ) -> ShpoolNoPidProbe {
+    async fn probe_daemon_without_pid_file(_runner: Arc<dyn CommandRunner>, _socket_path: &Path, _config_path: &Path) -> ShpoolNoPidProbe {
         ShpoolNoPidProbe::Inconclusive
     }
 
@@ -721,8 +706,7 @@ impl TerminalPool for ShpoolTerminalPool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::time::Duration;
+    use std::{path::Path, time::Duration};
 
     use async_trait::async_trait;
 

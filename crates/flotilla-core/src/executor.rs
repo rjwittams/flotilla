@@ -3101,10 +3101,7 @@ mod tests {
             _ => panic!("expected steps"),
         };
 
-        assert_eq!(
-            result,
-            CommandResult::CheckoutCreated { branch: "feat-x".into(), path: PathBuf::from("/repo/wt-feat-x") }
-        );
+        assert_eq!(result, CommandResult::CheckoutCreated { branch: "feat-x".into(), path: PathBuf::from("/repo/wt-feat-x") });
     }
 
     #[tokio::test]
