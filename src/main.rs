@@ -588,22 +588,28 @@ async fn run_hook(cli: &Cli, harness: &str, event_type: &str) -> Result<()> {
     };
 
     // 6. Update the store
+    // NOTE: This file-based approach has a known race condition when multiple
+    // hook processes run concurrently — the last writer wins. The proper fix
+    // is routing events through the daemon process (which owns the state as
+    // a single actor). See TODO at end of this function.
     let mut store = agents::AgentStateStore::with_base(&config_dir);
     if event.event_type == agents::AgentEventType::Ended {
         store.remove(&event.attachable_id);
-    } else {
+        store.save().map_err(|e| color_eyre::eyre::eyre!("failed to save agent state: {e}"))?;
+    } else if let Some(status) = event.event_type.to_status() {
         let existing = store.get(&event.attachable_id);
         let entry = AgentEntry {
             harness: event.harness.clone(),
-            status: event.event_type.to_status(),
+            status,
             model: event.model.clone().or_else(|| existing.and_then(|e| e.model.clone())),
             session_title: existing.and_then(|e| e.session_title.clone()),
             session_id: event.session_id.clone(),
             last_event_epoch_secs: now,
         };
         store.upsert(event.attachable_id.clone(), entry);
+        store.save().map_err(|e| color_eyre::eyre::eyre!("failed to save agent state: {e}"))?;
     }
-    store.save().map_err(|e| color_eyre::eyre::eyre!("failed to save agent state: {e}"))?;
+    // NoChange events (e.g. non-permission notifications) skip the store
 
     // TODO(#391): also send event to daemon via socket for live refresh
     Ok(())

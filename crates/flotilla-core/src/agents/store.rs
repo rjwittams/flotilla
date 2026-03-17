@@ -75,6 +75,14 @@ impl AgentStoreState {
     }
 
     fn upsert(&mut self, attachable_id: AttachableId, entry: AgentEntry) {
+        // Clean up stale session_index entry if session_id changed
+        if let Some(existing) = self.registry.agents.get(&attachable_id) {
+            if let Some(ref old_sid) = existing.session_id {
+                if entry.session_id.as_ref() != Some(old_sid) {
+                    self.registry.session_index.remove(old_sid);
+                }
+            }
+        }
         if let Some(ref session_id) = entry.session_id {
             self.registry.session_index.insert(session_id.clone(), attachable_id.clone());
         }
@@ -278,6 +286,20 @@ mod tests {
         assert_eq!(got.last_event_epoch_secs, 1710000200);
     }
 
+    fn contract_upsert_cleans_stale_session_index(store: &mut dyn AgentStateStoreApi) {
+        let id = AttachableId::new("att-1");
+        store.upsert(id.clone(), sample_entry()); // session_id = "sess-abc"
+        assert_eq!(store.lookup_by_session_id("sess-abc"), Some(&id));
+
+        // Update with a different session_id
+        let updated = AgentEntry { session_id: Some("sess-new".into()), ..sample_entry() };
+        store.upsert(id.clone(), updated);
+
+        // Old session_id should be removed, new one should resolve
+        assert!(store.lookup_by_session_id("sess-abc").is_none());
+        assert_eq!(store.lookup_by_session_id("sess-new"), Some(&id));
+    }
+
     fn contract_remove_clears_agent_and_session_index(store: &mut dyn AgentStateStoreApi) {
         let id = AttachableId::new("att-1");
         store.upsert(id.clone(), sample_entry());
@@ -345,6 +367,11 @@ mod tests {
     }
 
     #[test]
+    fn in_memory_upsert_cleans_stale_session_index() {
+        contract_upsert_cleans_stale_session_index(&mut InMemoryAgentStateStore::new());
+    }
+
+    #[test]
     fn in_memory_remove_clears_agent_and_session_index() {
         contract_remove_clears_agent_and_session_index(&mut InMemoryAgentStateStore::new());
     }
@@ -386,6 +413,11 @@ mod tests {
     #[test]
     fn file_backed_upsert_updates_existing() {
         contract_upsert_updates_existing(&mut AgentStateStore::with_base(tempfile::tempdir().expect("tempdir").path()));
+    }
+
+    #[test]
+    fn file_backed_upsert_cleans_stale_session_index() {
+        contract_upsert_cleans_stale_session_index(&mut AgentStateStore::with_base(tempfile::tempdir().expect("tempdir").path()));
     }
 
     #[test]

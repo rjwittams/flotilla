@@ -32,16 +32,20 @@ pub enum AgentEventType {
     Active,
     Idle,
     WaitingForPermission,
+    /// The event was informational and should not change agent status.
+    NoChange,
 }
 
 impl AgentEventType {
-    pub fn to_status(&self) -> AgentStatus {
+    /// Returns the agent status this event implies, or None for NoChange.
+    pub fn to_status(&self) -> Option<AgentStatus> {
         match self {
-            AgentEventType::Started => AgentStatus::Idle,
-            AgentEventType::Ended => AgentStatus::Idle, // caller removes entry
-            AgentEventType::Active => AgentStatus::Active,
-            AgentEventType::Idle => AgentStatus::Idle,
-            AgentEventType::WaitingForPermission => AgentStatus::WaitingForPermission,
+            AgentEventType::Started => Some(AgentStatus::Idle),
+            AgentEventType::Ended => Some(AgentStatus::Idle), // caller removes entry
+            AgentEventType::Active => Some(AgentStatus::Active),
+            AgentEventType::Idle => Some(AgentStatus::Idle),
+            AgentEventType::WaitingForPermission => Some(AgentStatus::WaitingForPermission),
+            AgentEventType::NoChange => None,
         }
     }
 }
@@ -127,8 +131,7 @@ impl HarnessHookParser for ClaudeCodeParser {
                 let event_type = if parsed.notification_type.as_deref() == Some("permission_prompt") {
                     AgentEventType::WaitingForPermission
                 } else {
-                    // Non-permission notifications don't change agent status
-                    AgentEventType::Idle
+                    AgentEventType::NoChange
                 };
                 Ok(ParsedHookEvent { event_type, session_id: parsed.common.session_id, model: None, cwd: parsed.common.cwd })
             }
@@ -209,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_notification_non_permission_maps_to_idle() {
+    fn claude_notification_non_permission_maps_to_no_change() {
         let payload = serde_json::json!({
             "session_id": "sess-abc",
             "notification_type": "idle_prompt"
@@ -217,7 +220,7 @@ mod tests {
         let parser = ClaudeCodeParser;
         let result = parser.parse_event("notification", payload.to_string().as_bytes()).unwrap();
 
-        assert_eq!(result.event_type, AgentEventType::Idle);
+        assert_eq!(result.event_type, AgentEventType::NoChange);
     }
 
     #[test]
@@ -228,10 +231,11 @@ mod tests {
 
     #[test]
     fn event_type_to_status_mappings() {
-        assert_eq!(AgentEventType::Started.to_status(), AgentStatus::Idle);
-        assert_eq!(AgentEventType::Active.to_status(), AgentStatus::Active);
-        assert_eq!(AgentEventType::Idle.to_status(), AgentStatus::Idle);
-        assert_eq!(AgentEventType::WaitingForPermission.to_status(), AgentStatus::WaitingForPermission);
+        assert_eq!(AgentEventType::Started.to_status(), Some(AgentStatus::Idle));
+        assert_eq!(AgentEventType::Active.to_status(), Some(AgentStatus::Active));
+        assert_eq!(AgentEventType::Idle.to_status(), Some(AgentStatus::Idle));
+        assert_eq!(AgentEventType::WaitingForPermission.to_status(), Some(AgentStatus::WaitingForPermission));
+        assert_eq!(AgentEventType::NoChange.to_status(), None);
     }
 
     #[test]
