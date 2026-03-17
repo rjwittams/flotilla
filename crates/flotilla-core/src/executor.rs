@@ -110,10 +110,11 @@ pub async fn build_plan(
 /// Steps:
 /// 1. Create the checkout (skipped if it already exists on the local host)
 /// 2. Link issues to the branch (skipped if no issue_ids)
+/// 3. Create a workspace for the new checkout
 ///
-/// Workspace creation is NOT included here because this plan may execute on a
-/// remote host.  The TUI handles workspace creation locally when it receives
-/// `CheckoutCreated` from a local command.
+/// The final step creates a workspace for the new checkout. This is a symbolic
+/// step resolved by the `ExecutorStepResolver` at execution time, so it has
+/// access to the registry and config without needing pre-refreshed provider data.
 #[allow(clippy::too_many_arguments)]
 async fn build_create_checkout_plan(
     branch: String,
@@ -186,6 +187,17 @@ async fn build_create_checkout_plan(
             })),
         });
     }
+
+    // Final step: create workspace for the new checkout.
+    // The checkout path comes from the shared slot populated by step 1.
+    steps.push(Step {
+        description: "Create workspace".to_string(),
+        host: StepHost::Local,
+        action: StepAction::CreateWorkspaceForCheckout {
+            checkout_path: Arc::clone(&checkout_path_slot),
+            label: branch.clone(),
+        },
+    });
 
     ExecutionPlan::Steps(StepPlan::new(steps))
 }
@@ -2955,8 +2967,9 @@ mod tests {
 
         match plan {
             ExecutionPlan::Steps(step_plan) => {
-                assert_eq!(step_plan.steps.len(), 1, "checkout only — workspace creation is handled by the TUI");
+                assert_eq!(step_plan.steps.len(), 2, "checkout + workspace steps");
                 assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
+                assert_eq!(step_plan.steps[1].description, "Create workspace");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
         }
@@ -2976,11 +2989,84 @@ mod tests {
 
         match plan {
             ExecutionPlan::Steps(step_plan) => {
-                assert_eq!(step_plan.steps.len(), 1, "checkout only — workspace creation is handled by the TUI");
+                assert_eq!(step_plan.steps.len(), 2, "checkout + workspace steps");
                 assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
+                assert_eq!(step_plan.steps[1].description, "Create workspace");
             }
             ExecutionPlan::Immediate(_) => panic!("expected Steps, got Immediate"),
         }
+    }
+
+    #[tokio::test]
+    async fn checkout_plan_includes_workspace_step() {
+        let mut registry = empty_registry();
+        registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
+        registry.workspace_managers.insert("cmux", desc("cmux"), Arc::new(MockWorkspaceManager::succeeding()));
+
+        let plan = run_build_plan(fresh_checkout_action("feat-x"), registry, empty_data(), runner_ok()).await;
+
+        match plan {
+            ExecutionPlan::Steps(step_plan) => {
+                assert_eq!(step_plan.steps.len(), 2, "expected checkout + workspace steps");
+                assert_eq!(step_plan.steps[0].description, "Create checkout for branch feat-x");
+                assert_eq!(step_plan.steps[1].description, "Create workspace");
+            }
+            ExecutionPlan::Immediate(_) => panic!("expected Steps"),
+        }
+    }
+
+    #[tokio::test]
+    async fn checkout_plan_end_to_end_creates_workspace() {
+        use crate::step::run_step_plan;
+        use tokio::sync::broadcast;
+        use tokio_util::sync::CancellationToken;
+
+        let ws_mgr = Arc::new(MockWorkspaceManager::succeeding());
+        let mut registry = ProviderRegistry::new();
+        registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
+        registry.workspace_managers.insert("cmux", desc("cmux"), Arc::clone(&ws_mgr) as Arc<dyn WorkspaceManager>);
+        let registry = Arc::new(registry);
+        let runner = Arc::new(MockRunner::new(vec![Err("missing".into()), Err("missing".into())]));
+        let cb = config_base();
+        let attachable = test_attachable_store(&cb);
+        let lh = local_host();
+        let repo = RepoExecutionContext { identity: repo_identity(), root: repo_root() };
+
+        let plan = build_plan(
+            local_command(fresh_checkout_action("feat-x")),
+            RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+            Arc::clone(&registry),
+            Arc::new(empty_data()),
+            runner,
+            cb.clone(),
+            attachable.clone(),
+            lh.clone(),
+            None,
+        )
+        .await;
+
+        let (cancel, tx) = (CancellationToken::new(), broadcast::channel(64).0);
+        let resolver = ExecutorStepResolver {
+            repo,
+            registry,
+            config_base: cb,
+            attachable_store: attachable,
+            local_host: lh.clone(),
+        };
+
+        let result = match plan {
+            ExecutionPlan::Steps(step_plan) => {
+                run_step_plan(step_plan, 1, lh, repo_identity(), repo_root(), cancel, tx, Some(&resolver)).await
+            }
+            _ => panic!("expected steps"),
+        };
+
+        assert!(matches!(result, CommandResult::CheckoutCreated { .. }));
+        let calls = ws_mgr.calls.lock().await;
+        assert!(
+            calls.iter().any(|c| c.starts_with("create_workspace")),
+            "should create workspace, got: {calls:?}"
+        );
     }
 
     #[tokio::test]
