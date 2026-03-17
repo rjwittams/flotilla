@@ -23,5 +23,5 @@ expression: output
 │                                                                      ││                                              │
 │                                                                      ││                                              │
 └──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘
-/he                          <ENT> RUN  <TAB> FILL  <esc> CLOSE                                   ◫ auto   @local
+/he                          <ENT> RUN  <TAB> FILL  <ESC> CLOSE                                   ◫ auto   @local
   help  show key bindings                                                                                         ?

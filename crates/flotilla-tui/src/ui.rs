@@ -377,7 +377,7 @@ fn status_bar_content(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, I
             let task = active_task(model, in_flight).map(|(description, spinner_index)| TaskSection::new(&description, spinner_index));
             let mut keys = normal_mode_key_chips();
             if rui.active_search_query.is_some() {
-                keys.insert(0, key_chip("esc", "Clear", KeyCode::Esc));
+                keys.insert(0, key_chip("ESC", "Clear", KeyCode::Esc));
             }
             StatusBarContent { status, keys, task, mode_indicators: normal_mode_indicators(ui) }
         }
@@ -401,7 +401,7 @@ fn status_bar_content(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, I
         },
         UiMode::BranchInput { kind: BranchInputKind::Manual, .. } => StatusBarContent {
             status: StatusSection::plain("NEW BRANCH"),
-            keys: vec![key_chip(ENTER_KEY_GLYPH, "Create", KeyCode::Enter), key_chip("esc", "Cancel", KeyCode::Esc)],
+            keys: vec![key_chip(ENTER_KEY_GLYPH, "Create", KeyCode::Enter), key_chip("ESC", "Cancel", KeyCode::Esc)],
             task: None,
             mode_indicators: vec![],
         },
@@ -411,14 +411,14 @@ fn status_bar_content(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, I
                 key_chip("j", "Down", KeyCode::Char('j')),
                 key_chip("k", "Up", KeyCode::Char('k')),
                 key_chip(ENTER_KEY_GLYPH, "Select", KeyCode::Enter),
-                key_chip("esc", "Close", KeyCode::Esc),
+                key_chip("ESC", "Close", KeyCode::Esc),
             ],
             task: None,
             mode_indicators: vec![],
         },
         UiMode::IssueSearch { input } => StatusBarContent {
             status: StatusSection::plain(&format!("SEARCH {}", input.value())),
-            keys: vec![key_chip(ENTER_KEY_GLYPH, "Apply", KeyCode::Enter), key_chip("esc", "Cancel", KeyCode::Esc)],
+            keys: vec![key_chip(ENTER_KEY_GLYPH, "Apply", KeyCode::Enter), key_chip("ESC", "Cancel", KeyCode::Esc)],
             task: None,
             mode_indicators: vec![],
         },
@@ -429,7 +429,7 @@ fn status_bar_content(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, I
                 key_chip("k", "Up", KeyCode::Char('k')),
                 key_chip("tab", "Complete", KeyCode::Tab),
                 key_chip(ENTER_KEY_GLYPH, "Select", KeyCode::Enter),
-                key_chip("esc", "Cancel", KeyCode::Esc),
+                key_chip("ESC", "Cancel", KeyCode::Esc),
             ],
             task: None,
             mode_indicators: vec![],
@@ -451,7 +451,7 @@ fn status_bar_content(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, I
             keys: vec![
                 key_chip("j", "Down", KeyCode::Char('j')),
                 key_chip("k", "Up", KeyCode::Char('k')),
-                key_chip("esc", "Close", KeyCode::Esc),
+                key_chip("ESC", "Close", KeyCode::Esc),
                 key_chip("?", "Close", KeyCode::Char('?')),
             ],
             task: None,
@@ -464,7 +464,7 @@ fn status_bar_content(model: &TuiModel, ui: &UiState, in_flight: &HashMap<u64, I
                 keys: vec![
                     key_chip(ENTER_KEY_GLYPH, "Run", KeyCode::Enter),
                     key_chip("TAB", "Fill", KeyCode::Tab),
-                    key_chip("esc", "Close", KeyCode::Esc),
+                    key_chip("ESC", "Close", KeyCode::Esc),
                 ],
                 task: None,
                 mode_indicators: normal_mode_indicators(ui),
