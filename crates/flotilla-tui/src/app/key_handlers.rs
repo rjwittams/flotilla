@@ -1969,4 +1969,75 @@ mod tests {
         let (command, _) = app.proto_commands.take_next().expect("should have command");
         assert_eq!(command, expected);
     }
+
+    // ── command palette key handling ────────────────────────────────
+
+    #[test]
+    fn double_slash_opens_issue_search() {
+        let mut app = stub_app();
+        app.handle_key(key(KeyCode::Char('/')));
+        assert!(matches!(app.ui.mode, UiMode::CommandPalette { .. }));
+        app.handle_key(key(KeyCode::Char('/')));
+        assert!(matches!(app.ui.mode, UiMode::IssueSearch { .. }));
+    }
+
+    #[test]
+    fn command_palette_enter_dispatches_action() {
+        let mut app = stub_app();
+        app.handle_key(key(KeyCode::Char('/')));
+        // First entry is "search" which dispatches OpenIssueSearch
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.ui.mode, UiMode::IssueSearch { .. }));
+    }
+
+    #[test]
+    fn command_palette_esc_dismisses() {
+        let mut app = stub_app();
+        app.handle_key(key(KeyCode::Char('/')));
+        assert!(matches!(app.ui.mode, UiMode::CommandPalette { .. }));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.ui.mode, UiMode::Normal));
+    }
+
+    #[test]
+    fn command_palette_arrow_navigation_wraps() {
+        let mut app = stub_app();
+        app.handle_key(key(KeyCode::Char('/')));
+        // Down from 0 → 1
+        app.handle_key(key(KeyCode::Down));
+        if let UiMode::CommandPalette { selected, .. } = app.ui.mode {
+            assert_eq!(selected, 1);
+        } else {
+            panic!("expected CommandPalette");
+        }
+        // Up from 1 → 0
+        app.handle_key(key(KeyCode::Up));
+        if let UiMode::CommandPalette { selected, .. } = app.ui.mode {
+            assert_eq!(selected, 0);
+        } else {
+            panic!("expected CommandPalette");
+        }
+        // Up from 0 → wraps to last
+        app.handle_key(key(KeyCode::Up));
+        if let UiMode::CommandPalette { selected, entries, .. } = &app.ui.mode {
+            assert_eq!(*selected, entries.len() - 1);
+        } else {
+            panic!("expected CommandPalette");
+        }
+    }
+
+    #[test]
+    fn command_palette_typing_resets_selection() {
+        let mut app = stub_app();
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Down));
+        // Now type a char — selection resets
+        app.handle_key(key(KeyCode::Char('h')));
+        if let UiMode::CommandPalette { selected, .. } = app.ui.mode {
+            assert_eq!(selected, 0);
+        } else {
+            panic!("expected CommandPalette");
+        }
+    }
 }
