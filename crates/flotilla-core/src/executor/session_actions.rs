@@ -27,6 +27,13 @@ pub(super) struct TeleportSessionActionService<'a> {
     local_host: &'a HostName,
 }
 
+pub(super) struct TeleportFlow<'a> {
+    service: TeleportSessionActionService<'a>,
+    session_id: &'a str,
+    branch: Option<&'a str>,
+    checkout_key: Option<&'a PathBuf>,
+}
+
 impl<'a> ReadOnlySessionActionService<'a> {
     pub(super) fn new(registry: &'a ProviderRegistry, providers_data: &'a ProviderData) -> Self {
         Self { registry, providers_data }
@@ -183,6 +190,60 @@ impl<'a> TeleportSessionActionService<'a> {
             let host_key = flotilla_protocol::HostPath::new(self.local_host.clone(), key.clone());
             self.read_only.providers_data.checkouts.get(&host_key).map(|_| key.clone())
         })
+    }
+}
+
+impl<'a> TeleportFlow<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        repo_root: &'a Path,
+        registry: &'a ProviderRegistry,
+        providers_data: &'a ProviderData,
+        config_base: &'a Path,
+        attachable_store: &'a SharedAttachableStore,
+        daemon_socket_path: Option<&'a Path>,
+        local_host: &'a HostName,
+        session_id: &'a str,
+        branch: Option<&'a str>,
+        checkout_key: Option<&'a PathBuf>,
+    ) -> Self {
+        Self {
+            service: TeleportSessionActionService::new(
+                repo_root,
+                registry,
+                providers_data,
+                config_base,
+                attachable_store,
+                daemon_socket_path,
+                local_host,
+            ),
+            session_id,
+            branch,
+            checkout_key,
+        }
+    }
+
+    pub(super) async fn initial_checkout_path(&self) -> Result<Option<PathBuf>, String> {
+        self.service.resolve_teleport_checkout_path(self.checkout_key, None).await
+    }
+
+    pub(super) async fn resolve_attach_step(&self) -> Result<String, String> {
+        self.service.resolve_attach_command(self.session_id).await
+    }
+
+    pub(super) async fn ensure_checkout_step(&self) -> Result<Option<PathBuf>, String> {
+        self.service.resolve_teleport_checkout_path(None, self.branch).await
+    }
+
+    pub(super) async fn create_workspace_step(&self, checkout_path: &Path, teleport_cmd: &str) -> Result<(), String> {
+        self.service.create_workspace_for_teleport(checkout_path, self.branch, teleport_cmd).await
+    }
+
+    pub(super) async fn execute(&self) -> Result<(), String> {
+        let teleport_cmd = self.resolve_attach_step().await?;
+        let checkout_path = self.service.resolve_teleport_checkout_path(self.checkout_key, self.branch).await?;
+        let checkout_path = checkout_path.ok_or_else(|| "Could not determine checkout path for teleport".to_string())?;
+        self.create_workspace_step(&checkout_path, &teleport_cmd).await
     }
 }
 

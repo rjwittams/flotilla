@@ -13,12 +13,12 @@ use std::{
     sync::Arc,
 };
 
-use flotilla_protocol::{CheckoutTarget, Command, CommandAction, CommandResult, HostName, HostPath, ManagedTerminalId};
+use flotilla_protocol::{CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandResult, HostName, HostPath, ManagedTerminalId};
 use tracing::{debug, error, info};
 
 use self::{
     checkout::{resolve_checkout_branch, write_branch_issue_links, CheckoutIntent, CheckoutService},
-    session_actions::{ReadOnlySessionActionService, TeleportSessionActionService},
+    session_actions::{ReadOnlySessionActionService, TeleportFlow},
     terminals::TerminalPreparationService,
     workspace::WorkspaceOrchestrator,
 };
@@ -42,6 +42,97 @@ pub enum ExecutionPlan {
 pub struct RepoExecutionContext {
     pub identity: flotilla_protocol::RepoIdentity,
     pub root: PathBuf,
+}
+
+enum CheckoutExistingPolicy {
+    ReuseKnownCheckout,
+    AlwaysCreate,
+}
+
+enum CheckoutIssueLinkPolicy {
+    Inline,
+    Deferred,
+}
+
+struct CheckoutFlow<'a> {
+    branch: &'a str,
+    create_branch: bool,
+    intent: CheckoutIntent,
+    issue_ids: &'a [(String, String)],
+    repo_root: &'a Path,
+    registry: &'a ProviderRegistry,
+    providers_data: &'a ProviderData,
+    runner: &'a dyn CommandRunner,
+    local_host: &'a HostName,
+}
+
+impl<'a> CheckoutFlow<'a> {
+    fn existing_checkout_path(&self) -> Option<PathBuf> {
+        self.providers_data.checkouts.iter().find_map(|(hp, co)| {
+            if hp.host == *self.local_host && co.branch == self.branch {
+                Some(hp.path.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    async fn checkout_created_result(
+        &self,
+        existing_policy: CheckoutExistingPolicy,
+        issue_link_policy: CheckoutIssueLinkPolicy,
+    ) -> Result<CommandResult, String> {
+        let checkout_service = CheckoutService::new(self.registry, self.runner);
+        checkout_service.validate_target(self.repo_root, self.branch, self.intent).await?;
+
+        if matches!(existing_policy, CheckoutExistingPolicy::ReuseKnownCheckout) {
+            if let Some(path) = self.existing_checkout_path() {
+                if matches!(self.intent, CheckoutIntent::FreshBranch) {
+                    return Err(format!("branch already exists: {}", self.branch));
+                }
+                return Ok(CommandResult::CheckoutCreated { branch: self.branch.to_string(), path });
+            }
+        }
+
+        let path = checkout_service.create_checkout(self.repo_root, self.branch, self.create_branch).await?;
+        if !self.issue_ids.is_empty() && matches!(issue_link_policy, CheckoutIssueLinkPolicy::Inline) {
+            checkout_service.write_branch_issue_links(self.repo_root, self.branch, self.issue_ids).await;
+        }
+        Ok(CommandResult::CheckoutCreated { branch: self.branch.to_string(), path })
+    }
+}
+
+struct RemoveCheckoutFlow<'a> {
+    checkout: &'a CheckoutSelector,
+    terminal_keys: &'a [ManagedTerminalId],
+    repo_root: &'a Path,
+    registry: &'a ProviderRegistry,
+    providers_data: &'a ProviderData,
+    runner: &'a dyn CommandRunner,
+    local_host: &'a HostName,
+}
+
+impl<'a> RemoveCheckoutFlow<'a> {
+    fn resolve_branch(&self) -> Result<String, String> {
+        resolve_checkout_branch(self.checkout, self.providers_data, self.local_host)
+    }
+
+    async fn remove_branch(&self, branch: &str) -> Result<(), String> {
+        let checkout_service = CheckoutService::new(self.registry, self.runner);
+        checkout_service.remove_checkout(self.repo_root, branch, self.terminal_keys).await
+    }
+
+    async fn execute(&self) -> CommandResult {
+        let branch = match self.resolve_branch() {
+            Ok(branch) => branch,
+            Err(message) => return CommandResult::Error { message },
+        };
+        info!(%branch, "removing checkout");
+        match self.remove_branch(&branch).await {
+            Ok(()) => CommandResult::CheckoutRemoved { branch },
+            Err(message) => CommandResult::Error { message },
+        }
+    }
 }
 
 /// Build an execution plan for a command.
@@ -96,7 +187,16 @@ pub async fn build_plan(
         }
 
         CommandAction::RemoveCheckout { checkout, terminal_keys } => {
-            match resolve_checkout_branch(&checkout, &providers_data, &local_host) {
+            let remove_flow = RemoveCheckoutFlow {
+                checkout: &checkout,
+                terminal_keys: &terminal_keys,
+                repo_root: &repo.root,
+                registry: registry.as_ref(),
+                providers_data: providers_data.as_ref(),
+                runner: runner.as_ref(),
+                local_host: &local_host,
+            };
+            match remove_flow.resolve_branch() {
                 Ok(branch) => build_remove_checkout_plan(branch, terminal_keys, repo.root, registry, runner),
                 Err(message) => ExecutionPlan::Immediate(CommandResult::Error { message }),
             }
@@ -146,45 +246,40 @@ async fn build_create_checkout_plan(
     runner: Arc<dyn CommandRunner>,
     local_host: flotilla_protocol::HostName,
 ) -> ExecutionPlan {
-    // Check if checkout already exists for this branch on the local host.
-    let existing_checkout_path: Option<PathBuf> =
-        providers_data.checkouts.iter().find_map(
-            |(hp, co)| {
-                if hp.host == local_host && co.branch == branch {
-                    Some(hp.path.clone())
-                } else {
-                    None
-                }
-            },
-        );
-
     let mut steps = Vec::new();
 
     // Step 1: Create checkout
     {
         let branch = branch.clone();
+        let issue_ids = issue_ids.clone();
         let repo_root = repo_root.clone();
         let registry = Arc::clone(&registry);
+        let providers_data = Arc::clone(&providers_data);
         let runner = Arc::clone(&runner);
-        let existing = existing_checkout_path.clone();
+        let local_host = local_host.clone();
         steps.push(Step {
             description: format!("Create checkout for branch {branch}"),
             host: StepHost::Local,
             action: StepAction::Closure(Box::new(move |_prior| {
                 Box::pin(async move {
-                    let checkout_service = CheckoutService::new(registry.as_ref(), runner.as_ref());
-                    checkout_service.validate_target(&repo_root, &branch, intent).await?;
-                    // If checkout already exists, emit CheckoutCreated so the workspace
-                    // step can find the path in prior outcomes.
-                    if let Some(path) = existing {
-                        if matches!(intent, CheckoutIntent::FreshBranch) {
-                            return Err(format!("branch already exists: {branch}"));
-                        }
-                        return Ok(StepOutcome::CompletedWith(CommandResult::CheckoutCreated { branch, path }));
+                    let checkout_flow = CheckoutFlow {
+                        branch: &branch,
+                        create_branch,
+                        intent,
+                        issue_ids: &issue_ids,
+                        repo_root: &repo_root,
+                        registry: registry.as_ref(),
+                        providers_data: providers_data.as_ref(),
+                        runner: runner.as_ref(),
+                        local_host: &local_host,
+                    };
+                    let result = checkout_flow
+                        .checkout_created_result(CheckoutExistingPolicy::ReuseKnownCheckout, CheckoutIssueLinkPolicy::Deferred)
+                        .await?;
+                    if let CommandResult::CheckoutCreated { path, .. } = &result {
+                        info!(checkout_path = %path.display(), "created checkout");
                     }
-                    let path = checkout_service.create_checkout(&repo_root, &branch, create_branch).await?;
-                    info!(checkout_path = %path.display(), "created checkout");
-                    Ok(StepOutcome::CompletedWith(CommandResult::CheckoutCreated { branch, path }))
+                    Ok(StepOutcome::CompletedWith(result))
                 })
             })),
         });
@@ -236,7 +331,7 @@ async fn build_teleport_session_plan(
     daemon_socket_path: Option<PathBuf>,
     local_host: flotilla_protocol::HostName,
 ) -> ExecutionPlan {
-    let session_actions = TeleportSessionActionService::new(
+    let teleport_flow = TeleportFlow::new(
         &repo_root,
         registry.as_ref(),
         providers_data.as_ref(),
@@ -244,13 +339,16 @@ async fn build_teleport_session_plan(
         &attachable_store,
         daemon_socket_path.as_deref(),
         &local_host,
+        &session_id,
+        branch.as_deref(),
+        checkout_key.as_ref(),
     );
 
     // Shared slot for the teleport (attach) command — populated by step 1.
     let teleport_cmd_slot: Arc<tokio::sync::Mutex<Option<String>>> = Arc::new(tokio::sync::Mutex::new(None));
 
     // Shared slot for checkout path — pre-populated if checkout_key references a known checkout.
-    let initial_checkout_path = match session_actions.resolve_teleport_checkout_path(checkout_key.as_ref(), None).await {
+    let initial_checkout_path = match teleport_flow.initial_checkout_path().await {
         Ok(path) => path,
         Err(message) => return ExecutionPlan::Immediate(CommandResult::Error { message }),
     };
@@ -262,6 +360,8 @@ async fn build_teleport_session_plan(
     {
         let slot = Arc::clone(&teleport_cmd_slot);
         let session_id = session_id.clone();
+        let branch = branch.clone();
+        let checkout_key = checkout_key.clone();
         let repo_root = repo_root.clone();
         let registry = Arc::clone(&registry);
         let providers_data = Arc::clone(&providers_data);
@@ -274,7 +374,7 @@ async fn build_teleport_session_plan(
             host: StepHost::Local,
             action: StepAction::Closure(Box::new(move |_prior| {
                 Box::pin(async move {
-                    let session_actions = TeleportSessionActionService::new(
+                    let teleport_flow = TeleportFlow::new(
                         &repo_root,
                         registry.as_ref(),
                         providers_data.as_ref(),
@@ -282,8 +382,11 @@ async fn build_teleport_session_plan(
                         &attachable_store,
                         daemon_socket_path.as_deref(),
                         &local_host,
+                        &session_id,
+                        branch.as_deref(),
+                        checkout_key.as_ref(),
                     );
-                    let cmd = session_actions.resolve_attach_command(&session_id).await?;
+                    let cmd = teleport_flow.resolve_attach_step().await?;
                     *slot.lock().await = Some(cmd);
                     Ok(StepOutcome::Completed)
                 })
@@ -295,7 +398,9 @@ async fn build_teleport_session_plan(
     // Only runs when there's no pre-existing checkout and a branch is provided.
     {
         let slot = Arc::clone(&checkout_path_slot);
+        let session_id = session_id.clone();
         let branch = branch.clone();
+        let checkout_key = checkout_key.clone();
         let repo_root = repo_root.clone();
         let registry = Arc::clone(&registry);
         let providers_data = Arc::clone(&providers_data);
@@ -312,7 +417,7 @@ async fn build_teleport_session_plan(
                     if slot.lock().await.is_some() {
                         return Ok(StepOutcome::Skipped);
                     }
-                    let session_actions = TeleportSessionActionService::new(
+                    let teleport_flow = TeleportFlow::new(
                         &repo_root,
                         registry.as_ref(),
                         providers_data.as_ref(),
@@ -320,8 +425,11 @@ async fn build_teleport_session_plan(
                         &attachable_store,
                         daemon_socket_path.as_deref(),
                         &local_host,
+                        &session_id,
+                        branch.as_deref(),
+                        checkout_key.as_ref(),
                     );
-                    let path = session_actions.resolve_teleport_checkout_path(None, branch.as_deref()).await?;
+                    let path = teleport_flow.ensure_checkout_step().await?;
                     *slot.lock().await = path;
                     Ok(StepOutcome::Completed)
                 })
@@ -333,7 +441,9 @@ async fn build_teleport_session_plan(
     {
         let teleport_slot = Arc::clone(&teleport_cmd_slot);
         let path_slot = Arc::clone(&checkout_path_slot);
+        let session_id = session_id.clone();
         let branch = branch.clone();
+        let checkout_key = checkout_key.clone();
         let repo_root = repo_root.clone();
         let registry = Arc::clone(&registry);
         let providers_data = Arc::clone(&providers_data);
@@ -349,7 +459,7 @@ async fn build_teleport_session_plan(
                     let path =
                         path_slot.lock().await.clone().ok_or_else(|| "Could not determine checkout path for teleport".to_string())?;
                     let teleport_cmd = teleport_slot.lock().await.clone().ok_or_else(|| "Attach command not resolved".to_string())?;
-                    let session_actions = TeleportSessionActionService::new(
+                    let teleport_flow = TeleportFlow::new(
                         &repo_root,
                         registry.as_ref(),
                         providers_data.as_ref(),
@@ -357,8 +467,11 @@ async fn build_teleport_session_plan(
                         &attachable_store,
                         daemon_socket_path.as_deref(),
                         &local_host,
+                        &session_id,
+                        branch.as_deref(),
+                        checkout_key.as_ref(),
                     );
-                    session_actions.create_workspace_for_teleport(&path, branch.as_deref(), &teleport_cmd).await?;
+                    teleport_flow.create_workspace_step(&path, &teleport_cmd).await?;
                     Ok(StepOutcome::Completed)
                 })
             })),
@@ -538,23 +651,28 @@ pub async fn execute(
                 CheckoutTarget::Branch(branch) => (branch, false, CheckoutIntent::ExistingBranch),
                 CheckoutTarget::FreshBranch(branch) => (branch, true, CheckoutIntent::FreshBranch),
             };
-            let checkout_service = CheckoutService::new(registry, runner);
-            if let Err(message) = checkout_service.validate_target(&repo.root, &branch, intent).await {
-                return CommandResult::Error { message };
-            }
+            let checkout_flow = CheckoutFlow {
+                branch: &branch,
+                create_branch,
+                intent,
+                issue_ids: &issue_ids,
+                repo_root: &repo.root,
+                registry,
+                providers_data,
+                runner,
+                local_host,
+            };
             info!(%branch, "creating checkout");
-            match checkout_service.create_checkout(&repo.root, &branch, create_branch).await {
-                Ok(checkout_path) => {
-                    // Write issue links to git config
-                    if !issue_ids.is_empty() {
-                        checkout_service.write_branch_issue_links(&repo.root, &branch, &issue_ids).await;
+            match checkout_flow.checkout_created_result(CheckoutExistingPolicy::AlwaysCreate, CheckoutIssueLinkPolicy::Inline).await {
+                Ok(result) => {
+                    if let CommandResult::CheckoutCreated { path, .. } = &result {
+                        info!(checkout_path = %path.display(), "created checkout");
                     }
-                    info!(checkout_path = %checkout_path.display(), "created checkout");
-                    CommandResult::CheckoutCreated { branch: branch.clone(), path: checkout_path }
+                    result
                 }
-                Err(e) => {
-                    error!(err = %e, "create checkout failed");
-                    CommandResult::Error { message: e }
+                Err(message) => {
+                    error!(err = %message, "create checkout failed");
+                    CommandResult::Error { message }
                 }
             }
         }
@@ -588,16 +706,17 @@ pub async fn execute(
         }
 
         CommandAction::RemoveCheckout { checkout, terminal_keys } => {
-            let checkout_service = CheckoutService::new(registry, runner);
-            let branch = match resolve_checkout_branch(&checkout, providers_data, local_host) {
-                Ok(branch) => branch,
-                Err(message) => return CommandResult::Error { message },
-            };
-            info!(%branch, "removing checkout");
-            match checkout_service.remove_checkout(&repo.root, &branch, &terminal_keys).await {
-                Ok(()) => CommandResult::CheckoutRemoved { branch },
-                Err(e) => CommandResult::Error { message: e },
+            RemoveCheckoutFlow {
+                checkout: &checkout,
+                terminal_keys: &terminal_keys,
+                repo_root: &repo.root,
+                registry,
+                providers_data,
+                runner,
+                local_host,
             }
+            .execute()
+            .await
         }
 
         CommandAction::FetchCheckoutStatus { branch, checkout_path, change_request_id } => {
@@ -672,7 +791,7 @@ pub async fn execute(
 
         CommandAction::TeleportSession { session_id, branch, checkout_key } => {
             info!(%session_id, "teleporting to session");
-            let session_actions = TeleportSessionActionService::new(
+            let teleport_flow = TeleportFlow::new(
                 &repo.root,
                 registry,
                 providers_data,
@@ -680,22 +799,13 @@ pub async fn execute(
                 attachable_store,
                 daemon_socket_path,
                 local_host,
+                &session_id,
+                branch.as_deref(),
+                checkout_key.as_ref(),
             );
-            let teleport_cmd = match session_actions.resolve_attach_command(&session_id).await {
-                Ok(cmd) => cmd,
-                Err(message) => return CommandResult::Error { message },
-            };
-            let wt_path = match session_actions.resolve_teleport_checkout_path(checkout_key.as_ref(), branch.as_deref()).await {
-                Ok(path) => path,
-                Err(message) => return CommandResult::Error { message },
-            };
-            if let Some(path) = wt_path {
-                if let Err(message) = session_actions.create_workspace_for_teleport(&path, branch.as_deref(), &teleport_cmd).await {
-                    return CommandResult::Error { message };
-                }
-                CommandResult::Ok
-            } else {
-                CommandResult::Error { message: "Could not determine checkout path for teleport".to_string() }
+            match teleport_flow.execute().await {
+                Ok(()) => CommandResult::Ok,
+                Err(message) => CommandResult::Error { message },
             }
         }
 
