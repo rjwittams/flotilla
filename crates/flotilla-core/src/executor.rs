@@ -803,8 +803,43 @@ pub async fn execute(
             };
             match result {
                 Some(Ok(())) => {
-                    // Best-effort cleanup of correlated terminal sessions
+                    // Cascade: remove attachable sets owned by this checkout
+                    let deleted_checkout_paths: Vec<HostPath> =
+                        providers_data.checkouts.iter().filter(|(_, co)| co.branch == branch).map(|(hp, _)| hp.clone()).collect();
+
+                    let mut all_session_refs = Vec::new();
+                    let mut any_removed = false;
+                    if let Ok(mut store) = attachable_store.lock() {
+                        for checkout_path in &deleted_checkout_paths {
+                            let set_ids = store.sets_for_checkout(checkout_path);
+                            for set_id in set_ids {
+                                if let Some(removed) = store.remove_set(&set_id) {
+                                    all_session_refs.extend(removed.member_binding_refs);
+                                    any_removed = true;
+                                }
+                            }
+                        }
+                        if any_removed {
+                            if let Err(e) = store.save() {
+                                warn!(err = %e, "failed to persist registry after cascade delete");
+                            }
+                        }
+                    }
+
+                    // Best-effort terminal teardown for cascade-removed sessions
                     if let Some(tp) = registry.terminal_pools.preferred() {
+                        for session_ref in &all_session_refs {
+                            if let Some(terminal_id) = crate::attachable::parse_terminal_session_binding_ref(session_ref) {
+                                if let Err(e) = tp.kill_terminal(&terminal_id).await {
+                                    warn!(
+                                        session = %session_ref,
+                                        err = %e,
+                                        "failed to kill cascaded terminal session (best-effort)"
+                                    );
+                                }
+                            }
+                        }
+                        // Also kill explicitly-passed terminal keys (existing behavior)
                         for terminal_id in &terminal_keys {
                             if let Err(e) = tp.kill_terminal(terminal_id).await {
                                 warn!(
@@ -2550,6 +2585,68 @@ mod tests {
         let killed = mock_pool.killed.lock().await;
         assert_eq!(killed.len(), 1);
         assert_eq!(killed[0], terminal_id);
+    }
+
+    #[tokio::test]
+    async fn remove_checkout_cascades_attachable_set_deletion() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_base = temp.path().to_path_buf();
+        let attachable_store = test_attachable_store(&config_base);
+        let host = local_host();
+
+        // Pre-populate the store with a set and members
+        {
+            let mut store = attachable_store.lock().expect("lock store");
+            let checkout_path = HostPath::new(host.clone(), "/repo/wt-feat-x");
+            let set_id = store.ensure_terminal_set(Some(host.clone()), Some(checkout_path));
+            store.ensure_terminal_attachable(
+                &set_id,
+                "terminal_pool",
+                "shpool",
+                "flotilla/feat-x/shell/0",
+                crate::attachable::TerminalPurpose { checkout: "feat-x".into(), role: "shell".into(), index: 0 },
+                "bash",
+                PathBuf::from("/repo/wt-feat-x"),
+                flotilla_protocol::TerminalStatus::Running,
+            );
+        }
+
+        let mock_pool = Arc::new(MockTerminalPool { killed: tokio::sync::Mutex::new(vec![]) });
+        let mut registry = empty_registry();
+        registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
+        registry.terminal_pools.insert("shpool", desc("shpool"), Arc::clone(&mock_pool) as Arc<dyn TerminalPool>);
+        let mut data = empty_data();
+        data.checkouts.insert(hp("/repo/wt-feat-x"), make_checkout("feat-x", "/repo/wt-feat-x"));
+
+        let repo = RepoExecutionContext { identity: repo_identity(), root: repo_root() };
+        let runner = runner_ok();
+        let result = execute(
+            remove_checkout_action("feat-x", vec![]),
+            &repo,
+            &registry,
+            &data,
+            &runner,
+            &config_base,
+            &attachable_store,
+            None,
+            &host,
+        )
+        .await;
+
+        assert_checkout_removed_branch(result, "feat-x");
+
+        // Verify set and members were removed from store
+        {
+            let store = attachable_store.lock().expect("lock store");
+            assert!(store.registry().sets.is_empty(), "set should be removed");
+            assert!(store.registry().attachables.is_empty(), "attachables should be removed");
+            assert!(store.registry().bindings.is_empty(), "bindings should be removed");
+        }
+
+        // Verify terminal was killed via cascade
+        let killed = mock_pool.killed.lock().await;
+        assert_eq!(killed.len(), 1, "cascade should kill the terminal");
+        assert_eq!(killed[0].checkout, "feat-x");
     }
 
     // -----------------------------------------------------------------------
