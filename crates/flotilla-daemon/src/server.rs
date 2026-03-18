@@ -3,6 +3,7 @@ mod peer_connection;
 mod peer_runtime;
 mod remote_commands;
 mod request_dispatch;
+mod shared;
 
 use std::{
     collections::HashMap,
@@ -14,7 +15,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use async_trait::async_trait;
 use flotilla_core::{
     agents::{AgentEntry, SharedAgentStateStore},
     config::ConfigStore,
@@ -47,32 +47,11 @@ use self::{
     peer_runtime::{disconnect_peer_and_rebuild, PeerRuntime},
     remote_commands::{ForwardedCommandMap, PendingRemoteCancelMap, PendingRemoteCommandMap, RemoteCommandRouter},
     request_dispatch::RequestDispatcher,
+    shared::{sync_peer_query_state, write_message, ConnectionLines, ConnectionWriter, SocketPeerSender},
 };
 use crate::peer::{
     ActivationResult, ConnectionDirection, ConnectionMeta, HandleResult, InboundPeerEnvelope, PeerManager, PeerSender, SshTransport,
 };
-
-struct SocketPeerSender {
-    tx: tokio::sync::Mutex<Option<mpsc::Sender<Message>>>,
-}
-
-#[async_trait]
-impl PeerSender for SocketPeerSender {
-    async fn send(&self, msg: PeerWireMessage) -> Result<(), String> {
-        let tx = self.tx.lock().await.as_ref().cloned().ok_or_else(|| "socket peer outbound channel closed".to_string())?;
-        tx.send(Message::Peer(Box::new(msg))).await.map_err(|_| "socket peer outbound channel closed".to_string())
-    }
-
-    async fn retire(&self, reason: GoodbyeReason) -> Result<(), String> {
-        let tx = self.tx.lock().await.take();
-        if let Some(tx) = tx {
-            tx.send(Message::Peer(Box::new(PeerWireMessage::Goodbye { reason })))
-                .await
-                .map_err(|_| "socket peer outbound channel closed".to_string())?;
-        }
-        Ok(())
-    }
-}
 
 /// Notification sent from connection sites to the outbound task when a
 /// peer connects or reconnects. The outbound task responds by sending
@@ -84,6 +63,20 @@ impl PeerSender for SocketPeerSender {
 pub(crate) struct PeerConnectedNotice {
     pub peer: HostName,
     pub generation: u64,
+}
+
+fn build_remote_command_router(daemon: &Arc<InProcessDaemon>, peer_manager: &Arc<Mutex<PeerManager>>) -> RemoteCommandRouter {
+    let pending_remote_commands: PendingRemoteCommandMap = Arc::new(Mutex::new(HashMap::new()));
+    let forwarded_commands: ForwardedCommandMap = Arc::new(Mutex::new(HashMap::new()));
+    let pending_remote_cancels: PendingRemoteCancelMap = Arc::new(Mutex::new(HashMap::new()));
+    RemoteCommandRouter::new(
+        Arc::clone(daemon),
+        Arc::clone(peer_manager),
+        pending_remote_commands,
+        forwarded_commands,
+        pending_remote_cancels,
+        Arc::new(AtomicU64::new(1 << 62)),
+    )
 }
 
 fn build_peer_manager(daemon: &Arc<InProcessDaemon>, config: &ConfigStore) -> Result<Arc<Mutex<PeerManager>>, String> {
@@ -115,21 +108,6 @@ fn build_peer_manager(daemon: &Arc<InProcessDaemon>, config: &ConfigStore) -> Re
     Ok(Arc::new(Mutex::new(peer_manager)))
 }
 
-async fn sync_peer_query_state(peer_manager: &Arc<Mutex<PeerManager>>, daemon: &Arc<InProcessDaemon>) {
-    // Keep the PeerManager lock scoped to this snapshot read. Several call sites
-    // invoke this immediately after mutating PeerManager state; holding the lock
-    // across the daemon writes would deadlock if a future refactor re-entered
-    // PeerManager while mirroring query state.
-    let (configured, summaries, routes) = {
-        let pm = peer_manager.lock().await;
-        (pm.configured_peer_names(), pm.get_peer_host_summaries().clone(), pm.topology_routes())
-    };
-
-    daemon.set_configured_peer_names(configured).await;
-    daemon.set_peer_host_summaries(summaries).await;
-    daemon.set_topology_routes(routes).await;
-}
-
 pub fn spawn_embedded_peer_networking(daemon: Arc<InProcessDaemon>, config: &ConfigStore) -> Result<tokio::task::JoinHandle<()>, String> {
     let peer_manager = build_peer_manager(&daemon, config)?;
     {
@@ -140,17 +118,7 @@ pub fn spawn_embedded_peer_networking(daemon: Arc<InProcessDaemon>, config: &Con
         });
     }
     let (peer_data_tx, peer_data_rx) = mpsc::channel(256);
-    let pending_remote_commands: PendingRemoteCommandMap = Arc::new(Mutex::new(HashMap::new()));
-    let forwarded_commands: ForwardedCommandMap = Arc::new(Mutex::new(HashMap::new()));
-    let pending_remote_cancels: PendingRemoteCancelMap = Arc::new(Mutex::new(HashMap::new()));
-    let remote_command_router = RemoteCommandRouter::new(
-        Arc::clone(&daemon),
-        Arc::clone(&peer_manager),
-        pending_remote_commands,
-        forwarded_commands,
-        pending_remote_cancels,
-        Arc::new(AtomicU64::new(1 << 62)),
-    );
+    let remote_command_router = build_remote_command_router(&daemon, &peer_manager);
     let (handle, _peer_connected_tx) =
         spawn_peer_networking_runtime(daemon, peer_manager, Some(peer_data_rx), peer_data_tx, remote_command_router);
     Ok(handle)
@@ -170,17 +138,7 @@ pub fn spawn_test_peer_networking(
     // Receiver dropped intentionally — None is passed for the inbound task,
     // so no messages are forwarded; the sender satisfies the runtime signature.
     let (peer_data_tx, _peer_data_rx) = mpsc::channel(256);
-    let pending_remote_commands: PendingRemoteCommandMap = Arc::new(Mutex::new(HashMap::new()));
-    let forwarded_commands: ForwardedCommandMap = Arc::new(Mutex::new(HashMap::new()));
-    let pending_remote_cancels: PendingRemoteCancelMap = Arc::new(Mutex::new(HashMap::new()));
-    let remote_command_router = RemoteCommandRouter::new(
-        Arc::clone(&daemon),
-        Arc::clone(&peer_manager),
-        pending_remote_commands,
-        forwarded_commands,
-        pending_remote_cancels,
-        Arc::new(AtomicU64::new(1 << 62)),
-    );
+    let remote_command_router = build_remote_command_router(&daemon, &peer_manager);
     spawn_peer_networking_runtime(
         daemon,
         peer_manager,
@@ -206,10 +164,7 @@ pub struct DaemonServer {
     peer_data_rx: Option<mpsc::Receiver<InboundPeerEnvelope>>,
     /// Manages connections to remote peer hosts and stores their provider data.
     peer_manager: Arc<Mutex<PeerManager>>,
-    pending_remote_commands: PendingRemoteCommandMap,
-    forwarded_commands: ForwardedCommandMap,
-    pending_remote_cancels: PendingRemoteCancelMap,
-    next_remote_command_id: Arc<AtomicU64>,
+    remote_command_router: RemoteCommandRouter,
     agent_state_store: SharedAgentStateStore,
 }
 
@@ -237,6 +192,7 @@ impl DaemonServer {
         let (peer_data_tx, peer_data_rx) = mpsc::channel(256);
 
         let agent_state_store = Arc::clone(daemon.agent_state_store());
+        let remote_command_router = build_remote_command_router(&daemon, &peer_manager);
 
         Ok(Self {
             daemon,
@@ -250,10 +206,7 @@ impl DaemonServer {
             peer_data_tx,
             peer_data_rx: Some(peer_data_rx),
             peer_manager,
-            pending_remote_commands: Arc::new(Mutex::new(HashMap::new())),
-            forwarded_commands: Arc::new(Mutex::new(HashMap::new())),
-            pending_remote_cancels: Arc::new(Mutex::new(HashMap::new())),
-            next_remote_command_id: Arc::new(AtomicU64::new(1 << 62)),
+            remote_command_router,
             agent_state_store,
         })
     }
@@ -297,19 +250,8 @@ impl DaemonServer {
         let socket_path = self.socket_path.clone();
         let client_notify = self.client_notify;
         let peer_data_tx = self.peer_data_tx;
-        let pending_remote_commands = self.pending_remote_commands;
-        let forwarded_commands = self.forwarded_commands;
-        let pending_remote_cancels = self.pending_remote_cancels;
-        let next_remote_command_id = self.next_remote_command_id;
         let agent_state_store = self.agent_state_store;
-        let remote_command_router = RemoteCommandRouter::new(
-            Arc::clone(&daemon),
-            Arc::clone(&self.peer_manager),
-            Arc::clone(&pending_remote_commands),
-            Arc::clone(&forwarded_commands),
-            Arc::clone(&pending_remote_cancels),
-            Arc::clone(&next_remote_command_id),
-        );
+        let remote_command_router = self.remote_command_router;
 
         // Spawn idle timeout watcher (disabled for follower-mode daemons
         // which serve peer connections and should stay up indefinitely)
@@ -434,15 +376,6 @@ fn spawn_peer_networking_runtime(
     remote_command_router: RemoteCommandRouter,
 ) -> (tokio::task::JoinHandle<()>, mpsc::UnboundedSender<PeerConnectedNotice>) {
     PeerRuntime::new(daemon, peer_manager, peer_data_rx, peer_data_tx, remote_command_router).spawn()
-}
-
-type ConnectionLines = tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>;
-type ConnectionWriter = Arc<tokio::sync::Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>>;
-
-/// Write a JSON message followed by a newline to the writer.
-async fn write_message(writer: &tokio::sync::Mutex<BufWriter<tokio::net::unix::OwnedWriteHalf>>, msg: &Message) -> Result<(), ()> {
-    let mut w = writer.lock().await;
-    flotilla_protocol::framing::write_message_line(&mut *w, msg).await.map_err(|_| ())
 }
 
 /// Handle a single client connection.
