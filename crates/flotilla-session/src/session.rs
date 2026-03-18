@@ -25,6 +25,7 @@ use crate::{
 const SOCKET_NAME: &str = "socket";
 const PID_NAME: &str = "daemon.pid";
 const FOREGROUND_NAME: &str = "foreground";
+const STRIP_ENV_VARS: &[&str] = &["SSH_TTY", "SSH_CONNECTION", "SSH_CLIENT"];
 
 #[derive(Debug)]
 pub struct ForegroundAttach {
@@ -33,6 +34,7 @@ pub struct ForegroundAttach {
 
 impl ForegroundAttach {
     pub fn relay_stdio(self) -> Result<(), String> {
+        let _tty_mode = TerminalModeGuard::activate()?;
         let read_handle = {
             let stream = self.stream.lock().map_err(|_| "attach stream lock poisoned".to_string())?;
             stream.try_clone().map_err(|err| format!("clone attach stream: {err}"))?
@@ -44,7 +46,10 @@ impl ForegroundAttach {
             let mut stdout = std::io::stdout().lock();
             loop {
                 match Frame::read(&mut read_stream) {
-                    Ok(Frame::Output(bytes)) => stdout.write_all(&bytes).map_err(|err| format!("write stdout: {err}"))?,
+                    Ok(Frame::Output(bytes)) => {
+                        stdout.write_all(&bytes).map_err(|err| format!("write stdout: {err}"))?;
+                        stdout.flush().map_err(|err| format!("flush stdout: {err}"))?;
+                    }
                     Ok(_) => {}
                     Err(err) => {
                         alive_out.store(false, Ordering::SeqCst);
@@ -92,6 +97,54 @@ impl ForegroundAttach {
         let resize_result = resize_loop.join().map_err(|_| "resize thread panicked".to_string())?;
         out_result?;
         resize_result
+    }
+}
+
+struct TerminalModeGuard {
+    fd: RawFd,
+    original: Option<libc::termios>,
+}
+
+impl TerminalModeGuard {
+    fn activate() -> Result<Self, String> {
+        let fd = std::io::stdin().as_raw_fd();
+        if unsafe { libc::isatty(fd) } != 1 {
+            return Ok(Self { fd, original: None });
+        }
+
+        let mut original = libc::termios {
+            c_iflag: 0,
+            c_oflag: 0,
+            c_cflag: 0,
+            c_lflag: 0,
+            c_line: 0,
+            c_cc: [0; libc::NCCS],
+            c_ispeed: 0,
+            c_ospeed: 0,
+        };
+        if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+            return Err(format!("read terminal attrs: {}", std::io::Error::last_os_error()));
+        }
+
+        let mut raw = original;
+        unsafe {
+            libc::cfmakeraw(&mut raw);
+        }
+        if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) } != 0 {
+            return Err(format!("set terminal raw mode: {}", std::io::Error::last_os_error()));
+        }
+
+        Ok(Self { fd, original: Some(original) })
+    }
+}
+
+impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        if let Some(original) = self.original {
+            unsafe {
+                libc::tcsetattr(self.fd, libc::TCSAFLUSH, &original);
+            }
+        }
     }
 }
 
@@ -316,6 +369,12 @@ fn spawn_pty_child(session: &SessionMetadata) -> Result<RawFd, String> {
             let cwd_c = CString::new(cwd.as_os_str().as_encoded_bytes().to_vec()).map_err(|_| "cwd contains interior nul".to_string())?;
             unsafe {
                 libc::chdir(cwd_c.as_ptr());
+            }
+        }
+        for key in STRIP_ENV_VARS {
+            let key_c = CString::new(*key).map_err(|_| format!("invalid env key {key}"))?;
+            unsafe {
+                libc::unsetenv(key_c.as_ptr());
             }
         }
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());

@@ -11,13 +11,25 @@ fn help_lists_expected_subcommands() {
 #[test]
 fn attach_command_parses() {
     let cli = Cli::try_parse_from(["flotilla-session", "attach", "--name", "demo"]).expect("attach parses");
-    assert_eq!(cli.command, Command::Attach { name: Some("demo".into()), cwd: None, cmd: None });
+    assert_eq!(cli.command, Command::Attach { id: None, name: Some("demo".into()), cwd: None, cmd: None });
+}
+
+#[test]
+fn attach_command_parses_positional_name() {
+    let cli = Cli::try_parse_from(["flotilla-session", "attach", "demo"]).expect("attach positional parses");
+    assert_eq!(cli.command, Command::Attach { id: Some("demo".into()), name: None, cwd: None, cmd: None });
 }
 
 #[test]
 fn create_command_parses() {
     let cli = Cli::try_parse_from(["flotilla-session", "create", "--cmd", "bash"]).expect("create parses");
-    assert_eq!(cli.command, Command::Create { name: None, cwd: None, cmd: Some("bash".into()) });
+    assert_eq!(cli.command, Command::Create { id: None, name: None, cwd: None, cmd: Some("bash".into()) });
+}
+
+#[test]
+fn create_command_parses_positional_name() {
+    let cli = Cli::try_parse_from(["flotilla-session", "create", "demo", "--cmd", "bash"]).expect("create positional parses");
+    assert_eq!(cli.command, Command::Create { id: Some("demo".into()), name: None, cwd: None, cmd: Some("bash".into()) });
 }
 
 #[test]

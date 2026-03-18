@@ -17,6 +17,8 @@ pub struct Cli {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
     Attach {
+        #[arg(value_name = "ID")]
+        id: Option<String>,
         #[arg(long)]
         name: Option<String>,
         #[arg(long)]
@@ -25,6 +27,8 @@ pub enum Command {
         cmd: Option<String>,
     },
     Create {
+        #[arg(value_name = "ID")]
+        id: Option<String>,
         #[arg(long)]
         name: Option<String>,
         #[arg(long)]
@@ -53,13 +57,13 @@ pub fn command() -> clap::Command {
 
 pub fn execute(cli: Cli, service: &SessionService) -> Result<Option<String>, String> {
     match cli.command {
-        Command::Attach { name, cwd, cmd } => {
-            let (_attached, guard) = service.attach(name, cwd, cmd)?;
+        Command::Attach { id, name, cwd, cmd } => {
+            let (_attached, guard) = service.attach(resolve_session_name(id, name)?, cwd, cmd)?;
             guard.relay_stdio()?;
             Ok(None)
         }
-        Command::Create { name, cwd, cmd } => {
-            let created = service.create(name, cwd, cmd)?;
+        Command::Create { id, name, cwd, cmd } => {
+            let created = service.create(resolve_session_name(id, name)?, cwd, cmd)?;
             serde_json::to_string(&created).map(Some).map_err(|err| format!("serialize create result: {err}"))
         }
         Command::List => {
@@ -74,5 +78,14 @@ pub fn execute(cli: Cli, service: &SessionService) -> Result<Option<String>, Str
             service.serve(&id)?;
             Ok(None)
         }
+    }
+}
+
+fn resolve_session_name(id: Option<String>, name: Option<String>) -> Result<Option<String>, String> {
+    match (id, name) {
+        (Some(_), Some(_)) => Err("session id must be provided either positionally or via --name, not both".into()),
+        (Some(id), None) => Ok(Some(id)),
+        (None, Some(name)) => Ok(Some(name)),
+        (None, None) => Ok(None),
     }
 }
