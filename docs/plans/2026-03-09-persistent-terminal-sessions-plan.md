@@ -367,7 +367,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_list_json_with_flotilla_sessions() {
+    fn parse_list_json_with_flotilla_named_sessions() {
         let json = r#"{
             "sessions": [
                 {
