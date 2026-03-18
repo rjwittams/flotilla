@@ -1090,4 +1090,46 @@ mod tests {
 
         assert_eq!(pd.attachable_sets.len(), 1, "set should appear without terminal scan");
     }
+
+    #[test]
+    fn project_attachable_data_strips_orphaned_local_set_id_from_terminal() {
+        let store = crate::attachable::shared_in_memory_attachable_store();
+        let host = flotilla_protocol::HostName::local();
+        let checkout = flotilla_protocol::HostPath::new(host.clone(), "/repo/wt-deleted");
+
+        let set_id = {
+            let mut s = store.lock().expect("lock");
+            let set_id = s.ensure_terminal_set(Some(host.clone()), Some(checkout.clone()));
+            s.ensure_terminal_attachable(
+                &set_id,
+                "terminal_pool",
+                "shpool",
+                "flotilla/deleted/shell/0",
+                crate::attachable::TerminalPurpose { checkout: "deleted".into(), role: "shell".into(), index: 0 },
+                "bash",
+                std::path::PathBuf::from("/repo/wt-deleted"),
+                flotilla_protocol::TerminalStatus::Disconnected,
+            );
+            set_id
+        };
+
+        // Terminal references the set, but checkout is gone from pd.checkouts
+        let mut pd = ProviderData::default();
+        pd.managed_terminals.insert("deleted/shell/0".into(), flotilla_protocol::ManagedTerminal {
+            id: flotilla_protocol::ManagedTerminalId { checkout: "deleted".into(), role: "shell".into(), index: 0 },
+            role: "shell".into(),
+            command: "bash".into(),
+            working_directory: std::path::PathBuf::from("/repo/wt-deleted"),
+            status: flotilla_protocol::TerminalStatus::Disconnected,
+            attachable_id: None,
+            attachable_set_id: Some(set_id),
+        });
+
+        let registry = ProviderRegistry::new();
+        project_attachable_data(&mut pd, &registry, &store);
+
+        assert!(pd.attachable_sets.is_empty(), "orphaned set should not be projected");
+        let terminal = &pd.managed_terminals["deleted/shell/0"];
+        assert!(terminal.attachable_set_id.is_none(), "orphaned local set id should be stripped from terminal");
+    }
 }
