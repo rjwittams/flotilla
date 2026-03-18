@@ -4,6 +4,7 @@
 //! No UI state mutation — all results are carried in the return value.
 
 mod checkout;
+mod session_actions;
 mod terminals;
 mod workspace;
 
@@ -14,17 +15,20 @@ use std::{
 
 #[cfg(test)]
 use flotilla_protocol::CheckoutSelector;
-use flotilla_protocol::{
-    CheckoutTarget, Command, CommandAction, CommandResult, HostName, HostPath, ManagedTerminalId, PreparedTerminalCommand,
-};
-use tracing::{debug, error, info, warn};
+#[cfg(test)]
+use flotilla_protocol::PreparedTerminalCommand;
+use flotilla_protocol::{CheckoutTarget, Command, CommandAction, CommandResult, HostName, HostPath, ManagedTerminalId};
+use tracing::{debug, error, info};
 
 #[cfg(test)]
 use self::checkout::validate_checkout_target;
 #[cfg(test)]
+use self::session_actions::resolve_attach_command;
+#[cfg(test)]
 use self::terminals::{build_terminal_env_vars, escape_for_double_quotes, resolve_terminal_pool, wrap_remote_attach_commands};
 use self::{
     checkout::{resolve_checkout_branch, write_branch_issue_links, CheckoutIntent, CheckoutService},
+    session_actions::SessionActionService,
     terminals::TerminalPreparationService,
     workspace::WorkspaceOrchestrator,
 };
@@ -32,12 +36,7 @@ use crate::{
     attachable::SharedAttachableStore,
     data,
     provider_data::ProviderData,
-    providers::{
-        registry::ProviderRegistry,
-        run,
-        types::{CloudAgentSession, CorrelationKey, WorkspaceConfig},
-        CommandRunner,
-    },
+    providers::{registry::ProviderRegistry, run, types::WorkspaceConfig, CommandRunner},
     step::{Step, StepAction, StepHost, StepOutcome, StepPlan, StepResolver},
 };
 
@@ -247,17 +246,25 @@ async fn build_teleport_session_plan(
     daemon_socket_path: Option<PathBuf>,
     local_host: flotilla_protocol::HostName,
 ) -> ExecutionPlan {
+    let session_actions = SessionActionService::new(
+        &repo_root,
+        registry.as_ref(),
+        providers_data.as_ref(),
+        &config_base,
+        &attachable_store,
+        daemon_socket_path.as_deref(),
+        &local_host,
+    );
+
     // Shared slot for the teleport (attach) command — populated by step 1.
     let teleport_cmd_slot: Arc<tokio::sync::Mutex<Option<String>>> = Arc::new(tokio::sync::Mutex::new(None));
 
     // Shared slot for checkout path — pre-populated if checkout_key references a known checkout.
-    let checkout_path_slot: Arc<tokio::sync::Mutex<Option<PathBuf>>> = {
-        let existing = checkout_key.as_ref().and_then(|key| {
-            let host_key = flotilla_protocol::HostPath::new(local_host.clone(), key.clone());
-            providers_data.checkouts.get(&host_key).map(|_| key.clone())
-        });
-        Arc::new(tokio::sync::Mutex::new(existing))
+    let initial_checkout_path = match session_actions.resolve_teleport_checkout_path(checkout_key.as_ref(), None).await {
+        Ok(path) => path,
+        Err(message) => return ExecutionPlan::Immediate(CommandResult::Error { message }),
     };
+    let checkout_path_slot: Arc<tokio::sync::Mutex<Option<PathBuf>>> = Arc::new(tokio::sync::Mutex::new(initial_checkout_path));
 
     let mut steps = Vec::new();
 
@@ -265,14 +272,28 @@ async fn build_teleport_session_plan(
     {
         let slot = Arc::clone(&teleport_cmd_slot);
         let session_id = session_id.clone();
+        let repo_root = repo_root.clone();
         let registry = Arc::clone(&registry);
         let providers_data = Arc::clone(&providers_data);
+        let config_base = config_base.clone();
+        let attachable_store = attachable_store.clone();
+        let daemon_socket_path = daemon_socket_path.clone();
+        let local_host = local_host.clone();
         steps.push(Step {
             description: format!("Resolve attach command for session {session_id}"),
             host: StepHost::Local,
             action: StepAction::Closure(Box::new(move |_prior| {
                 Box::pin(async move {
-                    let cmd = resolve_attach_command(&session_id, &registry, &providers_data).await?;
+                    let session_actions = SessionActionService::new(
+                        &repo_root,
+                        registry.as_ref(),
+                        providers_data.as_ref(),
+                        &config_base,
+                        &attachable_store,
+                        daemon_socket_path.as_deref(),
+                        &local_host,
+                    );
+                    let cmd = session_actions.resolve_attach_command(&session_id).await?;
                     *slot.lock().await = Some(cmd);
                     Ok(StepOutcome::Completed)
                 })
@@ -287,6 +308,11 @@ async fn build_teleport_session_plan(
         let branch = branch.clone();
         let repo_root = repo_root.clone();
         let registry = Arc::clone(&registry);
+        let providers_data = Arc::clone(&providers_data);
+        let config_base = config_base.clone();
+        let attachable_store = attachable_store.clone();
+        let daemon_socket_path = daemon_socket_path.clone();
+        let local_host = local_host.clone();
         steps.push(Step {
             description: "Ensure checkout for teleport".to_string(),
             host: StepHost::Local,
@@ -296,13 +322,17 @@ async fn build_teleport_session_plan(
                     if slot.lock().await.is_some() {
                         return Ok(StepOutcome::Skipped);
                     }
-                    let branch_name = match &branch {
-                        Some(b) => b.clone(),
-                        None => return Ok(StepOutcome::Skipped),
-                    };
-                    let cm = registry.checkout_managers.preferred().cloned().ok_or_else(|| "No checkout manager available".to_string())?;
-                    let (path, _checkout) = cm.create_checkout(&repo_root, &branch_name, false).await?;
-                    *slot.lock().await = Some(path);
+                    let session_actions = SessionActionService::new(
+                        &repo_root,
+                        registry.as_ref(),
+                        providers_data.as_ref(),
+                        &config_base,
+                        &attachable_store,
+                        daemon_socket_path.as_deref(),
+                        &local_host,
+                    );
+                    let path = session_actions.resolve_teleport_checkout_path(None, branch.as_deref()).await?;
+                    *slot.lock().await = path;
                     Ok(StepOutcome::Completed)
                 })
             })),
@@ -316,6 +346,7 @@ async fn build_teleport_session_plan(
         let branch = branch.clone();
         let repo_root = repo_root.clone();
         let registry = Arc::clone(&registry);
+        let providers_data = Arc::clone(&providers_data);
         let config_base = config_base.clone();
         let attachable_store = attachable_store.clone();
         let daemon_socket_path = daemon_socket_path.clone();
@@ -328,16 +359,16 @@ async fn build_teleport_session_plan(
                     let path =
                         path_slot.lock().await.clone().ok_or_else(|| "Could not determine checkout path for teleport".to_string())?;
                     let teleport_cmd = teleport_slot.lock().await.clone().ok_or_else(|| "Attach command not resolved".to_string())?;
-                    let name = branch.as_deref().unwrap_or("session");
-                    let workspace_orchestrator = WorkspaceOrchestrator::new(
+                    let session_actions = SessionActionService::new(
                         &repo_root,
                         registry.as_ref(),
+                        providers_data.as_ref(),
                         &config_base,
                         &attachable_store,
                         daemon_socket_path.as_deref(),
                         &local_host,
                     );
-                    workspace_orchestrator.create_workspace_for_teleport(&path, name, &teleport_cmd).await?;
+                    session_actions.create_workspace_for_teleport(&path, branch.as_deref(), &teleport_cmd).await?;
                     Ok(StepOutcome::Completed)
                 })
             })),
@@ -416,15 +447,10 @@ async fn build_archive_session_plan(
     registry: Arc<ProviderRegistry>,
     providers_data: Arc<ProviderData>,
 ) -> ExecutionPlan {
-    let should_run_as_step = providers_data
-        .sessions
-        .get(session_id.as_str())
-        .and_then(|session| session_provider_key(session, &session_id))
-        .and_then(|provider_key| registry.cloud_agents.get(provider_key))
-        .is_some();
+    let session_actions = SessionActionService::new_read_only(registry.as_ref(), providers_data.as_ref());
 
-    if !should_run_as_step {
-        return ExecutionPlan::Immediate(archive_session_result(&session_id, &registry, &providers_data).await);
+    if !session_actions.should_run_archive_as_step(&session_id) {
+        return ExecutionPlan::Immediate(session_actions.archive_session_result(&session_id).await);
     }
 
     ExecutionPlan::Steps(StepPlan::new(vec![Step {
@@ -432,7 +458,8 @@ async fn build_archive_session_plan(
         host: StepHost::Local,
         action: StepAction::Closure(Box::new(move |_prior| {
             Box::pin(async move {
-                match archive_session_result(&session_id, &registry, &providers_data).await {
+                let session_actions = SessionActionService::new_read_only(registry.as_ref(), providers_data.as_ref());
+                match session_actions.archive_session_result(&session_id).await {
                     CommandResult::Error { message } => Err(message),
                     result => Ok(StepOutcome::CompletedWith(result)),
                 }
@@ -446,8 +473,10 @@ async fn build_generate_branch_name_plan(
     registry: Arc<ProviderRegistry>,
     providers_data: Arc<ProviderData>,
 ) -> ExecutionPlan {
-    if registry.ai_utilities.is_empty() {
-        return ExecutionPlan::Immediate(generate_branch_name_result(&issue_keys, &registry, &providers_data).await);
+    let session_actions = SessionActionService::new_read_only(registry.as_ref(), providers_data.as_ref());
+
+    if !session_actions.should_run_generate_branch_name_as_step() {
+        return ExecutionPlan::Immediate(session_actions.generate_branch_name_result(&issue_keys).await);
     }
 
     ExecutionPlan::Steps(StepPlan::new(vec![Step {
@@ -455,10 +484,8 @@ async fn build_generate_branch_name_plan(
         host: StepHost::Local,
         action: StepAction::Closure(Box::new(move |_prior| {
             Box::pin(async move {
-                match generate_branch_name_result(&issue_keys, &registry, &providers_data).await {
-                    CommandResult::Error { message } => Err(message),
-                    result => Ok(StepOutcome::CompletedWith(result)),
-                }
+                let session_actions = SessionActionService::new_read_only(registry.as_ref(), providers_data.as_ref());
+                Ok(StepOutcome::CompletedWith(session_actions.generate_branch_name_result(&issue_keys).await))
             })
         })),
     }]))
@@ -643,34 +670,53 @@ pub async fn execute(
             }
         }
 
-        CommandAction::ArchiveSession { session_id } => archive_session_result(&session_id, registry, providers_data).await,
+        CommandAction::ArchiveSession { session_id } => {
+            let session_actions = SessionActionService::new(
+                &repo.root,
+                registry,
+                providers_data,
+                config_base,
+                attachable_store,
+                daemon_socket_path,
+                local_host,
+            );
+            session_actions.archive_session_result(&session_id).await
+        }
 
-        CommandAction::GenerateBranchName { issue_keys } => generate_branch_name_result(&issue_keys, registry, providers_data).await,
+        CommandAction::GenerateBranchName { issue_keys } => {
+            let session_actions = SessionActionService::new(
+                &repo.root,
+                registry,
+                providers_data,
+                config_base,
+                attachable_store,
+                daemon_socket_path,
+                local_host,
+            );
+            session_actions.generate_branch_name_result(&issue_keys).await
+        }
 
         CommandAction::TeleportSession { session_id, branch, checkout_key } => {
             info!(%session_id, "teleporting to session");
-            let teleport_cmd = match resolve_attach_command(&session_id, registry, providers_data).await {
+            let session_actions = SessionActionService::new(
+                &repo.root,
+                registry,
+                providers_data,
+                config_base,
+                attachable_store,
+                daemon_socket_path,
+                local_host,
+            );
+            let teleport_cmd = match session_actions.resolve_attach_command(&session_id).await {
                 Ok(cmd) => cmd,
                 Err(message) => return CommandResult::Error { message },
             };
-            let workspace_orchestrator =
-                WorkspaceOrchestrator::new(&repo.root, registry, config_base, attachable_store, daemon_socket_path, local_host);
-            let wt_path = if let Some(ref key) = checkout_key {
-                let host_key = flotilla_protocol::HostPath::new(local_host.clone(), key.clone());
-                providers_data.checkouts.get(&host_key).map(|_| key.clone())
-            } else if let Some(branch_name) = &branch {
-                let checkout_result = if let Some(cm) = registry.checkout_managers.preferred() {
-                    cm.create_checkout(&repo.root, branch_name, false).await.ok()
-                } else {
-                    None
-                };
-                checkout_result.map(|(path, _)| path)
-            } else {
-                None
+            let wt_path = match session_actions.resolve_teleport_checkout_path(checkout_key.as_ref(), branch.as_deref()).await {
+                Ok(path) => path,
+                Err(message) => return CommandResult::Error { message },
             };
             if let Some(path) = wt_path {
-                let name = branch.as_deref().unwrap_or("session");
-                if let Err(message) = workspace_orchestrator.create_workspace_for_teleport(&path, name, &teleport_cmd).await {
+                if let Err(message) = session_actions.create_workspace_for_teleport(&path, branch.as_deref(), &teleport_cmd).await {
                     return CommandResult::Error { message };
                 }
                 CommandResult::Ok
@@ -693,82 +739,6 @@ pub async fn execute(
     }
 }
 
-async fn archive_session_result(session_id: &str, registry: &ProviderRegistry, providers_data: &ProviderData) -> CommandResult {
-    if let Some(session) = providers_data.sessions.get(session_id) {
-        info!(%session_id, "archiving session");
-        if let Some(key) = session_provider_key(session, session_id) {
-            if let Some((_, ca)) = registry.cloud_agents.get(key) {
-                match ca.archive_session(session_id).await {
-                    Ok(()) => CommandResult::Ok,
-                    Err(e) => CommandResult::Error { message: e },
-                }
-            } else {
-                CommandResult::Error { message: format!("No coding agent provider: {key}") }
-            }
-        } else {
-            CommandResult::Error { message: format!("Cannot determine provider for session {session_id}") }
-        }
-    } else {
-        CommandResult::Error { message: format!("session not found: {session_id}") }
-    }
-}
-
-async fn generate_branch_name_result(issue_keys: &[String], registry: &ProviderRegistry, providers_data: &ProviderData) -> CommandResult {
-    let issues: Vec<(String, String)> =
-        issue_keys.iter().filter_map(|k| providers_data.issues.get(k.as_str()).map(|issue| (k.clone(), issue.title.clone()))).collect();
-
-    let issue_id_pairs: Vec<(String, String)> = {
-        let provider = registry.issue_trackers.preferred_name().map(|s| s.to_string()).unwrap_or_else(|| "issues".to_string());
-        issues.iter().map(|(id, _title)| (provider.clone(), id.clone())).collect()
-    };
-
-    info!(issue_count = issue_keys.len(), "generating branch name");
-    let branch_result = if let Some(ai) = registry.ai_utilities.preferred() {
-        let context: Vec<String> = issues.iter().map(|(id, title)| format!("{} #{}", title, id)).collect();
-        let prompt_text = if context.len() == 1 { context[0].clone() } else { context.join("; ") };
-        Some(ai.generate_branch_name(&prompt_text).await)
-    } else {
-        None
-    };
-
-    match branch_result {
-        Some(Ok(name)) => {
-            info!(%name, "AI suggested");
-            CommandResult::BranchNameGenerated { name, issue_ids: issue_id_pairs }
-        }
-        Some(Err(error)) => {
-            warn!(%error, "using fallback branch name after AI failure");
-            let fallback: Vec<String> = issues.iter().map(|(id, _)| format!("issue-{}", id)).collect();
-            let name = fallback.join("-");
-            CommandResult::BranchNameGenerated { name, issue_ids: issue_id_pairs }
-        }
-        None => {
-            warn!("using fallback branch name without AI provider");
-            let fallback: Vec<String> = issues.iter().map(|(id, _)| format!("issue-{}", id)).collect();
-            let name = fallback.join("-");
-            CommandResult::BranchNameGenerated { name, issue_ids: issue_id_pairs }
-        }
-    }
-}
-
-fn session_provider_key<'a>(session: &'a CloudAgentSession, session_id: &str) -> Option<&'a str> {
-    session.correlation_keys.iter().find_map(|k| match k {
-        CorrelationKey::SessionRef(provider, id) if id == session_id => Some(provider.as_str()),
-        _ => None,
-    })
-}
-
-async fn resolve_attach_command(session_id: &str, registry: &ProviderRegistry, providers_data: &ProviderData) -> Result<String, String> {
-    let provider_key = providers_data
-        .sessions
-        .get(session_id)
-        .and_then(|s| session_provider_key(s, session_id))
-        .ok_or_else(|| format!("Cannot determine provider for session {session_id}"))?;
-
-    let (_, ca) = registry.cloud_agents.get(provider_key).ok_or_else(|| format!("No coding agent provider: {provider_key}"))?;
-
-    ca.attach_command(session_id).await
-}
 /// Build a WorkspaceConfig from repo/branch/dir/command.
 pub(crate) fn workspace_config(
     repo_root: &Path,
