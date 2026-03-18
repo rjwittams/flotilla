@@ -327,8 +327,15 @@ async fn build_teleport_session_plan(
                     let name = branch.as_deref().unwrap_or("session");
                     if let Some(ws_mgr) = registry.workspace_managers.preferred() {
                         let mut config = workspace_config(&repo_root, name, &path, &teleport_cmd, &config_base);
-                        if let Some(tp) = registry.terminal_pools.preferred() {
-                            resolve_terminal_pool(&mut config, tp.as_ref(), &attachable_store, daemon_socket_path.as_deref()).await;
+                        if let Some((tp_desc, tp)) = registry.terminal_pools.preferred_with_desc() {
+                            resolve_terminal_pool(
+                                &mut config,
+                                tp.as_ref(),
+                                &attachable_store,
+                                &tp_desc.implementation,
+                                daemon_socket_path.as_deref(),
+                            )
+                            .await;
                         }
                         // Teleport always creates a new workspace — the attach command is
                         // session-specific, so reusing an existing workspace would attach
@@ -531,8 +538,8 @@ async fn create_workspace_for_checkout_impl(
             return Ok(StepOutcome::Completed);
         }
         let mut config = workspace_config(&repo.root, label, checkout_path, "claude", config_base);
-        if let Some(tp) = registry.terminal_pools.preferred() {
-            resolve_terminal_pool(&mut config, tp.as_ref(), attachable_store, daemon_socket_path).await;
+        if let Some((tp_desc, tp)) = registry.terminal_pools.preferred_with_desc() {
+            resolve_terminal_pool(&mut config, tp.as_ref(), attachable_store, &tp_desc.implementation, daemon_socket_path).await;
         }
         match ws_mgr.create_workspace(&config).await {
             Ok((ws_ref, _workspace)) => {
@@ -902,8 +909,9 @@ pub async fn execute(
                 let name = branch.as_deref().unwrap_or("session");
                 if let Some((provider_name, ws_mgr)) = preferred_workspace_manager(registry) {
                     let mut config = workspace_config(&repo.root, name, &path, &teleport_cmd, config_base);
-                    if let Some(tp) = registry.terminal_pools.preferred() {
-                        resolve_terminal_pool(&mut config, tp.as_ref(), attachable_store, daemon_socket_path).await;
+                    if let Some((tp_desc, tp)) = registry.terminal_pools.preferred_with_desc() {
+                        resolve_terminal_pool(&mut config, tp.as_ref(), attachable_store, &tp_desc.implementation, daemon_socket_path)
+                            .await;
                     }
                     // Teleport always creates a new workspace — the attach command is
                     // session-specific, so reusing an existing workspace would attach
@@ -1043,12 +1051,11 @@ async fn validate_checkout_target(
     }
 }
 
-/// Resolve terminal sessions through the pool. Each terminal content entry is
-/// ensured running and its attach command is stored in `config.resolved_commands`.
 /// Build the env vars to inject into a managed terminal session.
 fn build_terminal_env_vars(
     id: &ManagedTerminalId,
     attachable_store: &SharedAttachableStore,
+    terminal_pool_provider: &str,
     daemon_socket_path: Option<&Path>,
 ) -> crate::providers::terminal::TerminalEnvVars {
     use crate::attachable::{terminal_session_binding_ref, BindingObjectKind};
@@ -1057,9 +1064,16 @@ fn build_terminal_env_vars(
 
     // Look up the stable AttachableId for this terminal from the store.
     let session_name = terminal_session_binding_ref(id);
-    if let Ok(store) = attachable_store.lock() {
-        if let Some(attachable_id) = store.lookup_binding("terminal_pool", "shpool", BindingObjectKind::Attachable, &session_name) {
-            vars.push(("FLOTILLA_ATTACHABLE_ID".to_string(), attachable_id.to_string()));
+    match attachable_store.lock() {
+        Ok(store) => {
+            if let Some(attachable_id) =
+                store.lookup_binding("terminal_pool", terminal_pool_provider, BindingObjectKind::Attachable, &session_name)
+            {
+                vars.push(("FLOTILLA_ATTACHABLE_ID".to_string(), attachable_id.to_string()));
+            }
+        }
+        Err(e) => {
+            warn!(err = %e, "attachable store lock poisoned in build_terminal_env_vars");
         }
     }
 
@@ -1070,10 +1084,13 @@ fn build_terminal_env_vars(
     vars
 }
 
+/// Resolve terminal sessions through the pool. Each terminal content entry is
+/// ensured running and its attach command is stored in `config.resolved_commands`.
 async fn resolve_terminal_pool(
     config: &mut WorkspaceConfig,
     terminal_pool: &dyn TerminalPool,
     attachable_store: &SharedAttachableStore,
+    terminal_pool_provider: &str,
     daemon_socket_path: Option<&Path>,
 ) {
     let tmpl = if let Some(ref yaml) = config.template_yaml {
@@ -1103,7 +1120,7 @@ async fn resolve_terminal_pool(
                 warn!(%id, err = %e, "failed to ensure terminal");
                 continue;
             }
-            let env_vars = build_terminal_env_vars(&id, attachable_store, daemon_socket_path);
+            let env_vars = build_terminal_env_vars(&id, attachable_store, terminal_pool_provider, daemon_socket_path);
             match terminal_pool.attach_command(&id, &entry.command, &config.working_directory, &env_vars).await {
                 Ok(cmd) => {
                     debug!(%id, command = ?entry.command, resolved = ?cmd, "terminal resolved");
@@ -1134,7 +1151,8 @@ async fn prepare_terminal_commands(
         // The requesting host sent its template's role→command mappings.
         // If a terminal pool is available, wrap each command through it
         // for persistent sessions. Otherwise return as-is for passthrough.
-        if let Some(tp) = registry.terminal_pools.preferred() {
+        if let Some((tp_desc, tp)) = registry.terminal_pools.preferred_with_desc() {
+            let terminal_pool_provider = tp_desc.implementation.as_str();
             let mut resolved = Vec::new();
             let mut role_index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
             for cmd in requested_commands {
@@ -1144,7 +1162,7 @@ async fn prepare_terminal_commands(
                 if let Err(e) = tp.ensure_running(&id, &cmd.command, checkout_path).await {
                     warn!(%id, err = %e, "failed to ensure terminal");
                 }
-                let env_vars = build_terminal_env_vars(&id, attachable_store, daemon_socket_path);
+                let env_vars = build_terminal_env_vars(&id, attachable_store, terminal_pool_provider, daemon_socket_path);
                 match tp.attach_command(&id, &cmd.command, checkout_path, &env_vars).await {
                     Ok(attach_cmd) => resolved.push(PreparedTerminalCommand { role: cmd.role.clone(), command: attach_cmd }),
                     Err(e) => {
@@ -1160,8 +1178,8 @@ async fn prepare_terminal_commands(
 
     // Fallback: read the local template (for backwards compat or local use)
     let mut config = workspace_config(repo_root, branch, checkout_path, "claude", config_base);
-    if let Some(tp) = registry.terminal_pools.preferred() {
-        resolve_terminal_pool(&mut config, tp.as_ref(), attachable_store, daemon_socket_path).await;
+    if let Some((tp_desc, tp)) = registry.terminal_pools.preferred_with_desc() {
+        resolve_terminal_pool(&mut config, tp.as_ref(), attachable_store, &tp_desc.implementation, daemon_socket_path).await;
     }
 
     let commands = if let Some(resolved) = config.resolved_commands { resolved } else { render_template_commands(&config) };
@@ -3516,7 +3534,8 @@ mod tests {
             resolved_commands: None,
         };
 
-        resolve_terminal_pool(&mut config, mock_pool.as_ref(), &crate::attachable::shared_in_memory_attachable_store(), None).await;
+        resolve_terminal_pool(&mut config, mock_pool.as_ref(), &crate::attachable::shared_in_memory_attachable_store(), "shpool", None)
+            .await;
 
         // Default template has one "main" terminal entry
         assert!(config.resolved_commands.is_some());
@@ -3542,10 +3561,56 @@ content:
             resolved_commands: None,
         };
 
-        resolve_terminal_pool(&mut config, mock_pool.as_ref(), &crate::attachable::shared_in_memory_attachable_store(), None).await;
+        resolve_terminal_pool(&mut config, mock_pool.as_ref(), &crate::attachable::shared_in_memory_attachable_store(), "shpool", None)
+            .await;
 
         // All content entries were non-terminal, so resolved_commands stays None
         assert!(config.resolved_commands.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests: build_terminal_env_vars
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_terminal_env_vars_populates_both_vars_when_binding_exists() {
+        use flotilla_protocol::TerminalStatus;
+
+        use crate::attachable::{shared_in_memory_attachable_store, TerminalPurpose};
+
+        let store = shared_in_memory_attachable_store();
+        {
+            let mut s = store.lock().expect("lock");
+            let set_id = s.ensure_terminal_set(None, None);
+            s.ensure_terminal_attachable(
+                &set_id,
+                "terminal_pool",
+                "shpool",
+                "flotilla/feat/agent/0",
+                TerminalPurpose { checkout: "feat".into(), role: "agent".into(), index: 0 },
+                "claude",
+                std::path::PathBuf::from("/repo/feat"),
+                TerminalStatus::Running,
+            );
+        }
+
+        let id = ManagedTerminalId { checkout: "feat".into(), role: "agent".into(), index: 0 };
+        let socket = std::path::PathBuf::from("/tmp/flotilla.sock");
+        let vars = build_terminal_env_vars(&id, &store, "shpool", Some(&socket));
+
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].0, "FLOTILLA_ATTACHABLE_ID");
+        assert!(!vars[0].1.is_empty());
+        assert_eq!(vars[1].0, "FLOTILLA_DAEMON_SOCKET");
+        assert_eq!(vars[1].1, "/tmp/flotilla.sock");
+    }
+
+    #[test]
+    fn build_terminal_env_vars_empty_when_no_binding() {
+        let store = crate::attachable::shared_in_memory_attachable_store();
+        let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
+        let vars = build_terminal_env_vars(&id, &store, "shpool", None);
+        assert!(vars.is_empty());
     }
 
     // -----------------------------------------------------------------------
