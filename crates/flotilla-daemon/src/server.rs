@@ -1,3 +1,5 @@
+mod remote_commands;
+
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -17,18 +19,20 @@ use flotilla_core::{
     providers::discovery::DiscoveryRuntime,
 };
 use flotilla_protocol::{
-    Command, CommandAction, CommandPeerEvent, CommandResult, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message,
-    PeerConnectionState, PeerDataMessage, PeerWireMessage, RepoIdentity, RepoSelector, Request, Response, RoutedPeerMessage,
-    PROTOCOL_VERSION,
+    Command, CommandAction, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message, PeerConnectionState, PeerDataMessage,
+    PeerWireMessage, RepoIdentity, RepoSelector, Request, Response, PROTOCOL_VERSION,
 };
 use futures::future::join_all;
 use tokio::{
     io::{AsyncBufReadExt, BufReader, BufWriter},
     net::UnixListener,
-    sync::{mpsc, oneshot, watch, Mutex, Notify},
+    sync::{mpsc, watch, Mutex, Notify},
 };
 use tracing::{debug, error, info, warn};
 
+#[cfg(test)]
+use self::remote_commands::{extract_command_repo_identity, ForwardedCommand, ForwardedCommandState, PendingRemoteCommand};
+use self::remote_commands::{ForwardedCommandMap, PendingRemoteCancelMap, PendingRemoteCommandMap, RemoteCommandRouter};
 use crate::peer::{
     ActivationResult, ConnectionDirection, ConnectionMeta, HandleResult, InboundPeerEnvelope, PeerManager, PeerSender, SshTransport,
 };
@@ -54,30 +58,6 @@ impl PeerSender for SocketPeerSender {
         Ok(())
     }
 }
-
-#[derive(Debug, Clone)]
-struct PendingRemoteCommand {
-    command_id: u64,
-    target_host: HostName,
-    repo_identity: Option<RepoIdentity>,
-    repo: Option<PathBuf>,
-    finished_via_event: bool,
-}
-
-#[derive(Debug, Clone)]
-struct ForwardedCommand {
-    state: ForwardedCommandState,
-}
-
-#[derive(Debug, Clone)]
-enum ForwardedCommandState {
-    Launching { ready: Arc<Notify> },
-    Running { command_id: u64 },
-}
-
-type PendingRemoteCommandMap = Arc<Mutex<HashMap<u64, PendingRemoteCommand>>>;
-type ForwardedCommandMap = Arc<Mutex<HashMap<u64, ForwardedCommand>>>;
-type PendingRemoteCancelMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<(), String>>>>>;
 
 /// Notification sent from connection sites to the outbound task when a
 /// peer connects or reconnects. The outbound task responds by sending
@@ -148,15 +128,16 @@ pub fn spawn_embedded_peer_networking(daemon: Arc<InProcessDaemon>, config: &Con
     let pending_remote_commands: PendingRemoteCommandMap = Arc::new(Mutex::new(HashMap::new()));
     let forwarded_commands: ForwardedCommandMap = Arc::new(Mutex::new(HashMap::new()));
     let pending_remote_cancels: PendingRemoteCancelMap = Arc::new(Mutex::new(HashMap::new()));
-    let (handle, _peer_connected_tx) = spawn_peer_networking_runtime(
-        daemon,
-        peer_manager,
-        Some(peer_data_rx),
-        peer_data_tx,
+    let remote_command_router = RemoteCommandRouter::new(
+        Arc::clone(&daemon),
+        Arc::clone(&peer_manager),
         pending_remote_commands,
         forwarded_commands,
         pending_remote_cancels,
+        Arc::new(AtomicU64::new(1 << 62)),
     );
+    let (handle, _peer_connected_tx) =
+        spawn_peer_networking_runtime(daemon, peer_manager, Some(peer_data_rx), peer_data_tx, remote_command_router);
     Ok(handle)
 }
 
@@ -177,37 +158,27 @@ pub fn spawn_test_peer_networking(
     let pending_remote_commands: PendingRemoteCommandMap = Arc::new(Mutex::new(HashMap::new()));
     let forwarded_commands: ForwardedCommandMap = Arc::new(Mutex::new(HashMap::new()));
     let pending_remote_cancels: PendingRemoteCancelMap = Arc::new(Mutex::new(HashMap::new()));
+    let remote_command_router = RemoteCommandRouter::new(
+        Arc::clone(&daemon),
+        Arc::clone(&peer_manager),
+        pending_remote_commands,
+        forwarded_commands,
+        pending_remote_cancels,
+        Arc::new(AtomicU64::new(1 << 62)),
+    );
     spawn_peer_networking_runtime(
         daemon,
         peer_manager,
         None, // No inbound task — test drives outbound via PeerConnectedNotice
         peer_data_tx,
-        pending_remote_commands,
-        forwarded_commands,
-        pending_remote_cancels,
+        remote_command_router,
     )
 }
 
 struct DispatchContext<'a> {
     daemon: &'a Arc<InProcessDaemon>,
-    peer_manager: &'a Arc<Mutex<PeerManager>>,
-    pending_remote_commands: &'a PendingRemoteCommandMap,
-    pending_remote_cancels: &'a PendingRemoteCancelMap,
-    next_remote_command_id: &'a Arc<AtomicU64>,
+    remote_command_router: &'a RemoteCommandRouter,
     agent_state_store: &'a SharedAgentStateStore,
-}
-
-fn extract_command_repo_identity(command: &Command) -> Option<RepoIdentity> {
-    if let Some(RepoSelector::Identity(identity)) = command.context_repo.as_ref() {
-        return Some(identity.clone());
-    }
-    match &command.action {
-        CommandAction::Checkout { repo: RepoSelector::Identity(identity), .. } => Some(identity.clone()),
-        CommandAction::PrepareTerminalForCheckout { .. } => None,
-        CommandAction::UntrackRepo { repo: RepoSelector::Identity(identity) } => Some(identity.clone()),
-        CommandAction::Refresh { repo: Some(RepoSelector::Identity(identity)) } => Some(identity.clone()),
-        _ => None,
-    }
 }
 
 /// The daemon server that listens on a Unix socket and dispatches requests
@@ -322,6 +293,14 @@ impl DaemonServer {
         let pending_remote_cancels = self.pending_remote_cancels;
         let next_remote_command_id = self.next_remote_command_id;
         let agent_state_store = self.agent_state_store;
+        let remote_command_router = RemoteCommandRouter::new(
+            Arc::clone(&daemon),
+            Arc::clone(&self.peer_manager),
+            Arc::clone(&pending_remote_commands),
+            Arc::clone(&forwarded_commands),
+            Arc::clone(&pending_remote_cancels),
+            Arc::clone(&next_remote_command_id),
+        );
 
         // Spawn idle timeout watcher (disabled for follower-mode daemons
         // which serve peer connections and should stay up indefinitely)
@@ -367,9 +346,7 @@ impl DaemonServer {
             Arc::clone(&peer_manager),
             peer_data_rx,
             peer_data_tx.clone(),
-            Arc::clone(&pending_remote_commands),
-            Arc::clone(&forwarded_commands),
-            Arc::clone(&pending_remote_cancels),
+            remote_command_router.clone(),
         );
 
         // SIGTERM handler
@@ -388,9 +365,7 @@ impl DaemonServer {
                             let shutdown_rx = shutdown_rx.clone();
                             let peer_data_tx = peer_data_tx.clone();
                             let peer_manager = Arc::clone(&peer_manager);
-                            let pending_remote_commands = Arc::clone(&pending_remote_commands);
-                            let pending_remote_cancels = Arc::clone(&pending_remote_cancels);
-                            let next_remote_command_id = Arc::clone(&next_remote_command_id);
+                            let remote_command_router = remote_command_router.clone();
                             let peer_connected_tx = peer_connected_tx.clone();
                             let agent_state_store = Arc::clone(&agent_state_store);
 
@@ -401,9 +376,7 @@ impl DaemonServer {
                                     shutdown_rx,
                                     peer_data_tx,
                                     peer_manager,
-                                    pending_remote_commands,
-                                    pending_remote_cancels,
-                                    next_remote_command_id,
+                                    remote_command_router,
                                     client_count,
                                     client_notify,
                                     peer_connected_tx,
@@ -449,9 +422,7 @@ fn spawn_peer_networking_runtime(
     peer_manager: Arc<Mutex<PeerManager>>,
     peer_data_rx: Option<mpsc::Receiver<InboundPeerEnvelope>>,
     peer_data_tx: mpsc::Sender<InboundPeerEnvelope>,
-    pending_remote_commands: PendingRemoteCommandMap,
-    forwarded_commands: ForwardedCommandMap,
-    pending_remote_cancels: PendingRemoteCancelMap,
+    remote_command_router: RemoteCommandRouter,
 ) -> (tokio::task::JoinHandle<()>, mpsc::UnboundedSender<PeerConnectedNotice>) {
     let outbound_peer_manager = Arc::clone(&peer_manager);
     let peer_manager_task = Arc::clone(&peer_manager);
@@ -459,9 +430,7 @@ fn spawn_peer_networking_runtime(
     let (peer_connected_tx, peer_connected_rx) = mpsc::unbounded_channel::<PeerConnectedNotice>();
     let peer_connected_tx_for_ssh = peer_connected_tx.clone();
     let peer_daemon = Arc::clone(&daemon);
-    let pending_remote_commands_task = Arc::clone(&pending_remote_commands);
-    let forwarded_commands_task = Arc::clone(&forwarded_commands);
-    let pending_remote_cancels_task = Arc::clone(&pending_remote_cancels);
+    let remote_command_router_task = remote_command_router.clone();
 
     let inbound_handle = tokio::spawn(async move {
         if let Some(mut rx) = peer_data_rx {
@@ -700,55 +669,26 @@ fn spawn_peer_networking_runtime(
                             }
                             HandleResult::CommandRequested { request_id, requester_host, reply_via, command } => {
                                 drop(pm);
-                                let ready = Arc::new(Notify::new());
-                                forwarded_commands_task.lock().await.insert(
-                                    request_id,
-                                    ForwardedCommand {
-                                        state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) },
-                                    },
-                                );
-                                tokio::spawn(execute_forwarded_command(
-                                    Arc::clone(&peer_daemon),
-                                    Arc::clone(&peer_manager_task),
-                                    Arc::clone(&forwarded_commands_task),
-                                    request_id,
-                                    requester_host,
-                                    reply_via,
-                                    command,
-                                    ready,
-                                ));
+                                remote_command_router_task
+                                    .spawn_forwarded_command(request_id, requester_host, reply_via, command)
+                                    .await;
                             }
                             HandleResult::CommandCancelRequested { cancel_id, requester_host, reply_via, command_request_id } => {
                                 drop(pm);
-                                tokio::spawn(cancel_forwarded_command(
-                                    Arc::clone(&peer_daemon),
-                                    Arc::clone(&peer_manager_task),
-                                    Arc::clone(&forwarded_commands_task),
-                                    cancel_id,
-                                    requester_host,
-                                    reply_via,
-                                    command_request_id,
-                                ));
+                                remote_command_router_task
+                                    .spawn_forwarded_cancel(cancel_id, requester_host, reply_via, command_request_id);
                             }
                             HandleResult::CommandEventReceived { request_id, responder_host, event } => {
                                 drop(pm);
-                                emit_remote_command_event(&peer_daemon, &pending_remote_commands_task, request_id, responder_host, event)
-                                    .await;
+                                remote_command_router_task.emit_remote_command_event(request_id, responder_host, event).await;
                             }
                             HandleResult::CommandResponseReceived { request_id, responder_host, result } => {
                                 drop(pm);
-                                complete_remote_command(
-                                    &peer_daemon,
-                                    &pending_remote_commands_task,
-                                    request_id,
-                                    responder_host,
-                                    result,
-                                )
-                                .await;
+                                remote_command_router_task.complete_remote_command(request_id, responder_host, result).await;
                             }
                             HandleResult::CommandCancelResponseReceived { cancel_id, responder_host: _, error } => {
                                 drop(pm);
-                                complete_remote_cancel(&pending_remote_cancels_task, cancel_id, error).await;
+                                remote_command_router_task.complete_remote_cancel(cancel_id, error).await;
                             }
                             HandleResult::Ignored => {}
                         }
@@ -970,242 +910,6 @@ async fn dispatch_resync_requests(peer_manager: &Arc<Mutex<PeerManager>>, reques
         if let Err(e) = sender.send(PeerWireMessage::Routed(request)).await {
             warn!(peer = %target, err = %e, "failed to dispatch routed resync request");
         }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn execute_forwarded_command(
-    daemon: Arc<InProcessDaemon>,
-    peer_manager: Arc<Mutex<PeerManager>>,
-    forwarded_commands: ForwardedCommandMap,
-    request_id: u64,
-    requester_host: HostName,
-    reply_via: HostName,
-    command: Command,
-    ready: Arc<Notify>,
-) {
-    let mut event_rx = daemon.subscribe();
-    let responder_host = daemon.host_name().clone();
-    let command_id = match daemon.execute(command).await {
-        Ok(command_id) => command_id,
-        Err(message) => {
-            forwarded_commands.lock().await.remove(&request_id);
-            ready.notify_waiters();
-            let response = RoutedPeerMessage::CommandResponse {
-                request_id,
-                requester_host,
-                responder_host,
-                remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
-                result: Box::new(CommandResult::Error { message }),
-            };
-            let pm = peer_manager.lock().await;
-            let _ = pm.send_to(&reply_via, PeerWireMessage::Routed(response)).await;
-            return;
-        }
-    };
-    if let Some(entry) = forwarded_commands.lock().await.get_mut(&request_id) {
-        entry.state = ForwardedCommandState::Running { command_id };
-    }
-    ready.notify_waiters();
-
-    loop {
-        match event_rx.recv().await {
-            Ok(DaemonEvent::CommandStarted { command_id: id, repo_identity, repo, description, .. }) if id == command_id => {
-                let event = RoutedPeerMessage::CommandEvent {
-                    request_id,
-                    requester_host: requester_host.clone(),
-                    responder_host: responder_host.clone(),
-                    remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
-                    event: Box::new(CommandPeerEvent::Started { repo_identity, repo, description }),
-                };
-                let pm = peer_manager.lock().await;
-                let _ = pm.send_to(&reply_via, PeerWireMessage::Routed(event)).await;
-            }
-            Ok(DaemonEvent::CommandStepUpdate {
-                command_id: id, repo_identity, repo, step_index, step_count, description, status, ..
-            }) if id == command_id => {
-                let event = RoutedPeerMessage::CommandEvent {
-                    request_id,
-                    requester_host: requester_host.clone(),
-                    responder_host: responder_host.clone(),
-                    remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
-                    event: Box::new(CommandPeerEvent::StepUpdate { repo_identity, repo, step_index, step_count, description, status }),
-                };
-                let pm = peer_manager.lock().await;
-                let _ = pm.send_to(&reply_via, PeerWireMessage::Routed(event)).await;
-            }
-            Ok(DaemonEvent::CommandFinished { command_id: id, repo_identity, repo, result, .. }) if id == command_id => {
-                let finished = RoutedPeerMessage::CommandEvent {
-                    request_id,
-                    requester_host: requester_host.clone(),
-                    responder_host: responder_host.clone(),
-                    remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
-                    event: Box::new(CommandPeerEvent::Finished { repo_identity, repo, result: result.clone() }),
-                };
-                let response = RoutedPeerMessage::CommandResponse {
-                    request_id,
-                    requester_host,
-                    responder_host,
-                    remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
-                    result: Box::new(result),
-                };
-                let pm = peer_manager.lock().await;
-                let _ = pm.send_to(&reply_via, PeerWireMessage::Routed(finished)).await;
-                let _ = pm.send_to(&reply_via, PeerWireMessage::Routed(response)).await;
-                forwarded_commands.lock().await.remove(&request_id);
-                break;
-            }
-            Ok(_) => {}
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                forwarded_commands.lock().await.remove(&request_id);
-                break;
-            }
-        }
-    }
-}
-
-async fn await_forwarded_command_id(forwarded_commands: &ForwardedCommandMap, command_request_id: u64) -> Result<u64, String> {
-    loop {
-        let ready = {
-            let forwarded = forwarded_commands.lock().await;
-            match forwarded.get(&command_request_id) {
-                Some(ForwardedCommand { state: ForwardedCommandState::Running { command_id } }) => return Ok(*command_id),
-                Some(ForwardedCommand { state: ForwardedCommandState::Launching { ready } }) => Arc::clone(ready),
-                None => return Err(format!("remote command not found: {command_request_id}")),
-            }
-        };
-        ready.notified().await;
-    }
-}
-
-async fn cancel_forwarded_command(
-    daemon: Arc<InProcessDaemon>,
-    peer_manager: Arc<Mutex<PeerManager>>,
-    forwarded_commands: ForwardedCommandMap,
-    cancel_id: u64,
-    requester_host: HostName,
-    reply_via: HostName,
-    command_request_id: u64,
-) {
-    let responder_host = daemon.host_name().clone();
-    let error =
-        match tokio::time::timeout(Duration::from_secs(5), await_forwarded_command_id(&forwarded_commands, command_request_id)).await {
-            Ok(Ok(command_id)) => daemon.cancel(command_id).await.err(),
-            Ok(Err(message)) => Some(message),
-            Err(_) => Some(format!("timed out waiting for remote command registration: {command_request_id}")),
-        };
-
-    let response = RoutedPeerMessage::CommandCancelResponse {
-        cancel_id,
-        requester_host,
-        responder_host,
-        remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
-        error,
-    };
-    let pm = peer_manager.lock().await;
-    let _ = pm.send_to(&reply_via, PeerWireMessage::Routed(response)).await;
-}
-
-async fn emit_remote_command_event(
-    daemon: &Arc<InProcessDaemon>,
-    pending_remote_commands: &PendingRemoteCommandMap,
-    request_id: u64,
-    responder_host: HostName,
-    event: CommandPeerEvent,
-) {
-    let mut pending = pending_remote_commands.lock().await;
-    let Some(entry) = pending.get_mut(&request_id) else {
-        return;
-    };
-
-    match event {
-        CommandPeerEvent::Started { repo_identity, repo, description } => {
-            entry.repo_identity = Some(repo_identity.clone());
-            entry.repo = Some(repo.clone());
-            daemon.send_event(DaemonEvent::CommandStarted {
-                command_id: entry.command_id,
-                host: responder_host,
-                repo_identity,
-                repo,
-                description,
-            });
-        }
-        CommandPeerEvent::StepUpdate { repo_identity, repo, step_index, step_count, description, status } => {
-            entry.repo_identity = Some(repo_identity.clone());
-            entry.repo = Some(repo.clone());
-            daemon.send_event(DaemonEvent::CommandStepUpdate {
-                command_id: entry.command_id,
-                host: responder_host,
-                repo_identity,
-                repo,
-                step_index,
-                step_count,
-                description,
-                status,
-            });
-        }
-        CommandPeerEvent::Finished { repo_identity, repo, result } => {
-            entry.repo_identity = Some(repo_identity.clone());
-            entry.repo = Some(repo.clone());
-            entry.finished_via_event = true;
-            daemon.send_event(DaemonEvent::CommandFinished {
-                command_id: entry.command_id,
-                host: responder_host,
-                repo_identity,
-                repo,
-                result,
-            });
-        }
-    }
-}
-
-async fn complete_remote_command(
-    daemon: &Arc<InProcessDaemon>,
-    pending_remote_commands: &PendingRemoteCommandMap,
-    request_id: u64,
-    responder_host: HostName,
-    result: CommandResult,
-) {
-    let mut pending = pending_remote_commands.lock().await;
-    let Some(entry) = pending.remove(&request_id) else {
-        return;
-    };
-
-    if entry.finished_via_event {
-        return;
-    }
-
-    let fallback_repo_identity = || RepoIdentity {
-        // Routed command completions can arrive without any repo-bearing event.
-        // In that case there is no reliable filesystem path from the responder,
-        // so keep a local sentinel keyed to the last repo path we saw, if any.
-        authority: "local".into(),
-        path: entry.repo.clone().unwrap_or_default().display().to_string(),
-    };
-
-    daemon.send_event(DaemonEvent::CommandFinished {
-        command_id: entry.command_id,
-        host: responder_host,
-        repo_identity: entry
-            .repo_identity
-            .or_else(|| match &result {
-                CommandResult::TerminalPrepared { repo_identity, .. } => Some(repo_identity.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(fallback_repo_identity),
-        repo: entry.repo.unwrap_or_default(),
-        result,
-    });
-}
-
-async fn complete_remote_cancel(pending_remote_cancels: &PendingRemoteCancelMap, cancel_id: u64, error: Option<String>) {
-    let tx = pending_remote_cancels.lock().await.remove(&cancel_id);
-    if let Some(tx) = tx {
-        let _ = tx.send(match error {
-            Some(message) => Err(message),
-            None => Ok(()),
-        });
     }
 }
 
@@ -1480,9 +1184,7 @@ async fn handle_client(
     mut shutdown_rx: watch::Receiver<bool>,
     peer_data_tx: mpsc::Sender<InboundPeerEnvelope>,
     peer_manager: Arc<Mutex<PeerManager>>,
-    pending_remote_commands: PendingRemoteCommandMap,
-    pending_remote_cancels: PendingRemoteCancelMap,
-    next_remote_command_id: Arc<AtomicU64>,
+    remote_command_router: RemoteCommandRouter,
     client_count: Arc<AtomicUsize>,
     client_notify: Arc<Notify>,
     peer_connected_tx: mpsc::UnboundedSender<PeerConnectedNotice>,
@@ -1541,14 +1243,8 @@ async fn handle_client(
                 }
             });
 
-            let dispatch_ctx = DispatchContext {
-                daemon: &daemon,
-                peer_manager: &peer_manager,
-                pending_remote_commands: &pending_remote_commands,
-                pending_remote_cancels: &pending_remote_cancels,
-                next_remote_command_id: &next_remote_command_id,
-                agent_state_store: &agent_state_store,
-            };
+            let dispatch_ctx =
+                DispatchContext { daemon: &daemon, remote_command_router: &remote_command_router, agent_state_store: &agent_state_store };
             let first_response = dispatch_request(&dispatch_ctx, id, request).await;
             if write_message(&writer, &first_response).await.is_ok() {
                 loop {
@@ -1734,95 +1430,15 @@ async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, request: Request) 
             Err(e) => Message::error_response(id, e),
         },
 
-        Request::Execute { command } => {
-            let target_host = command.host.clone().unwrap_or_else(|| ctx.daemon.host_name().clone());
-            if target_host != *ctx.daemon.host_name() {
-                let request_id = {
-                    let mut pm = ctx.peer_manager.lock().await;
-                    pm.next_request_id()
-                };
-                let command_id = ctx.next_remote_command_id.fetch_add(1, Ordering::Relaxed);
-                ctx.pending_remote_commands.lock().await.insert(request_id, PendingRemoteCommand {
-                    command_id,
-                    target_host: target_host.clone(),
-                    repo_identity: extract_command_repo_identity(&command),
-                    repo: None,
-                    finished_via_event: false,
-                });
+        Request::Execute { command } => match ctx.remote_command_router.dispatch_execute(command).await {
+            Ok(command_id) => Message::ok_response(id, Response::Execute { command_id }),
+            Err(e) => Message::error_response(id, e),
+        },
 
-                let routed = RoutedPeerMessage::CommandRequest {
-                    request_id,
-                    requester_host: ctx.daemon.host_name().clone(),
-                    target_host: target_host.clone(),
-                    remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
-                    command: Box::new(command),
-                };
-                let send_result = {
-                    let pm = ctx.peer_manager.lock().await;
-                    pm.send_to(&target_host, PeerWireMessage::Routed(routed)).await
-                };
-
-                match send_result {
-                    Ok(()) => Message::ok_response(id, Response::Execute { command_id }),
-                    Err(e) => {
-                        ctx.pending_remote_commands.lock().await.remove(&request_id);
-                        Message::error_response(id, e)
-                    }
-                }
-            } else {
-                match ctx.daemon.execute(command).await {
-                    Ok(command_id) => Message::ok_response(id, Response::Execute { command_id }),
-                    Err(e) => Message::error_response(id, e),
-                }
-            }
-        }
-
-        Request::Cancel { command_id } => {
-            let remote = {
-                let pending = ctx.pending_remote_commands.lock().await;
-                pending
-                    .iter()
-                    .find(|(_, entry)| entry.command_id == command_id)
-                    .map(|(request_id, entry)| (*request_id, entry.target_host.clone()))
-            };
-            if let Some((command_request_id, target_host)) = remote {
-                let cancel_id = {
-                    let mut pm = ctx.peer_manager.lock().await;
-                    pm.next_request_id()
-                };
-                let (tx, rx) = oneshot::channel();
-                ctx.pending_remote_cancels.lock().await.insert(cancel_id, tx);
-                let routed = RoutedPeerMessage::CommandCancelRequest {
-                    cancel_id,
-                    requester_host: ctx.daemon.host_name().clone(),
-                    target_host: target_host.clone(),
-                    remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
-                    command_request_id,
-                };
-                let send_result = {
-                    let pm = ctx.peer_manager.lock().await;
-                    pm.send_to(&target_host, PeerWireMessage::Routed(routed)).await
-                };
-                if let Err(e) = send_result {
-                    ctx.pending_remote_cancels.lock().await.remove(&cancel_id);
-                    return Message::error_response(id, e);
-                }
-                match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                    Ok(Ok(Ok(()))) => Message::ok_response(id, Response::Cancel),
-                    Ok(Ok(Err(message))) => Message::error_response(id, message),
-                    Ok(Err(_)) => Message::error_response(id, "remote cancel response channel closed".to_string()),
-                    Err(_) => {
-                        ctx.pending_remote_cancels.lock().await.remove(&cancel_id);
-                        Message::error_response(id, "timed out waiting for remote cancel response".to_string())
-                    }
-                }
-            } else {
-                match ctx.daemon.cancel(command_id).await {
-                    Ok(()) => Message::ok_response(id, Response::Cancel),
-                    Err(e) => Message::error_response(id, e),
-                }
-            }
-        }
+        Request::Cancel { command_id } => match ctx.remote_command_router.dispatch_cancel(command_id).await {
+            Ok(()) => Message::ok_response(id, Response::Cancel),
+            Err(e) => Message::error_response(id, e),
+        },
 
         Request::Refresh { repo } => {
             let command =
