@@ -74,10 +74,9 @@ When `CheckoutManager::delete_checkout` succeeds, the executor:
 
 The checkout is already gone at this point, so the set removal is unconditional.
 
-**New store APIs required:** `AttachableStoreApi` currently has no removal methods. The following must be added:
-- `remove_set(id: &AttachableSetId)` — removes the set entry.
-- `remove_attachable(id: &AttachableId)` — removes the attachable entry.
-- `remove_bindings_for_object(object_id: &str)` — removes all bindings referencing the given object ID (covers both set and attachable bindings).
+**New store APIs required:** `AttachableStoreApi` currently has no removal methods. Add:
+- `remove_set(id: &AttachableSetId) -> Option<RemovedSetInfo>` — atomically removes the set, its member attachables, and all associated bindings. Returns `RemovedSetInfo` containing terminal pool binding external refs for teardown.
+- `sets_for_checkout(checkout: &HostPath) -> Vec<AttachableSetId>` — query method to find sets owned by a checkout path.
 
 **Executor interface change:** The checkout delete path (`build_remove_checkout_plan`) currently takes pre-resolved `ManagedTerminalId` keys. It needs access to `SharedAttachableStore` and the deleted checkout's `HostPath` to perform the cascade lookup. The step-plan closures will capture these.
 
