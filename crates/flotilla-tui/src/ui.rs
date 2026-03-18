@@ -120,8 +120,6 @@ pub fn render(
     render_status_bar(model, ui, in_flight, theme, frame, status_bar_area, active_widget_mode);
     render_command_palette(ui, theme, frame, status_bar_area);
     render_input_popup(ui, theme, frame);
-    render_delete_confirm(model, ui, theme, frame);
-    render_close_confirm(model, ui, theme, frame);
     render_file_picker(ui, theme, frame);
 }
 
@@ -391,6 +389,22 @@ fn status_bar_content(
                         key_chip(ENTER_KEY_GLYPH, "Select", KeyCode::Enter),
                         key_chip("ESC", "Close", KeyCode::Esc),
                     ],
+                    task: None,
+                    mode_indicators: vec![],
+                };
+            }
+            ModeId::DeleteConfirm => {
+                return StatusBarContent {
+                    status: StatusSection::plain("CONFIRM DELETE"),
+                    keys: vec![key_chip("y", "Yes", KeyCode::Char('y')), key_chip("n", "No", KeyCode::Char('n'))],
+                    task: None,
+                    mode_indicators: vec![],
+                };
+            }
+            ModeId::CloseConfirm => {
+                return StatusBarContent {
+                    status: StatusSection::plain("CONFIRM CLOSE"),
+                    keys: vec![key_chip("y", "Yes", KeyCode::Char('y')), key_chip("n", "No", KeyCode::Char('n'))],
                     task: None,
                     mode_indicators: vec![],
                 };
@@ -1087,119 +1101,6 @@ fn render_input_popup(ui: &UiState, theme: &Theme, frame: &mut Frame) {
     let cursor_x = inner_area.x + 2 + input.visual_cursor() as u16;
     let cursor_y = inner_area.y;
     frame.set_cursor_position((cursor_x, cursor_y));
-}
-
-fn render_delete_confirm(model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame) {
-    let UiMode::DeleteConfirm { ref info, loading, ref remote_host, .. } = ui.mode else {
-        return;
-    };
-
-    let area = ui_helpers::popup_area(frame.area(), 60, 50);
-    frame.render_widget(Clear, area);
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Wrap { trim: true } strips leading whitespace, so don't add prefix spaces.
-    const MAX_FILES: usize = 10;
-    const MAX_COMMITS: usize = 5;
-
-    if loading {
-        lines.push(Line::from(shimmer_spans("Loading safety info...", theme)));
-    } else if let Some(info) = info {
-        lines.push(Line::from(vec![Span::raw("Branch: "), Span::styled(&info.branch, Style::default().bold())]));
-        lines.push(Line::from(""));
-
-        if let Some(pr_status) = &info.change_request_status {
-            let color = theme.change_request_status_color(pr_status);
-            let status_text = pr_status.as_str();
-            lines.push(Line::from(vec![
-                Span::raw(format!("{}: ", model.active_labels().change_requests.abbr)),
-                Span::styled(status_text, Style::default().fg(color).bold()),
-            ]));
-            if let Some(sha) = &info.merge_commit_sha {
-                lines.push(Line::from(format!("Merge commit: {}", sha)));
-            }
-        } else {
-            lines.push(Line::from(Span::styled(
-                format!("No {} found", model.active_labels().change_requests.abbr),
-                Style::default().fg(theme.muted),
-            )));
-        }
-
-        lines.push(Line::from(""));
-
-        if info.has_uncommitted {
-            if info.uncommitted_files.is_empty() {
-                lines.push(Line::from(Span::styled("⚠ Has uncommitted changes", Style::default().fg(theme.error).bold())));
-            } else {
-                lines.push(Line::from(Span::styled(
-                    format!("⚠ {} uncommitted file(s):", info.uncommitted_files.len()),
-                    Style::default().fg(theme.error).bold(),
-                )));
-                for file_line in info.uncommitted_files.iter().take(MAX_FILES) {
-                    lines.push(Line::from(Span::styled(file_line.to_string(), Style::default().fg(theme.muted))));
-                }
-                if info.uncommitted_files.len() > MAX_FILES {
-                    lines.push(Line::from(Span::styled(
-                        format!("...and {} more", info.uncommitted_files.len() - MAX_FILES),
-                        Style::default().fg(theme.muted),
-                    )));
-                }
-            }
-        }
-
-        if let Some(warning) = &info.base_detection_warning {
-            lines.push(Line::from(Span::styled(format!("⚠ {}", warning), Style::default().fg(theme.warning))));
-        } else if !info.unpushed_commits.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("⚠ {} unpushed commit(s):", info.unpushed_commits.len()),
-                Style::default().fg(theme.error).bold(),
-            )));
-            for commit in info.unpushed_commits.iter().take(MAX_COMMITS) {
-                lines.push(Line::from(commit.to_string()));
-            }
-        }
-
-        if !info.has_uncommitted
-            && info.unpushed_commits.is_empty()
-            && info.base_detection_warning.is_none()
-            && info.change_request_status.as_ref().is_some_and(|s| s.eq_ignore_ascii_case("merged"))
-        {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("✓ Safe to delete", Style::default().fg(theme.status_ok).bold())));
-        }
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("y/Enter: confirm    n/Esc: cancel", Style::default().fg(theme.muted))));
-    }
-
-    let title = match remote_host {
-        Some(host) => format!(" Remove {} on {} ", model.active_labels().checkouts.noun_capitalized(), host),
-        None => format!(" Remove {} ", model.active_labels().checkouts.noun_capitalized()),
-    };
-    let paragraph = Paragraph::new(lines).block(Block::bordered().style(theme.block_style()).title(title)).wrap(Wrap { trim: true });
-    frame.render_widget(paragraph, area);
-}
-
-fn render_close_confirm(model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame) {
-    let UiMode::CloseConfirm { ref id, ref title, .. } = ui.mode else {
-        return;
-    };
-
-    let area = ui_helpers::popup_area(frame.area(), 50, 30);
-    frame.render_widget(Clear, area);
-
-    let noun = &model.active_labels().change_requests.noun;
-    let lines = vec![
-        Line::from(vec![Span::raw(format!("{} #", noun)), Span::styled(id, Style::default().bold())]),
-        Line::from(Span::styled(title.as_str(), Style::default().fg(theme.muted))),
-        Line::from(""),
-        Line::from(Span::styled("y/Enter: confirm    n/Esc: cancel", Style::default().fg(theme.muted))),
-    ];
-
-    let block_title = format!(" Close {} ", noun);
-    let paragraph = Paragraph::new(lines).block(Block::bordered().style(theme.block_style()).title(block_title)).wrap(Wrap { trim: true });
-    frame.render_widget(paragraph, area);
 }
 
 fn render_file_picker(ui: &mut UiState, theme: &Theme, frame: &mut Frame) {

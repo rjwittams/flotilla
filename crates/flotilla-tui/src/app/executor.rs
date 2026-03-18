@@ -1,4 +1,4 @@
-use flotilla_protocol::{Command, CommandAction, CommandResult, WorkItemIdentity};
+use flotilla_protocol::{Command, CommandAction, CommandResult};
 use tracing::info;
 
 use super::{
@@ -61,11 +61,17 @@ pub async fn dispatch(cmd: Command, app: &mut App, pending_ctx: Option<PendingAc
 /// `DeleteConfirm { loading: true }` must be cleared so the user
 /// can see the error message and isn't stuck in a loading state.
 fn reset_loading_mode(app: &mut App) {
-    match &app.ui.mode {
-        UiMode::DeleteConfirm { loading: true, .. } | UiMode::BranchInput { kind: super::BranchInputKind::Generating, .. } => {
-            app.ui.mode = UiMode::Normal;
+    if let UiMode::BranchInput { kind: super::BranchInputKind::Generating, .. } = &app.ui.mode {
+        app.ui.mode = UiMode::Normal;
+    }
+
+    // Pop a loading DeleteConfirmWidget from the widget stack on error.
+    if let Some(widget) = app.widget_stack.last_mut() {
+        if let Some(dcw) = widget.as_any_mut().downcast_mut::<crate::widgets::delete_confirm::DeleteConfirmWidget>() {
+            if dcw.loading {
+                app.widget_stack.pop();
+            }
         }
-        _ => {}
     }
 }
 
@@ -107,16 +113,15 @@ pub fn handle_result(result: CommandResult, app: &mut App) {
             app.prefill_branch_input(&name, issue_ids);
         }
         CommandResult::CheckoutStatus(info) => {
-            let (terminal_keys, identity, remote_host) = match &app.ui.mode {
-                UiMode::DeleteConfirm { terminal_keys, identity, remote_host, .. } => {
-                    (terminal_keys.clone(), identity.clone(), remote_host.clone())
-                }
-                other => {
-                    tracing::warn!(mode = ?std::mem::discriminant(other), "CheckoutStatus arrived outside DeleteConfirm");
-                    (vec![], WorkItemIdentity::Session(String::new()), None)
-                }
-            };
-            app.ui.mode = UiMode::DeleteConfirm { info: Some(info), loading: false, terminal_keys, identity, remote_host };
+            let updated = app
+                .widget_stack
+                .last_mut()
+                .and_then(|widget| widget.as_any_mut().downcast_mut::<crate::widgets::delete_confirm::DeleteConfirmWidget>());
+            if let Some(dcw) = updated {
+                dcw.update_info(info);
+            } else {
+                tracing::warn!("CheckoutStatus arrived but no DeleteConfirmWidget on stack");
+            }
         }
         CommandResult::Error { message } => {
             reset_loading_mode(app);

@@ -85,6 +85,12 @@ impl TestHarness {
         self
     }
 
+    /// Push an interactive widget onto the widget stack for rendering.
+    pub fn with_widget(mut self, widget: Box<dyn flotilla_tui::widgets::InteractiveWidget>) -> Self {
+        self.widget_stack.push(widget);
+        self
+    }
+
     /// Set a status message on the model.
     pub fn with_status_message(mut self, msg: &str) -> Self {
         self.model.status_message = Some(msg.to_string());

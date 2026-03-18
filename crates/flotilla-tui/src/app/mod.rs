@@ -408,6 +408,7 @@ impl App {
             repo_order: &self.model.repo_order,
             commands: &mut self.proto_commands,
             repo_ui: &mut self.ui.repo_ui,
+            mode: &mut self.ui.mode,
             should_quit: false,
             pending_cancel: None,
         }
@@ -1392,19 +1393,24 @@ mod tests {
         }
     }
 
-    // -- CloseConfirm flow --
+    // -- CloseConfirm flow (via widget stack) --
+
+    fn push_close_confirm_widget(app: &mut App, id: &str) {
+        let widget = crate::widgets::close_confirm::CloseConfirmWidget::new(
+            id.into(),
+            "Test PR".into(),
+            WorkItemIdentity::Session("test".into()),
+            Command { host: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: id.into() } },
+        );
+        app.widget_stack.push(Box::new(widget));
+    }
 
     #[test]
     fn close_confirm_y_dispatches_command() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm {
-            id: "42".into(),
-            title: "Test PR".into(),
-            identity: WorkItemIdentity::Session("test".into()),
-            command: Command { host: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } },
-        };
+        push_close_confirm_widget(&mut app, "42");
         app.handle_key(key(KeyCode::Char('y')));
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(app.widget_stack.is_empty());
         let cmd = app.proto_commands.take_next();
         assert!(matches!(cmd, Some((Command { action: CommandAction::CloseChangeRequest { id }, .. }, _)) if id == "42"));
     }
@@ -1412,14 +1418,9 @@ mod tests {
     #[test]
     fn close_confirm_enter_dispatches_command() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm {
-            id: "42".into(),
-            title: "Test PR".into(),
-            identity: WorkItemIdentity::Session("test".into()),
-            command: Command { host: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } },
-        };
+        push_close_confirm_widget(&mut app, "42");
         app.handle_key(key(KeyCode::Enter));
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(app.widget_stack.is_empty());
         let cmd = app.proto_commands.take_next();
         assert!(matches!(cmd, Some((Command { action: CommandAction::CloseChangeRequest { id }, .. }, _)) if id == "42"));
     }
@@ -1427,28 +1428,18 @@ mod tests {
     #[test]
     fn close_confirm_esc_cancels() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm {
-            id: "42".into(),
-            title: "Test PR".into(),
-            identity: WorkItemIdentity::Session("test".into()),
-            command: Command { host: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } },
-        };
+        push_close_confirm_widget(&mut app, "42");
         app.handle_key(key(KeyCode::Esc));
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(app.widget_stack.is_empty());
         assert!(app.proto_commands.take_next().is_none());
     }
 
     #[test]
     fn close_confirm_n_cancels() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::CloseConfirm {
-            id: "42".into(),
-            title: "Test PR".into(),
-            identity: WorkItemIdentity::Session("test".into()),
-            command: Command { host: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } },
-        };
+        push_close_confirm_widget(&mut app, "42");
         app.handle_key(key(KeyCode::Char('n')));
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(app.widget_stack.is_empty());
         assert!(app.proto_commands.take_next().is_none());
     }
 

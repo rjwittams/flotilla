@@ -84,10 +84,42 @@ fn help_screen_clamps_scroll_state_after_render() {
 
 #[test]
 fn action_menu() {
-    let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::ActionMenu {
-        items: vec![Intent::CreateWorkspace, Intent::OpenChangeRequest, Intent::RemoveCheckout],
-        index: 0,
-    });
+    let item = checkout_item("feat/a", "/test/my-project/feat/a", false);
+    let entries = vec![
+        flotilla_tui::widgets::action_menu::MenuEntry {
+            intent: Intent::CreateWorkspace,
+            command: flotilla_protocol::Command {
+                host: None,
+                context_repo: None,
+                action: flotilla_protocol::CommandAction::CreateWorkspaceForCheckout {
+                    checkout_path: "/test/my-project/feat/a".into(),
+                    label: "feat/a".into(),
+                },
+            },
+        },
+        flotilla_tui::widgets::action_menu::MenuEntry {
+            intent: Intent::OpenChangeRequest,
+            command: flotilla_protocol::Command {
+                host: None,
+                context_repo: None,
+                action: flotilla_protocol::CommandAction::OpenChangeRequest { id: "1".into() },
+            },
+        },
+        flotilla_tui::widgets::action_menu::MenuEntry {
+            intent: Intent::RemoveCheckout,
+            command: flotilla_protocol::Command {
+                host: None,
+                context_repo: None,
+                action: flotilla_protocol::CommandAction::FetchCheckoutStatus {
+                    branch: "feat/a".into(),
+                    checkout_path: Some("/test/my-project/feat/a".into()),
+                    change_request_id: None,
+                },
+            },
+        },
+    ];
+    let mut harness = TestHarness::single_repo("my-project");
+    harness.widget_stack.push(Box::new(flotilla_tui::widgets::action_menu::ActionMenuWidget::new(entries, item)));
     let output = harness.render_to_string();
     assert!(output.contains(""));
     insta::assert_snapshot!(output);
@@ -346,10 +378,20 @@ fn file_picker_popup() {
     insta::assert_snapshot!(output);
 }
 
+fn delete_confirm_widget(
+    info: flotilla_protocol::CheckoutStatus,
+    identity: WorkItemIdentity,
+    remote_host: Option<HostName>,
+) -> Box<dyn flotilla_tui::widgets::InteractiveWidget> {
+    let mut widget = flotilla_tui::widgets::delete_confirm::DeleteConfirmWidget::new(vec![], identity, remote_host);
+    widget.update_info(info);
+    Box::new(widget)
+}
+
 #[test]
 fn delete_confirm_safe_to_delete() {
-    let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::DeleteConfirm {
-        info: Some(flotilla_protocol::CheckoutStatus {
+    let mut harness = TestHarness::single_repo("my-project").with_widget(delete_confirm_widget(
+        flotilla_protocol::CheckoutStatus {
             branch: "feat-cleanup".into(),
             change_request_status: Some("MERGED".into()),
             merge_commit_sha: Some("abc1234".into()),
@@ -357,20 +399,18 @@ fn delete_confirm_safe_to_delete() {
             has_uncommitted: false,
             uncommitted_files: vec![],
             base_detection_warning: None,
-        }),
-        loading: false,
-        terminal_keys: vec![],
-        identity: WorkItemIdentity::Checkout(HostPath::new(HostName::local(), PathBuf::from("/tmp/my-project/feat-cleanup"))),
-        remote_host: None,
-    });
+        },
+        WorkItemIdentity::Checkout(HostPath::new(HostName::local(), PathBuf::from("/tmp/my-project/feat-cleanup"))),
+        None,
+    ));
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
 }
 
 #[test]
 fn delete_confirm_with_uncommitted_files() {
-    let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::DeleteConfirm {
-        info: Some(flotilla_protocol::CheckoutStatus {
+    let mut harness = TestHarness::single_repo("my-project").with_widget(delete_confirm_widget(
+        flotilla_protocol::CheckoutStatus {
             branch: "feat-wip".into(),
             change_request_status: Some("OPEN".into()),
             merge_commit_sha: None,
@@ -378,12 +418,10 @@ fn delete_confirm_with_uncommitted_files() {
             has_uncommitted: true,
             uncommitted_files: vec![" M src/main.rs".into(), " M src/lib.rs".into(), "?? TODO.txt".into()],
             base_detection_warning: None,
-        }),
-        loading: false,
-        terminal_keys: vec![],
-        identity: WorkItemIdentity::Checkout(HostPath::new(HostName::local(), PathBuf::from("/tmp/my-project/feat-wip"))),
-        remote_host: None,
-    });
+        },
+        WorkItemIdentity::Checkout(HostPath::new(HostName::local(), PathBuf::from("/tmp/my-project/feat-wip"))),
+        None,
+    ));
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
 }
@@ -391,8 +429,8 @@ fn delete_confirm_with_uncommitted_files() {
 #[test]
 fn delete_confirm_with_many_uncommitted_files() {
     let files: Vec<String> = (0..15).map(|i| format!(" M src/file_{}.rs", i)).collect();
-    let mut harness = TestHarness::single_repo("my-project").with_height(50).with_mode(UiMode::DeleteConfirm {
-        info: Some(flotilla_protocol::CheckoutStatus {
+    let mut harness = TestHarness::single_repo("my-project").with_height(50).with_widget(delete_confirm_widget(
+        flotilla_protocol::CheckoutStatus {
             branch: "feat-big-wip".into(),
             change_request_status: None,
             merge_commit_sha: None,
@@ -400,20 +438,18 @@ fn delete_confirm_with_many_uncommitted_files() {
             has_uncommitted: true,
             uncommitted_files: files,
             base_detection_warning: None,
-        }),
-        loading: false,
-        identity: WorkItemIdentity::Checkout(HostPath::new(HostName::local(), PathBuf::from("/tmp/my-project/feat-big-wip"))),
-        terminal_keys: vec![],
-        remote_host: None,
-    });
+        },
+        WorkItemIdentity::Checkout(HostPath::new(HostName::local(), PathBuf::from("/tmp/my-project/feat-big-wip"))),
+        None,
+    ));
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
 }
 
 #[test]
 fn delete_confirm_remote_host() {
-    let mut harness = TestHarness::single_repo("my-project").with_mode(UiMode::DeleteConfirm {
-        info: Some(flotilla_protocol::CheckoutStatus {
+    let mut harness = TestHarness::single_repo("my-project").with_widget(delete_confirm_widget(
+        flotilla_protocol::CheckoutStatus {
             branch: "feat-remote".into(),
             change_request_status: Some("MERGED".into()),
             merge_commit_sha: Some("def5678".into()),
@@ -421,12 +457,10 @@ fn delete_confirm_remote_host() {
             has_uncommitted: false,
             uncommitted_files: vec![],
             base_detection_warning: None,
-        }),
-        loading: false,
-        terminal_keys: vec![],
-        identity: WorkItemIdentity::Checkout(HostPath::new(HostName::new("feta"), PathBuf::from("/home/dev/my-project/feat-remote"))),
-        remote_host: Some(HostName::new("feta")),
-    });
+        },
+        WorkItemIdentity::Checkout(HostPath::new(HostName::new("feta"), PathBuf::from("/home/dev/my-project/feat-remote"))),
+        Some(HostName::new("feta")),
+    ));
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
 }

@@ -229,6 +229,7 @@ pub(crate) struct TestWidgetHarness {
     pub commands: CommandQueue,
     pub repo_ui: HashMap<RepoIdentity, RepoUiState>,
     pub target_host: Option<HostName>,
+    pub mode: UiMode,
 }
 
 impl TestWidgetHarness {
@@ -242,6 +243,7 @@ impl TestWidgetHarness {
             commands: app.proto_commands,
             repo_ui: app.ui.repo_ui,
             target_host: app.ui.target_host,
+            mode: UiMode::Normal,
         }
     }
 
@@ -256,6 +258,7 @@ impl TestWidgetHarness {
             repo_order: &self.model.repo_order,
             commands: &mut self.commands,
             repo_ui: &mut self.repo_ui,
+            mode: &mut self.mode,
             should_quit: false,
             pending_cancel: None,
         }

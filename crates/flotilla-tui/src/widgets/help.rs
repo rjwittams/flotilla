@@ -110,6 +110,10 @@ impl InteractiveWidget for HelpWidget {
     fn mode_id(&self) -> ModeId {
         ModeId::Help
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]

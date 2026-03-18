@@ -1,6 +1,9 @@
+pub mod action_menu;
+pub mod close_confirm;
+pub mod delete_confirm;
 pub mod help;
 
-use std::collections::HashMap;
+use std::{any::Any, collections::HashMap};
 
 use crossterm::event::{KeyEvent, MouseEvent};
 use flotilla_core::config::ConfigStore;
@@ -8,7 +11,7 @@ use flotilla_protocol::{HostName, RepoIdentity};
 use ratatui::{layout::Rect, Frame};
 
 use crate::{
-    app::{CommandQueue, InFlightCommand, RepoUiState, TuiModel},
+    app::{ui_state::UiMode, CommandQueue, InFlightCommand, RepoUiState, TuiModel},
     keymap::{Action, Keymap, ModeId},
     theme::Theme,
 };
@@ -38,6 +41,7 @@ pub struct WidgetContext<'a> {
     pub repo_order: &'a [RepoIdentity],
     pub commands: &'a mut CommandQueue,
     pub repo_ui: &'a mut HashMap<RepoIdentity, RepoUiState>,
+    pub mode: &'a mut UiMode,
     pub should_quit: bool,
     pub pending_cancel: Option<u64>,
 }
@@ -75,4 +79,7 @@ pub trait InteractiveWidget {
     fn captures_raw_keys(&self) -> bool {
         false
     }
+
+    /// Downcast support for updating widget state from outside the trait.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
