@@ -16,8 +16,8 @@ pub struct SessionInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionStatus {
-    Running,
-    Disconnected,
+    Attached,
+    Detached,
 }
 
 const TAG_ATTACH_INIT: u8 = 1;
