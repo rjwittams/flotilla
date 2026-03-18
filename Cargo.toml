@@ -4,6 +4,7 @@ members = [
     "crates/flotilla-core",
     "crates/flotilla-protocol",
     "crates/flotilla-daemon",
+    "crates/flotilla-session",
     "crates/flotilla-tui",
 ]
 exclude = ["lints/long_inline_paths"]

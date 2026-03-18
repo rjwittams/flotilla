@@ -1171,6 +1171,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "flotilla-session"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "flotilla-tui"
 version = "0.1.0"
 dependencies = [

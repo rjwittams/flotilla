@@ -198,6 +198,7 @@ Phase 1 replaces shpool for basic persistence but does not promise replay fideli
 - improve diagnostics and stale cleanup
 - support richer metadata or info queries
 - prepare for observer/control-side channels and future takeover policies
+- support agent-driven TUI testing and automation workflows that need structured snapshots and targeted input without relying on tmux screen-scraping
 - revisit whether the daemon should remain in-tree or split into its own repo
 
 ## Testing
