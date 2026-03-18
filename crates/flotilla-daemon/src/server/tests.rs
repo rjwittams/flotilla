@@ -153,8 +153,8 @@ async fn dispatch_request_test(daemon: &Arc<InProcessDaemon>, id: u64, request: 
         &pending_remote_cancels,
         &next_remote_command_id,
     );
-    let ctx = DispatchContext { daemon, remote_command_router: &remote_command_router, agent_state_store: &agent_state_store };
-    dispatch_request(&ctx, id, request).await
+    let request_dispatcher = RequestDispatcher::new(daemon, &remote_command_router, &agent_state_store);
+    request_dispatcher.dispatch(id, request).await
 }
 
 fn checkout(branch: &str) -> Checkout {
@@ -364,12 +364,13 @@ async fn dispatch_request_execute_remote_routes_command_through_peer_manager() {
         &pending_remote_cancels,
         &next_remote_command_id,
     );
-    let ctx = DispatchContext { daemon: &daemon, remote_command_router: &remote_command_router, agent_state_store: &agent_state_store };
+    let request_dispatcher = RequestDispatcher::new(&daemon, &remote_command_router, &agent_state_store);
 
-    let response = dispatch_request(&ctx, 40, Request::Execute {
-        command: Command { host: Some(HostName::new("feta")), context_repo: None, action: CommandAction::Refresh { repo: None } },
-    })
-    .await;
+    let response = request_dispatcher
+        .dispatch(40, Request::Execute {
+            command: Command { host: Some(HostName::new("feta")), context_repo: None, action: CommandAction::Refresh { repo: None } },
+        })
+        .await;
 
     let command_id = match ok_response(response, 40) {
         Response::Execute { command_id } => command_id,
@@ -430,12 +431,8 @@ async fn dispatch_request_cancel_remote_routes_cancel_and_waits_for_reply() {
             &pending_remote_cancels_for_task,
             &next_remote_command_id_for_task,
         );
-        let ctx = DispatchContext {
-            daemon: &daemon_for_task,
-            remote_command_router: &remote_command_router,
-            agent_state_store: &agent_state_store_for_task,
-        };
-        dispatch_request(&ctx, 41, Request::Cancel { command_id: 1u64 << 62 }).await
+        let request_dispatcher = RequestDispatcher::new(&daemon_for_task, &remote_command_router, &agent_state_store_for_task);
+        request_dispatcher.dispatch(41, Request::Cancel { command_id: 1u64 << 62 }).await
     });
 
     let cancel_id = tokio::time::timeout(StdDuration::from_secs(2), async {

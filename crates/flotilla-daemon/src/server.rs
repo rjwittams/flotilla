@@ -1,4 +1,5 @@
 mod remote_commands;
+mod request_dispatch;
 
 use std::{
     collections::HashMap,
@@ -19,8 +20,8 @@ use flotilla_core::{
     providers::discovery::DiscoveryRuntime,
 };
 use flotilla_protocol::{
-    Command, CommandAction, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message, PeerConnectionState, PeerDataMessage,
-    PeerWireMessage, RepoIdentity, RepoSelector, Request, Response, PROTOCOL_VERSION,
+    Command, ConfigLabel, DaemonEvent, GoodbyeReason, HostName, Message, PeerConnectionState, PeerDataMessage, PeerWireMessage,
+    RepoIdentity, PROTOCOL_VERSION,
 };
 use futures::future::join_all;
 use tokio::{
@@ -32,7 +33,10 @@ use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
 use self::remote_commands::{extract_command_repo_identity, ForwardedCommand, ForwardedCommandState, PendingRemoteCommand};
-use self::remote_commands::{ForwardedCommandMap, PendingRemoteCancelMap, PendingRemoteCommandMap, RemoteCommandRouter};
+use self::{
+    remote_commands::{ForwardedCommandMap, PendingRemoteCancelMap, PendingRemoteCommandMap, RemoteCommandRouter},
+    request_dispatch::RequestDispatcher,
+};
 use crate::peer::{
     ActivationResult, ConnectionDirection, ConnectionMeta, HandleResult, InboundPeerEnvelope, PeerManager, PeerSender, SshTransport,
 };
@@ -173,12 +177,6 @@ pub fn spawn_test_peer_networking(
         peer_data_tx,
         remote_command_router,
     )
-}
-
-struct DispatchContext<'a> {
-    daemon: &'a Arc<InProcessDaemon>,
-    remote_command_router: &'a RemoteCommandRouter,
-    agent_state_store: &'a SharedAgentStateStore,
 }
 
 /// The daemon server that listens on a Unix socket and dispatches requests
@@ -1243,9 +1241,8 @@ async fn handle_client(
                 }
             });
 
-            let dispatch_ctx =
-                DispatchContext { daemon: &daemon, remote_command_router: &remote_command_router, agent_state_store: &agent_state_store };
-            let first_response = dispatch_request(&dispatch_ctx, id, request).await;
+            let request_dispatcher = RequestDispatcher::new(&daemon, &remote_command_router, &agent_state_store);
+            let first_response = request_dispatcher.dispatch(id, request).await;
             if write_message(&writer, &first_response).await.is_ok() {
                 loop {
                     tokio::select! {
@@ -1261,7 +1258,7 @@ async fn handle_client(
                                     };
                                     match msg {
                                         Message::Request { id, request } => {
-                                            let response = dispatch_request(&dispatch_ctx, id, request).await;
+                                            let response = request_dispatcher.dispatch(id, request).await;
                                             if write_message(&writer, &response).await.is_err() {
                                                 break;
                                             }
@@ -1413,171 +1410,6 @@ async fn handle_client(
         }
         other => {
             warn!(msg = ?other, "unexpected first message type from client");
-        }
-    }
-}
-
-/// Dispatch a request to the appropriate `DaemonHandle` method.
-async fn dispatch_request(ctx: &DispatchContext<'_>, id: u64, request: Request) -> Message {
-    match request {
-        Request::ListRepos => match ctx.daemon.list_repos().await {
-            Ok(repos) => Message::ok_response(id, Response::ListRepos(repos)),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::GetState { repo } => match ctx.daemon.get_state(&flotilla_protocol::RepoSelector::Path(repo)).await {
-            Ok(snapshot) => Message::ok_response(id, Response::GetState(Box::new(snapshot))),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::Execute { command } => match ctx.remote_command_router.dispatch_execute(command).await {
-            Ok(command_id) => Message::ok_response(id, Response::Execute { command_id }),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::Cancel { command_id } => match ctx.remote_command_router.dispatch_cancel(command_id).await {
-            Ok(()) => Message::ok_response(id, Response::Cancel),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::Refresh { repo } => {
-            let command =
-                Command { host: None, context_repo: None, action: CommandAction::Refresh { repo: Some(RepoSelector::Path(repo)) } };
-            match ctx.daemon.execute(command).await {
-                Ok(_) => Message::ok_response(id, Response::Refresh),
-                Err(e) => Message::error_response(id, e),
-            }
-        }
-
-        Request::AddRepo { path } => {
-            let command = Command { host: None, context_repo: None, action: CommandAction::TrackRepoPath { path } };
-            match ctx.daemon.execute(command).await {
-                Ok(_) => Message::ok_response(id, Response::AddRepo),
-                Err(e) => Message::error_response(id, e),
-            }
-        }
-
-        Request::RemoveRepo { path } => {
-            let command = Command { host: None, context_repo: None, action: CommandAction::UntrackRepo { repo: RepoSelector::Path(path) } };
-            match ctx.daemon.execute(command).await {
-                Ok(_) => Message::ok_response(id, Response::RemoveRepo),
-                Err(e) => Message::error_response(id, e),
-            }
-        }
-
-        Request::ReplaySince { last_seen } => {
-            let last_seen = last_seen.into_iter().map(|entry| (entry.stream, entry.seq)).collect();
-            match ctx.daemon.replay_since(&last_seen).await {
-                Ok(events) => Message::ok_response(id, Response::ReplaySince(events)),
-                Err(e) => Message::error_response(id, e),
-            }
-        }
-
-        Request::GetStatus => match ctx.daemon.get_status().await {
-            Ok(status) => Message::ok_response(id, Response::GetStatus(status)),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::GetRepoDetail { slug } => match ctx.daemon.get_repo_detail(&flotilla_protocol::RepoSelector::Query(slug)).await {
-            Ok(detail) => Message::ok_response(id, Response::GetRepoDetail(detail)),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::GetRepoProviders { slug } => match ctx.daemon.get_repo_providers(&flotilla_protocol::RepoSelector::Query(slug)).await {
-            Ok(providers) => Message::ok_response(id, Response::GetRepoProviders(providers)),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::GetRepoWork { slug } => match ctx.daemon.get_repo_work(&flotilla_protocol::RepoSelector::Query(slug)).await {
-            Ok(work) => Message::ok_response(id, Response::GetRepoWork(work)),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::ListHosts => match ctx.daemon.list_hosts().await {
-            Ok(hosts) => Message::ok_response(id, Response::ListHosts(hosts)),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::GetHostStatus { host } => match ctx.daemon.get_host_status(&host).await {
-            Ok(status) => Message::ok_response(id, Response::GetHostStatus(status)),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::GetHostProviders { host } => match ctx.daemon.get_host_providers(&host).await {
-            Ok(providers) => Message::ok_response(id, Response::GetHostProviders(providers)),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::GetTopology => match ctx.daemon.get_topology().await {
-            Ok(topology) => Message::ok_response(id, Response::GetTopology(topology)),
-            Err(e) => Message::error_response(id, e),
-        },
-
-        Request::AgentHook { event } => {
-            use flotilla_protocol::AgentEventType;
-
-            tracing::info!(
-                harness = ?event.harness,
-                event_type = ?event.event_type,
-                attachable_id = %event.attachable_id,
-                session_id = ?event.session_id,
-                "received agent hook event"
-            );
-
-            let result = (|| {
-                let mut store = ctx.agent_state_store.lock().map_err(|_| "agent state store lock poisoned".to_string())?;
-
-                // Resolve attachable_id: if the hook didn't have one from env, check
-                // session_id index for a previously allocated one.
-                let attachable_id = if let Some(ref sid) = event.session_id {
-                    if let Some(existing) = store.lookup_by_session_id(sid) {
-                        existing.clone()
-                    } else {
-                        event.attachable_id.clone()
-                    }
-                } else {
-                    event.attachable_id.clone()
-                };
-
-                let changed = if event.event_type == AgentEventType::Ended {
-                    store.remove(&attachable_id);
-                    true
-                } else if let Some(status) = event.event_type.to_status() {
-                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                    let existing = store.get(&attachable_id);
-                    // TODO(#393): persist event.cwd for CliAgentProvider correlation
-                    let entry = AgentEntry {
-                        harness: event.harness.clone(),
-                        status,
-                        model: event.model.clone().or_else(|| existing.and_then(|e| e.model.clone())),
-                        session_title: existing.and_then(|e| e.session_title.clone()),
-                        session_id: event.session_id.clone(),
-                        last_event_epoch_secs: now,
-                    };
-                    store.upsert(attachable_id, entry);
-                    true
-                } else {
-                    false // NoChange events skip the store
-                };
-
-                if changed {
-                    store.save()
-                } else {
-                    Ok(())
-                }
-                // NOTE: agent state changes are not pushed to the TUI immediately.
-                // They become visible on the next refresh cycle (~10s). A proper fix
-                // requires the log-based architecture (#256) where push events can
-                // trigger targeted view re-materialization without a full provider refresh.
-            })();
-
-            match result {
-                Ok(()) => Message::ok_response(id, Response::AgentHook),
-                Err(e) => {
-                    warn!(err = %e, "failed to process agent hook event");
-                    Message::error_response(id, e)
-                }
-            }
         }
     }
 }
