@@ -1713,6 +1713,197 @@ async fn run_build_plan(
     .await
 }
 
+async fn run_build_plan_to_completion(
+    action: CommandAction,
+    registry: ProviderRegistry,
+    providers_data: ProviderData,
+    runner: MockRunner,
+) -> CommandResult {
+    use tokio::sync::broadcast;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::step::run_step_plan;
+
+    let config_base = config_base();
+    let attachable_store = test_attachable_store(&config_base);
+    let local_host = local_host();
+    let repo = RepoExecutionContext { identity: repo_identity(), root: repo_root() };
+    let registry = Arc::new(registry);
+
+    let plan = build_plan(
+        local_command(action),
+        repo.clone(),
+        Arc::clone(&registry),
+        Arc::new(providers_data),
+        Arc::new(runner),
+        config_base.clone(),
+        attachable_store.clone(),
+        None,
+        local_host.clone(),
+        None,
+    )
+    .await;
+
+    match plan {
+        ExecutionPlan::Immediate(result) => result,
+        ExecutionPlan::Steps(step_plan) => {
+            let (cancel, tx) = (CancellationToken::new(), broadcast::channel(64).0);
+            let resolver = ExecutorStepResolver {
+                repo,
+                registry,
+                config_base,
+                attachable_store,
+                daemon_socket_path: None,
+                local_host: local_host.clone(),
+            };
+            run_step_plan(step_plan, 1, local_host, repo_identity(), repo_root(), cancel, tx, Some(&resolver)).await
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Tests: paired characterization for execute and build_plan paths
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn checkout_create_plan_and_execute_return_same_checkout_created_result() {
+    let expected_path = PathBuf::from("/repo/wt-feat-x");
+    let execute_runner = MockRunner::new(vec![Err("not found".into()), Err("not found".into())]);
+    let plan_runner = MockRunner::new(vec![Err("not found".into()), Err("not found".into())]);
+
+    let mut execute_registry = empty_registry();
+    execute_registry
+        .checkout_managers
+        .insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", expected_path.to_str().expect("utf8 path"))));
+
+    let execute_result = run_execute(fresh_checkout_action("feat-x"), &execute_registry, &empty_data(), &execute_runner).await;
+
+    match execute_result {
+        CommandResult::CheckoutCreated { branch, path } => {
+            assert_eq!(branch, "feat-x");
+            assert_eq!(path, expected_path);
+        }
+        other => panic!("expected CheckoutCreated from execute, got {other:?}"),
+    }
+
+    let mut plan_registry = empty_registry();
+    plan_registry
+        .checkout_managers
+        .insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", expected_path.to_str().expect("utf8 path"))));
+
+    let plan_result = run_build_plan_to_completion(fresh_checkout_action("feat-x"), plan_registry, empty_data(), plan_runner).await;
+
+    match plan_result {
+        CommandResult::CheckoutCreated { branch, path } => {
+            assert_eq!(branch, "feat-x");
+            assert_eq!(path, expected_path);
+        }
+        other => panic!("expected CheckoutCreated from build_plan completion, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn remove_checkout_plan_and_execute_both_kill_correlated_terminals() {
+    let terminal_id = ManagedTerminalId { checkout: "feat-x".into(), role: "shell".into(), index: 0 };
+
+    let execute_pool = Arc::new(MockTerminalPool { killed: tokio::sync::Mutex::new(vec![]) });
+    let mut execute_registry = empty_registry();
+    execute_registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
+    execute_registry.terminal_pools.insert("shpool", desc("shpool"), Arc::clone(&execute_pool) as Arc<dyn TerminalPool>);
+    let mut execute_data = empty_data();
+    execute_data.checkouts.insert(hp("/repo/wt-feat-x"), make_checkout("feat-x", "/repo/wt-feat-x"));
+
+    let execute_result = run_execute(
+        remove_checkout_action("feat-x", vec![terminal_id.clone()]),
+        &execute_registry,
+        &execute_data,
+        &runner_ok(),
+    )
+    .await;
+
+    assert_checkout_removed_branch(execute_result, "feat-x");
+    let execute_killed = execute_pool.killed.lock().await;
+    assert_eq!(execute_killed.as_slice(), &[terminal_id.clone()]);
+    drop(execute_killed);
+
+    let plan_pool = Arc::new(MockTerminalPool { killed: tokio::sync::Mutex::new(vec![]) });
+    let mut plan_registry = empty_registry();
+    plan_registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
+    plan_registry.terminal_pools.insert("shpool", desc("shpool"), Arc::clone(&plan_pool) as Arc<dyn TerminalPool>);
+    let mut plan_data = empty_data();
+    plan_data.checkouts.insert(hp("/repo/wt-feat-x"), make_checkout("feat-x", "/repo/wt-feat-x"));
+
+    let plan_result =
+        run_build_plan_to_completion(remove_checkout_action("feat-x", vec![terminal_id.clone()]), plan_registry, plan_data, runner_ok())
+            .await;
+
+    assert_ok(plan_result);
+    let plan_killed = plan_pool.killed.lock().await;
+    assert_eq!(plan_killed.as_slice(), &[terminal_id]);
+}
+
+#[tokio::test]
+async fn teleport_plan_and_execute_both_create_new_workspace_even_when_one_exists() {
+    let checkout_path = PathBuf::from("/repo/wt-feat");
+    let existing_workspace = Workspace {
+        name: "feat".to_string(),
+        directories: vec![checkout_path.clone()],
+        correlation_keys: vec![],
+        attachable_set_id: None,
+    };
+
+    let execute_ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:77".to_string(), existing_workspace.clone())]));
+    let mut execute_registry = empty_registry();
+    execute_registry.cloud_agents.insert("claude", desc("claude"), Arc::new(MockCloudAgent::succeeding()));
+    execute_registry.workspace_managers.insert("cmux", desc("cmux"), execute_ws_mgr.clone());
+    let mut execute_data = empty_data();
+    execute_data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
+    execute_data.sessions.insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
+
+    let execute_result = run_execute(
+        CommandAction::TeleportSession {
+            session_id: "sess-1".to_string(),
+            branch: Some("feat".to_string()),
+            checkout_key: Some(checkout_path.clone()),
+        },
+        &execute_registry,
+        &execute_data,
+        &runner_ok(),
+    )
+    .await;
+
+    assert_ok(execute_result);
+    let execute_calls = execute_ws_mgr.calls.lock().await;
+    assert!(execute_calls.iter().any(|call| call.starts_with("create_workspace")), "execute teleport should create a new workspace, got: {execute_calls:?}");
+    assert!(!execute_calls.iter().any(|call| call.starts_with("select_workspace")), "execute teleport should not reuse an existing workspace, got: {execute_calls:?}");
+    drop(execute_calls);
+
+    let plan_ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:77".to_string(), existing_workspace)]));
+    let mut plan_registry = empty_registry();
+    plan_registry.cloud_agents.insert("claude", desc("claude"), Arc::new(MockCloudAgent::succeeding()));
+    plan_registry.workspace_managers.insert("cmux", desc("cmux"), plan_ws_mgr.clone());
+    let mut plan_data = empty_data();
+    plan_data.checkouts.insert(hp("/repo/wt-feat"), make_checkout("feat", "/repo/wt-feat"));
+    plan_data.sessions.insert("sess-1".to_string(), make_session_for("claude", "sess-1"));
+
+    let plan_result = run_build_plan_to_completion(
+        CommandAction::TeleportSession {
+            session_id: "sess-1".to_string(),
+            branch: Some("feat".to_string()),
+            checkout_key: Some(checkout_path),
+        },
+        plan_registry,
+        plan_data,
+        runner_ok(),
+    )
+    .await;
+
+    assert_ok(plan_result);
+    let plan_calls = plan_ws_mgr.calls.lock().await;
+    assert!(plan_calls.iter().any(|call| call.starts_with("create_workspace")), "planned teleport should create a new workspace, got: {plan_calls:?}");
+    assert!(!plan_calls.iter().any(|call| call.starts_with("select_workspace")), "planned teleport should not reuse an existing workspace, got: {plan_calls:?}");
+}
+
 // -----------------------------------------------------------------------
 // Tests: build_plan
 // -----------------------------------------------------------------------
