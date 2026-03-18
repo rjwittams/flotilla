@@ -1052,24 +1052,43 @@ async fn validate_checkout_target(
 }
 
 /// Build the env vars to inject into a managed terminal session.
+/// Ensures the attachable binding exists (creates it if needed) so the
+/// env var is available on the very first attach.
 fn build_terminal_env_vars(
     id: &ManagedTerminalId,
+    cwd: &Path,
+    command: &str,
     attachable_store: &SharedAttachableStore,
     terminal_pool_provider: &str,
     daemon_socket_path: Option<&Path>,
 ) -> crate::providers::terminal::TerminalEnvVars {
-    use crate::attachable::{terminal_session_binding_ref, BindingObjectKind};
+    use crate::attachable::{terminal_session_binding_ref, TerminalPurpose};
 
     let mut vars = Vec::new();
 
-    // Look up the stable AttachableId for this terminal from the store.
     let session_name = terminal_session_binding_ref(id);
     match attachable_store.lock() {
-        Ok(store) => {
-            if let Some(attachable_id) =
-                store.lookup_binding("terminal_pool", terminal_pool_provider, BindingObjectKind::Attachable, &session_name)
-            {
-                vars.push(("FLOTILLA_ATTACHABLE_ID".to_string(), attachable_id.to_string()));
+        Ok(mut store) => {
+            // Ensure the attachable exists before looking up its ID.
+            // This creates the binding on first workspace creation so the
+            // env var is available immediately, not only after shpool's
+            // attach_command .inspect() runs.
+            let host = flotilla_protocol::HostName::local();
+            let set_checkout = flotilla_protocol::HostPath::new(host.clone(), cwd.to_path_buf());
+            let set_id = store.ensure_terminal_set(Some(host), Some(set_checkout));
+            let attachable_id = store.ensure_terminal_attachable(
+                &set_id,
+                "terminal_pool",
+                terminal_pool_provider,
+                &session_name,
+                TerminalPurpose { checkout: id.checkout.clone(), role: id.role.clone(), index: id.index },
+                command,
+                cwd.to_path_buf(),
+                flotilla_protocol::TerminalStatus::Disconnected,
+            );
+            vars.push(("FLOTILLA_ATTACHABLE_ID".to_string(), attachable_id.to_string()));
+            if let Err(e) = store.save() {
+                warn!(err = %e, "failed to persist attachable store after env var injection");
             }
         }
         Err(e) => {
@@ -1120,7 +1139,14 @@ async fn resolve_terminal_pool(
                 warn!(%id, err = %e, "failed to ensure terminal");
                 continue;
             }
-            let env_vars = build_terminal_env_vars(&id, attachable_store, terminal_pool_provider, daemon_socket_path);
+            let env_vars = build_terminal_env_vars(
+                &id,
+                &config.working_directory,
+                &entry.command,
+                attachable_store,
+                terminal_pool_provider,
+                daemon_socket_path,
+            );
             match terminal_pool.attach_command(&id, &entry.command, &config.working_directory, &env_vars).await {
                 Ok(cmd) => {
                     debug!(%id, command = ?entry.command, resolved = ?cmd, "terminal resolved");
@@ -1162,7 +1188,8 @@ async fn prepare_terminal_commands(
                 if let Err(e) = tp.ensure_running(&id, &cmd.command, checkout_path).await {
                     warn!(%id, err = %e, "failed to ensure terminal");
                 }
-                let env_vars = build_terminal_env_vars(&id, attachable_store, terminal_pool_provider, daemon_socket_path);
+                let env_vars =
+                    build_terminal_env_vars(&id, checkout_path, &cmd.command, attachable_store, terminal_pool_provider, daemon_socket_path);
                 match tp.attach_command(&id, &cmd.command, checkout_path, &env_vars).await {
                     Ok(attach_cmd) => resolved.push(PreparedTerminalCommand { role: cmd.role.clone(), command: attach_cmd }),
                     Err(e) => {
@@ -3573,44 +3600,32 @@ content:
     // -----------------------------------------------------------------------
 
     #[test]
-    fn build_terminal_env_vars_populates_both_vars_when_binding_exists() {
-        use flotilla_protocol::TerminalStatus;
-
-        use crate::attachable::{shared_in_memory_attachable_store, TerminalPurpose};
-
-        let store = shared_in_memory_attachable_store();
-        {
-            let mut s = store.lock().expect("lock");
-            let set_id = s.ensure_terminal_set(None, None);
-            s.ensure_terminal_attachable(
-                &set_id,
-                "terminal_pool",
-                "shpool",
-                "flotilla/feat/agent/0",
-                TerminalPurpose { checkout: "feat".into(), role: "agent".into(), index: 0 },
-                "claude",
-                std::path::PathBuf::from("/repo/feat"),
-                TerminalStatus::Running,
-            );
-        }
-
+    fn build_terminal_env_vars_creates_binding_and_populates_both_vars() {
+        let store = crate::attachable::shared_in_memory_attachable_store();
         let id = ManagedTerminalId { checkout: "feat".into(), role: "agent".into(), index: 0 };
+        let cwd = std::path::Path::new("/repo/feat");
         let socket = std::path::PathBuf::from("/tmp/flotilla.sock");
-        let vars = build_terminal_env_vars(&id, &store, "shpool", Some(&socket));
+
+        let vars = build_terminal_env_vars(&id, cwd, "claude", &store, "shpool", Some(&socket));
 
         assert_eq!(vars.len(), 2);
         assert_eq!(vars[0].0, "FLOTILLA_ATTACHABLE_ID");
         assert!(!vars[0].1.is_empty());
         assert_eq!(vars[1].0, "FLOTILLA_DAEMON_SOCKET");
         assert_eq!(vars[1].1, "/tmp/flotilla.sock");
+
+        // Calling again returns the same attachable ID (idempotent)
+        let vars2 = build_terminal_env_vars(&id, cwd, "claude", &store, "shpool", Some(&socket));
+        assert_eq!(vars[0].1, vars2[0].1);
     }
 
     #[test]
-    fn build_terminal_env_vars_empty_when_no_binding() {
+    fn build_terminal_env_vars_without_socket_only_has_attachable_id() {
         let store = crate::attachable::shared_in_memory_attachable_store();
         let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
-        let vars = build_terminal_env_vars(&id, &store, "shpool", None);
-        assert!(vars.is_empty());
+        let vars = build_terminal_env_vars(&id, std::path::Path::new("/repo"), "$SHELL", &store, "shpool", None);
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].0, "FLOTILLA_ATTACHABLE_ID");
     }
 
     // -----------------------------------------------------------------------
