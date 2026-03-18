@@ -74,6 +74,7 @@ pub trait AttachableStoreApi: Send + Sync {
         external_ref: &str,
     ) -> Option<&str>;
     fn remove_set(&mut self, id: &AttachableSetId) -> Option<RemovedSetInfo>;
+    fn sets_for_checkout(&self, checkout: &HostPath) -> Vec<AttachableSetId>;
     fn save(&self) -> Result<(), String>;
 }
 
@@ -314,6 +315,10 @@ impl AttachableStoreState {
 
         Some(RemovedSetInfo { member_binding_refs })
     }
+
+    fn sets_for_checkout(&self, checkout: &HostPath) -> Vec<AttachableSetId> {
+        self.registry.sets.values().filter(|set| set.checkout.as_ref() == Some(checkout)).map(|set| set.id.clone()).collect()
+    }
 }
 
 pub struct AttachableStore {
@@ -448,6 +453,10 @@ impl AttachableStore {
         self.state.remove_set(id)
     }
 
+    pub fn sets_for_checkout(&self, checkout: &HostPath) -> Vec<AttachableSetId> {
+        self.state.sets_for_checkout(checkout)
+    }
+
     pub fn save(&self) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("failed to create attachable dir: {e}"))?;
@@ -571,6 +580,10 @@ impl AttachableStoreApi for AttachableStore {
         self.state.remove_set(id)
     }
 
+    fn sets_for_checkout(&self, checkout: &HostPath) -> Vec<AttachableSetId> {
+        self.state.sets_for_checkout(checkout)
+    }
+
     fn save(&self) -> Result<(), String> {
         AttachableStore::save(self)
     }
@@ -686,6 +699,10 @@ impl AttachableStoreApi for InMemoryAttachableStore {
 
     fn remove_set(&mut self, id: &AttachableSetId) -> Option<RemovedSetInfo> {
         self.state.remove_set(id)
+    }
+
+    fn sets_for_checkout(&self, checkout: &HostPath) -> Vec<AttachableSetId> {
+        self.state.sets_for_checkout(checkout)
     }
 
     fn save(&self) -> Result<(), String> {
@@ -1116,5 +1133,41 @@ mod tests {
     #[test]
     fn in_memory_contract_remove_set_returns_none_for_unknown_id() {
         contract_remove_set_returns_none_for_unknown_id(&mut InMemoryAttachableStore::new());
+    }
+
+    fn contract_sets_for_checkout_returns_matching_sets(store: &mut impl AttachableStoreApi) {
+        let host = HostName::new("desktop");
+        let checkout_a = HostPath::new(host.clone(), "/repo/wt-feat");
+        let checkout_b = HostPath::new(host.clone(), "/repo/wt-main");
+        let set_a = store.ensure_terminal_set(Some(host.clone()), Some(checkout_a.clone()));
+        let _set_b = store.ensure_terminal_set(Some(host.clone()), Some(checkout_b.clone()));
+        let found = store.sets_for_checkout(&checkout_a);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], set_a);
+    }
+
+    fn contract_sets_for_checkout_returns_empty_for_unknown(store: &mut impl AttachableStoreApi) {
+        let unknown = HostPath::new(HostName::new("desktop"), "/repo/nonexistent");
+        assert!(store.sets_for_checkout(&unknown).is_empty());
+    }
+
+    #[test]
+    fn file_backed_contract_sets_for_checkout_returns_matching_sets() {
+        contract_sets_for_checkout_returns_matching_sets(&mut AttachableStore::with_base(tempfile::tempdir().expect("tempdir").path()));
+    }
+
+    #[test]
+    fn in_memory_contract_sets_for_checkout_returns_matching_sets() {
+        contract_sets_for_checkout_returns_matching_sets(&mut InMemoryAttachableStore::new());
+    }
+
+    #[test]
+    fn file_backed_contract_sets_for_checkout_returns_empty_for_unknown() {
+        contract_sets_for_checkout_returns_empty_for_unknown(&mut AttachableStore::with_base(tempfile::tempdir().expect("tempdir").path()));
+    }
+
+    #[test]
+    fn in_memory_contract_sets_for_checkout_returns_empty_for_unknown() {
+        contract_sets_for_checkout_returns_empty_for_unknown(&mut InMemoryAttachableStore::new());
     }
 }
