@@ -5,6 +5,7 @@ pub mod cursor;
 pub mod git;
 pub mod github;
 pub mod passthrough;
+pub mod session;
 pub mod shpool;
 pub mod tmux;
 pub mod zellij;
@@ -21,7 +22,11 @@ fn workspace_factories() -> Vec<Box<super::WorkspaceManagerFactory>> {
 }
 
 fn terminal_pool_factories() -> Vec<Box<super::TerminalPoolFactory>> {
-    vec![Box::new(shpool::ShpoolTerminalPoolFactory), Box::new(passthrough::PassthroughTerminalPoolFactory)]
+    vec![
+        Box::new(session::SessionTerminalPoolFactory),
+        Box::new(shpool::ShpoolTerminalPoolFactory),
+        Box::new(passthrough::PassthroughTerminalPoolFactory),
+    ]
 }
 
 fn checkout_manager_factories() -> Vec<Box<super::CheckoutManagerFactory>> {

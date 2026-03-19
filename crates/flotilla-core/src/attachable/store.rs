@@ -73,6 +73,13 @@ pub trait AttachableStoreApi: Send + Sync {
         object_kind: BindingObjectKind,
         external_ref: &str,
     ) -> Option<&str>;
+    fn remove_binding_object(
+        &mut self,
+        provider_category: &str,
+        provider_name: &str,
+        object_kind: BindingObjectKind,
+        external_ref: &str,
+    ) -> bool;
     fn remove_set(&mut self, id: &AttachableSetId) -> Option<RemovedSetInfo>;
     fn sets_for_checkout(&self, checkout: &HostPath) -> Vec<AttachableSetId>;
     fn save(&self) -> Result<(), String>;
@@ -248,6 +255,41 @@ impl AttachableStoreState {
     ) -> Option<&str> {
         let key = Self::binding_key(provider_category, provider_name, &object_kind, external_ref);
         self.binding_index.get(&key).map(String::as_str)
+    }
+
+    fn remove_binding_object(
+        &mut self,
+        provider_category: &str,
+        provider_name: &str,
+        object_kind: BindingObjectKind,
+        external_ref: &str,
+    ) -> bool {
+        let key = Self::binding_key(provider_category, provider_name, &object_kind, external_ref);
+        let Some(object_id) = self.binding_index.remove(&key) else {
+            return false;
+        };
+
+        self.registry.bindings.retain(|binding| {
+            !(binding.provider_category == provider_category
+                && binding.provider_name == provider_name
+                && binding.object_kind == object_kind
+                && binding.external_ref == external_ref)
+        });
+
+        match object_kind {
+            BindingObjectKind::Attachable => {
+                let attachable_id = AttachableId::new(object_id);
+                if let Some(attachable) = self.registry.attachables.shift_remove(&attachable_id) {
+                    let _ = self.remove_member_link(&attachable.set_id, &attachable_id);
+                }
+            }
+            BindingObjectKind::AttachableSet => {
+                let set_id = AttachableSetId::new(object_id);
+                self.registry.sets.shift_remove(&set_id);
+            }
+        }
+
+        true
     }
 
     fn build_binding_index(registry: &AttachableRegistry) -> HashMap<BindingKey, String> {
@@ -449,6 +491,16 @@ impl AttachableStore {
         self.state.lookup_binding(provider_category, provider_name, object_kind, external_ref)
     }
 
+    pub fn remove_binding_object(
+        &mut self,
+        provider_category: &str,
+        provider_name: &str,
+        object_kind: BindingObjectKind,
+        external_ref: &str,
+    ) -> bool {
+        self.state.remove_binding_object(provider_category, provider_name, object_kind, external_ref)
+    }
+
     pub fn remove_set(&mut self, id: &AttachableSetId) -> Option<RemovedSetInfo> {
         self.state.remove_set(id)
     }
@@ -576,6 +628,16 @@ impl AttachableStoreApi for AttachableStore {
         self.state.lookup_binding(provider_category, provider_name, object_kind, external_ref)
     }
 
+    fn remove_binding_object(
+        &mut self,
+        provider_category: &str,
+        provider_name: &str,
+        object_kind: BindingObjectKind,
+        external_ref: &str,
+    ) -> bool {
+        self.state.remove_binding_object(provider_category, provider_name, object_kind, external_ref)
+    }
+
     fn remove_set(&mut self, id: &AttachableSetId) -> Option<RemovedSetInfo> {
         self.state.remove_set(id)
     }
@@ -695,6 +757,16 @@ impl AttachableStoreApi for InMemoryAttachableStore {
         external_ref: &str,
     ) -> Option<&str> {
         self.state.lookup_binding(provider_category, provider_name, object_kind, external_ref)
+    }
+
+    fn remove_binding_object(
+        &mut self,
+        provider_category: &str,
+        provider_name: &str,
+        object_kind: BindingObjectKind,
+        external_ref: &str,
+    ) -> bool {
+        self.state.remove_binding_object(provider_category, provider_name, object_kind, external_ref)
     }
 
     fn remove_set(&mut self, id: &AttachableSetId) -> Option<RemovedSetInfo> {

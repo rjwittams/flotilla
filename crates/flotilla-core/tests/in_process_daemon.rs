@@ -23,7 +23,8 @@ use flotilla_core::{
                 init_git_repo_with_remote, FakeCheckoutManager, FakeDiscoveryProviders, FakeIssueTracker, FakeTerminalPool,
                 FakeWorkspaceManager,
             },
-            DiscoveryRuntime, EnvironmentBag, Factory, ProviderCategory, ProviderDescriptor, UnmetRequirement,
+            DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostPlatform, ProviderCategory, ProviderDescriptor,
+            RepoDetector, UnmetRequirement,
         },
         types::{ChangeRequest, CloudAgentSession, RepoCriteria, SessionStatus, Workspace},
     },
@@ -34,6 +35,23 @@ use flotilla_protocol::{
     ProviderData, RepoIdentity, RepoSelector, StreamKey, SystemInfo, TerminalStatus, ToolInventory, TopologyRoute, WorkItemKind,
 };
 use tokio::sync::Notify;
+
+struct FixedRemoteHostDetector {
+    owner: &'static str,
+    repo: &'static str,
+}
+
+#[async_trait]
+impl RepoDetector for FixedRemoteHostDetector {
+    async fn detect(
+        &self,
+        _repo_root: &Path,
+        _runner: &dyn flotilla_core::providers::CommandRunner,
+        _env: &dyn flotilla_core::providers::discovery::EnvVars,
+    ) -> Vec<EnvironmentAssertion> {
+        vec![EnvironmentAssertion::remote_host(HostPlatform::GitHub, self.owner, self.repo, "origin")]
+    }
+}
 
 struct SlowCloudAgent {
     archive_started: Notify,
@@ -184,6 +202,24 @@ fn sample_remote_host_summary(name: &str) -> HostSummary {
     }
 }
 
+fn definitely_remote_host() -> HostName {
+    if HostName::local().to_string() == "test-remote-host" {
+        HostName::new("test-remote-host-alt")
+    } else {
+        HostName::new("test-remote-host")
+    }
+}
+
+fn test_repo_identity() -> RepoIdentity {
+    RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() }
+}
+
+fn local_bare_remote_discovery() -> DiscoveryRuntime {
+    let mut runtime = git_process_discovery(false);
+    runtime.repo_detectors.push(Box::new(FixedRemoteHostDetector { owner: "owner", repo: "repo" }));
+    runtime
+}
+
 struct FailingChangeRequestTracker;
 
 #[async_trait]
@@ -236,30 +272,47 @@ async fn daemon_for_plain_dir_with_discovery(discovery: DiscoveryRuntime) -> (te
     (temp, repo, daemon)
 }
 
-async fn daemon_for_git_repo(remote: &str) -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>, RepoIdentity) {
+fn init_bare_git_remote(path: &Path) {
+    let status = std::process::Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(path)
+        .status()
+        .expect("run git init --bare");
+    assert!(status.success(), "git init --bare should succeed");
+}
+
+fn init_git_repo_with_local_bare_remote(path: &Path, remote_path: &Path) -> RepoIdentity {
+    init_bare_git_remote(remote_path);
+    init_git_repo_with_remote(path, remote_path.to_str().expect("remote path utf8"))
+}
+
+async fn daemon_for_git_repo() -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>, RepoIdentity) {
     let temp = tempfile::tempdir().expect("create tempdir");
     let repo = temp.path().join("repo");
-    init_git_repo_with_remote(&repo, remote);
+    let remote = temp.path().join("origin.git");
+    init_git_repo_with_local_bare_remote(&repo, &remote);
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config, git_process_discovery(false), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, local_bare_remote_discovery(), HostName::local()).await;
     let identity = daemon.tracked_repo_identity_for_path(&repo).await.expect("repo identity should be detected");
     (temp, repo, daemon, identity)
 }
 
-async fn daemon_for_duplicate_git_repos(remote: &str) -> (tempfile::TempDir, PathBuf, PathBuf, Arc<InProcessDaemon>) {
+async fn daemon_for_duplicate_git_repos() -> (tempfile::TempDir, PathBuf, PathBuf, Arc<InProcessDaemon>) {
     let temp = tempfile::tempdir().expect("create tempdir");
     let repo_a = temp.path().join("repo-a");
     let repo_b = temp.path().join("repo-b");
-    init_git_repo_with_remote(&repo_a, remote);
-    init_git_repo_with_remote(&repo_b, remote);
+    let remote = temp.path().join("origin.git");
+    init_bare_git_remote(&remote);
+    init_git_repo_with_remote(&repo_a, remote.to_str().expect("remote path utf8"));
+    init_git_repo_with_remote(&repo_b, remote.to_str().expect("remote path utf8"));
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo_a.clone(), repo_b.clone()], config, git_process_discovery(false), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![repo_a.clone(), repo_b.clone()], config, local_bare_remote_discovery(), HostName::local()).await;
     (temp, repo_a, repo_b, daemon)
 }
 
 #[tokio::test]
 async fn list_hosts_includes_local_and_configured_disconnected_peers() {
-    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo().await;
 
     daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
 
@@ -276,7 +329,7 @@ async fn list_hosts_includes_local_and_configured_disconnected_peers() {
 
 #[tokio::test]
 async fn get_host_providers_returns_local_summary_and_errors_for_unknown_remote_summary() {
-    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo().await;
 
     daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
 
@@ -291,7 +344,7 @@ async fn get_host_providers_returns_local_summary_and_errors_for_unknown_remote_
 
 #[tokio::test]
 async fn list_hosts_counts_remote_repo_overlay_and_get_topology_returns_mirrored_routes() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
 
     daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
     daemon.set_peer_host_summaries(HashMap::from([(HostName::new("remote"), sample_remote_host_summary("remote"))])).await;
@@ -365,7 +418,7 @@ async fn daemon_broadcasts_snapshots() {
 
 #[tokio::test]
 async fn execute_broadcasts_lifecycle_events() {
-    let (_temp, repo, daemon, identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, repo, daemon, identity) = daemon_for_git_repo().await;
     let mut rx = daemon.subscribe();
 
     // Execute a command that goes through the spawned task path.
@@ -422,7 +475,7 @@ async fn execute_broadcasts_lifecycle_events() {
 
 #[tokio::test]
 async fn fetch_checkout_status_accepts_identity_context_repo() {
-    let (_temp, _repo, daemon, identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, _repo, daemon, identity) = daemon_for_git_repo().await;
     let mut rx = daemon.subscribe();
 
     let command = Command {
@@ -761,7 +814,7 @@ async fn publish_peer_summary_normalizes_host_name() {
 
 #[tokio::test]
 async fn set_peer_providers_emits_host_snapshot_for_overlay_only_host() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
     let mut rx = daemon.subscribe();
 
     let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
@@ -796,7 +849,7 @@ async fn set_peer_providers_emits_host_snapshot_for_overlay_only_host() {
 
 #[tokio::test]
 async fn replay_since_includes_overlay_only_hosts() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
     let mut rx = daemon.subscribe();
 
     let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
@@ -826,7 +879,7 @@ async fn replay_since_includes_overlay_only_hosts() {
 
 #[tokio::test]
 async fn list_hosts_and_replay_drop_stale_non_configured_hosts() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
     let mut rx = daemon.subscribe();
 
     let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
@@ -882,7 +935,7 @@ async fn list_hosts_and_replay_drop_stale_non_configured_hosts() {
 
 #[tokio::test]
 async fn clearing_summary_for_visible_host_emits_host_snapshot() {
-    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo().await;
     let mut rx = daemon.subscribe();
     let peer_host = HostName::new("configured-peer");
 
@@ -930,7 +983,7 @@ async fn clearing_summary_for_visible_host_emits_host_snapshot() {
 /// client that was connected from the start.
 #[tokio::test]
 async fn replay_since_includes_peer_checkouts_with_correct_host() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
     let mut rx = daemon.subscribe();
 
     // Initial refresh
@@ -985,7 +1038,8 @@ async fn replay_since_includes_peer_checkouts_with_correct_host() {
 async fn add_and_remove_repo_updates_state_and_emits_events() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("new-repo");
-    init_git_repo_with_remote(&repo, "git@github.com:owner/new-repo.git");
+    let remote = temp.path().join("origin.git");
+    init_git_repo_with_local_bare_remote(&repo, &remote);
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
     let daemon = InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::local()).await;
@@ -1061,7 +1115,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
 
 #[tokio::test]
 async fn duplicate_local_roots_share_identity_but_remain_tracked() {
-    let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_git_repos("git@github.com:owner/repo.git").await;
+    let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_git_repos().await;
 
     let identity_a = daemon.tracked_repo_identity_for_path(&repo_a).await.expect("identity for first repo");
     let identity_b = daemon.tracked_repo_identity_for_path(&repo_b).await.expect("identity for second repo");
@@ -1089,9 +1143,11 @@ async fn duplicate_local_roots_share_identity_but_remain_tracked() {
 async fn adding_local_clone_promotes_remote_only_identity_to_local_execution() {
     let temp = tempfile::tempdir().expect("create tempdir");
     let local_repo = temp.path().join("repo");
-    let identity = init_git_repo_with_remote(&local_repo, "git@github.com:owner/repo.git");
+    let remote = temp.path().join("origin.git");
+    let _ = init_git_repo_with_local_bare_remote(&local_repo, &remote);
+    let identity = test_repo_identity();
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![], config, git_process_discovery(false), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![], config, local_bare_remote_discovery(), HostName::local()).await;
 
     daemon
         .add_virtual_repo(identity.clone(), PathBuf::from("/remote/desktop/owner/repo"), ProviderData::default())
@@ -1113,7 +1169,7 @@ async fn adding_local_clone_promotes_remote_only_identity_to_local_execution() {
 
 #[tokio::test]
 async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
-    let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_git_repos("git@github.com:owner/repo.git").await;
+    let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_git_repos().await;
     let mut rx = daemon.subscribe();
 
     daemon.refresh(&RepoSelector::Path(repo_a.clone())).await.expect("refresh first repo");
@@ -1140,7 +1196,7 @@ async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
 
 #[tokio::test]
 async fn get_local_providers_excludes_peer_overlay_data() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
 
     daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh local repo");
 
@@ -1177,7 +1233,7 @@ async fn get_local_providers_excludes_peer_overlay_data() {
 /// the real peer checkouts again — duplicating them.
 #[tokio::test]
 async fn get_state_does_not_reattribute_peer_checkouts_after_poll() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
     let mut rx = daemon.subscribe();
 
     // Initial refresh — populates last_snapshot with local-only data
@@ -1225,7 +1281,7 @@ async fn get_state_does_not_reattribute_peer_checkouts_after_poll() {
 /// should not duplicate peer checkouts via the normalize-then-merge path.
 #[tokio::test]
 async fn set_peer_providers_after_poll_does_not_duplicate_checkouts() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo("git@github.com:owner/repo.git").await;
+    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
     let mut rx = daemon.subscribe();
 
     // Initial refresh
@@ -1275,7 +1331,7 @@ async fn set_peer_providers_after_poll_does_not_duplicate_checkouts() {
 
 #[tokio::test]
 async fn in_process_daemon_keeps_remote_attachable_set_anchor_when_local_workspace_is_bound() {
-    let remote_host = HostName::new("feta");
+    let remote_host = definitely_remote_host();
     let remote_checkout = HostPath::new(remote_host.clone(), "/home/robert/dev/flotilla.terminal-stuff");
     let set_id = AttachableSetId::new("set-remote");
     let workspace_ref = "workspace:9".to_string();
@@ -1368,7 +1424,7 @@ async fn in_process_daemon_keeps_remote_attachable_set_anchor_when_local_workspa
 
 #[tokio::test]
 async fn in_process_daemon_correlates_workspace_and_terminal_into_one_remote_checkout_item() {
-    let remote_host = HostName::new("feta");
+    let remote_host = definitely_remote_host();
     let remote_checkout = HostPath::new(remote_host.clone(), "/home/robert/dev/flotilla.issue-356-watch");
     let set_id = AttachableSetId::new("set-issue-356-watch");
     let workspace_ref = "workspace:10".to_string();
