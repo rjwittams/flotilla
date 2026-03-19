@@ -483,7 +483,19 @@ impl App {
                     self.active_ui_mut().show_providers = !sp;
                 }
                 AppAction::ToggleMultiSelect => {
-                    self.toggle_multi_select();
+                    if let Some(si) = self.active_ui().selected_selectable_idx {
+                        if let Some(&table_idx) = self.active_ui().table_view.selectable_indices.get(si) {
+                            if let Some(flotilla_core::data::GroupEntry::Item(item)) =
+                                self.active_ui().table_view.table_entries.get(table_idx)
+                            {
+                                let identity = item.identity.clone();
+                                let rui = self.active_ui_mut();
+                                if !rui.multi_selected.remove(&identity) {
+                                    rui.multi_selected.insert(identity);
+                                }
+                            }
+                        }
+                    }
                 }
                 AppAction::OpenActionMenu => {
                     self.open_action_menu();

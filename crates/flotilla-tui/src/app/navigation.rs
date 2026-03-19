@@ -1,5 +1,3 @@
-use flotilla_core::data::GroupEntry;
-
 use super::{App, UiMode};
 
 enum TabDirection {
@@ -135,32 +133,11 @@ impl App {
             None
         }
     }
-
-    /// Toggle multi-select on the currently selected work item.
-    ///
-    /// Production code now uses `BaseView::toggle_multi_select` via the
-    /// widget stack. This method remains for unit tests and will be removed
-    /// when the legacy scaffolding is cleaned up.
-    #[allow(dead_code)]
-    pub(super) fn toggle_multi_select(&mut self) {
-        if let Some(si) = self.active_ui().selected_selectable_idx {
-            if let Some(&table_idx) = self.active_ui().table_view.selectable_indices.get(si) {
-                if let Some(GroupEntry::Item(item)) = self.active_ui().table_view.table_entries.get(table_idx) {
-                    let identity = item.identity.clone();
-                    let rui = self.active_ui_mut();
-                    if !rui.multi_selected.remove(&identity) {
-                        rui.multi_selected.insert(identity);
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use flotilla_core::data::{GroupEntry, GroupedWorkItems};
-    use flotilla_protocol::WorkItemIdentity;
     use ratatui::layout::Rect;
 
     use super::*;
@@ -496,41 +473,5 @@ mod tests {
         assert!(app.row_at_mouse(15, 13).is_none());
         // y=14 -> data_row=2 -> actual_row=2, which IS in selectable_indices at position 1
         assert_eq!(app.row_at_mouse(15, 14), Some(1));
-    }
-
-    // ── toggle_multi_select tests ────────────────────────────────────
-
-    #[test]
-    fn toggle_adds_to_multi_selected() {
-        let mut app = stub_app_with_repos(1);
-        set_active_table_view(&mut app, issue_table_entries(3));
-        // Select first item
-        app.select_next(); // None -> 0
-        assert!(app.active_ui().multi_selected.is_empty());
-        app.toggle_multi_select();
-        assert!(app.active_ui().multi_selected.contains(&WorkItemIdentity::Issue("0".into())));
-    }
-
-    #[test]
-    fn toggle_removes_from_multi_selected() {
-        let mut app = stub_app_with_repos(1);
-        set_active_table_view(&mut app, issue_table_entries(3));
-        app.select_next(); // None -> 0
-                           // Toggle on
-        app.toggle_multi_select();
-        assert!(app.active_ui().multi_selected.contains(&WorkItemIdentity::Issue("0".into())));
-        // Toggle off
-        app.toggle_multi_select();
-        assert!(!app.active_ui().multi_selected.contains(&WorkItemIdentity::Issue("0".into())));
-        assert!(app.active_ui().multi_selected.is_empty());
-    }
-
-    #[test]
-    fn toggle_noop_when_no_selection() {
-        let mut app = stub_app_with_repos(1);
-        set_active_table_view(&mut app, issue_table_entries(3));
-        // selected_selectable_idx is None
-        app.toggle_multi_select();
-        assert!(app.active_ui().multi_selected.is_empty());
     }
 }

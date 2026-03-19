@@ -5,10 +5,7 @@ use flotilla_core::data::GroupEntry;
 use flotilla_protocol::{Command, CommandAction, WorkItem};
 use tui_input::Input;
 
-use super::{
-    ui_state::{FocusTarget, PendingActionContext},
-    App, BranchInputKind, Intent, UiMode,
-};
+use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent, UiMode};
 use crate::{
     keymap::{Action, ModeId},
     status_bar::StatusBarAction,
@@ -17,42 +14,21 @@ use crate::{
 impl App {
     // ── Key handling ──
 
+    /// Resolve a key event to an action using the UI mode rather than the
+    /// widget-stack mode. Called for raw-key widgets (BranchInput, IssueSearch)
+    /// and when the base widget (Normal mode_id) is on top — so Config mode
+    /// gets correct keymap bindings via `ModeId::from(&self.ui.mode)`.
     fn resolve_action(&self, key: KeyEvent) -> Option<Action> {
         let mode_id = ModeId::from(&self.ui.mode);
 
         // Text input modes: only Esc and Enter are intercepted.
-        // All other keys pass through to tui_input in handle_key.
-        match mode_id {
-            ModeId::BranchInput | ModeId::IssueSearch => {
-                return match key.code {
-                    KeyCode::Esc => Some(Action::Dismiss),
-                    KeyCode::Enter => Some(Action::Confirm),
-                    _ => None,
-                };
-            }
-            ModeId::CommandPalette => {
-                return match key.code {
-                    KeyCode::Esc => Some(Action::Dismiss),
-                    KeyCode::Enter => Some(Action::Confirm),
-                    KeyCode::Up => Some(Action::SelectPrev),
-                    KeyCode::Down => Some(Action::SelectNext),
-                    _ => None,
-                };
-            }
-            // FilePicker has both a text input and a navigation list.
-            // Hardcoded rather than routed through the keymap because shared
-            // bindings (e.g. `?` → ToggleHelp) would intercept keys the user
-            // intends to type into the path field.
-            ModeId::FilePicker => {
-                return match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => Some(Action::SelectNext),
-                    KeyCode::Char('k') | KeyCode::Up => Some(Action::SelectPrev),
-                    KeyCode::Esc => Some(Action::Dismiss),
-                    KeyCode::Enter => Some(Action::Confirm),
-                    _ => None,
-                };
-            }
-            _ => {}
+        // All other keys pass through to tui_input via handle_raw_key.
+        if matches!(mode_id, ModeId::BranchInput | ModeId::IssueSearch) {
+            return match key.code {
+                KeyCode::Esc => Some(Action::Dismiss),
+                KeyCode::Enter => Some(Action::Confirm),
+                _ => None,
+            };
         }
 
         self.keymap.resolve(mode_id, crokey::KeyCombination::from(key))
@@ -68,17 +44,17 @@ impl App {
         match action {
             Action::SelectNext => {
                 // BaseView handles Normal mode; only EventLog reaches here.
-                if matches!(self.ui.mode.focus_target(), FocusTarget::EventLog) {
+                if matches!(self.ui.mode, UiMode::Config) {
                     self.event_log_widget.select_next();
                 }
             }
             Action::SelectPrev => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::EventLog) {
+                if matches!(self.ui.mode, UiMode::Config) {
                     self.event_log_widget.select_prev();
                 }
             }
             Action::Confirm => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
+                if matches!(self.ui.mode, UiMode::Normal) {
                     self.action_enter();
                 }
             }
@@ -96,23 +72,23 @@ impl App {
                 }
             }
             Action::OpenActionMenu => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
+                if matches!(self.ui.mode, UiMode::Normal) {
                     self.open_action_menu();
                 }
             }
             Action::OpenFilePicker => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
+                if matches!(self.ui.mode, UiMode::Normal) {
                     self.open_file_picker_from_active_repo_parent();
                 }
             }
             Action::Dismiss => {
-                // BaseView handles Normal mode dismiss cascade. Only EventLog reaches here.
-                if matches!(self.ui.mode.focus_target(), FocusTarget::EventLog) {
+                // BaseView handles Normal mode dismiss cascade. Only Config reaches here.
+                if matches!(self.ui.mode, UiMode::Config) {
                     self.ui.mode = UiMode::Normal;
                 }
             }
             Action::Dispatch(intent) => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
+                if matches!(self.ui.mode, UiMode::Normal) {
                     self.dispatch_if_available(intent);
                 }
             }

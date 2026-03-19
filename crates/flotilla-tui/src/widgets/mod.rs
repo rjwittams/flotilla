@@ -11,7 +11,6 @@ pub mod issue_search;
 pub mod preview_panel;
 pub mod status_bar_widget;
 pub mod tab_bar;
-pub mod work_item_table;
 
 use std::{any::Any, collections::HashMap};
 
