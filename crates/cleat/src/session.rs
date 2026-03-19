@@ -478,6 +478,7 @@ pub fn run_session_daemon(root: &Path, id: &str) -> Result<(), String> {
     let _ = fs::remove_file(&socket_path);
     let _ = fs::remove_file(daemon_pid_path(root, id));
     let _ = fs::remove_file(foreground_path(root, id));
+    let _ = fs::remove_dir_all(root.join(id));
     Ok(())
 }
 
