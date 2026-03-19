@@ -102,9 +102,6 @@ pub fn render(
     tab_bar.render(model, ui, theme, frame, chunks[0]);
     render_content(model, ui, theme, frame, chunks[1], event_log_widget, preview_panel);
 
-    // Write event log filter area to shared layout for click detection
-    ui.layout.event_log_filter_area = event_log_widget.filter_area();
-
     // When the palette is active, move the status bar to the top of the overlay so the
     // input sits above the results instead of being pinned to the bottom of the screen.
     let status_bar_area = if matches!(ui.mode, UiMode::CommandPalette { .. }) {

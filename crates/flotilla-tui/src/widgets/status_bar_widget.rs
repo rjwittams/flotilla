@@ -166,11 +166,6 @@ impl StatusBarWidget {
         }
 
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
-
-        // Write back to shared layout for backward compatibility
-        ui.layout.status_bar.area = self.area;
-        ui.layout.status_bar.key_targets = self.key_targets.clone();
-        ui.layout.status_bar.dismiss_targets = self.dismiss_targets.clone();
     }
 
     /// Hit-test a left mouse click against the rendered status bar targets.
