@@ -196,6 +196,55 @@ fn lifecycle_attach_init_capabilities_drive_replay_output_on_daemon_path() {
     assert_eq!(replay, Frame::Output(b"Ansi256:true".to_vec()));
 }
 
+#[cfg(feature = "ghostty-vt")]
+#[test]
+fn replay_reattach_delivers_restore_before_new_live_output() {
+    let _lock = env_lock().lock().expect("env lock");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let service = service_for(temp.path());
+    service.create(Some("alpha".into()), None, Some("printf 'before'; sleep 1; printf 'after'; sleep 5".into())).expect("create alpha");
+
+    let mut first = UnixStream::connect(session_socket_path(temp.path(), "alpha")).expect("connect first socket");
+    Frame::AttachInit { cols: 100, rows: 30, capabilities: ClientCapabilities::new(ColorLevel::Ansi256, true) }
+        .write(&mut first)
+        .expect("write first attach init");
+    assert_eq!(Frame::read(&mut first).expect("read first attach response"), Frame::Ack);
+
+    let first_live = Frame::read(&mut first).expect("read first live output");
+    let first_live_bytes = match first_live {
+        Frame::Output(bytes) => bytes,
+        other => panic!("expected first live output, got {other:?}"),
+    };
+    assert!(String::from_utf8_lossy(&first_live_bytes).contains("before"));
+    drop(first);
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let mut second = UnixStream::connect(session_socket_path(temp.path(), "alpha")).expect("connect second socket");
+    Frame::AttachInit { cols: 100, rows: 30, capabilities: ClientCapabilities::new(ColorLevel::Ansi256, true) }
+        .write(&mut second)
+        .expect("write second attach init");
+    assert_eq!(Frame::read(&mut second).expect("read second attach response"), Frame::Ack);
+
+    let replay = Frame::read(&mut second).expect("read replay output");
+    let replay_bytes = match replay {
+        Frame::Output(bytes) => bytes,
+        other => panic!("expected replay output, got {other:?}"),
+    };
+    let replay_text = String::from_utf8_lossy(&replay_bytes);
+    assert!(replay_text.contains("before"), "replay should include prior output: {replay_text:?}");
+    assert!(!replay_text.contains("after"), "replay should arrive before later live output: {replay_text:?}");
+
+    let live = loop {
+        match Frame::read(&mut second).expect("read live output after replay") {
+            Frame::Output(bytes) if String::from_utf8_lossy(&bytes).contains("after") => break bytes,
+            Frame::Output(_) => continue,
+            other => panic!("expected output frame after replay, got {other:?}"),
+        }
+    };
+    assert!(String::from_utf8_lossy(&live).contains("after"));
+}
+
 #[test]
 fn dropping_foreground_attach_keeps_session_alive_for_later_attach() {
     let _lock = env_lock().lock().expect("env lock");
