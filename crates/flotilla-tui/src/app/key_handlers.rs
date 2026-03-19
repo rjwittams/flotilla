@@ -1098,6 +1098,30 @@ mod tests {
     }
 
     #[test]
+    fn clicking_gear_icon_toggles_providers() {
+        let mut app = stub_app();
+        // Place the gear hitbox where render_unified_table would put it
+        app.ui.layout.tab_areas.insert(TabId::Gear, Rect::new(75, 2, 3, 1));
+        assert!(!app.active_ui().show_providers);
+
+        app.handle_mouse(left_click(76, 2));
+        assert!(app.active_ui().show_providers);
+
+        app.handle_mouse(left_click(76, 2));
+        assert!(!app.active_ui().show_providers);
+    }
+
+    #[test]
+    fn clicking_gear_icon_ignored_in_config_mode() {
+        let mut app = stub_app();
+        app.ui.layout.tab_areas.insert(TabId::Gear, Rect::new(75, 2, 3, 1));
+        app.ui.mode = UiMode::Config;
+
+        app.handle_mouse(left_click(76, 2));
+        assert!(!app.active_ui().show_providers);
+    }
+
+    #[test]
     fn scroll_wheel_does_not_reach_table_while_help_is_open() {
         let mut app = stub_app();
         setup_table(&mut app, vec![make_work_item("a"), make_work_item("b")]);
