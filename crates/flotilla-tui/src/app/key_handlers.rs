@@ -139,7 +139,12 @@ impl App {
             | Action::ToggleStatusBarKeys
             | Action::CycleHost
             | Action::CycleLayout
-            | Action::CycleTheme => {}
+            | Action::CycleTheme => {
+                // These are handled by the widget stack in normal flow. They can
+                // still reach here when a modal widget returns Ignored (e.g. pressing
+                // `?` while the action menu is open). The no-op is correct — the
+                // action should not fire from inside an unrelated modal.
+            }
         }
     }
 

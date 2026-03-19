@@ -428,6 +428,7 @@ impl App {
     pub fn apply_outcome(&mut self, index: usize, outcome: crate::widgets::Outcome) {
         match outcome {
             crate::widgets::Outcome::Consumed => {}
+            // Callers only invoke apply_outcome for non-Ignored outcomes; this arm is unreachable today.
             crate::widgets::Outcome::Ignored => {}
             crate::widgets::Outcome::Finished => {
                 self.widget_stack.remove(index);
@@ -809,28 +810,6 @@ impl App {
         let dir_entries = if let UiMode::FilePicker { ref dir_entries, .. } = self.ui.mode { dir_entries.clone() } else { Vec::new() };
         self.widget_stack.push(Box::new(crate::widgets::file_picker::FilePickerWidget::new(input, dir_entries)));
     }
-
-    /// Clear the active issue search and optionally dispatch a clear command.
-    ///
-    /// Production code now uses inline logic in `WorkItemTable::dismiss` and
-    /// `IssueSearchWidget`. This method remains for unit tests and will be
-    /// removed when the legacy scaffolding is cleaned up.
-    #[allow(dead_code)]
-    pub(super) fn clear_active_issue_search(&mut self, dispatch: ClearDispatch) {
-        if dispatch == ClearDispatch::Always || self.active_ui().active_search_query.is_some() {
-            let repo = self.model.active_repo_root().clone();
-            self.proto_commands.push(self.command(CommandAction::ClearIssueSearch { repo: flotilla_protocol::RepoSelector::Path(repo) }));
-        }
-        self.active_ui_mut().active_search_query = None;
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ClearDispatch {
-    /// Always dispatch the clear command, even if no search is active.
-    Always,
-    /// Only dispatch if there is an active search query.
-    OnlyIfActive,
 }
 
 #[cfg(test)]
