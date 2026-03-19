@@ -130,3 +130,18 @@ fn send_keys_command_parses_repeat() {
     let cli = Cli::try_parse_from(["cleat", "send-keys", "-N", "3", "demo", "C-l"]).expect("send-keys -N parses");
     assert_eq!(cli.command, Command::SendKeys { id: "demo".into(), literal: false, hex: false, repeat: 3, keys: vec!["C-l".into()] });
 }
+
+#[test]
+fn send_keys_command_rejects_missing_keys() {
+    assert!(Cli::try_parse_from(["cleat", "send-keys", "demo"]).is_err());
+}
+
+#[test]
+fn send_keys_command_rejects_literal_and_hex_together() {
+    assert!(Cli::try_parse_from(["cleat", "send-keys", "-l", "-H", "demo", "Enter"]).is_err());
+}
+
+#[test]
+fn send_keys_command_rejects_zero_repeat() {
+    assert!(Cli::try_parse_from(["cleat", "send-keys", "-N", "0", "demo", "Enter"]).is_err());
+}

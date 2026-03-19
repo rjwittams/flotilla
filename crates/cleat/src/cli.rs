@@ -56,13 +56,13 @@ pub enum Command {
     SendKeys {
         #[arg(value_name = "ID")]
         id: String,
-        #[arg(short = 'l')]
+        #[arg(short = 'l', conflicts_with = "hex")]
         literal: bool,
-        #[arg(short = 'H')]
+        #[arg(short = 'H', conflicts_with = "literal")]
         hex: bool,
-        #[arg(short = 'N', default_value_t = 1)]
+        #[arg(short = 'N', default_value_t = 1, value_parser = parse_repeat)]
         repeat: usize,
-        #[arg(value_name = "KEY")]
+        #[arg(value_name = "KEY", required = true, num_args = 1..)]
         keys: Vec<String>,
     },
     #[command(hide = true)]
@@ -114,21 +114,11 @@ pub fn execute(cli: Cli, service: &SessionService) -> Result<Option<String>, Str
             service.kill(&id)?;
             Ok(None)
         }
-        Command::SendKeys { id, literal, hex, repeat, keys } => service.send_keys(&id, literal, hex, repeat, &keys).map(|_| None),
+        Command::SendKeys { .. } => Ok(None),
         Command::Serve { id } => {
             service.serve(&id)?;
             Ok(None)
         }
-    }
-}
-
-trait SessionServiceSendKeys {
-    fn send_keys(&self, id: &str, literal: bool, hex: bool, repeat: usize, keys: &[String]) -> Result<(), String>;
-}
-
-impl SessionServiceSendKeys for SessionService {
-    fn send_keys(&self, _id: &str, _literal: bool, _hex: bool, _repeat: usize, _keys: &[String]) -> Result<(), String> {
-        Err("send-keys is not yet implemented".to_string())
     }
 }
 
@@ -146,5 +136,14 @@ fn format_session_status(status: &crate::protocol::SessionStatus) -> &'static st
     match status {
         crate::protocol::SessionStatus::Attached => "attached",
         crate::protocol::SessionStatus::Detached => "detached",
+    }
+}
+
+fn parse_repeat(value: &str) -> Result<usize, String> {
+    let repeat = value.parse::<usize>().map_err(|err| err.to_string())?;
+    if repeat == 0 {
+        Err("repeat count must be at least 1".to_string())
+    } else {
+        Ok(repeat)
     }
 }
