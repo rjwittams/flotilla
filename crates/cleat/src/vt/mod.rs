@@ -7,3 +7,35 @@ pub trait VtEngine: Send {
     fn replay_payload(&self) -> Result<Option<Vec<u8>>, String>;
     fn size(&self) -> (u16, u16);
 }
+
+pub(crate) fn make_default_vt_engine(cols: u16, rows: u16) -> Box<dyn VtEngine> {
+    select_default_vt_engine(cols, rows)
+}
+
+#[cfg(test)]
+pub(crate) fn default_vt_engine_kind() -> &'static str {
+    select_default_vt_engine_kind()
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn select_default_vt_engine(cols: u16, rows: u16) -> Box<dyn VtEngine> {
+    // Ghostty is feature-gated for now; Task 4 will replace this with the real engine.
+    Box::new(passthrough::PassthroughVtEngine::new(cols, rows))
+}
+
+#[cfg(test)]
+#[cfg(feature = "ghostty-vt")]
+fn select_default_vt_engine_kind() -> &'static str {
+    "passthrough"
+}
+
+#[cfg(not(feature = "ghostty-vt"))]
+fn select_default_vt_engine(cols: u16, rows: u16) -> Box<dyn VtEngine> {
+    Box::new(passthrough::PassthroughVtEngine::new(cols, rows))
+}
+
+#[cfg(test)]
+#[cfg(not(feature = "ghostty-vt"))]
+fn select_default_vt_engine_kind() -> &'static str {
+    "passthrough"
+}

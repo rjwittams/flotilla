@@ -31,7 +31,7 @@ use nix::{
 use crate::{
     protocol::Frame,
     runtime::{RuntimeLayout, SessionMetadata},
-    vt::{passthrough::PassthroughVtEngine, VtEngine},
+    vt::{self, VtEngine},
 };
 
 const SOCKET_NAME: &str = "socket";
@@ -206,7 +206,7 @@ pub fn foreground_path(root: &Path, id: &str) -> PathBuf {
 }
 
 fn default_vt_engine() -> Box<dyn VtEngine> {
-    Box::new(PassthroughVtEngine::new(DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS))
+    vt::make_default_vt_engine(DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS)
 }
 
 fn record_pty_output(engine: &mut dyn VtEngine, bytes: &[u8]) -> Result<(), String> {
@@ -581,6 +581,7 @@ mod tests {
     };
 
     use super::{apply_attach_state, default_vt_engine, is_executable_file, record_pty_output, resolve_cleat_executable};
+    use crate::vt;
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -590,16 +591,31 @@ mod tests {
     #[test]
     fn default_vt_engine_starts_with_default_size() {
         let engine = default_vt_engine();
+        assert_eq!(vt::default_vt_engine_kind(), "passthrough");
         assert_eq!(engine.size(), (super::DEFAULT_TERMINAL_COLS, super::DEFAULT_TERMINAL_ROWS));
+        assert!(!engine.supports_replay());
+        assert_eq!(engine.replay_payload().expect("replay payload"), None);
     }
 
     #[test]
-    fn vt_engine_helpers_feed_and_resize_passthrough_engine() {
+    fn vt_engine_helpers_feed_and_resize_default_engine() {
         let mut engine = default_vt_engine();
         record_pty_output(engine.as_mut(), b"hello").expect("feed output");
         let replay = apply_attach_state(engine.as_mut(), 132, 40).expect("apply attach state");
 
         assert_eq!(engine.size(), (132, 40));
+        assert_eq!(replay, None);
+    }
+
+    #[cfg(not(feature = "ghostty-vt"))]
+    #[test]
+    fn vt_engine_helpers_compile_without_ghostty_feature() {
+        let mut engine = vt::make_default_vt_engine(80, 24);
+
+        record_pty_output(engine.as_mut(), b"hello").expect("feed output");
+        let replay = apply_attach_state(engine.as_mut(), 100, 30).expect("apply attach state");
+
+        assert_eq!(engine.size(), (100, 30));
         assert_eq!(replay, None);
     }
 
