@@ -2,6 +2,8 @@ pub mod passthrough;
 
 #[cfg(feature = "ghostty-vt")]
 pub mod ghostty;
+#[cfg(feature = "ghostty-vt")]
+mod ghostty_ffi;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -28,7 +30,7 @@ pub enum ColorLevel {
     TrueColor,
 }
 
-pub trait VtEngine: Send {
+pub trait VtEngine {
     fn feed(&mut self, bytes: &[u8]) -> Result<(), String>;
     fn resize(&mut self, cols: u16, rows: u16) -> Result<(), String>;
     fn supports_replay(&self) -> bool;

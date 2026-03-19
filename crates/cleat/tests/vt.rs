@@ -3,6 +3,8 @@ use cleat::vt::{passthrough::PassthroughVtEngine, ClientCapabilities, ColorLevel
 mod vt_contracts;
 
 use vt_contracts::{assert_non_replay_contract, assert_replay_contract_placeholder, PassthroughFixture, PlaceholderReplayFixture};
+#[cfg(feature = "ghostty-vt")]
+use vt_contracts::{assert_replay_contract, GhosttyFixture};
 
 #[test]
 fn vt_passthrough_engine_contract_is_locked() {
@@ -31,4 +33,10 @@ fn vt_passthrough_replay_remains_disabled_for_client_capabilities() {
     let capabilities = ClientCapabilities::new(ColorLevel::TrueColor, true);
 
     assert_eq!(engine.replay_payload(&capabilities).expect("replay payload"), None);
+}
+
+#[cfg(feature = "ghostty-vt")]
+#[test]
+fn vt_ghostty_engine_contract_is_locked() {
+    assert_replay_contract(&GhosttyFixture);
 }

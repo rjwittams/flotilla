@@ -1,3 +1,5 @@
+#[cfg(feature = "ghostty-vt")]
+use cleat::vt::ghostty::GhosttyVtEngine;
 use cleat::vt::{passthrough::PassthroughVtEngine, ClientCapabilities, ColorLevel, VtEngine};
 
 pub trait EngineFixture {
@@ -96,6 +98,34 @@ impl ReplayEngineFixture for PlaceholderReplayFixture {
     }
 }
 
+#[cfg(feature = "ghostty-vt")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GhosttyFixture;
+
+#[cfg(feature = "ghostty-vt")]
+impl EngineFixture for GhosttyFixture {
+    type Engine = GhosttyVtEngine;
+
+    fn name(&self) -> &'static str {
+        "ghostty"
+    }
+
+    fn make(&self) -> Self::Engine {
+        GhosttyVtEngine::new(80, 24)
+    }
+}
+
+#[cfg(feature = "ghostty-vt")]
+impl ReplayEngineFixture for GhosttyFixture {
+    fn replay_cases(&self) -> Vec<ClientCapabilities> {
+        vec![
+            ClientCapabilities::conservative_fallback(),
+            ClientCapabilities::new(ColorLevel::TrueColor, true),
+            ClientCapabilities::new(ColorLevel::Ansi256, false),
+        ]
+    }
+}
+
 pub fn assert_base_engine_contract<F>(fixture: &F, engine: &mut F::Engine)
 where
     F: EngineFixture,
@@ -139,4 +169,31 @@ where
     payloads.dedup();
     assert!(payloads.len() > 1, "Task 4 replay fixtures should react to at least one capability change");
     // Task 4 plugs a real replay-capable engine fixture into this seam.
+}
+
+#[allow(dead_code)]
+pub fn assert_replay_contract<F>(fixture: &F)
+where
+    F: ReplayEngineFixture,
+{
+    let mut engine = fixture.make();
+    assert_base_engine_contract(fixture, &mut engine);
+    assert!(engine.supports_replay(), "{} should support replay", fixture.name());
+
+    let mut payloads = Vec::new();
+    for capabilities in fixture.replay_cases() {
+        let payload = engine
+            .replay_payload(&capabilities)
+            .expect("replay payload result")
+            .expect("replay-capable engines should return payload bytes");
+        assert!(!payload.is_empty(), "{} should produce non-empty replay output", fixture.name());
+        payloads.push(payload);
+    }
+
+    let first = payloads.first().expect("at least one replay payload").clone();
+    let repeat = engine
+        .replay_payload(&fixture.replay_cases().into_iter().next().expect("at least one replay case"))
+        .expect("repeat replay payload result")
+        .expect("repeat replay payload");
+    assert_eq!(repeat, first, "{} replay should be deterministic for the same state", fixture.name());
 }

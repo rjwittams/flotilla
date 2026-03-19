@@ -745,9 +745,18 @@ mod tests {
     #[test]
     fn default_vt_engine_starts_with_default_size() {
         let engine = default_vt_engine();
+        #[cfg(feature = "ghostty-vt")]
+        assert_eq!(vt::default_vt_engine_kind(), "ghostty");
+        #[cfg(not(feature = "ghostty-vt"))]
         assert_eq!(vt::default_vt_engine_kind(), "passthrough");
         assert_eq!(engine.size(), (super::DEFAULT_TERMINAL_COLS, super::DEFAULT_TERMINAL_ROWS));
+        #[cfg(feature = "ghostty-vt")]
+        assert!(engine.supports_replay());
+        #[cfg(not(feature = "ghostty-vt"))]
         assert!(!engine.supports_replay());
+        #[cfg(feature = "ghostty-vt")]
+        assert!(engine.replay_payload(&vt::ClientCapabilities::conservative_fallback()).expect("replay payload").is_some());
+        #[cfg(not(feature = "ghostty-vt"))]
         assert_eq!(engine.replay_payload(&vt::ClientCapabilities::conservative_fallback()).expect("replay payload"), None);
     }
 
@@ -759,6 +768,9 @@ mod tests {
             apply_attach_state(engine.as_mut(), 132, 40, &vt::ClientCapabilities::conservative_fallback()).expect("apply attach state");
 
         assert_eq!(engine.size(), (132, 40));
+        #[cfg(feature = "ghostty-vt")]
+        assert!(replay.is_some());
+        #[cfg(not(feature = "ghostty-vt"))]
         assert_eq!(replay, None);
     }
 

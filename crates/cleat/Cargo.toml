@@ -3,6 +3,7 @@ name = "cleat"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
+build = "build.rs"
 
 [features]
 default = []
