@@ -1,9 +1,8 @@
 use std::any::Any;
 
-use flotilla_core::data::GroupEntry;
 use ratatui::{layout::Rect, Frame};
 
-use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext};
+use super::{work_item_table::WorkItemTable, AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext};
 use crate::{
     app::ui_state::UiMode,
     keymap::{Action, ModeId},
@@ -20,70 +19,17 @@ use crate::{
 /// Rendering delegates to `ui::render` which orchestrates layout across the
 /// child components (TabBar, StatusBarWidget, EventLogWidget, PreviewPanel).
 /// Those children live on `App` for now and are accessed through `RenderContext`.
-pub struct BaseView;
+#[derive(Default)]
+pub struct BaseView {
+    pub table: WorkItemTable,
+}
 
 impl BaseView {
     pub fn new() -> Self {
-        Self
+        Self { table: WorkItemTable::new() }
     }
 
-    // ── Action helpers (absorbed from WorkItemTable) ──
-
-    fn select_next(ctx: &mut WidgetContext) -> Outcome {
-        let repo_key = &ctx.repo_order[ctx.active_repo];
-        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-        let indices = &rui.table_view.selectable_indices;
-        if indices.is_empty() {
-            return Outcome::Consumed;
-        }
-        let current_si = rui.selected_selectable_idx;
-        let next = match current_si {
-            Some(si) if si + 1 < indices.len() => si + 1,
-            Some(si) => si,
-            None => 0,
-        };
-        let table_idx = rui.table_view.selectable_indices[next];
-        rui.selected_selectable_idx = Some(next);
-        rui.table_state.select(Some(table_idx));
-
-        Outcome::Consumed
-    }
-
-    fn select_prev(ctx: &mut WidgetContext) -> Outcome {
-        let repo_key = &ctx.repo_order[ctx.active_repo];
-        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-        let indices = &rui.table_view.selectable_indices;
-        if indices.is_empty() {
-            return Outcome::Consumed;
-        }
-        let current_si = rui.selected_selectable_idx;
-        let prev = match current_si {
-            Some(si) if si > 0 => si - 1,
-            Some(si) => si,
-            None => 0,
-        };
-        let table_idx = rui.table_view.selectable_indices[prev];
-        rui.selected_selectable_idx = Some(prev);
-        rui.table_state.select(Some(table_idx));
-
-        Outcome::Consumed
-    }
-
-    fn toggle_multi_select(ctx: &mut WidgetContext) -> Outcome {
-        let repo_key = &ctx.repo_order[ctx.active_repo];
-        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-        if let Some(si) = rui.selected_selectable_idx {
-            if let Some(&table_idx) = rui.table_view.selectable_indices.get(si) {
-                if let Some(GroupEntry::Item(item)) = rui.table_view.table_entries.get(table_idx) {
-                    let identity = item.identity.clone();
-                    if !rui.multi_selected.remove(&identity) {
-                        rui.multi_selected.insert(identity);
-                    }
-                }
-            }
-        }
-        Outcome::Consumed
-    }
+    // ── Action helpers ──
 
     fn toggle_providers(ctx: &mut WidgetContext) -> Outcome {
         let repo_key = &ctx.repo_order[ctx.active_repo];
@@ -121,12 +67,6 @@ impl BaseView {
     }
 }
 
-impl Default for BaseView {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl InteractiveWidget for BaseView {
     fn handle_action(&mut self, action: Action, ctx: &mut WidgetContext) -> Outcome {
         // Only handle table actions when in Normal mode. Config/EventLog mode
@@ -136,9 +76,18 @@ impl InteractiveWidget for BaseView {
         }
 
         match action {
-            Action::SelectNext => Self::select_next(ctx),
-            Action::SelectPrev => Self::select_prev(ctx),
-            Action::ToggleMultiSelect => Self::toggle_multi_select(ctx),
+            Action::SelectNext => {
+                self.table.select_next(ctx);
+                Outcome::Consumed
+            }
+            Action::SelectPrev => {
+                self.table.select_prev(ctx);
+                Outcome::Consumed
+            }
+            Action::ToggleMultiSelect => {
+                self.table.toggle_multi_select(ctx);
+                Outcome::Consumed
+            }
             Action::ToggleProviders => Self::toggle_providers(ctx),
             Action::Dismiss => Self::dismiss(ctx),
             Action::Quit => {
@@ -217,6 +166,7 @@ impl InteractiveWidget for BaseView {
             ctx.status_bar_widget,
             ctx.event_log_widget,
             ctx.preview_panel,
+            &self.table,
         );
     }
 
