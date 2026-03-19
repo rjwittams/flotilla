@@ -261,6 +261,8 @@ pub struct App {
     pub pending_cancel: Option<u64>,
     pub should_quit: bool,
     pub widget_stack: Vec<Box<dyn crate::widgets::InteractiveWidget>>,
+    pub tab_bar: crate::widgets::tab_bar::TabBar,
+    pub status_bar_widget: crate::widgets::status_bar_widget::StatusBarWidget,
 }
 
 impl App {
@@ -287,6 +289,8 @@ impl App {
             pending_cancel: None,
             should_quit: false,
             widget_stack: vec![Box::new(crate::widgets::work_item_table::WorkItemTable::new())],
+            tab_bar: crate::widgets::tab_bar::TabBar::new(),
+            status_bar_widget: crate::widgets::status_bar_widget::StatusBarWidget::new(),
         }
     }
 

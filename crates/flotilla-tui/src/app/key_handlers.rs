@@ -350,20 +350,9 @@ impl App {
             return false;
         }
 
-        for target in &self.ui.layout.status_bar.dismiss_targets {
-            if target.contains(mouse.column, mouse.row) {
-                if let StatusBarAction::ClearError(id) = target.action {
-                    self.dismiss_status_item(id);
-                    return true;
-                }
-            }
-        }
-
-        for target in &self.ui.layout.status_bar.key_targets {
-            if target.contains(mouse.column, mouse.row) {
-                self.dispatch_status_bar_action(target.action.clone());
-                return true;
-            }
+        if let Some(action) = self.status_bar_widget.handle_click(mouse.column, mouse.row) {
+            self.dispatch_status_bar_action(action);
+            return true;
         }
 
         false
@@ -1088,8 +1077,7 @@ mod tests {
     #[test]
     fn clicking_search_status_target_opens_command_palette() {
         let mut app = stub_app();
-        app.ui.layout.status_bar.key_targets =
-            vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
+        app.status_bar_widget.key_targets = vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
 
         app.handle_mouse(left_click(12, 29));
 
@@ -1100,8 +1088,7 @@ mod tests {
     fn clicking_layout_status_cycles_layout() {
         let mut app = stub_app();
         assert_eq!(app.ui.view_layout, RepoViewLayout::Auto);
-        app.ui.layout.status_bar.key_targets =
-            vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
+        app.status_bar_widget.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
 
         app.handle_mouse(left_click(4, 29));
 
@@ -1112,8 +1099,7 @@ mod tests {
     fn clicking_host_status_target_cycles_target_host() {
         let mut app = stub_app();
         insert_peer_host(&mut app.model, "alpha");
-        app.ui.layout.status_bar.key_targets =
-            vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
+        app.status_bar_widget.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
 
         app.handle_mouse(left_click(4, 29));
 
@@ -1124,7 +1110,7 @@ mod tests {
     fn clicking_dismiss_status_target_hides_visible_error() {
         let mut app = stub_app();
         app.model.status_message = Some("boom".into());
-        app.ui.layout.status_bar.dismiss_targets = vec![StatusBarTarget::new(Rect::new(20, 29, 1, 1), StatusBarAction::ClearError(0))];
+        app.status_bar_widget.dismiss_targets = vec![StatusBarTarget::new(Rect::new(20, 29, 1, 1), StatusBarAction::ClearError(0))];
 
         app.handle_mouse(left_click(20, 29));
 

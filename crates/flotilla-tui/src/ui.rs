@@ -3,7 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crossterm::event::KeyCode;
 use flotilla_core::data::{GroupEntry, SectionHeader};
 use flotilla_protocol::{HostName, ProviderData, WorkItem};
 use ratatui::{
@@ -13,23 +12,16 @@ use ratatui::{
     widgets::{Block, Cell, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Table, Wrap},
     Frame,
 };
-use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
-        collect_visible_status_items,
         ui_state::{PendingAction, PendingStatus},
         BranchInputKind, InFlightCommand, PeerStatus, ProviderStatus, RepoViewLayout, TabId, TuiHostState, TuiModel, UiMode, UiState,
     },
     event_log::{self, LevelExt},
     keymap::{Keymap, ModeId},
-    segment_bar::{self, BarStyle, ThemedRibbonStyle, ThemedTabBarStyle},
     shimmer::{shimmer_spans, Shimmer},
-    status_bar::{
-        KeyChip, ModeIndicator, StatusBarAction, StatusBarInput, StatusBarModel, StatusBarTarget, StatusSection, TaskSection,
-        DEFAULT_STATUS_WIDTH_BUDGET,
-    },
-    theme::{BarKind, Theme},
+    theme::Theme,
     ui_helpers,
 };
 
@@ -52,8 +44,6 @@ const PROVIDER_CATEGORIES: [(&str, &str); 8] = [
     ("Workspace mgr", "workspace_manager"),
     ("Terminal pool", "terminal_pool"),
 ];
-const ENTER_KEY_GLYPH: &str = "ENT";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResolvedPreviewPosition {
     Right,
@@ -93,6 +83,7 @@ fn resolve_auto_preview_position(area: Rect) -> ResolvedPreviewPosition {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     model: &TuiModel,
     ui: &mut UiState,
@@ -101,11 +92,13 @@ pub fn render(
     _keymap: &Keymap,
     frame: &mut Frame,
     active_widget_mode: Option<ModeId>,
+    tab_bar: &mut crate::widgets::tab_bar::TabBar,
+    status_bar_widget: &mut crate::widgets::status_bar_widget::StatusBarWidget,
 ) {
     let constraints = vec![Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)];
     let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(frame.area());
 
-    render_tab_bar(model, ui, theme, frame, chunks[0]);
+    tab_bar.render(model, ui, theme, frame, chunks[0]);
     render_content(model, ui, theme, frame, chunks[1]);
 
     // When the palette is active, move the status bar to the top of the overlay so the
@@ -115,71 +108,10 @@ pub fn render(
     } else {
         chunks[2]
     };
-    render_status_bar(model, ui, in_flight, theme, frame, status_bar_area, active_widget_mode);
+    status_bar_widget.render(model, ui, in_flight, theme, frame, status_bar_area, active_widget_mode);
     render_command_palette(ui, theme, frame, status_bar_area);
     render_input_popup(ui, theme, frame);
     render_file_picker(ui, theme, frame);
-}
-
-fn render_tab_bar(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
-    let mut items = Vec::new();
-    let mut tab_ids = Vec::new();
-
-    // Flotilla logo tab
-    let flotilla_style = theme.logo_style(ui.mode.is_config());
-    items.push(segment_bar::SegmentItem {
-        label: TabId::FLOTILLA_LABEL.to_string(),
-        key_hint: None,
-        active: ui.mode.is_config(),
-        dragging: false,
-        style_override: Some(flotilla_style),
-    });
-    tab_ids.push(TabId::Flotilla);
-
-    // Repo tabs
-    for (i, repo_identity) in model.repo_order.iter().enumerate() {
-        let rm = &model.repos[repo_identity];
-        let rui = &ui.repo_ui[repo_identity];
-        let name = TuiModel::repo_name(&rm.path);
-        let is_active = !ui.mode.is_config() && i == model.active_repo;
-        let loading = if rm.loading { " ⟳" } else { "" };
-        let changed = if rui.has_unseen_changes { "*" } else { "" };
-        let label = format!("{name}{changed}{loading}");
-
-        items.push(segment_bar::SegmentItem {
-            label,
-            key_hint: None,
-            active: is_active,
-            dragging: is_active && ui.drag.active,
-            style_override: None,
-        });
-        tab_ids.push(TabId::Repo(i));
-    }
-
-    // [+] button
-    items.push(segment_bar::SegmentItem {
-        label: "[+]".to_string(),
-        key_hint: None,
-        active: false,
-        dragging: false,
-        style_override: Some(Style::default().fg(theme.status_ok)),
-    });
-    tab_ids.push(TabId::Add);
-
-    // Render
-    let tab_style: Box<dyn BarStyle> = match theme.tab_bar.kind {
-        BarKind::Pipe => Box::new(ThemedTabBarStyle { theme, site: &theme.tab_bar }),
-        BarKind::Chevron => Box::new(ThemedRibbonStyle { theme, site: &theme.tab_bar }),
-    };
-    let hits = segment_bar::render(&items, tab_style.as_ref(), area, frame.buffer_mut());
-
-    // Map hit regions to tab areas
-    ui.layout.tab_areas.clear();
-    for hit in hits {
-        if let Some(tab_id) = tab_ids.get(hit.index) {
-            ui.layout.tab_areas.insert(tab_id.clone(), hit.area);
-        }
-    }
 }
 
 fn active_rui<'a>(model: &TuiModel, ui: &'a UiState) -> &'a crate::app::RepoUiState {
@@ -231,416 +163,6 @@ fn selected_work_item<'a>(model: &TuiModel, ui: &'a UiState) -> Option<&'a WorkI
         GroupEntry::Item(item) => Some(item),
         GroupEntry::Header(_) => None,
     }
-}
-
-fn render_status_bar(
-    model: &TuiModel,
-    ui: &mut UiState,
-    in_flight: &HashMap<u64, InFlightCommand>,
-    theme: &Theme,
-    frame: &mut Frame,
-    area: Rect,
-    active_widget_mode: Option<ModeId>,
-) {
-    ui.layout.status_bar.area = area;
-    ui.layout.status_bar.key_targets.clear();
-    ui.layout.status_bar.dismiss_targets.clear();
-
-    let content = status_bar_content(model, ui, in_flight, active_widget_mode);
-    let status_section = content.status.clone();
-    let status_model = StatusBarModel::build(StatusBarInput {
-        width: area.width as usize,
-        preferred_status_width: DEFAULT_STATUS_WIDTH_BUDGET.min(area.width as usize),
-        keys_visible: ui.status_bar.show_keys,
-        status: content.status,
-        task: content.task,
-        keys: content.keys,
-        mode_indicators: content.mode_indicators,
-    });
-
-    frame.render_widget(Block::default().style(Style::default().bg(theme.bar_bg)), area);
-
-    let mut spans = Vec::new();
-    let mut x = 0usize;
-    let status_style = match status_section {
-        StatusSection::Error { .. } => Style::default().fg(theme.status_error).bg(theme.bar_bg).bold(),
-        StatusSection::Plain(_) => Style::default().fg(theme.text).bg(theme.bar_bg),
-    };
-
-    if !status_model.status_text.is_empty() {
-        let status_width = status_model.status_text.width();
-        spans.push(Span::styled(status_model.status_text.clone(), status_style));
-        if let Some(id) = status_section.dismiss_id() {
-            ui.layout.status_bar.dismiss_targets.push(StatusBarTarget::new(
-                Rect::new(area.x + status_width.saturating_sub(1) as u16, area.y, 1, 1),
-                StatusBarAction::ClearError(id),
-            ));
-        }
-        x += status_width;
-    }
-
-    if x < status_model.keys_start {
-        spans.push(Span::styled(" ".repeat(status_model.keys_start - x), Style::default().fg(theme.text).bg(theme.bar_bg)));
-        x = status_model.keys_start;
-    }
-
-    let ribbon_style = ThemedRibbonStyle { theme, site: &theme.status_bar };
-    for chip in &status_model.visible_keys {
-        let ribbon_start = x;
-        let item = segment_bar::SegmentItem {
-            label: chip.label.clone(),
-            key_hint: Some(chip.key.clone()),
-            active: false,
-            dragging: false,
-            style_override: None,
-        };
-        let rendered = ribbon_style.render_item(&item);
-        for span in rendered.spans {
-            spans.push(span);
-        }
-
-        ui.layout
-            .status_bar
-            .key_targets
-            .push(StatusBarTarget::new(Rect::new(area.x + ribbon_start as u16, area.y, rendered.width as u16, 1), chip.action.clone()));
-        x += rendered.width;
-    }
-
-    // ── Mode indicators (compact, after keys) ──
-    if x < status_model.mode_start {
-        spans.push(Span::styled(" ".repeat(status_model.mode_start - x), Style::default().fg(theme.text).bg(theme.bar_bg)));
-        x = status_model.mode_start;
-    }
-
-    let icon_style = Style::default().fg(theme.key_hint).bg(theme.bar_bg);
-    let label_style = Style::default().fg(theme.muted).bg(theme.bar_bg);
-    for indicator in &status_model.mode_indicators {
-        let indicator_start = x;
-        spans.push(Span::styled(format!(" {}", indicator.icon), icon_style));
-        spans.push(Span::styled(format!(" {} ", indicator.label), label_style));
-        let indicator_width = indicator.width();
-        ui.layout.status_bar.key_targets.push(StatusBarTarget::new(
-            Rect::new(area.x + indicator_start as u16, area.y, indicator_width as u16, 1),
-            indicator.action.clone(),
-        ));
-        x += indicator_width;
-    }
-
-    if x < status_model.task_start {
-        spans.push(Span::styled(" ".repeat(status_model.task_start - x), Style::default().fg(theme.text).bg(theme.bar_bg)));
-        x = status_model.task_start;
-    }
-
-    if !status_model.task_text.is_empty() {
-        let task_spans = shimmer_spans(&status_model.task_text, theme);
-        for mut s in task_spans {
-            s.style = s.style.bg(theme.bar_bg);
-            spans.push(s);
-        }
-        x += status_model.task_text.width();
-    }
-
-    if x < area.width as usize {
-        spans.push(Span::styled(" ".repeat(area.width as usize - x), Style::default().fg(theme.text).bg(theme.bar_bg)));
-    }
-
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-struct StatusBarContent {
-    status: StatusSection,
-    keys: Vec<KeyChip>,
-    task: Option<TaskSection>,
-    mode_indicators: Vec<ModeIndicator>,
-}
-
-fn status_bar_content(
-    model: &TuiModel,
-    ui: &UiState,
-    in_flight: &HashMap<u64, InFlightCommand>,
-    active_widget_mode: Option<ModeId>,
-) -> StatusBarContent {
-    let visible_error = collect_visible_status_items(model, ui).into_iter().next();
-
-    // Widget stack overrides UiMode for status bar content.
-    if let Some(widget_mode) = active_widget_mode {
-        match widget_mode {
-            ModeId::Help => {
-                return StatusBarContent {
-                    status: StatusSection::plain("HELP"),
-                    keys: vec![
-                        key_chip("j", "Down", KeyCode::Char('j')),
-                        key_chip("k", "Up", KeyCode::Char('k')),
-                        key_chip("ESC", "Close", KeyCode::Esc),
-                        key_chip("?", "Close", KeyCode::Char('?')),
-                    ],
-                    task: None,
-                    mode_indicators: vec![],
-                };
-            }
-            ModeId::ActionMenu => {
-                return StatusBarContent {
-                    status: StatusSection::plain("ACTIONS"),
-                    keys: vec![
-                        key_chip("j", "Down", KeyCode::Char('j')),
-                        key_chip("k", "Up", KeyCode::Char('k')),
-                        key_chip(ENTER_KEY_GLYPH, "Select", KeyCode::Enter),
-                        key_chip("ESC", "Close", KeyCode::Esc),
-                    ],
-                    task: None,
-                    mode_indicators: vec![],
-                };
-            }
-            ModeId::DeleteConfirm => {
-                return StatusBarContent {
-                    status: StatusSection::plain("CONFIRM DELETE"),
-                    keys: vec![key_chip("y", "Yes", KeyCode::Char('y')), key_chip("n", "No", KeyCode::Char('n'))],
-                    task: None,
-                    mode_indicators: vec![],
-                };
-            }
-            ModeId::CloseConfirm => {
-                return StatusBarContent {
-                    status: StatusSection::plain("CONFIRM CLOSE"),
-                    keys: vec![key_chip("y", "Yes", KeyCode::Char('y')), key_chip("n", "No", KeyCode::Char('n'))],
-                    task: None,
-                    mode_indicators: vec![],
-                };
-            }
-            ModeId::BranchInput => {
-                // Distinguish generating vs manual via the UiMode bridge
-                let generating = matches!(ui.mode, UiMode::BranchInput { kind: BranchInputKind::Generating, .. });
-                return if generating {
-                    StatusBarContent {
-                        status: StatusSection::plain("NEW BRANCH"),
-                        keys: vec![],
-                        task: Some(TaskSection::new("Generating branch name...", 0)),
-                        mode_indicators: vec![],
-                    }
-                } else {
-                    StatusBarContent {
-                        status: StatusSection::plain("NEW BRANCH"),
-                        keys: vec![key_chip(ENTER_KEY_GLYPH, "Create", KeyCode::Enter), key_chip("ESC", "Cancel", KeyCode::Esc)],
-                        task: None,
-                        mode_indicators: vec![],
-                    }
-                };
-            }
-            ModeId::IssueSearch => {
-                // Read the current search text from the UiMode bridge
-                let query = if let UiMode::IssueSearch { ref input } = ui.mode { input.value().to_string() } else { String::new() };
-                return StatusBarContent {
-                    status: StatusSection::plain(&format!("SEARCH {}", query)),
-                    keys: vec![key_chip(ENTER_KEY_GLYPH, "Apply", KeyCode::Enter), key_chip("ESC", "Cancel", KeyCode::Esc)],
-                    task: None,
-                    mode_indicators: vec![],
-                };
-            }
-            ModeId::CommandPalette => {
-                // Read the current palette input from the UiMode bridge
-                let input_text =
-                    if let UiMode::CommandPalette { ref input, .. } = ui.mode { input.value().to_string() } else { String::new() };
-                let status_text = format!("/{}", input_text);
-                return StatusBarContent {
-                    status: StatusSection::plain(&status_text),
-                    keys: vec![
-                        key_chip(ENTER_KEY_GLYPH, "Run", KeyCode::Enter),
-                        key_chip("TAB", "Fill", KeyCode::Tab),
-                        key_chip("ESC", "Close", KeyCode::Esc),
-                    ],
-                    task: None,
-                    mode_indicators: normal_mode_indicators(ui),
-                };
-            }
-            ModeId::FilePicker => {
-                return StatusBarContent {
-                    status: StatusSection::plain("ADD REPO"),
-                    keys: vec![
-                        key_chip("j", "Down", KeyCode::Char('j')),
-                        key_chip("k", "Up", KeyCode::Char('k')),
-                        key_chip("tab", "Complete", KeyCode::Tab),
-                        key_chip(ENTER_KEY_GLYPH, "Select", KeyCode::Enter),
-                        key_chip("ESC", "Cancel", KeyCode::Esc),
-                    ],
-                    task: None,
-                    mode_indicators: vec![],
-                };
-            }
-            _ => {} // Other widget modes will be handled as they are extracted
-        }
-    }
-
-    match &ui.mode {
-        UiMode::Normal => {
-            let rui = active_rui(model, ui);
-            let status = if let Some(item) = visible_error {
-                StatusSection::error(item.id, &item.text)
-            } else if rui.show_providers {
-                StatusSection::plain("PROVIDERS")
-            } else if let Some(query) = rui.active_search_query.as_deref() {
-                StatusSection::plain(&format!("SEARCH \"{query}\""))
-            } else if !rui.multi_selected.is_empty() {
-                StatusSection::plain(&format!("{} SELECTED", rui.multi_selected.len()))
-            } else {
-                StatusSection::plain("/ for commands")
-            };
-
-            let task = active_task(model, in_flight).map(|(description, spinner_index)| TaskSection::new(&description, spinner_index));
-            let mut keys = normal_mode_key_chips();
-            if rui.active_search_query.is_some() {
-                keys.insert(0, key_chip("ESC", "Clear", KeyCode::Esc));
-            }
-            StatusBarContent { status, keys, task, mode_indicators: normal_mode_indicators(ui) }
-        }
-        UiMode::Config => StatusBarContent {
-            status: StatusSection::plain("FLOTILLA"),
-            keys: vec![
-                key_chip("j", "Down", KeyCode::Char('j')),
-                key_chip("k", "Up", KeyCode::Char('k')),
-                key_chip("[", "Prev", KeyCode::Char('[')),
-                key_chip("]", "Next", KeyCode::Char(']')),
-                key_chip("q", "Quit", KeyCode::Char('q')),
-            ],
-            task: None,
-            mode_indicators: vec![],
-        },
-        UiMode::BranchInput { kind: BranchInputKind::Generating, .. } => StatusBarContent {
-            status: StatusSection::plain("NEW BRANCH"),
-            keys: vec![],
-            task: Some(TaskSection::new("Generating branch name...", 0)),
-            mode_indicators: vec![],
-        },
-        UiMode::BranchInput { kind: BranchInputKind::Manual, .. } => StatusBarContent {
-            status: StatusSection::plain("NEW BRANCH"),
-            keys: vec![key_chip(ENTER_KEY_GLYPH, "Create", KeyCode::Enter), key_chip("ESC", "Cancel", KeyCode::Esc)],
-            task: None,
-            mode_indicators: vec![],
-        },
-        UiMode::ActionMenu { .. } => StatusBarContent {
-            status: StatusSection::plain("ACTIONS"),
-            keys: vec![
-                key_chip("j", "Down", KeyCode::Char('j')),
-                key_chip("k", "Up", KeyCode::Char('k')),
-                key_chip(ENTER_KEY_GLYPH, "Select", KeyCode::Enter),
-                key_chip("ESC", "Close", KeyCode::Esc),
-            ],
-            task: None,
-            mode_indicators: vec![],
-        },
-        UiMode::IssueSearch { input } => StatusBarContent {
-            status: StatusSection::plain(&format!("SEARCH {}", input.value())),
-            keys: vec![key_chip(ENTER_KEY_GLYPH, "Apply", KeyCode::Enter), key_chip("ESC", "Cancel", KeyCode::Esc)],
-            task: None,
-            mode_indicators: vec![],
-        },
-        UiMode::FilePicker { .. } => StatusBarContent {
-            status: StatusSection::plain("ADD REPO"),
-            keys: vec![
-                key_chip("j", "Down", KeyCode::Char('j')),
-                key_chip("k", "Up", KeyCode::Char('k')),
-                key_chip("tab", "Complete", KeyCode::Tab),
-                key_chip(ENTER_KEY_GLYPH, "Select", KeyCode::Enter),
-                key_chip("ESC", "Cancel", KeyCode::Esc),
-            ],
-            task: None,
-            mode_indicators: vec![],
-        },
-        UiMode::DeleteConfirm { .. } => StatusBarContent {
-            status: StatusSection::plain("CONFIRM DELETE"),
-            keys: vec![key_chip("y", "Yes", KeyCode::Char('y')), key_chip("n", "No", KeyCode::Char('n'))],
-            task: None,
-            mode_indicators: vec![],
-        },
-        UiMode::CloseConfirm { .. } => StatusBarContent {
-            status: StatusSection::plain("CONFIRM CLOSE"),
-            keys: vec![key_chip("y", "Yes", KeyCode::Char('y')), key_chip("n", "No", KeyCode::Char('n'))],
-            task: None,
-            mode_indicators: vec![],
-        },
-        UiMode::Help => {
-            // Help is now on the widget stack — this branch is only reached if
-            // UiMode::Help lingers from legacy code paths.  Fall through to the
-            // widget-mode override above, which handles ModeId::Help.
-            StatusBarContent {
-                status: StatusSection::plain("HELP"),
-                keys: vec![
-                    key_chip("j", "Down", KeyCode::Char('j')),
-                    key_chip("k", "Up", KeyCode::Char('k')),
-                    key_chip("ESC", "Close", KeyCode::Esc),
-                    key_chip("?", "Close", KeyCode::Char('?')),
-                ],
-                task: None,
-                mode_indicators: vec![],
-            }
-        }
-        UiMode::CommandPalette { ref input, .. } => {
-            let status_text = format!("/{}", input.value());
-            StatusBarContent {
-                status: StatusSection::plain(&status_text),
-                keys: vec![
-                    key_chip(ENTER_KEY_GLYPH, "Run", KeyCode::Enter),
-                    key_chip("TAB", "Fill", KeyCode::Tab),
-                    key_chip("ESC", "Close", KeyCode::Esc),
-                ],
-                task: None,
-                mode_indicators: normal_mode_indicators(ui),
-            }
-        }
-    }
-}
-
-fn active_task(model: &TuiModel, in_flight: &HashMap<u64, InFlightCommand>) -> Option<(String, usize)> {
-    let active_repo = &model.repo_order[model.active_repo];
-    let active_cmds: Vec<&str> =
-        in_flight.values().filter(|cmd| &cmd.repo_identity == active_repo).map(|cmd| cmd.description.as_str()).collect();
-
-    if active_cmds.is_empty() {
-        return None;
-    }
-
-    let description =
-        if active_cmds.len() == 1 { active_cmds[0].to_string() } else { format!("{} (+{})", active_cmds[0], active_cmds.len() - 1) };
-
-    Some((description, 0))
-}
-
-fn normal_mode_key_chips() -> Vec<KeyChip> {
-    vec![
-        key_chip(ENTER_KEY_GLYPH, "Open", KeyCode::Enter),
-        key_chip(".", "Menu", KeyCode::Char('.')),
-        key_chip("n", "New", KeyCode::Char('n')),
-        key_chip("?", "Help", KeyCode::Char('?')),
-        key_chip("q", "Quit", KeyCode::Char('q')),
-    ]
-}
-
-fn normal_mode_indicators(ui: &UiState) -> Vec<ModeIndicator> {
-    let layout_icon = match ui.view_layout {
-        RepoViewLayout::Auto => "◫",
-        RepoViewLayout::Zoom => "□",
-        RepoViewLayout::Right => "▥",
-        RepoViewLayout::Below => "▤",
-    };
-    let layout_label = match ui.view_layout {
-        RepoViewLayout::Auto => "auto",
-        RepoViewLayout::Zoom => "zoom",
-        RepoViewLayout::Right => "right",
-        RepoViewLayout::Below => "below",
-    };
-
-    let host_label = match ui.target_host.as_ref() {
-        Some(host) => format!("@{host}"),
-        None => "@local".into(),
-    };
-
-    vec![
-        ModeIndicator::new(layout_icon, layout_label, StatusBarAction::key(KeyCode::Char('l'))),
-        ModeIndicator::new("", &host_label, StatusBarAction::key(KeyCode::Char('h'))),
-    ]
-}
-
-fn key_chip(key: &str, label: &str, code: KeyCode) -> KeyChip {
-    KeyChip::new(key, label, StatusBarAction::key(code))
 }
 
 fn render_content(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
@@ -1464,10 +986,8 @@ fn render_event_log(ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Re
 
 #[cfg(test)]
 mod tests {
-    use flotilla_protocol::HostName;
-
     use super::*;
-    use crate::app::{RepoViewLayout, UiState};
+    use crate::app::RepoViewLayout;
 
     #[test]
     fn auto_layout_prefers_right_when_wide() {
@@ -1536,45 +1056,5 @@ mod tests {
         // 90x50: both viable, aspect_ratio = 1.8 (< 2.0) → Below
         let result = resolve_auto_preview_position(Rect::new(0, 0, 90, 50));
         assert_eq!(result, ResolvedPreviewPosition::Below);
-    }
-
-    #[test]
-    fn normal_mode_indicators_show_local_host_by_default() {
-        let ui = UiState::new(&[]);
-        let indicators = normal_mode_indicators(&ui);
-
-        let host = indicators.iter().find(|i| i.action == StatusBarAction::key(KeyCode::Char('h'))).expect("host indicator");
-        assert_eq!(host.label, "@local");
-    }
-
-    #[test]
-    fn normal_mode_indicators_show_selected_remote_host() {
-        let mut ui = UiState::new(&[]);
-        ui.target_host = Some(HostName::new("alpha"));
-        let indicators = normal_mode_indicators(&ui);
-
-        let host = indicators.iter().find(|i| i.action == StatusBarAction::key(KeyCode::Char('h'))).expect("host indicator");
-        assert_eq!(host.label, "@alpha");
-    }
-
-    #[test]
-    fn normal_mode_indicators_show_layout() {
-        let mut ui = UiState::new(&[]);
-        let indicators = normal_mode_indicators(&ui);
-        let layout = indicators.iter().find(|i| i.action == StatusBarAction::key(KeyCode::Char('l'))).expect("layout indicator");
-        assert_eq!(layout.icon, "◫");
-        assert_eq!(layout.label, "auto");
-
-        ui.view_layout = RepoViewLayout::Zoom;
-        let indicators = normal_mode_indicators(&ui);
-        let layout = indicators.iter().find(|i| i.action == StatusBarAction::key(KeyCode::Char('l'))).expect("layout indicator");
-        assert_eq!(layout.icon, "□");
-        assert_eq!(layout.label, "zoom");
-    }
-
-    #[test]
-    fn normal_mode_key_chips_exclude_host() {
-        let chips = normal_mode_key_chips();
-        assert!(chips.iter().all(|c| c.action != StatusBarAction::key(KeyCode::Char('h'))));
     }
 }
