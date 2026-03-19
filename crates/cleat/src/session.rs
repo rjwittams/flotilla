@@ -352,7 +352,7 @@ pub fn run_session_daemon(_root: &Path, _id: &str) -> Result<(), String> {
 }
 
 fn spawn_daemon_process(root: &Path, session: &SessionMetadata) -> Result<(), String> {
-    let exe = resolve_bollard_executable()?;
+    let exe = resolve_cleat_executable()?;
     let mut command = Command::new(exe);
     command
         .arg("--runtime-root")
@@ -368,8 +368,8 @@ fn spawn_daemon_process(root: &Path, session: &SessionMetadata) -> Result<(), St
     Ok(())
 }
 
-fn resolve_bollard_executable() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_bollard").map(PathBuf::from) {
+fn resolve_cleat_executable() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_cleat").map(PathBuf::from) {
         return Ok(path);
     }
 
@@ -580,7 +580,7 @@ mod tests {
         sync::{Mutex, OnceLock},
     };
 
-    use super::{apply_attach_state, default_vt_engine, is_executable_file, record_pty_output, resolve_bollard_executable};
+    use super::{apply_attach_state, default_vt_engine, is_executable_file, record_pty_output, resolve_cleat_executable};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -604,25 +604,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_bollard_executable_prefers_cargo_bin_env() {
+    fn resolve_cleat_executable_prefers_cargo_bin_env() {
         let _lock = env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
         let cleat = temp.path().join("cleat");
         fs::write(&cleat, b"#!/bin/sh\n").expect("write fake cleat");
-        let original = std::env::var_os("CARGO_BIN_EXE_bollard");
-        std::env::set_var("CARGO_BIN_EXE_bollard", &cleat);
+        let original = std::env::var_os("CARGO_BIN_EXE_cleat");
+        std::env::set_var("CARGO_BIN_EXE_cleat", &cleat);
 
-        let resolved = resolve_bollard_executable().expect("resolve cleat");
+        let resolved = resolve_cleat_executable().expect("resolve cleat");
 
         match original {
-            Some(value) => std::env::set_var("CARGO_BIN_EXE_bollard", value),
-            None => std::env::remove_var("CARGO_BIN_EXE_bollard"),
+            Some(value) => std::env::set_var("CARGO_BIN_EXE_cleat", value),
+            None => std::env::remove_var("CARGO_BIN_EXE_cleat"),
         }
         assert_eq!(resolved, cleat);
     }
 
     #[test]
-    fn resolve_bollard_executable_falls_back_to_path() {
+    fn resolve_cleat_executable_falls_back_to_path() {
         let _lock = env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
         let bin_dir = temp.path().join("bin");
@@ -638,16 +638,16 @@ mod tests {
             fs::set_permissions(&cleat, perms).expect("set executable");
         }
 
-        let original_bin = std::env::var_os("CARGO_BIN_EXE_bollard");
+        let original_bin = std::env::var_os("CARGO_BIN_EXE_cleat");
         let original_path = std::env::var_os("PATH");
-        std::env::remove_var("CARGO_BIN_EXE_bollard");
+        std::env::remove_var("CARGO_BIN_EXE_cleat");
         std::env::set_var("PATH", PathBuf::from(&bin_dir).into_os_string());
 
-        let resolved = resolve_bollard_executable().expect("resolve from path");
+        let resolved = resolve_cleat_executable().expect("resolve from path");
 
         match original_bin {
-            Some(value) => std::env::set_var("CARGO_BIN_EXE_bollard", value),
-            None => std::env::remove_var("CARGO_BIN_EXE_bollard"),
+            Some(value) => std::env::set_var("CARGO_BIN_EXE_cleat", value),
+            None => std::env::remove_var("CARGO_BIN_EXE_cleat"),
         }
         match original_path {
             Some(value) => std::env::set_var("PATH", value),
