@@ -111,9 +111,7 @@ pub fn render(
     // When the palette is active, move the status bar to the top of the overlay so the
     // input sits above the results instead of being pinned to the bottom of the screen.
     let status_bar_area = if matches!(ui.mode, UiMode::CommandPalette { .. }) {
-        let palette_height = crate::palette::MAX_PALETTE_ROWS as u16;
-        let overlay_y = chunks[2].y.saturating_sub(palette_height);
-        Rect::new(chunks[2].x, overlay_y, chunks[2].width, 1)
+        ui_helpers::bottom_anchored_overlay(frame.area(), 1, crate::palette::MAX_PALETTE_ROWS as u16).status_row
     } else {
         chunks[2]
     };
@@ -1220,11 +1218,8 @@ fn render_command_palette(ui: &UiState, theme: &Theme, frame: &mut Frame, status
     };
 
     let filtered: Vec<&crate::palette::PaletteEntry> = crate::palette::filter_entries(entries, input.value());
-    let palette_height = crate::palette::MAX_PALETTE_ROWS as u16;
-
-    // Overlay area: fixed height, sits directly below the status bar (which has been
-    // moved to the top of the overlay by the caller).
-    let area = Rect::new(status_bar_area.x, status_bar_area.y + 1, status_bar_area.width, palette_height);
+    let overlay = ui_helpers::bottom_anchored_overlay(frame.area(), 1, crate::palette::MAX_PALETTE_ROWS as u16);
+    let area = overlay.body;
 
     frame.render_widget(Clear, area);
     frame.render_widget(Block::default().style(Style::default().bg(theme.bar_bg)), area);
@@ -1232,7 +1227,7 @@ fn render_command_palette(ui: &UiState, theme: &Theme, frame: &mut Frame, status
     let name_width = filtered.iter().map(|e| e.name.len()).max().unwrap_or(0).min(20);
     let hint_width: u16 = 7;
 
-    for (i, entry) in filtered.iter().skip(scroll_top).take(crate::palette::MAX_PALETTE_ROWS).enumerate() {
+    for (i, entry) in filtered.iter().skip(scroll_top).take(overlay.visible_body_rows as usize).enumerate() {
         let row_y = area.y + i as u16;
         let is_selected = scroll_top + i == selected;
 

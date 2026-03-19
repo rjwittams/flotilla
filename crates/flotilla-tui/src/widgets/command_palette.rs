@@ -2,13 +2,7 @@ use std::any::Any;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use flotilla_protocol::{Command, CommandAction, RepoSelector};
-use ratatui::{
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Clear, Paragraph},
-    Frame,
-};
+use ratatui::{layout::Rect, Frame};
 use tui_input::{backend::crossterm::EventHandler as InputEventHandler, Input};
 
 use super::{InteractiveWidget, Outcome, RenderContext, WidgetContext};
@@ -275,55 +269,9 @@ impl InteractiveWidget for CommandPaletteWidget {
         Outcome::Consumed
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &RenderContext) {
-        let theme = ctx.theme;
-        let filtered = self.filtered();
-        let palette_height = MAX_PALETTE_ROWS as u16;
-
-        // The status bar area is the bottom row of the frame
-        let status_bar_y = area.y + area.height.saturating_sub(1);
-        let status_bar_area = Rect::new(area.x, status_bar_y, area.width, 1);
-
-        // Overlay area: fixed height, sits below the status bar (which has been moved up)
-        let overlay_y = status_bar_area.y + 1;
-        let render_area = Rect::new(status_bar_area.x, overlay_y, status_bar_area.width, palette_height);
-
-        frame.render_widget(Clear, render_area);
-        frame.render_widget(Block::default().style(Style::default().bg(theme.bar_bg)), render_area);
-
-        let name_width = filtered.iter().map(|e| e.name.len()).max().unwrap_or(0).min(20);
-        let hint_width: u16 = 7;
-
-        for (i, entry) in filtered.iter().skip(self.scroll_top).take(MAX_PALETTE_ROWS).enumerate() {
-            let row_y = render_area.y + i as u16;
-            let is_selected = self.scroll_top + i == self.selected;
-
-            let row_style = if is_selected {
-                Style::default().bg(theme.action_highlight).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().bg(theme.bar_bg)
-            };
-
-            let row_area = Rect::new(render_area.x, row_y, render_area.width, 1);
-            frame.render_widget(Block::default().style(row_style), row_area);
-
-            let name_span = Span::styled(format!("  {:<width$}", entry.name, width = name_width), row_style.fg(theme.text));
-            let desc_span = Span::styled(format!("  {}", entry.description), row_style.fg(theme.muted));
-
-            let line = Line::from(vec![name_span, desc_span]);
-            frame.render_widget(Paragraph::new(line), Rect::new(render_area.x, row_y, render_area.width.saturating_sub(hint_width), 1));
-
-            let hint_text = entry.key_hint.unwrap_or("");
-            if !hint_text.is_empty() {
-                let hint_span = Span::styled(format!(" {} ", hint_text), row_style.fg(theme.key_hint));
-                let hint_x = render_area.x + render_area.width.saturating_sub(hint_width);
-                frame.render_widget(Paragraph::new(Line::from(hint_span)), Rect::new(hint_x, row_y, hint_width, 1));
-            }
-        }
-
-        // Cursor on the status bar row
-        let cursor_x = status_bar_area.x + 1 + self.input.visual_cursor() as u16;
-        frame.set_cursor_position((cursor_x, status_bar_area.y));
+    fn render(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &RenderContext) {
+        // The palette is still rendered by ui.rs via UiMode::CommandPalette.
+        // This widget currently owns event handling/state sync only.
     }
 
     fn mode_id(&self) -> ModeId {

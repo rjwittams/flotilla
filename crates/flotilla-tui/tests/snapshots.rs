@@ -12,6 +12,10 @@ fn picker_entry(name: &str, is_git_repo: bool, is_added: bool) -> flotilla_tui::
     flotilla_tui::app::DirEntry { name: name.to_string(), is_dir: true, is_git_repo, is_added }
 }
 
+fn cramped_widget_harness(widget: Box<dyn flotilla_tui::widgets::InteractiveWidget>) -> TestHarness {
+    TestHarness::single_repo("my-project").with_width(40).with_height(6).with_widget(widget)
+}
+
 #[test]
 fn empty_state() {
     let mut harness = TestHarness::empty();
@@ -557,6 +561,115 @@ fn command_palette_open() {
     });
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
+}
+
+#[test]
+fn command_palette_widget_renders_without_overflow() {
+    let mut harness = TestHarness::single_repo("my-project")
+        .with_mode(UiMode::CommandPalette {
+            input: Input::default(),
+            entries: flotilla_tui::palette::all_entries(),
+            selected: 0,
+            scroll_top: 0,
+        })
+        .with_widget(Box::new(flotilla_tui::widgets::command_palette::CommandPaletteWidget::new()));
+
+    let _ = harness.render_to_buffer();
+}
+
+#[test]
+fn command_palette_renders_on_short_terminals_without_overflow() {
+    let mut harness = TestHarness::single_repo("my-project")
+        .with_mode(UiMode::CommandPalette {
+            input: Input::default(),
+            entries: flotilla_tui::palette::all_entries(),
+            selected: 0,
+            scroll_top: 0,
+        })
+        .with_height(6);
+
+    let _ = harness.render_to_buffer();
+}
+
+#[test]
+fn action_menu_widget_renders_on_short_terminals_without_overflow() {
+    let item = checkout_item("feat/a", "/test/my-project/feat/a", false);
+    let entries = vec![flotilla_tui::widgets::action_menu::MenuEntry {
+        intent: Intent::CreateWorkspace,
+        command: flotilla_protocol::Command {
+            host: None,
+            context_repo: None,
+            action: flotilla_protocol::CommandAction::CreateWorkspaceForCheckout {
+                checkout_path: "/test/my-project/feat/a".into(),
+                label: "feat/a".into(),
+            },
+        },
+    }];
+    let mut harness = cramped_widget_harness(Box::new(flotilla_tui::widgets::action_menu::ActionMenuWidget::new(entries, item)));
+
+    let _ = harness.render_to_buffer();
+}
+
+#[test]
+fn branch_input_widget_renders_on_short_terminals_without_overflow() {
+    let mut harness = cramped_widget_harness(Box::new(flotilla_tui::widgets::branch_input::BranchInputWidget::new(BranchInputKind::Manual)));
+
+    let _ = harness.render_to_buffer();
+}
+
+#[test]
+fn close_confirm_widget_renders_on_short_terminals_without_overflow() {
+    let command = flotilla_protocol::Command {
+        host: None,
+        context_repo: None,
+        action: flotilla_protocol::CommandAction::CloseChangeRequest { id: "42".into() },
+    };
+    let widget = flotilla_tui::widgets::close_confirm::CloseConfirmWidget::new(
+        "42".into(),
+        "Fix the thing".into(),
+        WorkItemIdentity::ChangeRequest("42".into()),
+        command,
+    );
+    let mut harness = cramped_widget_harness(Box::new(widget));
+
+    let _ = harness.render_to_buffer();
+}
+
+#[test]
+fn delete_confirm_widget_renders_on_short_terminals_without_overflow() {
+    let mut widget = flotilla_tui::widgets::delete_confirm::DeleteConfirmWidget::new(
+        vec![],
+        WorkItemIdentity::Checkout(HostPath::new(HostName::local(), PathBuf::from("/test/my-project/feat/a"))),
+        None,
+    );
+    widget.update_info(flotilla_protocol::CheckoutStatus {
+        branch: "feat/a".into(),
+        change_request_status: None,
+        merge_commit_sha: None,
+        unpushed_commits: vec![],
+        has_uncommitted: false,
+        uncommitted_files: vec![],
+        base_detection_warning: None,
+    });
+    let mut harness = cramped_widget_harness(Box::new(widget));
+
+    let _ = harness.render_to_buffer();
+}
+
+#[test]
+fn file_picker_widget_renders_on_short_terminals_without_overflow() {
+    let entries = vec![picker_entry("alpha", true, false), picker_entry("beta", false, false)];
+    let widget = flotilla_tui::widgets::file_picker::FilePickerWidget::new(Input::from("/test/"), entries);
+    let mut harness = cramped_widget_harness(Box::new(widget));
+
+    let _ = harness.render_to_buffer();
+}
+
+#[test]
+fn help_widget_renders_on_short_terminals_without_overflow() {
+    let mut harness = cramped_widget_harness(Box::new(flotilla_tui::widgets::help::HelpWidget::new()));
+
+    let _ = harness.render_to_buffer();
 }
 
 #[test]
