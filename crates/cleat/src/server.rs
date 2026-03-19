@@ -4,6 +4,7 @@ use crate::{
     protocol::{SessionInfo, SessionStatus},
     runtime::{RuntimeLayout, SessionRecord},
     session::{attach_foreground, ensure_session_started, foreground_path, run_session_daemon, ForegroundAttach},
+    vt::VtEngineKind,
 };
 
 #[derive(Debug, Clone)]
@@ -20,9 +21,22 @@ impl SessionService {
         Self::new(RuntimeLayout::discover())
     }
 
-    pub fn create(&self, name: Option<String>, cwd: Option<std::path::PathBuf>, cmd: Option<String>) -> Result<SessionInfo, String> {
-        let session = ensure_session_started(&self.layout, name, cwd, cmd)?;
-        Ok(SessionInfo { id: session.id, name: session.name, cwd: session.cwd, cmd: session.cmd, status: SessionStatus::Detached })
+    pub fn create(
+        &self,
+        name: Option<String>,
+        vt_engine: Option<VtEngineKind>,
+        cwd: Option<std::path::PathBuf>,
+        cmd: Option<String>,
+    ) -> Result<SessionInfo, String> {
+        let session = ensure_session_started(&self.layout, name, vt_engine, cwd, cmd)?;
+        Ok(SessionInfo {
+            id: session.id,
+            name: session.name,
+            vt_engine: session.vt_engine,
+            cwd: session.cwd,
+            cmd: session.cmd,
+            status: SessionStatus::Detached,
+        })
     }
 
     pub fn list(&self) -> Result<Vec<SessionInfo>, String> {
@@ -50,6 +64,7 @@ impl SessionService {
     pub fn attach(
         &self,
         name: Option<String>,
+        vt_engine: Option<VtEngineKind>,
         cwd: Option<std::path::PathBuf>,
         cmd: Option<String>,
         no_create: bool,
@@ -63,11 +78,18 @@ impl SessionService {
                 .map(|record| record.metadata)
                 .ok_or_else(|| format!("missing session {id}"))?
         } else {
-            ensure_session_started(&self.layout, name, cwd, cmd)?
+            ensure_session_started(&self.layout, name, vt_engine, cwd, cmd)?
         };
         let attach = attach_foreground(&self.layout, &session.id)?;
         Ok((
-            SessionInfo { id: session.id, name: session.name, cwd: session.cwd, cmd: session.cmd, status: SessionStatus::Attached },
+            SessionInfo {
+                id: session.id,
+                name: session.name,
+                vt_engine: session.vt_engine,
+                cwd: session.cwd,
+                cmd: session.cmd,
+                status: SessionStatus::Attached,
+            },
             attach,
         ))
     }
@@ -80,7 +102,14 @@ impl SessionService {
 fn session_info_from_record(root: &std::path::Path, record: SessionRecord) -> SessionInfo {
     let id = record.metadata.id.clone();
     let status = if foreground_path(root, &id).exists() { SessionStatus::Attached } else { SessionStatus::Detached };
-    SessionInfo { id: record.metadata.id, name: record.metadata.name, cwd: record.metadata.cwd, cmd: record.metadata.cmd, status }
+    SessionInfo {
+        id: record.metadata.id,
+        name: record.metadata.name,
+        vt_engine: record.metadata.vt_engine,
+        cwd: record.metadata.cwd,
+        cmd: record.metadata.cmd,
+        status,
+    }
 }
 
 fn is_expected_bollard_process(pid: i32) -> bool {

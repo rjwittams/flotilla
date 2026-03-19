@@ -5,12 +5,13 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::vt::{ClientCapabilities, ColorLevel};
+use crate::vt::{ClientCapabilities, ColorLevel, VtEngineKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: String,
     pub name: Option<String>,
+    pub vt_engine: VtEngineKind,
     pub cwd: Option<PathBuf>,
     pub cmd: Option<String>,
     pub status: SessionStatus,

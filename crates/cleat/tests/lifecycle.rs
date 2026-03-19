@@ -11,7 +11,7 @@ use cleat::{
     runtime::RuntimeLayout,
     server::SessionService,
     session::{daemon_pid_path, foreground_path, session_socket_path},
-    vt::{ClientCapabilities, ColorLevel},
+    vt::{self, ClientCapabilities, ColorLevel, VtEngineKind},
 };
 
 fn service_for(path: &std::path::Path) -> SessionService {
@@ -68,7 +68,34 @@ fn create_json_returns_structured_metadata() {
     let created: SessionInfo = serde_json::from_str(&output).expect("parse create output");
 
     assert_eq!(created.id, "alpha");
+    assert_eq!(created.vt_engine, vt::default_vt_engine_kind());
     assert_eq!(created.cmd.as_deref(), Some("bash"));
+}
+
+#[test]
+fn create_uses_requested_vt_engine() {
+    let _lock = env_lock().lock().expect("env lock");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let service = service_for(temp.path());
+    let cli = Cli::try_parse_from(["cleat", "create", "--json", "--vt", "passthrough", "alpha"]).expect("parse create");
+
+    let output = cli::execute(cli, &service).expect("execute create").expect("create output");
+    let created: SessionInfo = serde_json::from_str(&output).expect("parse create output");
+
+    assert_eq!(created.vt_engine, VtEngineKind::Passthrough);
+}
+
+#[cfg(not(feature = "ghostty-vt"))]
+#[test]
+fn create_rejects_unavailable_vt_engine() {
+    let _lock = env_lock().lock().expect("env lock");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let service = service_for(temp.path());
+    let cli = Cli::try_parse_from(["cleat", "create", "--vt", "ghostty", "alpha"]).expect("parse create");
+
+    let err = cli::execute(cli, &service).expect_err("ghostty should be unavailable");
+
+    assert!(err.contains("not compiled"));
 }
 
 #[test]
@@ -76,14 +103,17 @@ fn list_reports_existing_sessions() {
     let _lock = env_lock().lock().expect("env lock");
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
-    service.create(Some("alpha".into()), Some(PathBuf::from("/repo")), None).expect("create alpha");
-    service.create(Some("beta".into()), None, Some("zsh".into())).expect("create beta");
+    service.create(Some("alpha".into()), None, Some(PathBuf::from("/repo")), None).expect("create alpha");
+    service.create(Some("beta".into()), Some(VtEngineKind::Passthrough), None, Some("zsh".into())).expect("create beta");
     let cli = Cli::try_parse_from(["cleat", "list"]).expect("parse list");
 
     let output = cli::execute(cli, &service).expect("execute list").expect("list output");
     let lines: Vec<_> = output.lines().collect();
 
-    assert_eq!(lines, vec!["alpha\tdetached\t/repo", "beta\tdetached\tzsh"]);
+    assert_eq!(lines, vec![
+        format!("alpha\tdetached\t{}\t/repo", vt::default_vt_engine_kind().as_str()),
+        "beta\tdetached\tpassthrough\tzsh".to_string(),
+    ]);
 }
 
 #[test]
@@ -91,14 +121,16 @@ fn list_json_reports_existing_sessions() {
     let _lock = env_lock().lock().expect("env lock");
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
-    service.create(Some("alpha".into()), Some(PathBuf::from("/repo")), None).expect("create alpha");
-    service.create(Some("beta".into()), None, Some("zsh".into())).expect("create beta");
+    service.create(Some("alpha".into()), None, Some(PathBuf::from("/repo")), None).expect("create alpha");
+    service.create(Some("beta".into()), Some(VtEngineKind::Passthrough), None, Some("zsh".into())).expect("create beta");
     let cli = Cli::try_parse_from(["cleat", "list", "--json"]).expect("parse list");
 
     let output = cli::execute(cli, &service).expect("execute list").expect("list output");
     let listed: Vec<SessionInfo> = serde_json::from_str(&output).expect("parse list output");
 
     assert_eq!(listed.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec!["alpha", "beta"]);
+    assert_eq!(listed[0].vt_engine, vt::default_vt_engine_kind());
+    assert_eq!(listed[1].vt_engine, VtEngineKind::Passthrough);
 }
 
 #[test]
@@ -106,7 +138,7 @@ fn kill_removes_session_directory() {
     let _lock = env_lock().lock().expect("env lock");
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
-    service.create(Some("alpha".into()), None, None).expect("create alpha");
+    service.create(Some("alpha".into()), None, None, None).expect("create alpha");
     let cli = Cli::try_parse_from(["cleat", "kill", "alpha"]).expect("parse kill");
 
     let output = cli::execute(cli, &service).expect("execute kill");
@@ -133,14 +165,32 @@ fn attach_creates_session_lazily_and_reuses_it_on_later_attach() {
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
 
-    let (first, attach) = service.attach(Some("alpha".into()), None, Some("sleep 5".into()), false).expect("first attach");
+    let (first, attach) = service.attach(Some("alpha".into()), None, None, Some("sleep 5".into()), false).expect("first attach");
     assert_eq!(first.id, "alpha");
+    assert_eq!(first.vt_engine, vt::default_vt_engine_kind());
     assert!(daemon_pid_path(temp.path(), "alpha").exists());
 
     drop(attach);
 
-    let (second, _attach2) = service.attach(Some("alpha".into()), None, None, false).expect("reattach");
+    let (second, _attach2) = service.attach(Some("alpha".into()), Some(VtEngineKind::Passthrough), None, None, false).expect("reattach");
     assert_eq!(second.id, "alpha");
+    assert_eq!(second.vt_engine, vt::default_vt_engine_kind());
+}
+
+#[test]
+fn attach_vt_only_applies_when_creating_new_session() {
+    let _lock = env_lock().lock().expect("env lock");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let service = service_for(temp.path());
+
+    let (created, attach) =
+        service.attach(Some("alpha".into()), Some(VtEngineKind::Passthrough), None, Some("sleep 5".into()), false).expect("first attach");
+    assert_eq!(created.vt_engine, VtEngineKind::Passthrough);
+    drop(attach);
+
+    let (reattached, _attach2) =
+        service.attach(Some("alpha".into()), Some(vt::default_vt_engine_kind()), None, None, false).expect("reattach");
+    assert_eq!(reattached.vt_engine, VtEngineKind::Passthrough);
 }
 
 #[test]
@@ -149,8 +199,8 @@ fn attach_rejects_second_foreground_client_while_one_is_active() {
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
 
-    let (_session, _attach) = service.attach(Some("alpha".into()), None, Some("sleep 5".into()), false).expect("first attach");
-    let err = service.attach(Some("alpha".into()), None, None, false).expect_err("second attach should fail");
+    let (_session, _attach) = service.attach(Some("alpha".into()), None, None, Some("sleep 5".into()), false).expect("first attach");
+    let err = service.attach(Some("alpha".into()), None, None, None, false).expect_err("second attach should fail");
 
     assert!(err.contains("foreground client"));
 }
@@ -161,7 +211,7 @@ fn lifecycle_attach_init_with_capabilities_is_accepted_without_changing_single_c
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
 
-    service.create(Some("alpha".into()), None, Some("sleep 5".into())).expect("create alpha");
+    service.create(Some("alpha".into()), None, None, Some("sleep 5".into())).expect("create alpha");
 
     let mut stream = UnixStream::connect(session_socket_path(temp.path(), "alpha")).expect("connect socket");
     Frame::AttachInit { cols: 100, rows: 30, capabilities: ClientCapabilities::new(ColorLevel::Ansi256, true) }
@@ -171,7 +221,7 @@ fn lifecycle_attach_init_with_capabilities_is_accepted_without_changing_single_c
     let response = Frame::read(&mut stream).expect("read attach response");
     assert_eq!(response, Frame::Ack);
 
-    let err = service.attach(Some("alpha".into()), None, None, false).expect_err("second attach should fail");
+    let err = service.attach(Some("alpha".into()), None, None, None, false).expect_err("second attach should fail");
     assert!(err.contains("foreground client"));
 }
 
@@ -182,7 +232,7 @@ fn lifecycle_attach_init_capabilities_drive_replay_output_on_daemon_path() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
-    service.create(Some("alpha".into()), None, Some("sleep 5".into())).expect("create alpha");
+    service.create(Some("alpha".into()), None, None, Some("sleep 5".into())).expect("create alpha");
 
     let mut stream = UnixStream::connect(session_socket_path(temp.path(), "alpha")).expect("connect socket");
     Frame::AttachInit { cols: 100, rows: 30, capabilities: ClientCapabilities::new(ColorLevel::Ansi256, true) }
@@ -202,7 +252,9 @@ fn replay_reattach_delivers_restore_before_new_live_output() {
     let _lock = env_lock().lock().expect("env lock");
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
-    service.create(Some("alpha".into()), None, Some("printf 'before'; sleep 1; printf 'after'; sleep 5".into())).expect("create alpha");
+    service
+        .create(Some("alpha".into()), None, None, Some("printf 'before'; sleep 1; printf 'after'; sleep 5".into()))
+        .expect("create alpha");
 
     let mut first = UnixStream::connect(session_socket_path(temp.path(), "alpha")).expect("connect first socket");
     Frame::AttachInit { cols: 100, rows: 30, capabilities: ClientCapabilities::new(ColorLevel::Ansi256, true) }
@@ -251,13 +303,13 @@ fn dropping_foreground_attach_keeps_session_alive_for_later_attach() {
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
 
-    let (_session, attach) = service.attach(Some("alpha".into()), None, Some("sleep 5".into()), false).expect("first attach");
+    let (_session, attach) = service.attach(Some("alpha".into()), None, None, Some("sleep 5".into()), false).expect("first attach");
     let pid_path = daemon_pid_path(temp.path(), "alpha");
     assert!(pid_path.exists());
 
     drop(attach);
 
-    let (_session, _reattach) = service.attach(Some("alpha".into()), None, None, false).expect("reattach after disconnect");
+    let (_session, _reattach) = service.attach(Some("alpha".into()), None, None, None, false).expect("reattach after disconnect");
     assert!(pid_path.exists());
 }
 
@@ -267,10 +319,10 @@ fn stale_foreground_file_does_not_block_attach() {
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
 
-    service.create(Some("alpha".into()), None, Some("sleep 5".into())).expect("create alpha");
+    service.create(Some("alpha".into()), None, None, Some("sleep 5".into())).expect("create alpha");
     std::fs::write(foreground_path(temp.path(), "alpha"), b"999999").expect("write stale foreground marker");
 
-    let (_session, _attach) = service.attach(Some("alpha".into()), None, None, false).expect("attach with stale foreground marker");
+    let (_session, _attach) = service.attach(Some("alpha".into()), None, None, None, false).expect("attach with stale foreground marker");
 }
 
 #[test]

@@ -31,7 +31,7 @@ use nix::{
 use crate::{
     protocol::Frame,
     runtime::{RuntimeLayout, SessionMetadata},
-    vt::{self, VtEngine},
+    vt::{self, VtEngine, VtEngineKind},
 };
 
 const SOCKET_NAME: &str = "socket";
@@ -69,13 +69,7 @@ impl ForegroundAttach {
                     Ok(_) => {}
                     Err(err) => {
                         alive_out.store(false, Ordering::SeqCst);
-                        if matches!(
-                            err.kind(),
-                            std::io::ErrorKind::UnexpectedEof
-                                | std::io::ErrorKind::BrokenPipe
-                                | std::io::ErrorKind::ConnectionReset
-                                | std::io::ErrorKind::ConnectionAborted
-                        ) {
+                        if is_graceful_socket_shutdown(&err) {
                             return Ok(());
                         }
                         return Err(format!("read attach frame: {err}"));
@@ -108,6 +102,9 @@ impl ForegroundAttach {
                 Ok(n) => {
                     let mut stream = self.stream.lock().map_err(|_| "attach stream lock poisoned".to_string())?;
                     if let Err(err) = Frame::Input(buf[..n].to_vec()).write(&mut *stream) {
+                        if is_graceful_socket_shutdown(&err) {
+                            break Ok(());
+                        }
                         break Err(format!("write input frame: {err}"));
                     }
                 }
@@ -124,6 +121,16 @@ impl ForegroundAttach {
         out_result?;
         resize_result
     }
+}
+
+fn is_graceful_socket_shutdown(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+    )
 }
 
 enum AttachCleanupTarget {
@@ -221,13 +228,16 @@ impl Drop for TerminalModeGuard {
 pub fn ensure_session_started(
     layout: &RuntimeLayout,
     name: Option<String>,
+    vt_engine: Option<VtEngineKind>,
     cwd: Option<PathBuf>,
     cmd: Option<String>,
 ) -> Result<SessionMetadata, String> {
     let session = if let Some(existing) = name.as_deref().and_then(|value| load_session(layout.root(), value).ok().flatten()) {
         existing
     } else {
-        layout.create_session(name, cwd, cmd)?.metadata
+        let vt_engine = vt_engine.unwrap_or_else(vt::default_vt_engine_kind);
+        vt_engine.ensure_available()?;
+        layout.create_session(name, vt_engine, cwd, cmd)?.metadata
     };
 
     let socket_path = session_socket_path(layout.root(), &session.id);
@@ -272,13 +282,13 @@ pub fn foreground_path(root: &Path, id: &str) -> PathBuf {
     root.join(id).join(FOREGROUND_NAME)
 }
 
-fn default_vt_engine() -> Box<dyn VtEngine> {
+fn default_vt_engine(kind: VtEngineKind) -> Result<Box<dyn VtEngine>, String> {
     if std::env::var_os("CARGO_BIN_EXE_cleat").is_some()
         && std::env::var_os("CLEAT_TEST_VT_ENGINE").as_deref() == Some(std::ffi::OsStr::new("replay-probe"))
     {
-        return Box::new(TestReplayProbeVtEngine::new(DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS));
+        return Ok(Box::new(TestReplayProbeVtEngine::new(DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS)));
     }
-    vt::make_default_vt_engine(DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS)
+    vt::make_vt_engine(kind, DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS)
 }
 
 #[derive(Debug)]
@@ -356,7 +366,7 @@ pub fn run_session_daemon(root: &Path, id: &str) -> Result<(), String> {
     let pty_child = spawn_pty_child(&session)?;
     let pty_fd = pty_child.master_fd;
     set_nonblocking(pty_fd)?;
-    let mut vt_engine = default_vt_engine();
+    let mut vt_engine = default_vt_engine(session.vt_engine)?;
 
     let mut active_client: Option<UnixStream> = None;
     loop {
@@ -743,12 +753,14 @@ mod tests {
     }
 
     #[test]
+    fn graceful_socket_shutdown_classifies_broken_pipe_disconnects() {
+        let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe");
+        assert!(super::is_graceful_socket_shutdown(&err));
+    }
+
+    #[test]
     fn default_vt_engine_starts_with_default_size() {
-        let engine = default_vt_engine();
-        #[cfg(feature = "ghostty-vt")]
-        assert_eq!(vt::default_vt_engine_kind(), "ghostty");
-        #[cfg(not(feature = "ghostty-vt"))]
-        assert_eq!(vt::default_vt_engine_kind(), "passthrough");
+        let engine = default_vt_engine(vt::default_vt_engine_kind()).expect("create default vt engine");
         assert_eq!(engine.size(), (super::DEFAULT_TERMINAL_COLS, super::DEFAULT_TERMINAL_ROWS));
         #[cfg(feature = "ghostty-vt")]
         assert!(engine.supports_replay());
@@ -762,7 +774,7 @@ mod tests {
 
     #[test]
     fn vt_engine_helpers_feed_and_resize_default_engine() {
-        let mut engine = default_vt_engine();
+        let mut engine = default_vt_engine(vt::default_vt_engine_kind()).expect("create default vt engine");
         record_pty_output(engine.as_mut(), b"hello").expect("feed output");
         let replay =
             apply_attach_state(engine.as_mut(), 132, 40, &vt::ClientCapabilities::conservative_fallback()).expect("apply attach state");
