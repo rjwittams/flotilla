@@ -3,7 +3,7 @@ use std::any::Any;
 use flotilla_core::data::GroupEntry;
 use ratatui::{layout::Rect, Frame};
 
-use super::{InteractiveWidget, Outcome, RenderContext, WidgetContext};
+use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext};
 use crate::{
     app::ui_state::UiMode,
     keymap::{Action, ModeId},
@@ -103,7 +103,7 @@ impl WorkItemTable {
     fn dismiss(ctx: &mut WidgetContext) -> Outcome {
         // Cancellation takes priority over other dismiss actions while a command is running.
         if let Some(&command_id) = ctx.in_flight.keys().next() {
-            ctx.pending_cancel = Some(command_id);
+            ctx.app_actions.push(AppAction::CancelCommand(command_id));
             return Outcome::Consumed;
         }
 
@@ -126,7 +126,7 @@ impl WorkItemTable {
         } else if !rui.multi_selected.is_empty() {
             rui.multi_selected.clear();
         } else {
-            ctx.should_quit = true;
+            ctx.app_actions.push(AppAction::Quit);
         }
         Outcome::Consumed
     }
@@ -147,7 +147,7 @@ impl InteractiveWidget for WorkItemTable {
             Action::ToggleProviders => Self::toggle_providers(ctx),
             Action::Dismiss => Self::dismiss(ctx),
             Action::Quit => {
-                ctx.should_quit = true;
+                ctx.app_actions.push(AppAction::Quit);
                 Outcome::Consumed
             }
             Action::Refresh => {
@@ -187,6 +187,28 @@ impl InteractiveWidget for WorkItemTable {
                 Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new()))
             }
 
+            // App-level toggles — push AppAction and consume
+            Action::ToggleDebug => {
+                ctx.app_actions.push(AppAction::ToggleDebug);
+                Outcome::Consumed
+            }
+            Action::ToggleStatusBarKeys => {
+                ctx.app_actions.push(AppAction::ToggleStatusBarKeys);
+                Outcome::Consumed
+            }
+            Action::CycleHost => {
+                ctx.app_actions.push(AppAction::CycleHost);
+                Outcome::Consumed
+            }
+            Action::CycleLayout => {
+                ctx.app_actions.push(AppAction::CycleLayout);
+                Outcome::Consumed
+            }
+            Action::CycleTheme => {
+                ctx.app_actions.push(AppAction::CycleTheme);
+                Outcome::Consumed
+            }
+
             // Actions that need &App context — fall through to legacy dispatch
             Action::Confirm
             | Action::OpenActionMenu
@@ -195,12 +217,7 @@ impl InteractiveWidget for WorkItemTable {
             | Action::PrevTab
             | Action::NextTab
             | Action::MoveTabLeft
-            | Action::MoveTabRight
-            | Action::ToggleDebug
-            | Action::ToggleStatusBarKeys
-            | Action::CycleHost
-            | Action::CycleLayout
-            | Action::CycleTheme => Outcome::Ignored,
+            | Action::MoveTabRight => Outcome::Ignored,
         }
     }
 
@@ -440,8 +457,8 @@ mod tests {
 
         let outcome = widget.handle_action(Action::Dismiss, &mut ctx);
         assert!(matches!(outcome, Outcome::Consumed));
-        assert_eq!(ctx.pending_cancel, Some(42));
-        assert!(!ctx.should_quit);
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::CancelCommand(42))));
+        assert!(!ctx.app_actions.iter().any(|a| matches!(a, AppAction::Quit)));
     }
 
     #[test]
@@ -454,7 +471,7 @@ mod tests {
 
         let outcome = widget.handle_action(Action::Dismiss, &mut ctx);
         assert!(matches!(outcome, Outcome::Consumed));
-        assert!(!ctx.should_quit);
+        assert!(!ctx.app_actions.iter().any(|a| matches!(a, AppAction::Quit)));
 
         assert!(harness.repo_ui[&repo_key].active_search_query.is_none());
         let (cmd, _) = harness.commands.take_next().expect("expected ClearIssueSearch command");
@@ -471,7 +488,7 @@ mod tests {
 
         let outcome = widget.handle_action(Action::Dismiss, &mut ctx);
         assert!(matches!(outcome, Outcome::Consumed));
-        assert!(!ctx.should_quit);
+        assert!(!ctx.app_actions.iter().any(|a| matches!(a, AppAction::Quit)));
 
         assert!(!harness.repo_ui[&repo_key].show_providers);
     }
@@ -486,7 +503,7 @@ mod tests {
         let mut ctx = harness.ctx();
         let outcome = widget.handle_action(Action::Dismiss, &mut ctx);
         assert!(matches!(outcome, Outcome::Consumed));
-        assert!(!ctx.should_quit);
+        assert!(!ctx.app_actions.iter().any(|a| matches!(a, AppAction::Quit)));
 
         assert!(harness.repo_ui[&repo_key].multi_selected.is_empty());
     }
@@ -499,20 +516,20 @@ mod tests {
 
         let outcome = widget.handle_action(Action::Dismiss, &mut ctx);
         assert!(matches!(outcome, Outcome::Consumed));
-        assert!(ctx.should_quit);
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::Quit)));
     }
 
     // ── Quit ─────────────────────────────────────────────────────────
 
     #[test]
-    fn quit_sets_should_quit() {
+    fn quit_pushes_app_action() {
         let mut widget = WorkItemTable::new();
         let mut harness = harness_with_items(1);
         let mut ctx = harness.ctx();
 
         let outcome = widget.handle_action(Action::Quit, &mut ctx);
         assert!(matches!(outcome, Outcome::Consumed));
-        assert!(ctx.should_quit);
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::Quit)));
     }
 
     // ── Push modal widgets ───────────────────────────────────────────
@@ -593,12 +610,14 @@ mod tests {
     }
 
     #[test]
-    fn cycle_theme_returns_ignored() {
+    fn cycle_theme_pushes_app_action() {
         let mut widget = WorkItemTable::new();
         let mut harness = TestWidgetHarness::new();
         let mut ctx = harness.ctx();
 
-        assert!(matches!(widget.handle_action(Action::CycleTheme, &mut ctx), Outcome::Ignored));
+        let outcome = widget.handle_action(Action::CycleTheme, &mut ctx);
+        assert!(matches!(outcome, Outcome::Consumed));
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::CycleTheme)));
     }
 
     // ── Non-Normal mode returns Ignored ──────────────────────────────

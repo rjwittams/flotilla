@@ -12,7 +12,6 @@ use super::{
 use crate::{
     keymap::{Action, ModeId},
     status_bar::StatusBarAction,
-    theme,
 };
 
 impl App {
@@ -106,33 +105,6 @@ impl App {
                     self.config.save_tab_order(&self.persisted_tab_order_paths());
                 }
             }
-            Action::ToggleDebug => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
-                    self.ui.show_debug = !self.ui.show_debug;
-                }
-            }
-            Action::ToggleStatusBarKeys => {
-                self.ui.status_bar.show_keys = !self.ui.status_bar.show_keys;
-            }
-            Action::CycleHost => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
-                    let peer_hosts = self.model.peer_host_names();
-                    self.ui.cycle_target_host(&peer_hosts);
-                }
-            }
-            Action::CycleLayout => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
-                    self.ui.cycle_layout();
-                    self.persist_layout();
-                }
-            }
-            Action::CycleTheme => {
-                let themes = theme::available_themes();
-                let current = self.theme.name;
-                let idx = themes.iter().position(|(name, _)| *name == current).unwrap_or(0);
-                let next = (idx + 1) % themes.len();
-                self.theme = (themes[next].1)();
-            }
             Action::OpenActionMenu => {
                 if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
                     self.open_action_menu();
@@ -154,14 +126,20 @@ impl App {
                     self.dispatch_if_available(intent);
                 }
             }
-            // Handled by widget stack — should not reach here in normal flow
+            // Handled by widget stack (via AppAction or direct widget handling)
+            // — should not reach here in normal flow
             Action::ToggleHelp
             | Action::ToggleMultiSelect
             | Action::ToggleProviders
             | Action::Quit
             | Action::OpenBranchInput
             | Action::OpenIssueSearch
-            | Action::OpenCommandPalette => {}
+            | Action::OpenCommandPalette
+            | Action::ToggleDebug
+            | Action::ToggleStatusBarKeys
+            | Action::CycleHost
+            | Action::CycleLayout
+            | Action::CycleTheme => {}
         }
     }
 
@@ -204,7 +182,7 @@ impl App {
         };
 
         let mut stack = std::mem::take(&mut self.widget_stack);
-        let (outcome_action, should_quit, pending_cancel) = {
+        let (outcome_action, app_actions) = {
             let mut ctx = self.build_widget_context();
             let mut result: Option<(usize, crate::widgets::Outcome)> = None;
             // Dispatch to the top widget first. Only propagate down to the
@@ -224,7 +202,8 @@ impl App {
                     break;
                 }
             }
-            (result, ctx.should_quit, ctx.pending_cancel)
+            let app_actions = std::mem::take(&mut ctx.app_actions);
+            (result, app_actions)
         };
 
         self.widget_stack = stack;
@@ -234,12 +213,7 @@ impl App {
             // No widget consumed the action — fall through to legacy dispatch
             self.dispatch_action(action);
         }
-        if should_quit {
-            self.should_quit = true;
-        }
-        if let Some(command_id) = pending_cancel {
-            self.pending_cancel = Some(command_id);
-        }
+        self.process_app_actions(app_actions);
 
         // Post-dispatch: check for infinite scroll fetch-more only after
         // selection-changing actions (SelectNext/SelectPrev). Running it after
@@ -260,7 +234,7 @@ impl App {
         // present; skip the base widget entirely.
         let has_modal = self.widget_stack.len() > 1;
         let mut stack = std::mem::take(&mut self.widget_stack);
-        let (outcome_action, should_quit, pending_cancel) = {
+        let (outcome_action, app_actions) = {
             let mut ctx = self.build_widget_context();
             let mut result: Option<(usize, crate::widgets::Outcome)> = None;
             let top = stack.len() - 1;
@@ -274,18 +248,14 @@ impl App {
                     break;
                 }
             }
-            (result, ctx.should_quit, ctx.pending_cancel)
+            let app_actions = std::mem::take(&mut ctx.app_actions);
+            (result, app_actions)
         };
 
         self.widget_stack = stack;
         if let Some((index, outcome)) = outcome_action {
             self.apply_outcome(index, outcome);
-            if should_quit {
-                self.should_quit = true;
-            }
-            if let Some(command_id) = pending_cancel {
-                self.pending_cancel = Some(command_id);
-            }
+            self.process_app_actions(app_actions);
             return;
         }
 

@@ -5,7 +5,7 @@ use flotilla_protocol::{Command, CommandAction, RepoSelector};
 use ratatui::{layout::Rect, Frame};
 use tui_input::{backend::crossterm::EventHandler as InputEventHandler, Input};
 
-use super::{InteractiveWidget, Outcome, RenderContext, WidgetContext};
+use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext};
 use crate::{
     app::ui_state::UiMode,
     keymap::{Action, ModeId},
@@ -127,11 +127,48 @@ impl CommandPaletteWidget {
                 let widget = super::help::HelpWidget::new();
                 Outcome::Swap(Box::new(widget))
             }
-            // All other actions: pop the palette and re-dispatch through the
-            // stack/legacy path. This covers CycleLayout, CycleTheme, CycleHost,
-            // ToggleProviders, ToggleDebug, ToggleMultiSelect, ToggleStatusBarKeys,
-            // OpenActionMenu, Refresh, Quit, etc.
-            action => Outcome::FinishedWith(action),
+
+            // Actions that map to AppActions — push the action and close the palette
+            Action::Quit => {
+                ctx.app_actions.push(AppAction::Quit);
+                Outcome::Finished
+            }
+            Action::CycleLayout => {
+                ctx.app_actions.push(AppAction::CycleLayout);
+                Outcome::Finished
+            }
+            Action::CycleTheme => {
+                ctx.app_actions.push(AppAction::CycleTheme);
+                Outcome::Finished
+            }
+            Action::CycleHost => {
+                ctx.app_actions.push(AppAction::CycleHost);
+                Outcome::Finished
+            }
+            Action::ToggleDebug => {
+                ctx.app_actions.push(AppAction::ToggleDebug);
+                Outcome::Finished
+            }
+            Action::ToggleStatusBarKeys => {
+                ctx.app_actions.push(AppAction::ToggleStatusBarKeys);
+                Outcome::Finished
+            }
+            Action::Refresh => {
+                let repo = ctx.model.active_repo_root().clone();
+                ctx.commands.push(flotilla_protocol::Command {
+                    host: None,
+                    context_repo: None,
+                    action: flotilla_protocol::CommandAction::Refresh { repo: Some(flotilla_protocol::RepoSelector::Path(repo)) },
+                });
+                Outcome::Finished
+            }
+
+            // Remaining actions that the palette re-dispatches to the base layer
+            // via FinishedWith are now handled directly. Actions that toggle
+            // widget-level state (ToggleMultiSelect, ToggleProviders) or need
+            // App context (OpenActionMenu) close the palette without effect —
+            // acceptable since they lack item context when dispatched from the palette.
+            _ => Outcome::Finished,
         }
     }
 }
@@ -397,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_entry_quit_sets_should_quit() {
+    fn confirm_entry_quit_pushes_app_action() {
         let mut widget = CommandPaletteWidget::new();
         // Type "quit" to filter to the quit entry
         widget.input = Input::from("quit");
@@ -405,8 +442,8 @@ mod tests {
         let mut ctx = harness.ctx();
 
         let outcome = widget.handle_action(Action::Confirm, &mut ctx);
-        // Quit is dispatched via FinishedWith so the legacy path handles it
-        assert!(matches!(outcome, Outcome::FinishedWith(Action::Quit)));
+        assert!(matches!(outcome, Outcome::Finished));
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::Quit)));
     }
 
     #[test]

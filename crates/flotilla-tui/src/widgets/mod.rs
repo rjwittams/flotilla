@@ -21,6 +21,19 @@ use crate::{
     theme::Theme,
 };
 
+/// App-level effects that widgets can request. Processed by the event
+/// loop after widget dispatch — widgets declare intent, the app executes.
+#[derive(Debug, Clone)]
+pub enum AppAction {
+    Quit,
+    CancelCommand(u64),
+    CycleTheme,
+    CycleLayout,
+    CycleHost,
+    ToggleDebug,
+    ToggleStatusBarKeys,
+}
+
 /// Result of handling an event in a widget.
 pub enum Outcome {
     /// Event was handled; no further dispatch needed.
@@ -33,8 +46,6 @@ pub enum Outcome {
     Push(Box<dyn InteractiveWidget>),
     /// Pop the current widget and push a replacement.
     Swap(Box<dyn InteractiveWidget>),
-    /// Pop this widget, then re-dispatch the given action through the stack/legacy path.
-    FinishedWith(Action),
 }
 
 /// Mutable context provided to widgets during event handling.
@@ -49,8 +60,7 @@ pub struct WidgetContext<'a> {
     pub commands: &'a mut CommandQueue,
     pub repo_ui: &'a mut HashMap<RepoIdentity, RepoUiState>,
     pub mode: &'a mut UiMode,
-    pub should_quit: bool,
-    pub pending_cancel: Option<u64>,
+    pub app_actions: Vec<AppAction>,
 }
 
 /// Read-only context provided to widgets during rendering.

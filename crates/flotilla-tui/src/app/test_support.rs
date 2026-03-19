@@ -260,8 +260,7 @@ impl TestWidgetHarness {
             commands: &mut self.commands,
             repo_ui: &mut self.repo_ui,
             mode: &mut self.mode,
-            should_quit: false,
-            pending_cancel: None,
+            app_actions: Vec::new(),
         }
     }
 }
@@ -274,6 +273,6 @@ mod tests {
     fn test_widget_harness_builds_context() {
         let mut harness = TestWidgetHarness::new();
         let ctx = harness.ctx();
-        assert!(!ctx.should_quit);
+        assert!(ctx.app_actions.is_empty());
     }
 }

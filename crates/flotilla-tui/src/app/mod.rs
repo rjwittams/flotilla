@@ -409,8 +409,7 @@ impl App {
             commands: &mut self.proto_commands,
             repo_ui: &mut self.ui.repo_ui,
             mode: &mut self.ui.mode,
-            should_quit: false,
-            pending_cancel: None,
+            app_actions: Vec::new(),
         }
     }
 
@@ -428,39 +427,35 @@ impl App {
                 self.widget_stack.remove(index);
                 self.widget_stack.insert(index, widget);
             }
-            crate::widgets::Outcome::FinishedWith(action) => {
-                self.widget_stack.remove(index);
-                // Re-dispatch through the widget stack first (the palette is now
-                // popped, so WorkItemTable will handle actions like Quit,
-                // ToggleMultiSelect, etc.). Fall through to legacy dispatch for
-                // actions the stack doesn't handle.
-                let mut stack = std::mem::take(&mut self.widget_stack);
-                let (result, should_quit, pending_cancel) = {
-                    let mut ctx = self.build_widget_context();
-                    let mut result: Option<(usize, crate::widgets::Outcome)> = None;
-                    let top = stack.len().saturating_sub(1);
-                    let stop_at = if stack.len() > 1 { 1 } else { 0 };
-                    for i in (stop_at..=top).rev() {
-                        let outcome = stack[i].handle_action(action, &mut ctx);
-                        if !matches!(outcome, crate::widgets::Outcome::Ignored) {
-                            result = Some((i, outcome));
-                            break;
-                        }
-                    }
-                    (result, ctx.should_quit, ctx.pending_cancel)
-                };
-                if should_quit {
-                    self.should_quit = true;
+        }
+    }
+
+    pub fn process_app_actions(&mut self, actions: Vec<crate::widgets::AppAction>) {
+        use crate::widgets::AppAction;
+        for action in actions {
+            match action {
+                AppAction::Quit => self.should_quit = true,
+                AppAction::CancelCommand(id) => self.pending_cancel = Some(id),
+                AppAction::CycleTheme => {
+                    let themes = crate::theme::available_themes();
+                    let current = self.theme.name;
+                    let idx = themes.iter().position(|(name, _)| *name == current).unwrap_or(0);
+                    let next = (idx + 1) % themes.len();
+                    self.theme = (themes[next].1)();
                 }
-                if let Some(command_id) = pending_cancel {
-                    self.pending_cancel = Some(command_id);
+                AppAction::CycleLayout => {
+                    self.ui.cycle_layout();
+                    self.persist_layout();
                 }
-                self.widget_stack = stack;
-                if let Some((idx, outcome)) = result {
-                    self.apply_outcome(idx, outcome);
-                } else {
-                    // No widget handled it — legacy fallback
-                    self.dispatch_action(action);
+                AppAction::CycleHost => {
+                    let peer_hosts = self.model.peer_host_names();
+                    self.ui.cycle_target_host(&peer_hosts);
+                }
+                AppAction::ToggleDebug => {
+                    self.ui.show_debug = !self.ui.show_debug;
+                }
+                AppAction::ToggleStatusBarKeys => {
+                    self.ui.status_bar.show_keys = !self.ui.status_bar.show_keys;
                 }
             }
         }
