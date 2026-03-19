@@ -1,11 +1,11 @@
-use cleat::vt::contracts::{assert_passthrough_contract, assert_replay_contract, DeterministicReplayFixture, PassthroughFixture};
+use cleat::vt::contracts::{DeterministicReplayFixture, PassthroughFixture, assert_non_replay_contract, assert_replay_capable_contract};
 
 #[test]
 fn vt_passthrough_engine_contract_is_locked() {
-    assert_passthrough_contract(&PassthroughFixture);
+    assert_non_replay_contract(&PassthroughFixture);
 }
 
 #[test]
 fn vt_replay_engine_contract_is_locked() {
-    assert_replay_contract(&DeterministicReplayFixture);
+    assert_replay_capable_contract(&DeterministicReplayFixture);
 }

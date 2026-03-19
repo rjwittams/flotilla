@@ -1,24 +1,20 @@
-use super::{passthrough::PassthroughVtEngine, VtEngine};
+use super::{VtEngine, passthrough::PassthroughVtEngine};
 
 pub trait EngineFixture {
-    type Engine: VtEngine;
-
     fn name(&self) -> &'static str;
-    fn make(&self) -> Self::Engine;
+    fn make(&self) -> Box<dyn VtEngine>;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PassthroughFixture;
 
 impl EngineFixture for PassthroughFixture {
-    type Engine = PassthroughVtEngine;
-
     fn name(&self) -> &'static str {
         "passthrough"
     }
 
-    fn make(&self) -> Self::Engine {
-        PassthroughVtEngine::new(80, 24)
+    fn make(&self) -> Box<dyn VtEngine> {
+        Box::new(PassthroughVtEngine::new(80, 24))
     }
 }
 
@@ -26,14 +22,12 @@ impl EngineFixture for PassthroughFixture {
 pub struct DeterministicReplayFixture;
 
 impl EngineFixture for DeterministicReplayFixture {
-    type Engine = DeterministicReplayVtEngine;
-
     fn name(&self) -> &'static str {
         "deterministic-replay"
     }
 
-    fn make(&self) -> Self::Engine {
-        DeterministicReplayVtEngine::new(80, 24)
+    fn make(&self) -> Box<dyn VtEngine> {
+        Box::new(DeterministicReplayVtEngine::new(80, 24))
     }
 }
 
@@ -81,15 +75,11 @@ impl VtEngine for DeterministicReplayVtEngine {
     }
 }
 
-pub fn assert_passthrough_contract<F>(fixture: &F)
-where
-    F: EngineFixture<Engine = PassthroughVtEngine>,
-{
+pub fn assert_non_replay_contract(fixture: &impl EngineFixture) {
     let mut engine = fixture.make();
     engine.feed(b"\x1b[31mhello\x1b[0m").expect("feed bytes");
 
     assert_eq!(engine.size(), (80, 24), "{} should keep its initial size until resize", fixture.name());
-    assert_eq!(engine.bytes_seen(), 14, "{} should track fed bytes", fixture.name());
     assert!(!engine.supports_replay(), "{} should not support replay", fixture.name());
     assert_eq!(engine.replay_payload().expect("replay payload"), None);
 
@@ -98,10 +88,7 @@ where
     assert_eq!(engine.replay_payload().expect("replay payload"), None);
 }
 
-pub fn assert_replay_contract<F>(fixture: &F)
-where
-    F: EngineFixture<Engine = DeterministicReplayVtEngine>,
-{
+pub fn assert_replay_capable_contract(fixture: &impl EngineFixture) {
     let mut first = fixture.make();
     let mut second = fixture.make();
 
