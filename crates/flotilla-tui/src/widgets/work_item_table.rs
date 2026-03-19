@@ -150,6 +150,15 @@ impl InteractiveWidget for WorkItemTable {
                 ctx.should_quit = true;
                 Outcome::Consumed
             }
+            Action::Refresh => {
+                let repo = ctx.model.active_repo_root().clone();
+                ctx.commands.push(flotilla_protocol::Command {
+                    host: None,
+                    context_repo: None,
+                    action: flotilla_protocol::CommandAction::Refresh { repo: Some(flotilla_protocol::RepoSelector::Path(repo)) },
+                });
+                Outcome::Consumed
+            }
 
             // Open modal widgets — return Push outcomes
             Action::ToggleHelp => Outcome::Push(Box::new(super::help::HelpWidget::new())),
@@ -183,7 +192,6 @@ impl InteractiveWidget for WorkItemTable {
             | Action::OpenActionMenu
             | Action::OpenFilePicker
             | Action::Dispatch(_)
-            | Action::Refresh
             | Action::PrevTab
             | Action::NextTab
             | Action::MoveTabLeft
