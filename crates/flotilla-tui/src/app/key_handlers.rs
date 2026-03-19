@@ -33,12 +33,12 @@ impl App {
             Action::SelectNext => {
                 // BaseView handles Normal mode; only EventLog reaches here.
                 if matches!(self.ui.mode, UiMode::Config) {
-                    self.event_log_widget.select_next();
+                    self.with_base_view(|bv| bv.event_log.select_next());
                 }
             }
             Action::SelectPrev => {
                 if matches!(self.ui.mode, UiMode::Config) {
-                    self.event_log_widget.select_prev();
+                    self.with_base_view(|bv| bv.event_log.select_prev());
                 }
             }
             Action::Confirm => {
@@ -318,7 +318,8 @@ impl App {
             return false;
         }
 
-        if let Some(action) = self.status_bar_widget.handle_click(mouse.column, mouse.row) {
+        let action = self.with_base_view(|bv| bv.status_bar.handle_click(mouse.column, mouse.row));
+        if let Some(action) = action {
             self.dispatch_status_bar_action(action);
             return true;
         }
@@ -528,12 +529,15 @@ mod tests {
     fn dispatch_action_select_next_moves_config_event_log_selection() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.event_log_widget.count = 3;
-        app.event_log_widget.selected = Some(0);
+        app.with_base_view(|bv| {
+            bv.event_log.count = 3;
+            bv.event_log.selected = Some(0);
+        });
 
         app.dispatch_action(Action::SelectNext);
 
-        assert_eq!(app.event_log_widget.selected, Some(1));
+        let selected = app.with_base_view(|bv| bv.event_log.selected);
+        assert_eq!(selected, Some(1));
     }
 
     #[test]
@@ -755,50 +759,60 @@ mod tests {
     fn config_j_navigates_event_log_down() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.event_log_widget.count = 5;
-        app.event_log_widget.selected = Some(0);
+        app.with_base_view(|bv| {
+            bv.event_log.count = 5;
+            bv.event_log.selected = Some(0);
+        });
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.event_log_widget.selected, Some(1));
+        assert_eq!(app.with_base_view(|bv| bv.event_log.selected), Some(1));
     }
 
     #[test]
     fn config_k_navigates_event_log_up() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.event_log_widget.count = 5;
-        app.event_log_widget.selected = Some(3);
+        app.with_base_view(|bv| {
+            bv.event_log.count = 5;
+            bv.event_log.selected = Some(3);
+        });
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.event_log_widget.selected, Some(2));
+        assert_eq!(app.with_base_view(|bv| bv.event_log.selected), Some(2));
     }
 
     #[test]
     fn config_j_when_no_selection_jumps_to_last() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.event_log_widget.count = 5;
-        app.event_log_widget.selected = None;
+        app.with_base_view(|bv| {
+            bv.event_log.count = 5;
+            bv.event_log.selected = None;
+        });
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.event_log_widget.selected, Some(4));
+        assert_eq!(app.with_base_view(|bv| bv.event_log.selected), Some(4));
     }
 
     #[test]
     fn config_j_at_end_stays() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.event_log_widget.count = 3;
-        app.event_log_widget.selected = Some(2);
+        app.with_base_view(|bv| {
+            bv.event_log.count = 3;
+            bv.event_log.selected = Some(2);
+        });
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.event_log_widget.selected, Some(2));
+        assert_eq!(app.with_base_view(|bv| bv.event_log.selected), Some(2));
     }
 
     #[test]
     fn config_k_at_zero_stays() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.event_log_widget.count = 5;
-        app.event_log_widget.selected = Some(0);
+        app.with_base_view(|bv| {
+            bv.event_log.count = 5;
+            bv.event_log.selected = Some(0);
+        });
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.event_log_widget.selected, Some(0));
+        assert_eq!(app.with_base_view(|bv| bv.event_log.selected), Some(0));
     }
 
     #[test]
@@ -1022,7 +1036,9 @@ mod tests {
     #[test]
     fn clicking_search_status_target_opens_command_palette() {
         let mut app = stub_app();
-        app.status_bar_widget.key_targets = vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
+        app.with_base_view(|bv| {
+            bv.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
+        });
 
         app.handle_mouse(left_click(12, 29));
 
@@ -1033,7 +1049,9 @@ mod tests {
     fn clicking_layout_status_cycles_layout() {
         let mut app = stub_app();
         assert_eq!(app.ui.view_layout, RepoViewLayout::Auto);
-        app.status_bar_widget.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
+        app.with_base_view(|bv| {
+            bv.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
+        });
 
         app.handle_mouse(left_click(4, 29));
 
@@ -1044,7 +1062,9 @@ mod tests {
     fn clicking_host_status_target_cycles_target_host() {
         let mut app = stub_app();
         insert_peer_host(&mut app.model, "alpha");
-        app.status_bar_widget.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
+        app.with_base_view(|bv| {
+            bv.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
+        });
 
         app.handle_mouse(left_click(4, 29));
 
@@ -1055,7 +1075,9 @@ mod tests {
     fn clicking_dismiss_status_target_hides_visible_error() {
         let mut app = stub_app();
         app.model.status_message = Some("boom".into());
-        app.status_bar_widget.dismiss_targets = vec![StatusBarTarget::new(Rect::new(20, 29, 1, 1), StatusBarAction::ClearError(0))];
+        app.with_base_view(|bv| {
+            bv.status_bar.dismiss_targets = vec![StatusBarTarget::new(Rect::new(20, 29, 1, 1), StatusBarAction::ClearError(0))];
+        });
 
         app.handle_mouse(left_click(20, 29));
 

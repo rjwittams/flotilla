@@ -90,8 +90,8 @@ pub struct WidgetContext<'a> {
 
 /// Context provided to widgets during rendering.
 ///
-/// Mutable fields (`ui`, child components) are needed because the base layer
-/// rendering updates table state, layout areas, and widget-internal caches.
+/// Mutable fields (`ui`) are needed because the base layer rendering updates
+/// table state and layout areas.
 pub struct RenderContext<'a> {
     pub model: &'a TuiModel,
     pub ui: &'a mut UiState,
@@ -103,11 +103,6 @@ pub struct RenderContext<'a> {
     pub active_widget_mode: Option<ModeId>,
     /// Extra data from the active widget for status bar rendering.
     pub active_widget_data: WidgetStatusData,
-    // Child components used by BaseView rendering.
-    pub tab_bar: &'a mut tab_bar::TabBar,
-    pub status_bar_widget: &'a mut status_bar_widget::StatusBarWidget,
-    pub event_log_widget: &'a mut event_log::EventLogWidget,
-    pub preview_panel: &'a preview_panel::PreviewPanel,
 }
 
 /// A self-contained interactive widget that handles events and renders itself.

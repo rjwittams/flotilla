@@ -2,7 +2,10 @@ use std::any::Any;
 
 use ratatui::{layout::Rect, Frame};
 
-use super::{work_item_table::WorkItemTable, AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext};
+use super::{
+    event_log::EventLogWidget, preview_panel::PreviewPanel, status_bar_widget::StatusBarWidget, tab_bar::TabBar,
+    work_item_table::WorkItemTable, AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext,
+};
 use crate::{
     app::ui_state::UiMode,
     keymap::{Action, ModeId},
@@ -18,15 +21,29 @@ use crate::{
 ///
 /// Rendering delegates to `ui::render` which orchestrates layout across the
 /// child components (TabBar, StatusBarWidget, EventLogWidget, PreviewPanel).
-/// Those children live on `App` for now and are accessed through `RenderContext`.
-#[derive(Default)]
 pub struct BaseView {
+    pub tab_bar: TabBar,
+    pub status_bar: StatusBarWidget,
     pub table: WorkItemTable,
+    pub preview: PreviewPanel,
+    pub event_log: EventLogWidget,
+}
+
+impl Default for BaseView {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BaseView {
     pub fn new() -> Self {
-        Self { table: WorkItemTable::new() }
+        Self {
+            tab_bar: TabBar::new(),
+            status_bar: StatusBarWidget::new(),
+            table: WorkItemTable::new(),
+            preview: PreviewPanel::new(),
+            event_log: EventLogWidget::new(),
+        }
     }
 
     // ── Action helpers ──
@@ -162,10 +179,10 @@ impl InteractiveWidget for BaseView {
             frame,
             ctx.active_widget_mode,
             ctx.active_widget_data.clone(),
-            ctx.tab_bar,
-            ctx.status_bar_widget,
-            ctx.event_log_widget,
-            ctx.preview_panel,
+            &mut self.tab_bar,
+            &mut self.status_bar,
+            &mut self.event_log,
+            &self.preview,
             &self.table,
         );
     }

@@ -261,10 +261,6 @@ pub struct App {
     pub pending_cancel: Option<u64>,
     pub should_quit: bool,
     pub widget_stack: Vec<Box<dyn crate::widgets::InteractiveWidget>>,
-    pub tab_bar: crate::widgets::tab_bar::TabBar,
-    pub status_bar_widget: crate::widgets::status_bar_widget::StatusBarWidget,
-    pub event_log_widget: crate::widgets::event_log::EventLogWidget,
-    pub preview_panel: crate::widgets::preview_panel::PreviewPanel,
 }
 
 impl App {
@@ -291,10 +287,6 @@ impl App {
             pending_cancel: None,
             should_quit: false,
             widget_stack: vec![Box::new(crate::widgets::base_view::BaseView::new())],
-            tab_bar: crate::widgets::tab_bar::TabBar::new(),
-            status_bar_widget: crate::widgets::status_bar_widget::StatusBarWidget::new(),
-            event_log_widget: crate::widgets::event_log::EventLogWidget::new(),
-            preview_panel: crate::widgets::preview_panel::PreviewPanel::new(),
         }
     }
 
@@ -417,6 +409,17 @@ impl App {
     }
 
     // ── Widget stack helpers ──
+
+    /// Temporarily extract the widget stack so the caller can downcast and
+    /// mutate the `BaseView` at `stack[0]` without conflicting borrows on
+    /// other `App` fields. The stack is restored after the closure returns.
+    pub fn with_base_view<R>(&mut self, f: impl FnOnce(&mut crate::widgets::base_view::BaseView) -> R) -> R {
+        let mut stack = std::mem::take(&mut self.widget_stack);
+        let base = stack[0].as_any_mut().downcast_mut::<crate::widgets::base_view::BaseView>().expect("widget_stack[0] is always BaseView");
+        let result = f(base);
+        self.widget_stack = stack;
+        result
+    }
 
     /// Pop all modal widgets from the stack, leaving only the base BaseView.
     /// Called when the user switches tabs or navigates away, so stale modals

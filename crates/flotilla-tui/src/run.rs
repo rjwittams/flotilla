@@ -116,11 +116,13 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
                     MouseEventKind::Down(MouseButton::Left) => {
                         let x = m.column;
                         let y = m.row;
-                        // Check event log filter click first (owned by EventLogWidget)
-                        if app.event_log_widget.handle_click(x, y) {
+                        // Check event log filter click first (owned by EventLogWidget on BaseView)
+                        let log_clicked = app.with_base_view(|bv| bv.event_log.handle_click(x, y));
+                        if log_clicked {
                             continue;
                         }
-                        let action = app.tab_bar.handle_click(x, y, app.ui.mode.is_config());
+                        let is_config = app.ui.mode.is_config();
+                        let action = app.with_base_view(|bv| bv.tab_bar.handle_click(x, y, is_config));
                         let tab_clicked = match action {
                             TabBarAction::SwitchToConfig => {
                                 app.dismiss_modals();
@@ -149,13 +151,20 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
                         if app.ui.drag.dragging_tab.is_some() {
-                            app.tab_bar.handle_drag(
+                            // Take stack + drag state to avoid borrow conflicts with model fields.
+                            let mut stack = std::mem::take(&mut app.widget_stack);
+                            let base = stack[0]
+                                .as_any_mut()
+                                .downcast_mut::<crate::widgets::base_view::BaseView>()
+                                .expect("widget_stack[0] is always BaseView");
+                            base.tab_bar.handle_drag(
                                 m.column,
                                 m.row,
                                 &mut app.ui.drag,
                                 &mut app.model.repo_order,
                                 &mut app.model.active_repo,
                             );
+                            app.widget_stack = stack;
                         } else {
                             app.handle_mouse(m);
                         }
@@ -215,8 +224,8 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
 /// Render one frame by iterating the widget stack.
 ///
 /// Takes the widget stack out of `app` to avoid borrow conflicts between the
-/// stack iteration and the mutable `RenderContext` (which borrows `app.ui`,
-/// `app.tab_bar`, etc.). The stack is restored after rendering.
+/// stack iteration and the mutable `RenderContext` (which borrows `app.ui`).
+/// The stack is restored after rendering.
 fn render_frame(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     let mut stack = std::mem::take(&mut app.widget_stack);
     let active_widget_mode = stack.last().map(|w| w.mode_id());
@@ -231,10 +240,6 @@ fn render_frame(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Resul
             in_flight: &app.in_flight,
             active_widget_mode,
             active_widget_data: active_widget_data.clone(),
-            tab_bar: &mut app.tab_bar,
-            status_bar_widget: &mut app.status_bar_widget,
-            event_log_widget: &mut app.event_log_widget,
-            preview_panel: &app.preview_panel,
         };
         for widget in &mut stack {
             widget.render(f, area, &mut ctx);
