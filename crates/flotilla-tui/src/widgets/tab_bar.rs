@@ -211,5 +211,4 @@ mod tests {
         tab_bar.tab_areas.insert(TabId::Gear, Rect::new(40, 0, 3, 1));
         assert_eq!(tab_bar.handle_click(41, 0, false), TabBarAction::None);
     }
-
 }
