@@ -40,6 +40,7 @@ const FOREGROUND_NAME: &str = "foreground";
 const STRIP_ENV_VARS: &[&str] = &["SSH_TTY", "SSH_CONNECTION", "SSH_CLIENT"];
 const DEFAULT_TERMINAL_COLS: u16 = 80;
 const DEFAULT_TERMINAL_ROWS: u16 = 24;
+const DETACH_CLEANUP_SEQUENCE: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1049l\x1b[<u\x1b[?25h";
 
 #[derive(Debug)]
 pub struct ForegroundAttach {
@@ -48,6 +49,7 @@ pub struct ForegroundAttach {
 
 impl ForegroundAttach {
     pub fn relay_stdio(self) -> Result<(), String> {
+        let cleanup = AttachCleanupGuard::stdout();
         let _tty_mode = TerminalModeGuard::activate()?;
         let read_handle = {
             let stream = self.stream.lock().map_err(|_| "attach stream lock poisoned".to_string())?;
@@ -100,24 +102,87 @@ impl ForegroundAttach {
 
         let mut stdin = std::io::stdin().lock();
         let mut buf = [0u8; 4096];
-        loop {
+        let stdin_result = loop {
             match stdin.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => break Ok(()),
                 Ok(n) => {
                     let mut stream = self.stream.lock().map_err(|_| "attach stream lock poisoned".to_string())?;
-                    Frame::Input(buf[..n].to_vec()).write(&mut *stream).map_err(|err| format!("write input frame: {err}"))?;
+                    if let Err(err) = Frame::Input(buf[..n].to_vec()).write(&mut *stream) {
+                        break Err(format!("write input frame: {err}"));
+                    }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(err) => return Err(format!("read stdin: {err}")),
+                Err(err) => break Err(format!("read stdin: {err}")),
             }
-        }
+        };
 
         alive.store(false, Ordering::SeqCst);
         let out_result = relay_out.join().map_err(|_| "stdout relay thread panicked".to_string())?;
         let resize_result = resize_loop.join().map_err(|_| "resize thread panicked".to_string())?;
+        cleanup.emit()?;
+        stdin_result?;
         out_result?;
         resize_result
     }
+}
+
+enum AttachCleanupTarget {
+    Stdout,
+    #[cfg(test)]
+    Buffer(Arc<Mutex<Vec<u8>>>),
+}
+
+struct AttachCleanupGuard {
+    target: AttachCleanupTarget,
+    enabled: bool,
+}
+
+impl AttachCleanupGuard {
+    fn stdout() -> Self {
+        Self { target: AttachCleanupTarget::Stdout, enabled: stdout_is_tty().unwrap_or(false) }
+    }
+
+    #[cfg(test)]
+    fn test_buffer(buffer: Arc<Mutex<Vec<u8>>>) -> Self {
+        Self { target: AttachCleanupTarget::Buffer(buffer), enabled: true }
+    }
+
+    #[cfg(test)]
+    fn test_buffer_disabled(buffer: Arc<Mutex<Vec<u8>>>) -> Self {
+        Self { target: AttachCleanupTarget::Buffer(buffer), enabled: false }
+    }
+
+    fn emit(self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        match self.target {
+            AttachCleanupTarget::Stdout => {
+                let mut stdout = std::io::stdout().lock();
+                write_detach_cleanup(&mut stdout)
+            }
+            #[cfg(test)]
+            AttachCleanupTarget::Buffer(buffer) => {
+                if let Ok(mut buffer) = buffer.lock() {
+                    write_detach_cleanup(&mut *buffer)
+                } else {
+                    Err("cleanup buffer lock poisoned".to_string())
+                }
+            }
+        }
+    }
+}
+
+fn write_detach_cleanup<W: Write>(writer: &mut W) -> Result<(), String> {
+    writer.write_all(DETACH_CLEANUP_SEQUENCE).map_err(|err| format!("write detach cleanup: {err}"))?;
+    writer.flush().map_err(|err| format!("flush detach cleanup: {err}"))
+}
+
+fn stdout_is_tty() -> Result<bool, String> {
+    let fd = std::io::stdout().as_raw_fd();
+    // SAFETY: stdout remains open for the duration of this check; we only borrow its fd.
+    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+    isatty(borrowed_fd).map_err(|err| format!("detect terminal stdout: {err}"))
 }
 
 struct TerminalModeGuard {
@@ -630,18 +695,51 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
-        sync::{Mutex, OnceLock},
+        sync::{Arc, Mutex, OnceLock},
     };
 
     use super::{
         apply_attach_state, attach_init_capabilities, default_vt_engine, is_executable_file, record_pty_output, resolve_cleat_executable,
-        TestReplayProbeVtEngine,
+        AttachCleanupGuard, TestReplayProbeVtEngine,
     };
     use crate::vt::{self, VtEngine};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn cleanup_only_writes_when_explicitly_emitted() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let guard = AttachCleanupGuard::test_buffer(Arc::clone(&output));
+
+        drop(guard);
+
+        assert!(output.lock().expect("lock output").is_empty());
+    }
+
+    #[test]
+    fn cleanup_writes_fixed_reset_sequence_when_emitted() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let guard = AttachCleanupGuard::test_buffer(Arc::clone(&output));
+
+        guard.emit().expect("emit cleanup");
+
+        assert_eq!(
+            *output.lock().expect("lock output"),
+            b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1049l\x1b[<u\x1b[?25h"
+        );
+    }
+
+    #[test]
+    fn cleanup_does_not_write_when_target_is_disabled() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let guard = AttachCleanupGuard::test_buffer_disabled(Arc::clone(&output));
+
+        guard.emit().expect("emit cleanup");
+
+        assert!(output.lock().expect("lock output").is_empty());
     }
 
     #[test]
