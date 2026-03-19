@@ -1,5 +1,5 @@
-pub mod passthrough;
 pub mod cleat;
+pub mod passthrough;
 pub mod shpool;
 
 use std::path::Path;

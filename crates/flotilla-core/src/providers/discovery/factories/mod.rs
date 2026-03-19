@@ -1,11 +1,11 @@
 pub mod claude;
+pub mod cleat;
 pub mod cmux;
 pub mod codex;
 pub mod cursor;
 pub mod git;
 pub mod github;
 pub mod passthrough;
-pub mod cleat;
 pub mod shpool;
 pub mod tmux;
 pub mod zellij;

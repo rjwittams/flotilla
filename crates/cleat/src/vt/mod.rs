@@ -71,14 +71,12 @@ fn select_default_vt_engine_kind() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{make_default_vt_engine, select_default_vt_engine_kind};
-
     #[cfg(feature = "ghostty-vt")]
     #[test]
     fn ghostty_engine_smoke_constructs_resizes_and_drops() {
-        let mut engine = make_default_vt_engine(80, 24);
+        let mut engine = super::make_default_vt_engine(80, 24);
 
-        assert_eq!(select_default_vt_engine_kind(), "ghostty");
+        assert_eq!(super::select_default_vt_engine_kind(), "ghostty");
         assert_eq!(engine.size(), (80, 24));
 
         engine.resize(120, 40).expect("resize ghostty engine");

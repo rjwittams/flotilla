@@ -41,6 +41,32 @@ This replan intentionally does **not** cover:
 
 Those should be follow-up plans once the revised replay seam is proven.
 
+## Current outcome
+
+This phase is now implemented through the planned capability-aware replay, client-side cleanup, feature-gated Ghostty integration, and daemon replay verification slices.
+
+What shipped:
+
+- capability-aware `VtEngine` replay API
+- attach-time capability propagation through the internal protocol
+- client-side detach cleanup in the attach client
+- feature-gated Ghostty VT boundary with a real in-crate FFI-backed engine
+- replay ordering verified at the daemon lifecycle seam
+
+What remains deferred after this phase:
+
+- terminfo-style capability downconversion
+- DA query synthesis while detached
+- `esctest` / `vttest` integration
+- broader observer/control channels
+- CI automation for Zig and Ghostty feature-on builds
+
+Current local Ghostty assumption for feature-on development:
+
+- `libghostty-vt` is installed locally under a standard prefix
+- `build.rs` validates that local install when `ghostty-vt` is enabled
+- default Rust-only builds remain unchanged when the feature is off
+
 ## File map
 
 ### Cleat VT seam and protocol
@@ -312,3 +338,12 @@ Expected: PASS
 git add docs/superpowers/specs/2026-03-18-session-daemon-design.md docs/superpowers/plans/2026-03-19-cleat-phase2-vt-engine.md
 git commit -m "docs: revise cleat phase 2 vt engine plan"
 ```
+
+## Completed checkpoints
+
+- `6d5897e` `refactor: make cleat vt replay capability-aware`
+- `1c74ba0` `feat: carry client capabilities through cleat attach`
+- `1506bbb` `feat: add cleat client-side detach cleanup`
+- `2cba418` `build: add optional ghostty vt boundary`
+- `18180c2` `feat: add ghostty-backed cleat vt engine`
+- `c64c716` `test: verify cleat attach replay with ghostty vt`
