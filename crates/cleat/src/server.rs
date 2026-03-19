@@ -38,7 +38,7 @@ impl SessionService {
         let pid_path = crate::session::daemon_pid_path(self.layout.root(), id);
         if let Ok(Some(pid)) = std::fs::read_to_string(&pid_path).map(|value| value.trim().parse::<i32>().ok()) {
             if is_expected_bollard_process(pid) {
-                // SAFETY: the pid was verified to belong to a bollard process before signaling it.
+                // SAFETY: the pid was verified to belong to a cleat process before signaling it.
                 unsafe {
                     libc::kill(pid, libc::SIGTERM);
                 }
@@ -87,7 +87,7 @@ fn is_expected_bollard_process(pid: i32) -> bool {
     let mut sys = System::new();
     let sysinfo_pid = Pid::from(pid as usize);
     sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[sysinfo_pid]), true, ProcessRefreshKind::nothing());
-    sys.process(sysinfo_pid).map(|process| process.name().to_string_lossy().contains("bollard")).unwrap_or(false)
+    sys.process(sysinfo_pid).map(|process| process.name().to_string_lossy().contains("cleat")).unwrap_or(false)
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use crate::server::SessionService;
 
 #[derive(Debug, Parser)]
-#[command(name = "bollard", version)]
+#[command(name = "cleat", version)]
 pub struct Cli {
     #[arg(long, hide = true)]
     pub runtime_root: Option<PathBuf>,

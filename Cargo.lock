@@ -339,7 +339,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bollard"
+name = "cleat"
 version = "0.1.0"
 dependencies = [
  "clap",

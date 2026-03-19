@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
-use bollard::{
+use clap::Parser;
+use cleat::{
     cli::{self, Cli},
     protocol::SessionInfo,
     runtime::RuntimeLayout,
     server::SessionService,
     session::{daemon_pid_path, foreground_path},
 };
-use clap::Parser;
 
 fn service_for(path: &std::path::Path) -> SessionService {
     SessionService::new(RuntimeLayout::new(path.to_path_buf()))
@@ -17,7 +17,7 @@ fn service_for(path: &std::path::Path) -> SessionService {
 fn create_makes_session_directory_and_returns_metadata() {
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
-    let cli = Cli::try_parse_from(["bollard", "create", "alpha", "--cmd", "bash"]).expect("parse create");
+    let cli = Cli::try_parse_from(["cleat", "create", "alpha", "--cmd", "bash"]).expect("parse create");
 
     let output = cli::execute(cli, &service).expect("execute create").expect("create output");
     assert_eq!(output, "alpha");
@@ -28,7 +28,7 @@ fn create_makes_session_directory_and_returns_metadata() {
 fn create_json_returns_structured_metadata() {
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
-    let cli = Cli::try_parse_from(["bollard", "create", "--json", "alpha", "--cmd", "bash"]).expect("parse create");
+    let cli = Cli::try_parse_from(["cleat", "create", "--json", "alpha", "--cmd", "bash"]).expect("parse create");
 
     let output = cli::execute(cli, &service).expect("execute create").expect("create output");
     let created: SessionInfo = serde_json::from_str(&output).expect("parse create output");
@@ -43,7 +43,7 @@ fn list_reports_existing_sessions() {
     let service = service_for(temp.path());
     service.create(Some("alpha".into()), Some(PathBuf::from("/repo")), None).expect("create alpha");
     service.create(Some("beta".into()), None, Some("zsh".into())).expect("create beta");
-    let cli = Cli::try_parse_from(["bollard", "list"]).expect("parse list");
+    let cli = Cli::try_parse_from(["cleat", "list"]).expect("parse list");
 
     let output = cli::execute(cli, &service).expect("execute list").expect("list output");
     let lines: Vec<_> = output.lines().collect();
@@ -57,7 +57,7 @@ fn list_json_reports_existing_sessions() {
     let service = service_for(temp.path());
     service.create(Some("alpha".into()), Some(PathBuf::from("/repo")), None).expect("create alpha");
     service.create(Some("beta".into()), None, Some("zsh".into())).expect("create beta");
-    let cli = Cli::try_parse_from(["bollard", "list", "--json"]).expect("parse list");
+    let cli = Cli::try_parse_from(["cleat", "list", "--json"]).expect("parse list");
 
     let output = cli::execute(cli, &service).expect("execute list").expect("list output");
     let listed: Vec<SessionInfo> = serde_json::from_str(&output).expect("parse list output");
@@ -70,7 +70,7 @@ fn kill_removes_session_directory() {
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
     service.create(Some("alpha".into()), None, None).expect("create alpha");
-    let cli = Cli::try_parse_from(["bollard", "kill", "alpha"]).expect("parse kill");
+    let cli = Cli::try_parse_from(["cleat", "kill", "alpha"]).expect("parse kill");
 
     let output = cli::execute(cli, &service).expect("execute kill");
 
@@ -82,7 +82,7 @@ fn kill_removes_session_directory() {
 fn kill_missing_session_is_an_error() {
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
-    let cli = Cli::try_parse_from(["bollard", "kill", "missing"]).expect("parse kill");
+    let cli = Cli::try_parse_from(["cleat", "kill", "missing"]).expect("parse kill");
 
     let err = cli::execute(cli, &service).expect_err("missing kill should fail");
 
@@ -145,7 +145,7 @@ fn stale_foreground_file_does_not_block_attach() {
 fn attach_no_create_rejects_missing_session() {
     let temp = tempfile::tempdir().expect("tempdir");
     let service = service_for(temp.path());
-    let cli = Cli::try_parse_from(["bollard", "attach", "--no-create", "missing"]).expect("parse attach");
+    let cli = Cli::try_parse_from(["cleat", "attach", "--no-create", "missing"]).expect("parse attach");
 
     let err = cli::execute(cli, &service).expect_err("missing attach should fail");
 

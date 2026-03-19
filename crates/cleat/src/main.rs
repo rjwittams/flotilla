@@ -1,9 +1,9 @@
-use bollard::{cli, server::SessionService};
+use cleat::{cli, server::SessionService};
 
 fn main() {
     let cli = cli::parse();
     let service = if let Some(root) = cli.runtime_root.clone() {
-        SessionService::new(bollard::runtime::RuntimeLayout::new(root))
+        SessionService::new(cleat::runtime::RuntimeLayout::new(root))
     } else {
         SessionService::discover()
     };

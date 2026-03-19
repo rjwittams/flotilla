@@ -1,4 +1,4 @@
-use bollard::vt::{passthrough::PassthroughVtEngine, VtEngine};
+use cleat::vt::{passthrough::PassthroughVtEngine, VtEngine};
 
 #[test]
 fn passthrough_engine_accepts_bytes_and_reports_no_replay_support() {

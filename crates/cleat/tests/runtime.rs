@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use bollard::runtime::RuntimeLayout;
+use cleat::runtime::RuntimeLayout;
 
 #[test]
 fn named_sessions_use_supplied_name_as_id() {

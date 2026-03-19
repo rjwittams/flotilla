@@ -1,4 +1,4 @@
-//! Terminal pool factory for bollard.
+//! Terminal pool factory for cleat.
 
 use std::{path::Path, sync::Arc};
 
@@ -31,10 +31,10 @@ impl Factory for SessionTerminalPoolFactory {
         runner: Arc<dyn CommandRunner>,
         attachable_store: crate::attachable::SharedAttachableStore,
     ) -> Result<Arc<dyn TerminalPool>, Vec<UnmetRequirement>> {
-        if let Some(binary) = env.find_binary("bollard") {
+        if let Some(binary) = env.find_binary("cleat") {
             Ok(Arc::new(SessionTerminalPool::new(runner, binary.display().to_string(), attachable_store)))
         } else {
-            Err(vec![UnmetRequirement::MissingBinary("bollard".into())])
+            Err(vec![UnmetRequirement::MissingBinary("cleat".into())])
         }
     }
 }
@@ -54,7 +54,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_factory_succeeds_with_binary() {
-        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("bollard", "/usr/local/bin/bollard"));
+        let bag = EnvironmentBag::new().with(EnvironmentAssertion::binary("cleat", "/usr/local/bin/cleat"));
         let dir = tempfile::tempdir().expect("tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
@@ -70,6 +70,6 @@ mod tests {
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
         let result = SessionTerminalPoolFactory.probe(&bag, &config, Path::new("/repo"), runner, test_attachable_store(&config)).await;
         let unmet = result.err().expect("missing binary");
-        assert!(unmet.contains(&UnmetRequirement::MissingBinary("bollard".into())));
+        assert!(unmet.contains(&UnmetRequirement::MissingBinary("cleat".into())));
     }
 }

@@ -373,19 +373,19 @@ fn resolve_bollard_executable() -> Result<PathBuf, String> {
         return Ok(path);
     }
 
-    let path_var = std::env::var_os("PATH").ok_or_else(|| "PATH is not set; cannot locate bollard executable".to_string())?;
+    let path_var = std::env::var_os("PATH").ok_or_else(|| "PATH is not set; cannot locate cleat executable".to_string())?;
     for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join("bollard");
+        let candidate = dir.join("cleat");
         if is_executable_file(&candidate) {
             return Ok(candidate);
         }
     }
 
-    if let Some(path) = current_exe_sibling("bollard") {
+    if let Some(path) = current_exe_sibling("cleat") {
         return Ok(path);
     }
 
-    Err("unable to locate bollard executable in PATH".into())
+    Err("unable to locate cleat executable in PATH".into())
 }
 
 fn current_exe_sibling(name: &str) -> Option<PathBuf> {
@@ -607,18 +607,18 @@ mod tests {
     fn resolve_bollard_executable_prefers_cargo_bin_env() {
         let _lock = env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
-        let bollard = temp.path().join("bollard");
-        fs::write(&bollard, b"#!/bin/sh\n").expect("write fake bollard");
+        let cleat = temp.path().join("cleat");
+        fs::write(&cleat, b"#!/bin/sh\n").expect("write fake cleat");
         let original = std::env::var_os("CARGO_BIN_EXE_bollard");
-        std::env::set_var("CARGO_BIN_EXE_bollard", &bollard);
+        std::env::set_var("CARGO_BIN_EXE_bollard", &cleat);
 
-        let resolved = resolve_bollard_executable().expect("resolve bollard");
+        let resolved = resolve_bollard_executable().expect("resolve cleat");
 
         match original {
             Some(value) => std::env::set_var("CARGO_BIN_EXE_bollard", value),
             None => std::env::remove_var("CARGO_BIN_EXE_bollard"),
         }
-        assert_eq!(resolved, bollard);
+        assert_eq!(resolved, cleat);
     }
 
     #[test]
@@ -627,15 +627,15 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let bin_dir = temp.path().join("bin");
         fs::create_dir_all(&bin_dir).expect("create bin dir");
-        let bollard = bin_dir.join("bollard");
-        fs::write(&bollard, b"#!/bin/sh\n").expect("write fake bollard");
-        let mut perms = fs::metadata(&bollard).expect("metadata").permissions();
+        let cleat = bin_dir.join("cleat");
+        fs::write(&cleat, b"#!/bin/sh\n").expect("write fake cleat");
+        let mut perms = fs::metadata(&cleat).expect("metadata").permissions();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
 
             perms.set_mode(0o755);
-            fs::set_permissions(&bollard, perms).expect("set executable");
+            fs::set_permissions(&cleat, perms).expect("set executable");
         }
 
         let original_bin = std::env::var_os("CARGO_BIN_EXE_bollard");
@@ -653,7 +653,7 @@ mod tests {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),
         }
-        assert_eq!(resolved, bollard);
-        assert!(is_executable_file(&bollard));
+        assert_eq!(resolved, cleat);
+        assert!(is_executable_file(&cleat));
     }
 }

@@ -298,12 +298,12 @@ mod tests {
 
     #[tokio::test]
     async fn attach_command_wraps_cli_with_name_and_cwd() {
-        let pool = SessionTerminalPool::new(Arc::new(MockRunner::new(vec![])), "bollard", shared_in_memory_attachable_store());
+        let pool = SessionTerminalPool::new(Arc::new(MockRunner::new(vec![])), "cleat", shared_in_memory_attachable_store());
         let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
 
         let command = pool.attach_command(&id, "bash", Path::new("/repo"), &vec![]).await.expect("attach command");
 
-        assert!(command.contains("'bollard' attach"));
+        assert!(command.contains("'cleat' attach"));
         assert!(command.contains("'flotilla/feat/shell/0'"));
         assert!(command.contains("--cwd '/repo'"));
     }
@@ -323,7 +323,7 @@ mod tests {
                 TerminalStatus::Disconnected,
             );
         }
-        let pool = SessionTerminalPool::new(Arc::new(MockRunner::new(vec![Ok(json.into())])), "bollard", store);
+        let pool = SessionTerminalPool::new(Arc::new(MockRunner::new(vec![Ok(json.into())])), "cleat", store);
 
         let terminals = pool.list_terminals().await.expect("list terminals");
 
@@ -349,13 +349,13 @@ mod tests {
                 TerminalStatus::Disconnected,
             );
         }
-        let pool = SessionTerminalPool::new(Arc::clone(&runner) as Arc<dyn CommandRunner>, "bollard", store.clone());
+        let pool = SessionTerminalPool::new(Arc::clone(&runner) as Arc<dyn CommandRunner>, "cleat", store.clone());
         let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
 
         pool.kill_terminal(&id).await.expect("kill terminal");
 
         let calls = runner.calls.lock().expect("calls");
-        assert_eq!(calls[0].0, "bollard");
+        assert_eq!(calls[0].0, "cleat");
         assert_eq!(calls[0].1, vec!["kill".to_string(), "session-123".to_string()]);
         drop(calls);
 
@@ -368,7 +368,7 @@ mod tests {
         let json = r#"{ "id":"session-123", "name":"flotilla/feat/shell/0", "cwd":"/repo", "cmd":"bash", "status":"Detached" }"#;
         let store = shared_in_memory_attachable_store();
         let runner = Arc::new(MockRunner::new(vec![Ok(json.into())]));
-        let pool = SessionTerminalPool::new(Arc::clone(&runner) as Arc<dyn CommandRunner>, "bollard", store.clone());
+        let pool = SessionTerminalPool::new(Arc::clone(&runner) as Arc<dyn CommandRunner>, "cleat", store.clone());
         let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
 
         pool.ensure_running(&id, "bash", Path::new("/repo")).await.expect("ensure running");
