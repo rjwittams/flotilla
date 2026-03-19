@@ -1,7 +1,9 @@
 use std::{
     os::unix::net::UnixStream,
     path::PathBuf,
+    process::{Command, Stdio},
     sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use clap::Parser;
@@ -335,4 +337,47 @@ fn attach_no_create_rejects_missing_session() {
     let err = cli::execute(cli, &service).expect_err("missing attach should fail");
 
     assert!(err.contains("missing"));
+}
+
+#[test]
+fn cleat_attach_exits_when_session_is_killed() {
+    let _lock = env_lock().lock().expect("env lock");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let service = service_for(temp.path());
+    service.create(Some("alpha".into()), None, None, Some("sleep 30".into())).expect("create alpha");
+
+    let cleat_bin = std::env::var("CARGO_BIN_EXE_cleat").expect("cleat bin");
+    let mut child = Command::new(cleat_bin)
+        .arg("--runtime-root")
+        .arg(temp.path())
+        .arg("attach")
+        .arg("alpha")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn cleat attach");
+    let _stdin = child.stdin.take().expect("attach stdin");
+
+    let attach_deadline = Instant::now() + Duration::from_secs(2);
+    while !foreground_path(temp.path(), "alpha").exists() && Instant::now() < attach_deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(foreground_path(temp.path(), "alpha").exists(), "attach should establish a foreground client before kill");
+
+    service.kill("alpha").expect("kill session");
+
+    let exit_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait attach child") {
+            assert!(status.success(), "attach should exit cleanly after session kill: {status:?}");
+            break;
+        }
+        if Instant::now() >= exit_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("cleat attach did not exit after session kill");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

@@ -95,8 +95,15 @@ impl ForegroundAttach {
         });
 
         let mut stdin = std::io::stdin().lock();
+        let stdin_fd = stdin.as_raw_fd();
         let mut buf = [0u8; 4096];
         let stdin_result = loop {
+            if !alive.load(Ordering::SeqCst) {
+                break Ok(());
+            }
+            if !poll_fd_readable(stdin_fd, 100)? {
+                continue;
+            }
             match stdin.read(&mut buf) {
                 Ok(0) => break Ok(()),
                 Ok(n) => {
@@ -531,6 +538,15 @@ struct PollResult {
     listener_readable: bool,
     client_readable: bool,
     pty_readable: bool,
+}
+
+fn poll_fd_readable(fd: RawFd, timeout_ms: i32) -> Result<bool, String> {
+    // SAFETY: the fd remains open for the duration of the poll call; we only borrow it temporarily.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let mut fds = [PollFd::new(borrowed, PollFlags::POLLIN)];
+    poll(&mut fds, PollTimeout::try_from(timeout_ms).map_err(|err| format!("invalid poll timeout: {err}"))?)
+        .map_err(|err| format!("poll readable fd: {err}"))?;
+    Ok(has_pollin(&fds[0]))
 }
 
 struct PtyChild {
