@@ -73,38 +73,9 @@ pub enum UiMode {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FocusTarget {
-    WorkItemTable,
-    EventLog,
-    HelpText,
-    ActionMenu,
-    BranchInput,
-    IssueSearchInput,
-    FilePickerList,
-    DeleteConfirmDialog,
-    CloseConfirmDialog,
-    CommandPalette,
-}
-
 impl UiMode {
     pub fn is_config(&self) -> bool {
         matches!(self, UiMode::Config)
-    }
-
-    pub fn focus_target(&self) -> FocusTarget {
-        match self {
-            UiMode::Normal => FocusTarget::WorkItemTable,
-            UiMode::Help => FocusTarget::HelpText,
-            UiMode::Config => FocusTarget::EventLog,
-            UiMode::ActionMenu { .. } => FocusTarget::ActionMenu,
-            UiMode::BranchInput { .. } => FocusTarget::BranchInput,
-            UiMode::FilePicker { .. } => FocusTarget::FilePickerList,
-            UiMode::DeleteConfirm { .. } => FocusTarget::DeleteConfirmDialog,
-            UiMode::CloseConfirm { .. } => FocusTarget::CloseConfirmDialog,
-            UiMode::IssueSearch { .. } => FocusTarget::IssueSearchInput,
-            UiMode::CommandPalette { .. } => FocusTarget::CommandPalette,
-        }
     }
 }
 
@@ -262,18 +233,6 @@ pub struct DoubleClickState {
     pub last_selectable_idx: Option<usize>,
 }
 
-pub struct EventLogUiState {
-    pub selected: Option<usize>,
-    pub count: usize,
-    pub filter: tracing::Level,
-}
-
-impl Default for EventLogUiState {
-    fn default() -> Self {
-        Self { selected: None, count: 0, filter: tracing::Level::INFO }
-    }
-}
-
 pub struct UiState {
     pub mode: UiMode,
     pub repo_ui: HashMap<RepoIdentity, RepoUiState>,
@@ -283,7 +242,6 @@ pub struct UiState {
     pub layout: LayoutAreas,
     pub drag: DragState,
     pub double_click: DoubleClickState,
-    pub event_log: EventLogUiState,
     pub show_debug: bool,
     pub help_scroll: u16,
 }
@@ -300,7 +258,6 @@ impl UiState {
             layout: LayoutAreas::default(),
             drag: DragState::default(),
             double_click: DoubleClickState::default(),
-            event_log: EventLogUiState::default(),
             show_debug: false,
             help_scroll: 0,
         }
@@ -388,50 +345,6 @@ mod tests {
     #[test]
     fn ui_mode_default_is_normal() {
         assert!(matches!(UiMode::default(), UiMode::Normal));
-    }
-
-    #[test]
-    fn focus_target_maps_every_mode_to_expected_widget() {
-        let cases: Vec<(UiMode, FocusTarget)> = vec![
-            (UiMode::Normal, FocusTarget::WorkItemTable),
-            (UiMode::Help, FocusTarget::HelpText),
-            (UiMode::Config, FocusTarget::EventLog),
-            (UiMode::ActionMenu { items: vec![], index: 0 }, FocusTarget::ActionMenu),
-            (
-                UiMode::BranchInput { input: Input::default(), kind: BranchInputKind::Manual, pending_issue_ids: vec![] },
-                FocusTarget::BranchInput,
-            ),
-            (UiMode::FilePicker { input: Input::default(), dir_entries: vec![], selected: 0 }, FocusTarget::FilePickerList),
-            (
-                UiMode::DeleteConfirm {
-                    info: None,
-                    loading: false,
-                    terminal_keys: vec![],
-                    identity: WorkItemIdentity::Session("test".into()),
-                    remote_host: None,
-                },
-                FocusTarget::DeleteConfirmDialog,
-            ),
-            (
-                UiMode::CloseConfirm {
-                    id: "42".into(),
-                    title: "test".into(),
-                    identity: WorkItemIdentity::Session("test".into()),
-                    command: flotilla_protocol::Command {
-                        host: None,
-                        context_repo: None,
-                        action: flotilla_protocol::CommandAction::CloseChangeRequest { id: "42".into() },
-                    },
-                },
-                FocusTarget::CloseConfirmDialog,
-            ),
-            (UiMode::IssueSearch { input: Input::default() }, FocusTarget::IssueSearchInput),
-            (UiMode::CommandPalette { input: Input::default(), entries: &[], selected: 0, scroll_top: 0 }, FocusTarget::CommandPalette),
-        ];
-
-        for (mode, expected) in cases {
-            assert_eq!(mode.focus_target(), expected);
-        }
     }
 
     // ── UiState::new tests ────────────────────────────────────────────
@@ -557,16 +470,6 @@ mod tests {
         assert!(!state.has_unseen_changes);
         assert!(state.multi_selected.is_empty());
         assert!(!state.show_providers);
-    }
-
-    // ── EventLogUiState default tests ─────────────────────────────────
-
-    #[test]
-    fn event_log_ui_state_default_values() {
-        let state = EventLogUiState::default();
-        assert!(state.selected.is_none());
-        assert_eq!(state.count, 0);
-        assert_eq!(state.filter, tracing::Level::INFO);
     }
 
     // ── PendingAction tests ──────────────────────────────────────────

@@ -5,10 +5,7 @@ use flotilla_core::data::GroupEntry;
 use flotilla_protocol::{Command, CommandAction, WorkItem};
 use tui_input::Input;
 
-use super::{
-    ui_state::{FocusTarget, PendingActionContext},
-    App, BranchInputKind, Intent, UiMode,
-};
+use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent, TabId, UiMode};
 use crate::{
     keymap::{Action, ModeId},
     status_bar::StatusBarAction,
@@ -17,42 +14,21 @@ use crate::{
 impl App {
     // ── Key handling ──
 
+    /// Resolve a key event to an action using the UI mode rather than the
+    /// widget-stack mode. Called for raw-key widgets (BranchInput, IssueSearch)
+    /// and when the base widget (Normal mode_id) is on top — so Config mode
+    /// gets correct keymap bindings via `ModeId::from(&self.ui.mode)`.
     fn resolve_action(&self, key: KeyEvent) -> Option<Action> {
         let mode_id = ModeId::from(&self.ui.mode);
 
         // Text input modes: only Esc and Enter are intercepted.
-        // All other keys pass through to tui_input in handle_key.
-        match mode_id {
-            ModeId::BranchInput | ModeId::IssueSearch => {
-                return match key.code {
-                    KeyCode::Esc => Some(Action::Dismiss),
-                    KeyCode::Enter => Some(Action::Confirm),
-                    _ => None,
-                };
-            }
-            ModeId::CommandPalette => {
-                return match key.code {
-                    KeyCode::Esc => Some(Action::Dismiss),
-                    KeyCode::Enter => Some(Action::Confirm),
-                    KeyCode::Up => Some(Action::SelectPrev),
-                    KeyCode::Down => Some(Action::SelectNext),
-                    _ => None,
-                };
-            }
-            // FilePicker has both a text input and a navigation list.
-            // Hardcoded rather than routed through the keymap because shared
-            // bindings (e.g. `?` → ToggleHelp) would intercept keys the user
-            // intends to type into the path field.
-            ModeId::FilePicker => {
-                return match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => Some(Action::SelectNext),
-                    KeyCode::Char('k') | KeyCode::Up => Some(Action::SelectPrev),
-                    KeyCode::Esc => Some(Action::Dismiss),
-                    KeyCode::Enter => Some(Action::Confirm),
-                    _ => None,
-                };
-            }
-            _ => {}
+        // All other keys pass through to tui_input via handle_raw_key.
+        if matches!(mode_id, ModeId::BranchInput | ModeId::IssueSearch) {
+            return match key.code {
+                KeyCode::Esc => Some(Action::Dismiss),
+                KeyCode::Enter => Some(Action::Confirm),
+                _ => None,
+            };
         }
 
         self.keymap.resolve(mode_id, crokey::KeyCombination::from(key))
@@ -67,28 +43,18 @@ impl App {
     pub(super) fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::SelectNext => {
-                // Widget handles WorkItemTable; only EventLog reaches here.
-                if matches!(self.ui.mode.focus_target(), FocusTarget::EventLog) {
-                    if let Some(sel) = self.ui.event_log.selected {
-                        if sel + 1 < self.ui.event_log.count {
-                            self.ui.event_log.selected = Some(sel + 1);
-                        }
-                    } else if self.ui.event_log.count > 0 {
-                        self.ui.event_log.selected = Some(self.ui.event_log.count - 1);
-                    }
+                // BaseView handles Normal mode; only EventLog reaches here.
+                if matches!(self.ui.mode, UiMode::Config) {
+                    self.event_log_widget.select_next();
                 }
             }
             Action::SelectPrev => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::EventLog) {
-                    if let Some(sel) = self.ui.event_log.selected {
-                        if sel > 0 {
-                            self.ui.event_log.selected = Some(sel - 1);
-                        }
-                    }
+                if matches!(self.ui.mode, UiMode::Config) {
+                    self.event_log_widget.select_prev();
                 }
             }
             Action::Confirm => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
+                if matches!(self.ui.mode, UiMode::Normal) {
                     self.action_enter();
                 }
             }
@@ -106,23 +72,23 @@ impl App {
                 }
             }
             Action::OpenActionMenu => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
+                if matches!(self.ui.mode, UiMode::Normal) {
                     self.open_action_menu();
                 }
             }
             Action::OpenFilePicker => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
+                if matches!(self.ui.mode, UiMode::Normal) {
                     self.open_file_picker_from_active_repo_parent();
                 }
             }
             Action::Dismiss => {
-                // Widget handles WorkItemTable dismiss cascade. Only EventLog reaches here.
-                if matches!(self.ui.mode.focus_target(), FocusTarget::EventLog) {
+                // BaseView handles Normal mode dismiss cascade. Only Config reaches here.
+                if matches!(self.ui.mode, UiMode::Config) {
                     self.ui.mode = UiMode::Normal;
                 }
             }
             Action::Dispatch(intent) => {
-                if matches!(self.ui.mode.focus_target(), FocusTarget::WorkItemTable) {
+                if matches!(self.ui.mode, UiMode::Normal) {
                     self.dispatch_if_available(intent);
                 }
             }
@@ -149,7 +115,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
-        // The widget stack is always non-empty (WorkItemTable is the base layer).
+        // The widget stack is always non-empty (BaseView is the base layer).
         let captures_raw = self.widget_stack.last().expect("stack is never empty").captures_raw_keys();
         let mode_id = self.widget_stack.last().expect("stack is never empty").mode_id();
 
@@ -232,7 +198,7 @@ impl App {
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         // ── Widget stack mouse dispatch ──
-        // The stack is always non-empty (WorkItemTable is the base layer).
+        // The stack is always non-empty (BaseView is the base layer).
         // Modal widgets on top act as focus barriers — if a modal is present,
         // mouse events that it doesn't consume must NOT fall through to the
         // base table layer. Only dispatch to the top widget when modals are
@@ -282,6 +248,20 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // Gear icon is rendered in the table border area — check it first.
+                if let Some(gear_area) = self.ui.layout.tab_areas.get(&TabId::Gear) {
+                    if mouse.column >= gear_area.x
+                        && mouse.column < gear_area.x + gear_area.width
+                        && mouse.row >= gear_area.y
+                        && mouse.row < gear_area.y + gear_area.height
+                        && !self.ui.mode.is_config()
+                    {
+                        let sp = self.active_ui().show_providers;
+                        self.active_ui_mut().show_providers = !sp;
+                        return;
+                    }
+                }
+
                 if let Some(si) = self.row_at_mouse(mouse.column, mouse.row) {
                     let now = Instant::now();
                     let is_double_click = self.ui.double_click.last_time.map(|t| now.duration_since(t).as_millis() < 400).unwrap_or(false)
@@ -350,20 +330,9 @@ impl App {
             return false;
         }
 
-        for target in &self.ui.layout.status_bar.dismiss_targets {
-            if target.contains(mouse.column, mouse.row) {
-                if let StatusBarAction::ClearError(id) = target.action {
-                    self.dismiss_status_item(id);
-                    return true;
-                }
-            }
-        }
-
-        for target in &self.ui.layout.status_bar.key_targets {
-            if target.contains(mouse.column, mouse.row) {
-                self.dispatch_status_bar_action(target.action.clone());
-                return true;
-            }
+        if let Some(action) = self.status_bar_widget.handle_click(mouse.column, mouse.row) {
+            self.dispatch_status_bar_action(action);
+            return true;
         }
 
         false
@@ -575,12 +544,12 @@ mod tests {
     fn dispatch_action_select_next_moves_config_event_log_selection() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 3;
-        app.ui.event_log.selected = Some(0);
+        app.event_log_widget.count = 3;
+        app.event_log_widget.selected = Some(0);
 
         app.dispatch_action(Action::SelectNext);
 
-        assert_eq!(app.ui.event_log.selected, Some(1));
+        assert_eq!(app.event_log_widget.selected, Some(1));
     }
 
     #[test]
@@ -821,50 +790,50 @@ mod tests {
     fn config_j_navigates_event_log_down() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 5;
-        app.ui.event_log.selected = Some(0);
+        app.event_log_widget.count = 5;
+        app.event_log_widget.selected = Some(0);
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.ui.event_log.selected, Some(1));
+        assert_eq!(app.event_log_widget.selected, Some(1));
     }
 
     #[test]
     fn config_k_navigates_event_log_up() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 5;
-        app.ui.event_log.selected = Some(3);
+        app.event_log_widget.count = 5;
+        app.event_log_widget.selected = Some(3);
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.ui.event_log.selected, Some(2));
+        assert_eq!(app.event_log_widget.selected, Some(2));
     }
 
     #[test]
     fn config_j_when_no_selection_jumps_to_last() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 5;
-        app.ui.event_log.selected = None;
+        app.event_log_widget.count = 5;
+        app.event_log_widget.selected = None;
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.ui.event_log.selected, Some(4));
+        assert_eq!(app.event_log_widget.selected, Some(4));
     }
 
     #[test]
     fn config_j_at_end_stays() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 3;
-        app.ui.event_log.selected = Some(2);
+        app.event_log_widget.count = 3;
+        app.event_log_widget.selected = Some(2);
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.ui.event_log.selected, Some(2));
+        assert_eq!(app.event_log_widget.selected, Some(2));
     }
 
     #[test]
     fn config_k_at_zero_stays() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 5;
-        app.ui.event_log.selected = Some(0);
+        app.event_log_widget.count = 5;
+        app.event_log_widget.selected = Some(0);
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.ui.event_log.selected, Some(0));
+        assert_eq!(app.event_log_widget.selected, Some(0));
     }
 
     #[test]
@@ -919,7 +888,7 @@ mod tests {
 
         app.dismiss_modals();
 
-        assert_eq!(app.widget_stack.len(), 1, "only base WorkItemTable should remain");
+        assert_eq!(app.widget_stack.len(), 1, "only base BaseView should remain");
     }
 
     #[test]
@@ -1088,8 +1057,7 @@ mod tests {
     #[test]
     fn clicking_search_status_target_opens_command_palette() {
         let mut app = stub_app();
-        app.ui.layout.status_bar.key_targets =
-            vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
+        app.status_bar_widget.key_targets = vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
 
         app.handle_mouse(left_click(12, 29));
 
@@ -1100,8 +1068,7 @@ mod tests {
     fn clicking_layout_status_cycles_layout() {
         let mut app = stub_app();
         assert_eq!(app.ui.view_layout, RepoViewLayout::Auto);
-        app.ui.layout.status_bar.key_targets =
-            vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
+        app.status_bar_widget.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
 
         app.handle_mouse(left_click(4, 29));
 
@@ -1112,8 +1079,7 @@ mod tests {
     fn clicking_host_status_target_cycles_target_host() {
         let mut app = stub_app();
         insert_peer_host(&mut app.model, "alpha");
-        app.ui.layout.status_bar.key_targets =
-            vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
+        app.status_bar_widget.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
 
         app.handle_mouse(left_click(4, 29));
 
@@ -1124,11 +1090,35 @@ mod tests {
     fn clicking_dismiss_status_target_hides_visible_error() {
         let mut app = stub_app();
         app.model.status_message = Some("boom".into());
-        app.ui.layout.status_bar.dismiss_targets = vec![StatusBarTarget::new(Rect::new(20, 29, 1, 1), StatusBarAction::ClearError(0))];
+        app.status_bar_widget.dismiss_targets = vec![StatusBarTarget::new(Rect::new(20, 29, 1, 1), StatusBarAction::ClearError(0))];
 
         app.handle_mouse(left_click(20, 29));
 
         assert!(app.visible_status_items().is_empty());
+    }
+
+    #[test]
+    fn clicking_gear_icon_toggles_providers() {
+        let mut app = stub_app();
+        // Place the gear hitbox where render_unified_table would put it
+        app.ui.layout.tab_areas.insert(TabId::Gear, Rect::new(75, 2, 3, 1));
+        assert!(!app.active_ui().show_providers);
+
+        app.handle_mouse(left_click(76, 2));
+        assert!(app.active_ui().show_providers);
+
+        app.handle_mouse(left_click(76, 2));
+        assert!(!app.active_ui().show_providers);
+    }
+
+    #[test]
+    fn clicking_gear_icon_ignored_in_config_mode() {
+        let mut app = stub_app();
+        app.ui.layout.tab_areas.insert(TabId::Gear, Rect::new(75, 2, 3, 1));
+        app.ui.mode = UiMode::Config;
+
+        app.handle_mouse(left_click(76, 2));
+        assert!(!app.active_ui().show_providers);
     }
 
     #[test]

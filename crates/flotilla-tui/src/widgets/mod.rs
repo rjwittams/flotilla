@@ -1,12 +1,16 @@
 pub mod action_menu;
+pub mod base_view;
 pub mod branch_input;
 pub mod close_confirm;
 pub mod command_palette;
 pub mod delete_confirm;
+pub mod event_log;
 pub mod file_picker;
 pub mod help;
 pub mod issue_search;
-pub mod work_item_table;
+pub mod preview_panel;
+pub mod status_bar_widget;
+pub mod tab_bar;
 
 use std::{any::Any, collections::HashMap};
 
@@ -16,7 +20,7 @@ use flotilla_protocol::{HostName, RepoIdentity};
 use ratatui::{layout::Rect, Frame};
 
 use crate::{
-    app::{ui_state::UiMode, CommandQueue, InFlightCommand, RepoUiState, TuiModel},
+    app::{ui_state::UiMode, CommandQueue, InFlightCommand, RepoUiState, TuiModel, UiState},
     keymap::{Action, Keymap, ModeId},
     theme::Theme,
 };
@@ -66,12 +70,24 @@ pub struct WidgetContext<'a> {
     pub app_actions: Vec<AppAction>,
 }
 
-/// Read-only context provided to widgets during rendering.
+/// Context provided to widgets during rendering.
+///
+/// Mutable fields (`ui`, child components) are needed because the base layer
+/// rendering updates table state, layout areas, and widget-internal caches.
 pub struct RenderContext<'a> {
     pub model: &'a TuiModel,
+    pub ui: &'a mut UiState,
     pub theme: &'a Theme,
     pub keymap: &'a Keymap,
     pub in_flight: &'a HashMap<u64, InFlightCommand>,
+    /// The mode of the topmost widget on the stack. Used by the status bar
+    /// to show the correct key hints.
+    pub active_widget_mode: Option<ModeId>,
+    // Child components used by BaseView rendering.
+    pub tab_bar: &'a mut tab_bar::TabBar,
+    pub status_bar_widget: &'a mut status_bar_widget::StatusBarWidget,
+    pub event_log_widget: &'a mut event_log::EventLogWidget,
+    pub preview_panel: &'a preview_panel::PreviewPanel,
 }
 
 /// A self-contained interactive widget that handles events and renders itself.
@@ -90,7 +106,7 @@ pub trait InteractiveWidget {
     }
 
     /// Render the widget into the given area.
-    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &RenderContext);
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext);
 
     /// The mode identifier for keymap resolution.
     fn mode_id(&self) -> ModeId;

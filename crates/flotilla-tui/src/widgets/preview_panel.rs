@@ -1,0 +1,180 @@
+use flotilla_core::data::GroupEntry;
+use flotilla_protocol::WorkItem;
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    widgets::{Block, Paragraph, Wrap},
+    Frame,
+};
+
+use crate::{
+    app::{TuiModel, UiState},
+    theme::Theme,
+};
+
+/// Standalone preview panel component. Renders the selected work item's
+/// details and optionally a debug correlation overlay.
+///
+/// This is primarily a code-organisation move — the preview panel does not
+/// have interactive state yet (future enhancement).
+pub struct PreviewPanel;
+
+impl PreviewPanel {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Render the preview panel, optionally splitting for the debug overlay.
+    pub fn render(&self, model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+        if ui.show_debug {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+            self.render_content(model, ui, theme, frame, chunks[0]);
+            self.render_debug(model, ui, theme, frame, chunks[1]);
+        } else {
+            self.render_content(model, ui, theme, frame, area);
+        }
+    }
+
+    /// Render the preview content for the selected work item.
+    fn render_content(&self, model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+        let text = if let Some(item) = selected_work_item(model, ui) {
+            let rm = model.active();
+            let providers = &rm.providers;
+            let mut lines = Vec::new();
+
+            lines.push(format!("Description: {}", item.description));
+
+            if let Some(ref branch) = item.branch {
+                lines.push(format!("Branch: {}", branch));
+            }
+
+            if let Some(wt_key) = item.checkout_key() {
+                if let Some(co) = providers.checkouts.get(wt_key) {
+                    lines.push(format!("Path: {}", wt_key.path.display()));
+                    if let Some(commit) = &co.last_commit {
+                        let sha = if commit.short_sha.is_empty() { "?" } else { &commit.short_sha };
+                        lines.push(format!("Commit: {} {}", sha, commit.message));
+                    }
+                    if let Some(main) = &co.trunk_ahead_behind {
+                        if main.ahead > 0 || main.behind > 0 {
+                            lines.push(format!("vs main: +{} -{}", main.ahead, main.behind));
+                        }
+                    }
+                    if let Some(remote) = &co.remote_ahead_behind {
+                        if remote.ahead > 0 || remote.behind > 0 {
+                            lines.push(format!("vs remote: +{} -{}", remote.ahead, remote.behind));
+                        }
+                    }
+                }
+            }
+
+            if let Some(ref pr_key) = item.change_request_key {
+                if let Some(cr) = providers.change_requests.get(pr_key.as_str()) {
+                    let provider_prefix =
+                        if cr.provider_display_name.is_empty() { String::new() } else { format!("{} ", cr.provider_display_name) };
+                    lines.push(format!("{}{} #{}: {}", provider_prefix, model.active_labels().change_requests.abbr, pr_key, cr.title));
+                    lines.push(format!("State: {:?}", cr.status));
+                }
+            }
+
+            if let Some(ref ses_key) = item.session_key {
+                if let Some(ses) = providers.sessions.get(ses_key.as_str()) {
+                    let noun = if ses.item_noun.is_empty() {
+                        model.active_labels().cloud_agents.noun_capitalized()
+                    } else {
+                        ses.item_noun.clone()
+                    };
+                    let provider_prefix =
+                        if ses.provider_display_name.is_empty() { noun } else { format!("{} {}", ses.provider_display_name, noun) };
+                    lines.push(format!("{}: {}", provider_prefix, ses.title));
+                    lines.push(format!("Id: {}", ses_key));
+                    lines.push(format!("Status: {:?}", ses.status));
+                    if let Some(ref model_name) = ses.model {
+                        lines.push(format!("Model: {}", model_name));
+                    }
+                    if let Some(ref updated) = ses.updated_at {
+                        let display = updated.split('T').next().unwrap_or(updated);
+                        lines.push(format!("Updated: {}", display));
+                    }
+                }
+            }
+
+            for ws_ref in &item.workspace_refs {
+                if let Some(ws) = providers.workspaces.get(ws_ref.as_str()) {
+                    let name = if ws.name.is_empty() { ws_ref.as_str() } else { &ws.name };
+                    lines.push(format!("Workspace: {}", name));
+                }
+            }
+
+            for issue_key in &item.issue_keys {
+                if let Some(issue) = providers.issues.get(issue_key.as_str()) {
+                    let labels = issue.labels.join(", ");
+                    let provider_prefix =
+                        if issue.provider_display_name.is_empty() { String::new() } else { format!("{} ", issue.provider_display_name) };
+                    lines.push(format!("{}Issue #{}: {} [{}]", provider_prefix, issue_key, issue.title, labels));
+                }
+            }
+
+            if let Some(ref set_id) = item.attachable_set_id {
+                lines.push(format!("Set: {}", set_id));
+            }
+
+            if !item.terminal_keys.is_empty() {
+                for key in &item.terminal_keys {
+                    let key_str = key.to_string();
+                    if let Some(terminal) = providers.managed_terminals.get(&key_str) {
+                        let status = format!("{:?}", terminal.status);
+                        let cmd = if terminal.command.is_empty() { String::new() } else { format!(" ({})", terminal.command) };
+                        lines.push(format!("Terminal: {} [{}]{}", key.role, status, cmd));
+                    } else {
+                        lines.push(format!("Terminal: {} [?]", key.role));
+                    }
+                }
+            }
+
+            lines.join("\n")
+        } else {
+            String::new()
+        };
+
+        let preview = Paragraph::new(text).block(Block::bordered().style(theme.block_style()).title(" Preview ")).wrap(Wrap { trim: true });
+        frame.render_widget(preview, area);
+    }
+
+    /// Render the debug correlation overlay.
+    fn render_debug(&self, model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+        let text = if let Some(item) = selected_work_item(model, ui) {
+            if !item.debug_group.is_empty() {
+                item.debug_group.join("\n")
+            } else {
+                "Not correlated (standalone)".into()
+            }
+        } else {
+            String::new()
+        };
+
+        let panel = Paragraph::new(text)
+            .block(Block::bordered().style(theme.block_style()).title(" Debug (D to toggle) "))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(panel, area);
+    }
+}
+
+impl Default for PreviewPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
+fn selected_work_item<'a>(model: &TuiModel, ui: &'a UiState) -> Option<&'a WorkItem> {
+    let rui = ui.active_repo_ui(&model.repo_order, model.active_repo);
+    let table_idx = rui.table_state.selected()?;
+    match rui.table_view.table_entries.get(table_idx)? {
+        GroupEntry::Item(item) => Some(item),
+        GroupEntry::Header(_) => None,
+    }
+}

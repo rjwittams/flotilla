@@ -7,10 +7,9 @@ use crossterm::{
 };
 
 use crate::{
-    app::{self, App, TabId, UiMode},
+    app::{self, App, UiMode},
     event::{self, Event},
-    event_log::LevelExt,
-    ui,
+    widgets::tab_bar::TabBarAction,
 };
 
 /// Run the TUI event loop: replay initial state, then process events until quit.
@@ -34,15 +33,7 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
     events.attach_daemon(daemon_rx);
 
     // Initial draw before entering the event loop
-    terminal.draw(|f| {
-        let widget_mode = app.widget_stack.last().map(|w| w.mode_id());
-        ui::render(&app.model, &mut app.ui, &app.in_flight, &app.theme, &app.keymap, f, widget_mode);
-        let area = f.area();
-        let ctx = crate::widgets::RenderContext { model: &app.model, theme: &app.theme, keymap: &app.keymap, in_flight: &app.in_flight };
-        for widget in &mut app.widget_stack {
-            widget.render(f, area, &ctx);
-        }
-    })?;
+    render_frame(&mut terminal, &mut app)?;
 
     loop {
         // ── Wait for the first event (blocking) ──
@@ -121,105 +112,66 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
                         app.handle_key(k);
                     }
                 }
-                Event::Mouse(m) => {
-                    match m.kind {
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            let x = m.column;
-                            let y = m.row;
-                            let mut tab_clicked = false;
-
-                            // Check event log filter area (click cycles level)
-                            let ef = app.ui.layout.event_log_filter_area;
-                            if x >= ef.x && x < ef.x + ef.width && y >= ef.y && y < ef.y + ef.height {
-                                app.ui.event_log.filter = app.ui.event_log.filter.cycle();
-                                app.ui.event_log.count = 0;
-                                tab_clicked = true;
-                            }
-
-                            // Check which tab area was clicked
-                            if !tab_clicked {
-                                let hit = app
-                                    .ui
-                                    .layout
-                                    .tab_areas
-                                    .iter()
-                                    .find(|(_, r)| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height)
-                                    .map(|(id, _)| id.clone());
-
-                                match hit {
-                                    Some(TabId::Flotilla) => {
-                                        app.dismiss_modals();
-                                        app.ui.mode = UiMode::Config;
-                                        app.ui.drag.dragging_tab = None;
-                                        tab_clicked = true;
-                                    }
-                                    Some(TabId::Repo(i)) => {
-                                        app.dismiss_modals();
-                                        app.switch_tab(i);
-                                        app.ui.drag.dragging_tab = Some(i);
-                                        app.ui.drag.start_x = x;
-                                        app.ui.drag.active = false;
-                                        tab_clicked = true;
-                                    }
-                                    Some(TabId::Gear) if !app.ui.mode.is_config() => {
-                                        let sp = app.active_ui().show_providers;
-                                        app.active_ui_mut().show_providers = !sp;
-                                        tab_clicked = true;
-                                    }
-                                    Some(TabId::Add) => {
-                                        app.open_file_picker_from_active_repo_parent();
-                                        tab_clicked = true;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if !tab_clicked {
+                Event::Mouse(m) => match m.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let x = m.column;
+                        let y = m.row;
+                        // Check event log filter click first (owned by EventLogWidget)
+                        if app.event_log_widget.handle_click(x, y) {
+                            continue;
+                        }
+                        let action = app.tab_bar.handle_click(x, y, app.ui.mode.is_config());
+                        let tab_clicked = match action {
+                            TabBarAction::SwitchToConfig => {
+                                app.dismiss_modals();
+                                app.ui.mode = UiMode::Config;
                                 app.ui.drag.dragging_tab = None;
-                                app.handle_mouse(m);
+                                true
                             }
-                        }
-                        MouseEventKind::Drag(MouseButton::Left) => {
-                            if let Some(dragging_idx) = app.ui.drag.dragging_tab {
-                                if !app.ui.drag.active {
-                                    let dx = (m.column as i16 - app.ui.drag.start_x as i16).unsigned_abs();
-                                    if dx >= 2 {
-                                        app.ui.drag.active = true;
-                                    }
-                                }
-                                if app.ui.drag.active {
-                                    for (id, r) in &app.ui.layout.tab_areas {
-                                        if let TabId::Repo(i) = *id {
-                                            if m.column >= r.x
-                                                && m.column < r.x + r.width
-                                                && m.row >= r.y
-                                                && m.row < r.y + r.height
-                                                && i != dragging_idx
-                                            {
-                                                app.model.repo_order.swap(dragging_idx, i);
-                                                app.model.active_repo = i;
-                                                app.ui.drag.dragging_tab = Some(i);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                app.handle_mouse(m);
-                            }
-                        }
-                        MouseEventKind::Up(MouseButton::Left) => {
-                            if app.ui.drag.dragging_tab.take().is_some() {
-                                if app.ui.drag.active {
-                                    app.config.save_tab_order(&app.persisted_tab_order_paths());
-                                }
+                            TabBarAction::SwitchToRepo(i) => {
+                                app.dismiss_modals();
+                                app.switch_tab(i);
+                                app.ui.drag.dragging_tab = Some(i);
+                                app.ui.drag.start_x = x;
                                 app.ui.drag.active = false;
+                                true
                             }
-                        }
-                        _ => {
+                            TabBarAction::OpenFilePicker => {
+                                app.open_file_picker_from_active_repo_parent();
+                                true
+                            }
+                            TabBarAction::None => false,
+                        };
+                        if !tab_clicked {
+                            app.ui.drag.dragging_tab = None;
                             app.handle_mouse(m);
                         }
                     }
-                }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if app.ui.drag.dragging_tab.is_some() {
+                            app.tab_bar.handle_drag(
+                                m.column,
+                                m.row,
+                                &mut app.ui.drag,
+                                &mut app.model.repo_order,
+                                &mut app.model.active_repo,
+                            );
+                        } else {
+                            app.handle_mouse(m);
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if app.ui.drag.dragging_tab.take().is_some() {
+                            if app.ui.drag.active {
+                                app.config.save_tab_order(&app.persisted_tab_order_paths());
+                            }
+                            app.ui.drag.active = false;
+                        }
+                    }
+                    _ => {
+                        app.handle_mouse(m);
+                    }
+                },
                 Event::Tick => {} // already filtered out
             }
         }
@@ -249,16 +201,7 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
         }
 
         // ── Draw once ──
-        terminal.draw(|f| {
-            let widget_mode = app.widget_stack.last().map(|w| w.mode_id());
-            ui::render(&app.model, &mut app.ui, &app.in_flight, &app.theme, &app.keymap, f, widget_mode);
-            let area = f.area();
-            let ctx =
-                crate::widgets::RenderContext { model: &app.model, theme: &app.theme, keymap: &app.keymap, in_flight: &app.in_flight };
-            for widget in &mut app.widget_stack {
-                widget.render(f, area, &ctx);
-            }
-        })?;
+        render_frame(&mut terminal, &mut app)?;
 
         if app.should_quit {
             break;
@@ -266,5 +209,35 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
     }
 
     crate::terminal::restore_terminal();
+    Ok(())
+}
+
+/// Render one frame by iterating the widget stack.
+///
+/// Takes the widget stack out of `app` to avoid borrow conflicts between the
+/// stack iteration and the mutable `RenderContext` (which borrows `app.ui`,
+/// `app.tab_bar`, etc.). The stack is restored after rendering.
+fn render_frame(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
+    let mut stack = std::mem::take(&mut app.widget_stack);
+    let active_widget_mode = stack.last().map(|w| w.mode_id());
+    terminal.draw(|f| {
+        let area = f.area();
+        let mut ctx = crate::widgets::RenderContext {
+            model: &app.model,
+            ui: &mut app.ui,
+            theme: &app.theme,
+            keymap: &app.keymap,
+            in_flight: &app.in_flight,
+            active_widget_mode,
+            tab_bar: &mut app.tab_bar,
+            status_bar_widget: &mut app.status_bar_widget,
+            event_log_widget: &mut app.event_log_widget,
+            preview_panel: &app.preview_panel,
+        };
+        for widget in &mut stack {
+            widget.render(f, area, &mut ctx);
+        }
+    })?;
+    app.widget_stack = stack;
     Ok(())
 }
