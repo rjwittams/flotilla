@@ -69,22 +69,12 @@ impl App {
             Action::SelectNext => {
                 // Widget handles WorkItemTable; only EventLog reaches here.
                 if matches!(self.ui.mode.focus_target(), FocusTarget::EventLog) {
-                    if let Some(sel) = self.ui.event_log.selected {
-                        if sel + 1 < self.ui.event_log.count {
-                            self.ui.event_log.selected = Some(sel + 1);
-                        }
-                    } else if self.ui.event_log.count > 0 {
-                        self.ui.event_log.selected = Some(self.ui.event_log.count - 1);
-                    }
+                    self.event_log_widget.select_next();
                 }
             }
             Action::SelectPrev => {
                 if matches!(self.ui.mode.focus_target(), FocusTarget::EventLog) {
-                    if let Some(sel) = self.ui.event_log.selected {
-                        if sel > 0 {
-                            self.ui.event_log.selected = Some(sel - 1);
-                        }
-                    }
+                    self.event_log_widget.select_prev();
                 }
             }
             Action::Confirm => {
@@ -564,12 +554,12 @@ mod tests {
     fn dispatch_action_select_next_moves_config_event_log_selection() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 3;
-        app.ui.event_log.selected = Some(0);
+        app.event_log_widget.count = 3;
+        app.event_log_widget.selected = Some(0);
 
         app.dispatch_action(Action::SelectNext);
 
-        assert_eq!(app.ui.event_log.selected, Some(1));
+        assert_eq!(app.event_log_widget.selected, Some(1));
     }
 
     #[test]
@@ -810,50 +800,50 @@ mod tests {
     fn config_j_navigates_event_log_down() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 5;
-        app.ui.event_log.selected = Some(0);
+        app.event_log_widget.count = 5;
+        app.event_log_widget.selected = Some(0);
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.ui.event_log.selected, Some(1));
+        assert_eq!(app.event_log_widget.selected, Some(1));
     }
 
     #[test]
     fn config_k_navigates_event_log_up() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 5;
-        app.ui.event_log.selected = Some(3);
+        app.event_log_widget.count = 5;
+        app.event_log_widget.selected = Some(3);
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.ui.event_log.selected, Some(2));
+        assert_eq!(app.event_log_widget.selected, Some(2));
     }
 
     #[test]
     fn config_j_when_no_selection_jumps_to_last() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 5;
-        app.ui.event_log.selected = None;
+        app.event_log_widget.count = 5;
+        app.event_log_widget.selected = None;
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.ui.event_log.selected, Some(4));
+        assert_eq!(app.event_log_widget.selected, Some(4));
     }
 
     #[test]
     fn config_j_at_end_stays() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 3;
-        app.ui.event_log.selected = Some(2);
+        app.event_log_widget.count = 3;
+        app.event_log_widget.selected = Some(2);
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.ui.event_log.selected, Some(2));
+        assert_eq!(app.event_log_widget.selected, Some(2));
     }
 
     #[test]
     fn config_k_at_zero_stays() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.ui.event_log.count = 5;
-        app.ui.event_log.selected = Some(0);
+        app.event_log_widget.count = 5;
+        app.event_log_widget.selected = Some(0);
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.ui.event_log.selected, Some(0));
+        assert_eq!(app.event_log_widget.selected, Some(0));
     }
 
     #[test]

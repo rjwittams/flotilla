@@ -263,6 +263,8 @@ pub struct App {
     pub widget_stack: Vec<Box<dyn crate::widgets::InteractiveWidget>>,
     pub tab_bar: crate::widgets::tab_bar::TabBar,
     pub status_bar_widget: crate::widgets::status_bar_widget::StatusBarWidget,
+    pub event_log_widget: crate::widgets::event_log::EventLogWidget,
+    pub preview_panel: crate::widgets::preview_panel::PreviewPanel,
 }
 
 impl App {
@@ -291,6 +293,8 @@ impl App {
             widget_stack: vec![Box::new(crate::widgets::work_item_table::WorkItemTable::new())],
             tab_bar: crate::widgets::tab_bar::TabBar::new(),
             status_bar_widget: crate::widgets::status_bar_widget::StatusBarWidget::new(),
+            event_log_widget: crate::widgets::event_log::EventLogWidget::new(),
+            preview_panel: crate::widgets::preview_panel::PreviewPanel::new(),
         }
     }
 

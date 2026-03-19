@@ -9,7 +9,6 @@ use crossterm::{
 use crate::{
     app::{self, App, UiMode},
     event::{self, Event},
-    event_log::LevelExt,
     ui,
     widgets::tab_bar::TabBarAction,
 };
@@ -47,6 +46,8 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
             widget_mode,
             &mut app.tab_bar,
             &mut app.status_bar_widget,
+            &mut app.event_log_widget,
+            &app.preview_panel,
         );
         let area = f.area();
         let ctx = crate::widgets::RenderContext { model: &app.model, theme: &app.theme, keymap: &app.keymap, in_flight: &app.in_flight };
@@ -136,11 +137,17 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
                     MouseEventKind::Down(MouseButton::Left) => {
                         let x = m.column;
                         let y = m.row;
+                        // Check event log filter click first (owned by EventLogWidget)
+                        if app.event_log_widget.handle_click(x, y) {
+                            continue;
+                        }
                         let action = app.tab_bar.handle_click(x, y, app.ui.mode.is_config());
                         let tab_clicked = match action {
                             TabBarAction::CycleEventLogFilter => {
-                                app.ui.event_log.filter = app.ui.event_log.filter.cycle();
-                                app.ui.event_log.count = 0;
+                                // Fallback: TabBar detected the filter area. Delegate
+                                // to the widget (should not normally fire since we
+                                // check the widget first, but kept for safety).
+                                app.event_log_widget.handle_click(x, y);
                                 true
                             }
                             TabBarAction::SwitchToConfig => {
@@ -239,6 +246,8 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
                 widget_mode,
                 &mut app.tab_bar,
                 &mut app.status_bar_widget,
+                &mut app.event_log_widget,
+                &app.preview_panel,
             );
             let area = f.area();
             let ctx =

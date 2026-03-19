@@ -9,16 +9,15 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Cell, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Cell, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Row, Table},
     Frame,
 };
 
 use crate::{
     app::{
         ui_state::{PendingAction, PendingStatus},
-        BranchInputKind, InFlightCommand, PeerStatus, ProviderStatus, RepoViewLayout, TabId, TuiHostState, TuiModel, UiMode, UiState,
+        BranchInputKind, InFlightCommand, ProviderStatus, RepoViewLayout, TabId, TuiModel, UiMode, UiState,
     },
-    event_log::{self, LevelExt},
     keymap::{Keymap, ModeId},
     shimmer::{shimmer_spans, Shimmer},
     theme::Theme,
@@ -94,12 +93,19 @@ pub fn render(
     active_widget_mode: Option<ModeId>,
     tab_bar: &mut crate::widgets::tab_bar::TabBar,
     status_bar_widget: &mut crate::widgets::status_bar_widget::StatusBarWidget,
+    event_log_widget: &mut crate::widgets::event_log::EventLogWidget,
+    preview_panel: &crate::widgets::preview_panel::PreviewPanel,
 ) {
     let constraints = vec![Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)];
     let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(frame.area());
 
     tab_bar.render(model, ui, theme, frame, chunks[0]);
-    render_content(model, ui, theme, frame, chunks[1]);
+    render_content(model, ui, theme, frame, chunks[1], event_log_widget, preview_panel);
+
+    // Write the event log filter area back to the tab bar for click detection
+    tab_bar.set_event_log_filter_area(event_log_widget.filter_area());
+    // Also write to shared layout for backward compatibility
+    ui.layout.event_log_filter_area = event_log_widget.filter_area();
 
     // When the palette is active, move the status bar to the top of the overlay so the
     // input sits above the results instead of being pinned to the bottom of the screen.
@@ -118,10 +124,12 @@ fn active_rui<'a>(model: &TuiModel, ui: &'a UiState) -> &'a crate::app::RepoUiSt
     ui.active_repo_ui(&model.repo_order, model.active_repo)
 }
 
+// ── Provider table helpers (shared with render_repo_providers) ────────
+
 fn provider_status_badge(status: Option<ProviderStatus>, theme: &Theme) -> (&'static str, Color) {
     match status {
-        Some(ProviderStatus::Ok) => ("✓", theme.status_ok),
-        Some(ProviderStatus::Error) => ("✗", theme.error),
+        Some(ProviderStatus::Ok) => ("\u{2713}", theme.status_ok),
+        Some(ProviderStatus::Error) => ("\u{2717}", theme.error),
         None => ("", theme.text),
     }
 }
@@ -138,7 +146,7 @@ fn provider_row(label: &str, provider: &str, status: Option<ProviderStatus>, the
 fn provider_empty_row(category: &str, theme: &Theme) -> Row<'static> {
     Row::new(vec![
         Cell::from(Span::styled(category.to_string(), Style::default().fg(theme.muted))),
-        Cell::from(Span::styled("—", Style::default().fg(theme.muted))),
+        Cell::from(Span::styled("\u{2014}", Style::default().fg(theme.muted))),
         Cell::from(""),
     ])
 }
@@ -156,18 +164,17 @@ fn provider_table_widths() -> [Constraint; 3] {
     [Constraint::Length(16), Constraint::Length(24), Constraint::Length(6)]
 }
 
-fn selected_work_item<'a>(model: &TuiModel, ui: &'a UiState) -> Option<&'a WorkItem> {
-    let rui = active_rui(model, ui);
-    let table_idx = rui.table_state.selected()?;
-    match rui.table_view.table_entries.get(table_idx)? {
-        GroupEntry::Item(item) => Some(item),
-        GroupEntry::Header(_) => None,
-    }
-}
-
-fn render_content(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+fn render_content(
+    model: &TuiModel,
+    ui: &mut UiState,
+    theme: &Theme,
+    frame: &mut Frame,
+    area: Rect,
+    event_log_widget: &mut crate::widgets::event_log::EventLogWidget,
+    preview_panel: &crate::widgets::preview_panel::PreviewPanel,
+) {
     if ui.mode.is_config() {
-        render_config_screen(model, ui, theme, frame, area);
+        event_log_widget.render_config_screen(model, theme, frame, area);
         return;
     }
 
@@ -188,7 +195,7 @@ fn render_content(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut
     };
 
     render_unified_table(model, ui, theme, frame, chunks[0]);
-    render_preview(model, ui, theme, frame, chunks[1]);
+    preview_panel.render(model, ui, theme, frame, chunks[1]);
 }
 
 fn render_repo_providers(model: &TuiModel, _ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
@@ -527,137 +534,6 @@ fn build_item_row<'a>(
     ])
 }
 
-fn render_preview(model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
-    if ui.show_debug {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
-        render_preview_content(model, ui, theme, frame, chunks[0]);
-        render_debug_panel(model, ui, theme, frame, chunks[1]);
-    } else {
-        render_preview_content(model, ui, theme, frame, area);
-    }
-}
-
-fn render_preview_content(model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
-    let text = if let Some(item) = selected_work_item(model, ui) {
-        let rm = model.active();
-        let providers = &rm.providers;
-        let mut lines = Vec::new();
-
-        lines.push(format!("Description: {}", item.description));
-
-        if let Some(ref branch) = item.branch {
-            lines.push(format!("Branch: {}", branch));
-        }
-
-        if let Some(wt_key) = item.checkout_key() {
-            if let Some(co) = providers.checkouts.get(wt_key) {
-                lines.push(format!("Path: {}", wt_key.path.display()));
-                if let Some(commit) = &co.last_commit {
-                    let sha = if commit.short_sha.is_empty() { "?" } else { &commit.short_sha };
-                    lines.push(format!("Commit: {} {}", sha, commit.message));
-                }
-                if let Some(main) = &co.trunk_ahead_behind {
-                    if main.ahead > 0 || main.behind > 0 {
-                        lines.push(format!("vs main: +{} -{}", main.ahead, main.behind));
-                    }
-                }
-                if let Some(remote) = &co.remote_ahead_behind {
-                    if remote.ahead > 0 || remote.behind > 0 {
-                        lines.push(format!("vs remote: +{} -{}", remote.ahead, remote.behind));
-                    }
-                }
-            }
-        }
-
-        if let Some(ref pr_key) = item.change_request_key {
-            if let Some(cr) = providers.change_requests.get(pr_key.as_str()) {
-                let provider_prefix =
-                    if cr.provider_display_name.is_empty() { String::new() } else { format!("{} ", cr.provider_display_name) };
-                lines.push(format!("{}{} #{}: {}", provider_prefix, model.active_labels().change_requests.abbr, pr_key, cr.title));
-                lines.push(format!("State: {:?}", cr.status));
-            }
-        }
-
-        if let Some(ref ses_key) = item.session_key {
-            if let Some(ses) = providers.sessions.get(ses_key.as_str()) {
-                let noun =
-                    if ses.item_noun.is_empty() { model.active_labels().cloud_agents.noun_capitalized() } else { ses.item_noun.clone() };
-                let provider_prefix =
-                    if ses.provider_display_name.is_empty() { noun } else { format!("{} {}", ses.provider_display_name, noun) };
-                lines.push(format!("{}: {}", provider_prefix, ses.title));
-                lines.push(format!("Id: {}", ses_key));
-                lines.push(format!("Status: {:?}", ses.status));
-                if let Some(ref model_name) = ses.model {
-                    lines.push(format!("Model: {}", model_name));
-                }
-                if let Some(ref updated) = ses.updated_at {
-                    let display = updated.split('T').next().unwrap_or(updated);
-                    lines.push(format!("Updated: {}", display));
-                }
-            }
-        }
-
-        for ws_ref in &item.workspace_refs {
-            if let Some(ws) = providers.workspaces.get(ws_ref.as_str()) {
-                let name = if ws.name.is_empty() { ws_ref.as_str() } else { &ws.name };
-                lines.push(format!("Workspace: {}", name));
-            }
-        }
-
-        for issue_key in &item.issue_keys {
-            if let Some(issue) = providers.issues.get(issue_key.as_str()) {
-                let labels = issue.labels.join(", ");
-                let provider_prefix =
-                    if issue.provider_display_name.is_empty() { String::new() } else { format!("{} ", issue.provider_display_name) };
-                lines.push(format!("{}Issue #{}: {} [{}]", provider_prefix, issue_key, issue.title, labels));
-            }
-        }
-
-        if let Some(ref set_id) = item.attachable_set_id {
-            lines.push(format!("Set: {}", set_id));
-        }
-
-        if !item.terminal_keys.is_empty() {
-            for key in &item.terminal_keys {
-                let key_str = key.to_string();
-                if let Some(terminal) = providers.managed_terminals.get(&key_str) {
-                    let status = format!("{:?}", terminal.status);
-                    let cmd = if terminal.command.is_empty() { String::new() } else { format!(" ({})", terminal.command) };
-                    lines.push(format!("Terminal: {} [{}]{}", key.role, status, cmd));
-                } else {
-                    lines.push(format!("Terminal: {} [?]", key.role));
-                }
-            }
-        }
-
-        lines.join("\n")
-    } else {
-        String::new()
-    };
-
-    let preview = Paragraph::new(text).block(Block::bordered().style(theme.block_style()).title(" Preview ")).wrap(Wrap { trim: true });
-    frame.render_widget(preview, area);
-}
-
-fn render_debug_panel(model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
-    let text = if let Some(item) = selected_work_item(model, ui) {
-        if !item.debug_group.is_empty() {
-            item.debug_group.join("\n")
-        } else {
-            "Not correlated (standalone)".into()
-        }
-    } else {
-        String::new()
-    };
-
-    let panel =
-        Paragraph::new(text).block(Block::bordered().style(theme.block_style()).title(" Debug (D to toggle) ")).wrap(Wrap { trim: true });
-    frame.render_widget(panel, area);
-}
-
 fn render_input_popup(ui: &UiState, theme: &Theme, frame: &mut Frame) {
     let UiMode::BranchInput { ref input, ref kind, .. } = ui.mode else {
         return;
@@ -779,209 +655,6 @@ fn render_command_palette(ui: &UiState, theme: &Theme, frame: &mut Frame, status
     // Cursor on the status bar row
     let cursor_x = status_bar_area.x + 1 + input.visual_cursor() as u16;
     frame.set_cursor_position((cursor_x, status_bar_area.y));
-}
-
-fn render_config_screen(model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(area);
-
-    let host_count = model.hosts.len();
-    let host_height = (host_count as u16 + 2).min(8);
-    let left_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(host_height)])
-        .split(chunks[0]);
-    render_global_status(model, theme, frame, left_chunks[0]);
-    render_hosts_status(model, theme, frame, left_chunks[1]);
-
-    render_event_log(ui, theme, frame, chunks[1]);
-}
-
-/// Return the worse of two provider statuses (Error > Ok > None).
-fn worse_status(a: Option<ProviderStatus>, b: Option<ProviderStatus>) -> Option<ProviderStatus> {
-    match (a, b) {
-        (Some(ProviderStatus::Error), _) | (_, Some(ProviderStatus::Error)) => Some(ProviderStatus::Error),
-        (Some(ProviderStatus::Ok), _) | (_, Some(ProviderStatus::Ok)) => Some(ProviderStatus::Ok),
-        _ => None,
-    }
-}
-
-fn render_global_status(model: &TuiModel, theme: &Theme, frame: &mut Frame, area: Rect) {
-    // Collect providers across all repos: (category_key, provider_name) → status.
-    // Collect unique (category, provider_name) pairs with worst-wins status.
-    // If a provider is healthy in repo A but failing in repo B, the global
-    // view should surface the failure (Error > Ok > None).
-    struct ProviderEntry {
-        name: String,
-        status: Option<ProviderStatus>,
-    }
-    let mut by_category: HashMap<&str, Vec<ProviderEntry>> = HashMap::new();
-
-    for repo_identity in &model.repo_order {
-        let rm = &model.repos[repo_identity];
-        for &(_, key) in &PROVIDER_CATEGORIES {
-            if let Some(pnames) = rm.provider_names.get(key) {
-                let entries = by_category.entry(key).or_default();
-                for pname in pnames {
-                    let status = model.provider_statuses.get(&(repo_identity.clone(), key.to_string(), pname.clone())).copied();
-                    if let Some(existing) = entries.iter_mut().find(|e| e.name == *pname) {
-                        // Worst-wins: Error beats Ok beats None.
-                        existing.status = worse_status(existing.status, status);
-                    } else {
-                        entries.push(ProviderEntry { name: pname.clone(), status });
-                    }
-                }
-            }
-        }
-    }
-
-    let mut rows: Vec<Row> = Vec::new();
-
-    for &(category, key) in &PROVIDER_CATEGORIES {
-        let entries = by_category.get(key);
-        if let Some(providers) = entries {
-            for (i, provider) in providers.iter().enumerate() {
-                let label = if i == 0 { category } else { "" };
-                rows.push(provider_row(label, &provider.name, provider.status, theme));
-            }
-        } else {
-            rows.push(provider_empty_row(category, theme));
-        }
-    }
-
-    let table = Table::new(rows, provider_table_widths())
-        .header(provider_table_header(theme))
-        .block(Block::bordered().style(theme.block_style()).title(" Providers "));
-    frame.render_widget(table, area);
-}
-
-fn render_hosts_status(model: &TuiModel, theme: &Theme, frame: &mut Frame, area: Rect) {
-    // Sort: local first, then peers alphabetically
-    let mut hosts: Vec<&TuiHostState> = model.hosts.values().collect();
-    hosts.sort_by(|a, b| match (a.is_local, b.is_local) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.host_name.cmp(&b.host_name),
-    });
-
-    let rows: Vec<Row> =
-        hosts
-            .iter()
-            .map(|h| {
-                let (icon, icon_style) = match h.status {
-                    PeerStatus::Connected => ("\u{25cf}", Style::default().fg(theme.status_ok)),
-                    PeerStatus::Disconnected => ("\u{25cb}", Style::default().fg(theme.error)),
-                    PeerStatus::Connecting => ("\u{25d0}", Style::default().fg(theme.warning)),
-                    PeerStatus::Reconnecting => ("\u{25d0}", Style::default().fg(theme.warning)),
-                    PeerStatus::Rejected => ("\u{2717}", Style::default().fg(theme.error)),
-                };
-
-                let name = if h.is_local { format!("{} (local)", h.host_name) } else { h.host_name.to_string() };
-
-                let sys = &h.summary.system;
-                let os_arch = match (sys.os.as_deref(), sys.arch.as_deref()) {
-                    (Some(os), Some(arch)) => format!("{os}/{arch}"),
-                    (Some(os), None) => os.to_string(),
-                    _ => "\u{2014}".to_string(),
-                };
-                let cpus = sys.cpu_count.map_or("\u{2014}".to_string(), |c| format!("{c} CPUs"));
-                let mem = sys.memory_total_mb.map_or("\u{2014}".to_string(), |m| {
-                    if m >= 1024 {
-                        format!("{} GB", m / 1024)
-                    } else {
-                        format!("{m} MB")
-                    }
-                });
-
-                let providers: String = h
-                    .summary
-                    .providers
-                    .iter()
-                    .map(|p| {
-                        let check = if p.healthy { "\u{2713}" } else { "\u{2717}" };
-                        format!("{} {check}", p.name)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("  ");
-
-                Row::new(vec![
-                    Cell::from(Span::styled(format!("{icon} "), icon_style)),
-                    Cell::from(name),
-                    Cell::from(os_arch),
-                    Cell::from(cpus),
-                    Cell::from(mem),
-                    Cell::from(providers),
-                ])
-            })
-            .collect();
-
-    let widths = [
-        Constraint::Length(2),
-        Constraint::Min(12),
-        Constraint::Length(14),
-        Constraint::Length(8),
-        Constraint::Length(7),
-        Constraint::Fill(1),
-    ];
-
-    let table = Table::new(rows, widths).block(Block::bordered().style(theme.block_style()).title(" Hosts "));
-    frame.render_widget(table, area);
-}
-
-fn render_event_log(ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
-    use event_log::DisplayEntry;
-
-    let filter = ui.event_log.filter;
-    let entries = event_log::get_entries(&filter);
-    let entry_count = entries.len();
-
-    if entry_count != ui.event_log.count {
-        ui.event_log.count = entry_count;
-        if entry_count > 0 {
-            ui.event_log.selected = Some(entry_count - 1);
-        }
-    }
-
-    let items: Vec<ListItem> = entries
-        .iter()
-        .map(|display_entry| match display_entry {
-            DisplayEntry::Log(entry) => {
-                let (h, m, s) = entry.hms;
-                let timestamp = format!("{h:02}:{m:02}:{s:02}");
-
-                let level_style = theme.log_level_style(entry.level.as_str());
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{} ", timestamp), Style::default().fg(theme.muted)),
-                    Span::styled(format!("{:<5} ", entry.level), level_style),
-                    Span::raw(&entry.message),
-                ]))
-            }
-            DisplayEntry::RetentionMarker(level) => {
-                ListItem::new(Line::from(Span::styled(format!("── {level} retention starts here ──"), Style::default().fg(theme.muted))))
-            }
-        })
-        .collect();
-
-    let filter_label = format!(" {} ", filter.filter_label());
-    let filter_label_len = filter_label.len() as u16;
-    let filter_x = area.x + area.width.saturating_sub(filter_label_len + 1);
-    ui.layout.event_log_filter_area = Rect::new(filter_x, area.y, filter_label_len, 1);
-
-    let list = List::new(items)
-        .block(
-            Block::bordered()
-                .style(theme.block_style())
-                .title(" Event Log ")
-                .title_top(Line::from(Span::styled(filter_label, Style::default().fg(theme.muted))).right_aligned()),
-        )
-        .highlight_style(Style::default().bg(theme.multi_select_bg));
-
-    let mut state = ListState::default();
-    state.select(ui.event_log.selected);
-    frame.render_stateful_widget(list, area, &mut state);
 }
 
 #[cfg(test)]

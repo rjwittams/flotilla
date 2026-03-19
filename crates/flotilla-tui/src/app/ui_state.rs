@@ -262,18 +262,6 @@ pub struct DoubleClickState {
     pub last_selectable_idx: Option<usize>,
 }
 
-pub struct EventLogUiState {
-    pub selected: Option<usize>,
-    pub count: usize,
-    pub filter: tracing::Level,
-}
-
-impl Default for EventLogUiState {
-    fn default() -> Self {
-        Self { selected: None, count: 0, filter: tracing::Level::INFO }
-    }
-}
-
 pub struct UiState {
     pub mode: UiMode,
     pub repo_ui: HashMap<RepoIdentity, RepoUiState>,
@@ -283,7 +271,6 @@ pub struct UiState {
     pub layout: LayoutAreas,
     pub drag: DragState,
     pub double_click: DoubleClickState,
-    pub event_log: EventLogUiState,
     pub show_debug: bool,
     pub help_scroll: u16,
 }
@@ -300,7 +287,6 @@ impl UiState {
             layout: LayoutAreas::default(),
             drag: DragState::default(),
             double_click: DoubleClickState::default(),
-            event_log: EventLogUiState::default(),
             show_debug: false,
             help_scroll: 0,
         }
@@ -557,16 +543,6 @@ mod tests {
         assert!(!state.has_unseen_changes);
         assert!(state.multi_selected.is_empty());
         assert!(!state.show_providers);
-    }
-
-    // ── EventLogUiState default tests ─────────────────────────────────
-
-    #[test]
-    fn event_log_ui_state_default_values() {
-        let state = EventLogUiState::default();
-        assert!(state.selected.is_none());
-        assert_eq!(state.count, 0);
-        assert_eq!(state.filter, tracing::Level::INFO);
     }
 
     // ── PendingAction tests ──────────────────────────────────────────
