@@ -241,10 +241,12 @@ impl App {
             self.pending_cancel = Some(command_id);
         }
 
-        // Post-dispatch: check for infinite scroll fetch-more after selection changes.
-        // The widget handles selection but can't mutate model.repos to set
-        // issue_fetch_pending, so we handle it here.
-        self.check_infinite_scroll();
+        // Post-dispatch: check for infinite scroll fetch-more only after
+        // selection-changing actions (SelectNext/SelectPrev). Running it after
+        // every key event would trigger background fetches from unrelated keys.
+        if matches!(action, Some(Action::SelectNext | Action::SelectPrev)) {
+            self.check_infinite_scroll();
+        }
     }
 
     // ── Mouse handling ──
@@ -252,13 +254,20 @@ impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         // ── Widget stack mouse dispatch ──
         // The stack is always non-empty (WorkItemTable is the base layer).
-        // Modal widgets on top may consume mouse events; if none do, fall
-        // through to the legacy mouse handling below.
+        // Modal widgets on top act as focus barriers — if a modal is present,
+        // mouse events that it doesn't consume must NOT fall through to the
+        // base table layer. Only dispatch to the top widget when modals are
+        // present; skip the base widget entirely.
+        let has_modal = self.widget_stack.len() > 1;
         let mut stack = std::mem::take(&mut self.widget_stack);
         let (outcome_action, should_quit, pending_cancel) = {
             let mut ctx = self.build_widget_context();
             let mut result: Option<(usize, crate::widgets::Outcome)> = None;
-            for i in (0..stack.len()).rev() {
+            let top = stack.len() - 1;
+            // Only try the top modal widget, not the base layer underneath.
+            // When no modal is present, the base widget (index 0) gets the event.
+            let stop_at = if stack.len() > 1 { top } else { 0 };
+            for i in (stop_at..=top).rev() {
                 let outcome = stack[i].handle_mouse(mouse, &mut ctx);
                 if !matches!(outcome, crate::widgets::Outcome::Ignored) {
                     result = Some((i, outcome));
@@ -280,7 +289,14 @@ impl App {
             return;
         }
 
-        // No widget consumed the mouse event — legacy mouse handling.
+        // A modal was open but didn't consume the mouse event — block it
+        // from reaching the table. This prevents scroll-wheel input from
+        // moving the table selection while a popup is visible.
+        if has_modal {
+            return;
+        }
+
+        // No widget consumed the mouse event and no modal is active — legacy mouse handling.
         if self.handle_status_bar_mouse(mouse) {
             return;
         }
