@@ -1150,12 +1150,7 @@ mod tests {
         app.ui.layout.table_area = Rect::new(0, 2, 80, 10);
         app.widget_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
 
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 5,
-            row: 5,
-            modifiers: KeyModifiers::NONE,
-        });
+        app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: 5, row: 5, modifiers: KeyModifiers::NONE });
 
         assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
         assert_eq!(app.widget_stack.len(), 2, "expected help widget to remain on stack");
@@ -1168,12 +1163,7 @@ mod tests {
         app.ui.layout.table_area = Rect::new(0, 2, 80, 10);
         push_action_menu_widget(&mut app);
 
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 5,
-            row: 5,
-            modifiers: KeyModifiers::NONE,
-        });
+        app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: 5, row: 5, modifiers: KeyModifiers::NONE });
 
         assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
         assert_eq!(app.widget_stack.len(), 2, "expected action menu to remain on stack");
