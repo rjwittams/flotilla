@@ -53,6 +53,18 @@ pub enum Command {
     Kill {
         id: String,
     },
+    SendKeys {
+        #[arg(value_name = "ID")]
+        id: String,
+        #[arg(short = 'l')]
+        literal: bool,
+        #[arg(short = 'H')]
+        hex: bool,
+        #[arg(short = 'N', default_value_t = 1)]
+        repeat: usize,
+        #[arg(value_name = "KEY")]
+        keys: Vec<String>,
+    },
     #[command(hide = true)]
     Serve {
         #[arg(long)]
@@ -102,10 +114,21 @@ pub fn execute(cli: Cli, service: &SessionService) -> Result<Option<String>, Str
             service.kill(&id)?;
             Ok(None)
         }
+        Command::SendKeys { id, literal, hex, repeat, keys } => service.send_keys(&id, literal, hex, repeat, &keys).map(|_| None),
         Command::Serve { id } => {
             service.serve(&id)?;
             Ok(None)
         }
+    }
+}
+
+trait SessionServiceSendKeys {
+    fn send_keys(&self, id: &str, literal: bool, hex: bool, repeat: usize, keys: &[String]) -> Result<(), String>;
+}
+
+impl SessionServiceSendKeys for SessionService {
+    fn send_keys(&self, _id: &str, _literal: bool, _hex: bool, _repeat: usize, _keys: &[String]) -> Result<(), String> {
+        Err("send-keys is not yet implemented".to_string())
     }
 }
 
