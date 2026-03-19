@@ -258,9 +258,9 @@ impl App {
         };
 
         self.widget_stack = stack;
+        self.process_app_actions(app_actions);
         if let Some((index, outcome)) = outcome_action {
             self.apply_outcome(index, outcome);
-            self.process_app_actions(app_actions);
             return;
         }
 
