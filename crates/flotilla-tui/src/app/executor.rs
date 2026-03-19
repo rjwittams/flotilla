@@ -74,9 +74,11 @@ fn reset_loading_mode(app: &mut App) {
             }
         }
     }
-    if let Some(widget) = app.widget_stack.last() {
-        if widget.mode_id() == crate::keymap::ModeId::BranchInput {
-            app.widget_stack.pop();
+    if let Some(widget) = app.widget_stack.last_mut() {
+        if let Some(biw) = widget.as_any_mut().downcast_mut::<crate::widgets::branch_input::BranchInputWidget>() {
+            if biw.is_generating() {
+                app.widget_stack.pop();
+            }
         }
     }
 }

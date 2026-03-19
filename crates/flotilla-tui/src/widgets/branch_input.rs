@@ -24,6 +24,11 @@ impl BranchInputWidget {
         Self { input: Input::default(), kind, pending_issue_ids: Vec::new() }
     }
 
+    /// Whether the widget is in the async generating state.
+    pub fn is_generating(&self) -> bool {
+        self.kind == BranchInputKind::Generating
+    }
+
     /// Update the input text and switch to manual mode after async generation completes.
     pub fn prefill(&mut self, name: &str, issue_ids: Vec<(String, String)>) {
         self.input = Input::from(name);
