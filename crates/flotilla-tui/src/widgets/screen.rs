@@ -11,6 +11,11 @@ use crate::keymap::{Action, ModeId};
 /// Renders the base view first, then any modals on top. Owns the
 /// `has_modal()`, `dismiss_modals()`, and `apply_outcome()` helpers
 /// that previously lived on `App`.
+///
+/// Modal dispatch is handled internally: `handle_action`, `handle_raw_key`,
+/// and `handle_mouse` route events to the top modal when one exists, with
+/// modals acting as focus barriers (unhandled events do NOT fall through
+/// to the base layer).
 pub struct Screen {
     pub base_view: BaseView,
     pub modal_stack: Vec<Box<dyn InteractiveWidget>>,
@@ -74,7 +79,7 @@ impl Screen {
 
 impl InteractiveWidget for Screen {
     fn handle_action(&mut self, action: Action, ctx: &mut WidgetContext) -> Outcome {
-        // Phase 1: Global actions
+        // Phase 1: Global actions (always handled, even with modals)
         match action {
             Action::PrevTab => {
                 ctx.app_actions.push(AppAction::PrevTab);
@@ -114,16 +119,65 @@ impl InteractiveWidget for Screen {
             }
             _ => {}
         }
-        // Phase 2: Delegate to BaseView
-        self.base_view.handle_action(action, ctx)
+
+        // Phase 2: Modal dispatch — modals are focus barriers
+        if let Some(modal) = self.modal_stack.last_mut() {
+            let outcome = modal.handle_action(action, ctx);
+            if !matches!(outcome, Outcome::Ignored) {
+                self.apply_outcome(outcome);
+                return Outcome::Consumed;
+            }
+            // Modal is a focus barrier — don't fall through to base
+            return Outcome::Ignored;
+        }
+
+        // Phase 3: No modal — dispatch to base_view
+        let outcome = self.base_view.handle_action(action, ctx);
+        if !matches!(outcome, Outcome::Ignored) {
+            self.apply_outcome(outcome);
+            return Outcome::Consumed;
+        }
+        Outcome::Ignored
     }
 
     fn handle_raw_key(&mut self, key: KeyEvent, ctx: &mut WidgetContext) -> Outcome {
-        self.base_view.handle_raw_key(key, ctx)
+        // Modal dispatch first
+        if let Some(modal) = self.modal_stack.last_mut() {
+            let outcome = modal.handle_raw_key(key, ctx);
+            if !matches!(outcome, Outcome::Ignored) {
+                self.apply_outcome(outcome);
+                return Outcome::Consumed;
+            }
+            return Outcome::Ignored;
+        }
+
+        // No modal — dispatch to base_view
+        let outcome = self.base_view.handle_raw_key(key, ctx);
+        if !matches!(outcome, Outcome::Ignored) {
+            self.apply_outcome(outcome);
+            return Outcome::Consumed;
+        }
+        Outcome::Ignored
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, ctx: &mut WidgetContext) -> Outcome {
-        self.base_view.handle_mouse(mouse, ctx)
+        // Modal dispatch first — modals are focus barriers
+        if let Some(modal) = self.modal_stack.last_mut() {
+            let outcome = modal.handle_mouse(mouse, ctx);
+            if !matches!(outcome, Outcome::Ignored) {
+                self.apply_outcome(outcome);
+                return Outcome::Consumed;
+            }
+            return Outcome::Ignored;
+        }
+
+        // No modal — dispatch to base_view
+        let outcome = self.base_view.handle_mouse(mouse, ctx);
+        if !matches!(outcome, Outcome::Ignored) {
+            self.apply_outcome(outcome);
+            return Outcome::Consumed;
+        }
+        Outcome::Ignored
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
@@ -134,15 +188,15 @@ impl InteractiveWidget for Screen {
     }
 
     fn mode_id(&self) -> ModeId {
-        self.base_view.mode_id()
+        self.modal_stack.last().map(|w| w.mode_id()).unwrap_or_else(|| self.base_view.mode_id())
     }
 
     fn captures_raw_keys(&self) -> bool {
-        self.base_view.captures_raw_keys()
+        self.modal_stack.last().map(|w| w.captures_raw_keys()).unwrap_or_else(|| self.base_view.captures_raw_keys())
     }
 
     fn status_data(&self) -> WidgetStatusData {
-        self.base_view.status_data()
+        self.modal_stack.last().map(|w| w.status_data()).unwrap_or_default()
     }
 
     fn as_any(&self) -> &dyn Any {

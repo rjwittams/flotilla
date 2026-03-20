@@ -56,13 +56,10 @@ impl App {
         // Snapshot selection so we can detect changes for infinite scroll.
         let prev_selection = self.active_ui().selected_selectable_idx;
 
-        // Determine the topmost widget's mode. With modals, check the top
-        // modal; otherwise the Screen (base_view).
-        let (captures_raw, mode_id) = if let Some(top_modal) = self.screen.modal_stack.last() {
-            (top_modal.captures_raw_keys(), top_modal.mode_id())
-        } else {
-            (self.screen.base_view.captures_raw_keys(), self.screen.base_view.mode_id())
-        };
+        // Determine the topmost widget's mode. Screen now delegates to the
+        // top modal (if any) or base_view for mode_id / captures_raw_keys.
+        let captures_raw = self.screen.captures_raw_keys();
+        let mode_id = self.screen.mode_id();
 
         let action = if captures_raw {
             match key.code {
@@ -97,46 +94,22 @@ impl App {
             }
         };
 
-        // Dispatch to modal stack first, then fall through to Screen (base_view).
+        // Dispatch to Screen, which handles modal routing internally.
         // Take the screen out to avoid borrow conflicts between the widget
         // dispatch (`&mut Screen`) and the `WidgetContext` (borrows other `App` fields).
         let mut screen = std::mem::take(&mut self.screen);
-        let (outcome, app_actions) = {
+        let (outcome_is_ignored, app_actions) = {
             let mut ctx = self.build_widget_context();
-            let mut result: Option<crate::widgets::Outcome> = None;
-
-            // Try the top modal if any. Modal widgets act as focus barriers —
-            // their Ignored result does not cascade to the base layer.
-            if let Some(top_modal) = screen.modal_stack.last_mut() {
-                let outcome = if let Some(action) = action {
-                    top_modal.handle_action(action, &mut ctx)
-                } else {
-                    top_modal.handle_raw_key(key, &mut ctx)
-                };
-                if !matches!(outcome, crate::widgets::Outcome::Ignored) {
-                    result = Some(outcome);
-                }
-            } else {
-                // No modals — dispatch to Screen (handles globals + base_view).
-                let outcome =
-                    if let Some(action) = action { screen.handle_action(action, &mut ctx) } else { screen.handle_raw_key(key, &mut ctx) };
-                if !matches!(outcome, crate::widgets::Outcome::Ignored) {
-                    result = Some(outcome);
-                }
-            }
-
-            let app_actions = std::mem::take(&mut ctx.app_actions);
-            (result, app_actions)
+            let outcome =
+                if let Some(action) = action { screen.handle_action(action, &mut ctx) } else { screen.handle_raw_key(key, &mut ctx) };
+            (matches!(outcome, crate::widgets::Outcome::Ignored), std::mem::take(&mut ctx.app_actions))
         };
-
-        let handled = outcome.is_some();
-        if let Some(outcome) = outcome {
-            screen.apply_outcome(outcome);
-        }
         self.screen = screen;
-        if !handled {
+
+        // Fall through if unhandled — these are actions that need &mut App
+        // context the widget stack doesn't have.
+        if outcome_is_ignored {
             if let Some(action) = action {
-                // No widget consumed the action — fall through to legacy dispatch
                 self.dispatch_action(action);
             }
         }
@@ -156,34 +129,13 @@ impl App {
         // Snapshot selection so we can detect changes for infinite scroll.
         let prev_selection = self.active_ui().selected_selectable_idx;
 
-        // ── Modal + base_view mouse dispatch ──
-        // Modal widgets on top act as focus barriers — if a modal is present,
-        // mouse events that it doesn't consume must NOT fall through to the
-        // base table layer.
+        // Dispatch to Screen, which handles modal routing internally.
         let mut screen = std::mem::take(&mut self.screen);
-        let (outcome, app_actions) = {
+        let app_actions = {
             let mut ctx = self.build_widget_context();
-            let mut result: Option<crate::widgets::Outcome> = None;
-
-            if let Some(top_modal) = screen.modal_stack.last_mut() {
-                let out = top_modal.handle_mouse(mouse, &mut ctx);
-                if !matches!(out, crate::widgets::Outcome::Ignored) {
-                    result = Some(out);
-                }
-            } else {
-                let out = screen.handle_mouse(mouse, &mut ctx);
-                if !matches!(out, crate::widgets::Outcome::Ignored) {
-                    result = Some(out);
-                }
-            }
-
-            let app_actions = std::mem::take(&mut ctx.app_actions);
-            (result, app_actions)
+            screen.handle_mouse(mouse, &mut ctx);
+            std::mem::take(&mut ctx.app_actions)
         };
-
-        if let Some(outcome) = outcome {
-            screen.apply_outcome(outcome);
-        }
         self.screen = screen;
         self.process_app_actions(app_actions);
 
