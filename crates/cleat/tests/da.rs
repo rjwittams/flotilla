@@ -12,3 +12,9 @@ fn ignores_partial_or_non_query_sequences() {
     assert!(device_attribute_replies(b"\x1b[").is_empty());
     assert!(device_attribute_replies(b"\x1b[?62;22c").is_empty());
 }
+
+#[test]
+fn detects_explicit_and_implicit_query_variants() {
+    assert_eq!(device_attribute_replies(b"\x1b[0c"), vec![DA1_RESPONSE.to_vec()]);
+    assert_eq!(device_attribute_replies(b"\x1b[>c"), vec![DA2_RESPONSE.to_vec()]);
+}
