@@ -25,6 +25,20 @@ fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn require_python3() -> bool {
+    let available = Command::new("python3")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !available {
+        eprintln!("skipping test: python3 not found");
+    }
+    available
+}
+
 struct EnvVarGuard {
     key: &'static str,
     original: Option<std::ffi::OsString>,
@@ -362,6 +376,70 @@ fn send_keys_cli_executes_end_to_end() {
         "cli send-keys output should reach the attached session, got {:?}",
         String::from_utf8_lossy(&output)
     );
+}
+
+#[test]
+fn detached_session_answers_da_queries() {
+    if !require_python3() {
+        return;
+    }
+    let _lock = env_lock().lock().expect("env lock");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let service = service_for(temp.path());
+    let cmd = r#"python3 -c 'import os,select,time,tty; fd=os.open("/dev/tty", os.O_RDWR); tty.setcbreak(fd); os.write(fd,b"\x1b[c"); data=b""; deadline=time.time()+2; 
+while time.time() < deadline and not data.endswith(b"c"):
+    timeout=max(0.0, deadline-time.time()); ready,_,_=select.select([fd], [], [], timeout);
+    if not ready: break
+    data += os.read(fd, 1)
+open("da.txt","wb").write(data); time.sleep(5)'"#;
+
+    service.create(Some("alpha".into()), None, Some(temp.path().to_path_buf()), Some(cmd.into())).expect("create alpha");
+
+    let result_path = temp.path().join("da.txt");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !result_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let contents = std::fs::read(&result_path).expect("read DA result");
+    assert_eq!(contents, b"\x1b[?62;22c");
+}
+
+#[test]
+fn attached_session_does_not_get_synthetic_da_reply() {
+    if !require_python3() {
+        return;
+    }
+    let _lock = env_lock().lock().expect("env lock");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let service = service_for(temp.path());
+    let cmd = r#"python3 -c 'import os,select,time,tty; fd=os.open("/dev/tty", os.O_RDWR); tty.setcbreak(fd);
+while not os.path.exists("go"):
+    time.sleep(0.01)
+os.write(fd,b"\x1b[c"); data=b""; deadline=time.time()+1;
+while time.time() < deadline and not data.endswith(b"c"):
+    timeout=max(0.0, deadline-time.time()); ready,_,_=select.select([fd], [], [], timeout);
+    if not ready: break
+    data += os.read(fd, 1)
+open("da.txt","wb").write(data); time.sleep(5)'"#;
+
+    service.create(Some("alpha".into()), None, Some(temp.path().to_path_buf()), Some(cmd.into())).expect("create alpha");
+
+    let mut stream = UnixStream::connect(session_socket_path(temp.path(), "alpha")).expect("connect socket");
+    Frame::AttachInit { cols: 100, rows: 30, capabilities: ClientCapabilities::conservative_fallback() }
+        .write(&mut stream)
+        .expect("write attach init");
+    assert_eq!(Frame::read(&mut stream).expect("read attach response"), Frame::Ack);
+    std::fs::write(temp.path().join("go"), b"x").expect("write attached test gate");
+
+    let result_path = temp.path().join("da.txt");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !result_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let contents = std::fs::read(&result_path).expect("read DA result");
+    assert!(contents.is_empty(), "attached sessions should rely on the real terminal for DA replies");
 }
 
 #[cfg(feature = "ghostty-vt")]
