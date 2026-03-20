@@ -286,7 +286,7 @@ impl App {
             in_flight: HashMap::new(),
             pending_cancel: None,
             should_quit: false,
-            widget_stack: vec![Box::new(crate::widgets::base_view::BaseView::new())],
+            widget_stack: vec![Box::new(crate::widgets::screen::Screen::new())],
         }
     }
 
@@ -415,8 +415,8 @@ impl App {
     /// other `App` fields. The stack is restored after the closure returns.
     pub fn with_base_view<R>(&mut self, f: impl FnOnce(&mut crate::widgets::base_view::BaseView) -> R) -> R {
         let mut stack = std::mem::take(&mut self.widget_stack);
-        let base = stack[0].as_any_mut().downcast_mut::<crate::widgets::base_view::BaseView>().expect("widget_stack[0] is always BaseView");
-        let result = f(base);
+        let screen = stack[0].as_any_mut().downcast_mut::<crate::widgets::screen::Screen>().expect("widget_stack[0] is always Screen");
+        let result = f(&mut screen.base_view);
         self.widget_stack = stack;
         result
     }

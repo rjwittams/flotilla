@@ -234,10 +234,9 @@ impl App {
             let drag_active = self.with_base_view(|bv| bv.drag.dragging_tab.is_some() && bv.drag.active);
             if drag_active {
                 let mut stack = std::mem::take(&mut self.widget_stack);
-                let base = stack[0]
-                    .as_any_mut()
-                    .downcast_mut::<crate::widgets::base_view::BaseView>()
-                    .expect("widget_stack[0] is always BaseView");
+                let screen =
+                    stack[0].as_any_mut().downcast_mut::<crate::widgets::screen::Screen>().expect("widget_stack[0] is always Screen");
+                let base = &mut screen.base_view;
                 base.tab_bar.handle_drag(mouse.column, mouse.row, &mut base.drag, &mut self.model.repo_order, &mut self.model.active_repo);
                 self.widget_stack = stack;
             }
