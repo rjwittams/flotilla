@@ -31,6 +31,7 @@ use nix::{
 };
 
 use crate::{
+    da::device_attribute_replies,
     protocol::Frame,
     runtime::{RuntimeLayout, SessionMetadata},
     vt::{self, VtEngine, VtEngineKind},
@@ -576,6 +577,11 @@ pub fn run_session_daemon(root: &Path, id: &str) -> Result<(), String> {
                     Ok(0) => break,
                     Ok(n) => {
                         record_pty_output(vt_engine.as_mut(), &buf[..n])?;
+                        if active_client.is_none() {
+                            for reply in device_attribute_replies(&buf[..n]) {
+                                write_fd_all(pty_fd, &reply)?;
+                            }
+                        }
                         if let Some(client) = active_client.as_mut() {
                             if client.enqueue_frame(&Frame::Output(buf[..n].to_vec())).is_err() {
                                 let _ = fs::remove_file(foreground_path(root, id));
