@@ -124,8 +124,6 @@ impl TabBar {
             Some(TabId::Flotilla) => TabBarAction::SwitchToConfig,
             Some(TabId::Repo(i)) => TabBarAction::SwitchToRepo(i),
             Some(TabId::Add) => TabBarAction::OpenFilePicker,
-            // TabId::Gear is not a tab bar item — it's rendered in the table
-            // border and handled by the table mouse path in key_handlers.rs.
             _ => TabBarAction::None,
         }
     }
@@ -253,12 +251,4 @@ mod tests {
         assert_eq!(tab_bar.handle_click(32, 0, false), TabBarAction::OpenFilePicker);
     }
 
-    #[test]
-    fn gear_click_not_handled_by_tab_bar() {
-        // TabId::Gear is rendered in the table border, not the tab bar.
-        // Even if it ends up in tab_areas, the tab bar should not handle it.
-        let mut tab_bar = TabBar::new();
-        tab_bar.tab_areas.insert(TabId::Gear, Rect::new(40, 0, 3, 1));
-        assert_eq!(tab_bar.handle_click(41, 0, false), TabBarAction::None);
-    }
 }

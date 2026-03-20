@@ -141,8 +141,6 @@ pub enum TabId {
     Repo(usize),
     /// The [+] button for adding repos.
     Add,
-    /// The gear/settings icon.
-    Gear,
 }
 
 impl TabId {

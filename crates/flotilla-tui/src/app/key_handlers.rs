@@ -97,6 +97,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Snapshot selection so we can detect changes for infinite scroll.
+        let prev_selection = self.active_ui().selected_selectable_idx;
+
         // The widget stack is always non-empty (BaseView is the base layer).
         let captures_raw = self.widget_stack.last().expect("stack is never empty").captures_raw_keys();
         let mode_id = self.widget_stack.last().expect("stack is never empty").mode_id();
@@ -134,9 +137,12 @@ impl App {
             }
         };
 
-        // Global actions bypass the widget stack entirely.
+        // Global actions bypass the widget stack — but only when no modal is
+        // open. Modals act as focus barriers: they must trap all input,
+        // including globals like tab switching or theme cycling, to prevent
+        // unexpected state changes while a confirm dialog is visible.
         if let Some(action) = action {
-            if action.is_global() {
+            if action.is_global() && !self.has_modal() {
                 self.handle_global_action(action);
                 return;
             }
@@ -176,10 +182,10 @@ impl App {
         }
         self.process_app_actions(app_actions);
 
-        // Post-dispatch: check for infinite scroll fetch-more only after
-        // selection-changing actions (SelectNext/SelectPrev). Running it after
-        // every key event would trigger background fetches from unrelated keys.
-        if matches!(action, Some(Action::SelectNext | Action::SelectPrev)) {
+        // Post-dispatch: check for infinite scroll only if the selection
+        // actually changed. This avoids spurious fetches from unrelated
+        // key presses that happen to fire when the selection is near the bottom.
+        if self.active_ui().selected_selectable_idx != prev_selection {
             self.check_infinite_scroll();
         }
     }
@@ -187,6 +193,9 @@ impl App {
     // ── Mouse handling ──
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Snapshot selection so we can detect changes for infinite scroll.
+        let prev_selection = self.active_ui().selected_selectable_idx;
+
         // ── Widget stack mouse dispatch ──
         // The stack is always non-empty (BaseView is the base layer).
         // Modal widgets on top act as focus barriers — if a modal is present,
@@ -235,14 +244,9 @@ impl App {
         }
 
         // ── Infinite scroll check ──
-        // Only after mouse events that actually change selection (scroll or
-        // table click). Other mouse events (status bar, modals, tab bar)
-        // should not trigger background issue fetches.
-        if matches!(
-            mouse.kind,
-            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp | MouseEventKind::Down(MouseButton::Left | MouseButton::Right)
-        ) && !self.has_modal()
-        {
+        // Only if the selection actually changed — avoids spurious fetches
+        // from tab bar clicks, status bar clicks, etc.
+        if self.active_ui().selected_selectable_idx != prev_selection {
             self.check_infinite_scroll();
         }
     }

@@ -19,7 +19,7 @@ use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext}
 use crate::{
     app::{
         ui_state::{BranchInputKind, PendingAction, PendingStatus, UiMode},
-        ProviderStatus, TabId, TuiModel, UiState,
+        ProviderStatus, TuiModel, UiState,
     },
     keymap::{Action, ModeId},
     shimmer::Shimmer,
@@ -109,19 +109,19 @@ impl WorkItemTable {
 
     // ── Rendering ────────────────────────────────────────────────────
 
-    fn render_table(&self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+    fn render_table(&mut self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
         ui.layout.table_area = area;
 
         let rui = active_rui(model, ui);
         if rui.show_providers {
             let close_x = area.x + area.width.saturating_sub(5);
-            ui.layout.tab_areas.insert(TabId::Gear, Rect::new(close_x, area.y, 3, 1));
+            self.gear_area = Some(Rect::new(close_x, area.y, 3, 1));
             self.render_providers(model, ui, theme, frame, area);
             return;
         }
 
         let gear_x = area.x + area.width.saturating_sub(5);
-        ui.layout.tab_areas.insert(TabId::Gear, Rect::new(gear_x, area.y, 3, 1));
+        self.gear_area = Some(Rect::new(gear_x, area.y, 3, 1));
 
         let labels = model.active_labels();
         let header = Row::new(vec![
@@ -387,9 +387,8 @@ impl InteractiveWidget for WorkItemTable {
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
         // Store area for mouse hit-testing
         self.table_area = area;
+        // gear_area is set inside render_table
         self.render_table(ctx.model, ctx.ui, ctx.theme, frame, area);
-        // Capture gear icon area from layout (set during render_table)
-        self.gear_area = ctx.ui.layout.tab_areas.get(&TabId::Gear).copied();
     }
 
     fn mode_id(&self) -> ModeId {
