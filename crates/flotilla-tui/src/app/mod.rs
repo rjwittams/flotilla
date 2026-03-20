@@ -539,6 +539,22 @@ impl App {
                 AppAction::OpenFilePicker => {
                     self.open_file_picker_from_active_repo_parent();
                 }
+                AppAction::PrevTab => self.prev_tab(),
+                AppAction::NextTab => self.next_tab(),
+                AppAction::MoveTabLeft => {
+                    if !self.ui.mode.is_config() && self.move_tab(-1) {
+                        self.config.save_tab_order(&self.persisted_tab_order_paths());
+                    }
+                }
+                AppAction::MoveTabRight => {
+                    if !self.ui.mode.is_config() && self.move_tab(1) {
+                        self.config.save_tab_order(&self.persisted_tab_order_paths());
+                    }
+                }
+                AppAction::Refresh => {
+                    let repo = self.model.active_repo_root().clone();
+                    self.proto_commands.push(self.command(CommandAction::Refresh { repo: Some(RepoSelector::Path(repo)) }));
+                }
             }
         }
     }

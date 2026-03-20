@@ -208,6 +208,10 @@ impl InteractiveWidget for BaseView {
                 ctx.app_actions.push(AppAction::Quit);
                 Outcome::Consumed
             }
+            Action::CycleLayout => {
+                ctx.app_actions.push(AppAction::CycleLayout);
+                Outcome::Consumed
+            }
             // Actions that need &App context -- fall through to legacy dispatch
             Action::Confirm | Action::OpenActionMenu | Action::OpenFilePicker | Action::Dispatch(_) => Outcome::Ignored,
             _ => Outcome::Ignored,
@@ -781,14 +785,17 @@ mod tests {
         let mut harness = TestWidgetHarness::new();
         let mut ctx = harness.ctx();
 
-        // Global actions are pre-dispatched by App before reaching the widget
-        // stack, so BaseView should return Ignored for all of them.
-        let globals =
-            [Action::CycleTheme, Action::CycleLayout, Action::CycleHost, Action::ToggleDebug, Action::ToggleStatusBarKeys, Action::Refresh];
+        // Global actions are intercepted by Screen before reaching BaseView,
+        // so BaseView should return Ignored for all of them.
+        let globals = [Action::CycleTheme, Action::CycleHost, Action::ToggleDebug, Action::ToggleStatusBarKeys, Action::Refresh];
         for action in globals {
             let outcome = widget.handle_action(action, &mut ctx);
             assert!(matches!(outcome, Outcome::Ignored), "expected Ignored for {action:?}");
         }
+
+        // CycleLayout is page-scoped (not global), so BaseView emits AppAction for it.
+        let outcome = widget.handle_action(Action::CycleLayout, &mut ctx);
+        assert!(matches!(outcome, Outcome::Consumed), "expected Consumed for CycleLayout");
     }
 
     // -- Config mode --

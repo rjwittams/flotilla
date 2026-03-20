@@ -7,7 +7,7 @@ use crossterm::{
 };
 
 use crate::{
-    app::{self, App, UiMode},
+    app::{self, App},
     event::{self, Event},
 };
 
@@ -92,24 +92,7 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
                         continue;
                     }
 
-                    let is_normal = matches!(app.ui.mode, UiMode::Normal) && !app.has_modal();
-                    if k.code == KeyCode::Char('r') && is_normal {
-                        let repo = app.model.active_repo_root().clone();
-                        let daemon = app.daemon.clone();
-                        tokio::spawn(async move {
-                            let _ = daemon
-                                .execute(flotilla_protocol::Command {
-                                    host: None,
-                                    context_repo: None,
-                                    action: flotilla_protocol::CommandAction::Refresh {
-                                        repo: Some(flotilla_protocol::RepoSelector::Path(repo)),
-                                    },
-                                })
-                                .await;
-                        });
-                    } else {
-                        app.handle_key(k);
-                    }
+                    app.handle_key(k);
                 }
                 Event::Mouse(m) => {
                     app.handle_mouse(m);

@@ -65,6 +65,11 @@ pub enum AppAction {
     SwitchToRepo(usize),
     SaveTabOrder,
     OpenFilePicker,
+    PrevTab,
+    NextTab,
+    MoveTabLeft,
+    MoveTabRight,
+    Refresh,
 }
 
 /// Result of handling an event in a widget.
