@@ -429,4 +429,73 @@ mod tests {
         let outcome = widget.handle_action(Action::Quit, &mut ctx);
         assert!(matches!(outcome, Outcome::Ignored));
     }
+
+    // ── refresh_dir_listing tests (filesystem-backed) ─────────────────
+
+    fn picker_for_tmpdir(tmp: &std::path::Path, harness: &TestWidgetHarness) -> FilePickerWidget {
+        let path_str = format!("{}/", tmp.display());
+        let mut widget = FilePickerWidget::new(Input::from(path_str.as_str()), Vec::new());
+        widget.refresh_dir_listing(&harness.model);
+        widget
+    }
+
+    #[test]
+    fn refresh_lists_entries_sorted_alphabetically() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        std::fs::create_dir(tmp.path().join("bravo")).expect("create dir");
+        std::fs::create_dir(tmp.path().join("alpha")).expect("create dir");
+        std::fs::create_dir(tmp.path().join("charlie")).expect("create dir");
+
+        let harness = TestWidgetHarness::new();
+        let widget = picker_for_tmpdir(tmp.path(), &harness);
+
+        let names: Vec<&str> = widget.dir_entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
+    fn refresh_hides_dotfiles() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        std::fs::create_dir(tmp.path().join(".hidden")).expect("create dir");
+        std::fs::create_dir(tmp.path().join("visible")).expect("create dir");
+
+        let harness = TestWidgetHarness::new();
+        let widget = picker_for_tmpdir(tmp.path(), &harness);
+
+        let names: Vec<&str> = widget.dir_entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["visible"]);
+    }
+
+    #[test]
+    fn refresh_detects_git_repos() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let repo_dir = tmp.path().join("my-repo");
+        std::fs::create_dir(&repo_dir).expect("create dir");
+        std::fs::create_dir(repo_dir.join(".git")).expect("create .git");
+        std::fs::create_dir(tmp.path().join("not-a-repo")).expect("create dir");
+
+        let harness = TestWidgetHarness::new();
+        let widget = picker_for_tmpdir(tmp.path(), &harness);
+
+        let git_entry = widget.dir_entries.iter().find(|e| e.name == "my-repo").expect("should find my-repo");
+        assert!(git_entry.is_git_repo);
+        let non_git = widget.dir_entries.iter().find(|e| e.name == "not-a-repo").expect("should find not-a-repo");
+        assert!(!non_git.is_git_repo);
+    }
+
+    #[test]
+    fn refresh_filters_by_prefix() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        std::fs::create_dir(tmp.path().join("alpha")).expect("create dir");
+        std::fs::create_dir(tmp.path().join("beta")).expect("create dir");
+
+        let harness = TestWidgetHarness::new();
+        // Type "al" as a prefix filter (no trailing slash = filter mode)
+        let path_str = format!("{}/al", tmp.path().display());
+        let mut widget = FilePickerWidget::new(Input::from(path_str.as_str()), Vec::new());
+        widget.refresh_dir_listing(&harness.model);
+
+        let names: Vec<&str> = widget.dir_entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha"]);
+    }
 }
