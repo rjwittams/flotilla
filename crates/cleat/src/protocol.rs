@@ -32,6 +32,7 @@ const TAG_BUSY: u8 = 6;
 const TAG_DETACH: u8 = 7;
 const TAG_CAPTURE: u8 = 8;
 const TAG_ERROR: u8 = 9;
+const TAG_SEND_KEYS: u8 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
@@ -43,6 +44,7 @@ pub enum Frame {
     Busy,
     Detach,
     Capture,
+    SendKeys(Vec<u8>),
     Error(String),
 }
 
@@ -87,6 +89,7 @@ impl Frame {
             Frame::Busy => (TAG_BUSY, vec![]),
             Frame::Detach => (TAG_DETACH, vec![]),
             Frame::Capture => (TAG_CAPTURE, vec![]),
+            Frame::SendKeys(bytes) => (TAG_SEND_KEYS, bytes.clone()),
             Frame::Error(message) => (TAG_ERROR, message.clone().into_bytes()),
         }
     }
@@ -101,6 +104,7 @@ impl Frame {
             TAG_BUSY => Ok(Frame::Busy),
             TAG_DETACH => Ok(Frame::Detach),
             TAG_CAPTURE => Ok(Frame::Capture),
+            TAG_SEND_KEYS => Ok(Frame::SendKeys(payload)),
             TAG_ERROR => String::from_utf8(payload)
                 .map(Frame::Error)
                 .map_err(|err| Error::new(ErrorKind::InvalidData, format!("invalid error frame utf-8: {err}"))),
@@ -170,6 +174,15 @@ mod tests {
     #[test]
     fn frame_round_trip_preserves_binary_payloads() {
         let frame = Frame::Output(vec![0, 1, 2, 3, 4, 5]);
+        let mut bytes = Vec::new();
+        frame.write(&mut bytes).expect("write frame");
+        let decoded = Frame::read(&mut bytes.as_slice()).expect("read frame");
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn send_keys_round_trip_preserves_binary_payloads() {
+        let frame = Frame::SendKeys(vec![0, 1, 2, 3, 4, 5]);
         let mut bytes = Vec::new();
         frame.write(&mut bytes).expect("write frame");
         let decoded = Frame::read(&mut bytes.as_slice()).expect("read frame");
