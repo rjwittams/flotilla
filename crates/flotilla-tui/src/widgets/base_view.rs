@@ -119,7 +119,7 @@ impl BaseView {
         if ctx.ui.mode.is_config() {
             self.table.table_area = Rect::default();
             ctx.ui.layout.table_area = Rect::default();
-            self.event_log.render_config_screen(ctx.model, ctx.theme, frame, area);
+            InteractiveWidget::render(&mut self.event_log, frame, area, ctx);
             return;
         }
 
@@ -146,7 +146,7 @@ impl BaseView {
         };
 
         InteractiveWidget::render(&mut self.table, frame, chunks[0], ctx);
-        self.preview.render(ctx.model, ctx.ui, ctx.theme, frame, chunks[1]);
+        self.preview.render_bespoke(ctx.model, ctx.ui, ctx.theme, frame, chunks[1]);
     }
 
     // ── Action helpers ──
@@ -184,21 +184,12 @@ impl InteractiveWidget for BaseView {
     fn handle_action(&mut self, action: Action, ctx: &mut WidgetContext) -> Outcome {
         // Phase 1: delegate to focused child.
         let outcome = if ctx.mode.is_config() {
-            // Config mode: event-log navigation (Task 3 will move into EventLogWidget).
             match action {
-                Action::SelectNext => {
-                    self.event_log.select_next();
-                    Outcome::Consumed
-                }
-                Action::SelectPrev => {
-                    self.event_log.select_prev();
-                    Outcome::Consumed
-                }
                 Action::Dismiss => {
                     *ctx.mode = UiMode::Normal;
                     Outcome::Consumed
                 }
-                _ => Outcome::Ignored,
+                _ => self.event_log.handle_action(action, ctx),
             }
         } else {
             self.table.handle_action(action, ctx)
@@ -226,10 +217,13 @@ impl InteractiveWidget for BaseView {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // 1. Event log filter area (only active in Config mode —
+                // 1. Event log filter area (delegate to event_log in Config mode —
                 // the filter area Rect is stale when not in Config mode)
-                if ctx.mode.is_config() && self.event_log.handle_click(x, y) {
-                    return Outcome::Consumed;
+                if ctx.mode.is_config() {
+                    let outcome = self.event_log.handle_mouse(mouse, ctx);
+                    if !matches!(outcome, Outcome::Ignored) {
+                        return outcome;
+                    }
                 }
 
                 // 2. Tab bar
@@ -337,7 +331,7 @@ impl InteractiveWidget for BaseView {
             MouseEventKind::ScrollDown => {
                 if matches!(*ctx.mode, UiMode::Normal | UiMode::Config) {
                     if matches!(*ctx.mode, UiMode::Config) {
-                        self.event_log.select_next();
+                        self.event_log.handle_action(Action::SelectNext, ctx);
                     } else {
                         return self.table.handle_mouse(mouse, ctx);
                     }
@@ -349,7 +343,7 @@ impl InteractiveWidget for BaseView {
             MouseEventKind::ScrollUp => {
                 if matches!(*ctx.mode, UiMode::Normal | UiMode::Config) {
                     if matches!(*ctx.mode, UiMode::Config) {
-                        self.event_log.select_prev();
+                        self.event_log.handle_action(Action::SelectPrev, ctx);
                     } else {
                         return self.table.handle_mouse(mouse, ctx);
                     }
@@ -366,7 +360,8 @@ impl InteractiveWidget for BaseView {
         let constraints = vec![Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)];
         let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(frame.area());
 
-        self.tab_bar.render(ctx.model, ctx.ui, self.drag.active, ctx.theme, frame, chunks[0]);
+        self.tab_bar.drag_active = self.drag.active;
+        self.tab_bar.render_bespoke(ctx.model, ctx.ui, self.drag.active, ctx.theme, frame, chunks[0]);
         self.render_content(frame, chunks[1], ctx);
 
         // When the palette is active, move the status bar to the top of the overlay so the
@@ -376,7 +371,7 @@ impl InteractiveWidget for BaseView {
         } else {
             chunks[2]
         };
-        self.status_bar.render(
+        self.status_bar.render_bespoke(
             ctx.model,
             ctx.ui,
             ctx.in_flight,

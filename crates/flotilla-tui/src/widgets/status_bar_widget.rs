@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::{any::Any, collections::HashMap};
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::Rect,
     style::Style,
@@ -10,9 +10,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext};
 use crate::{
     app::{collect_visible_status_items, InFlightCommand, RepoViewLayout, TuiModel, UiMode, UiState},
-    keymap::ModeId,
+    keymap::{Action, ModeId},
     segment_bar::{self, BarStyle, ThemedRibbonStyle},
     shimmer::shimmer_spans,
     status_bar::{
@@ -35,9 +36,6 @@ struct StatusBarContent {
 
 /// Standalone status bar component. Handles rendering and mouse hit-testing
 /// for the bottom status strip.
-///
-/// Does not implement `InteractiveWidget` — it will be composed into
-/// `BaseView` in a future step.
 #[derive(Default)]
 pub struct StatusBarWidget {
     /// Click targets for key chips, populated during render.
@@ -56,7 +54,7 @@ impl StatusBarWidget {
     /// Render the status bar into `area`. Click targets are stored on
     /// `self` for later hit-testing via `handle_click`.
     #[allow(clippy::too_many_arguments)]
-    pub fn render(
+    pub fn render_bespoke(
         &mut self,
         model: &TuiModel,
         ui: &mut UiState,
@@ -189,6 +187,55 @@ impl StatusBarWidget {
         }
 
         None
+    }
+}
+
+impl InteractiveWidget for StatusBarWidget {
+    fn handle_action(&mut self, _action: Action, _ctx: &mut WidgetContext) -> Outcome {
+        Outcome::Ignored
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent, ctx: &mut WidgetContext) -> Outcome {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return Outcome::Ignored;
+        }
+
+        match self.handle_click(mouse.column, mouse.row) {
+            Some(StatusBarAction::KeyPress { code, modifiers }) => {
+                ctx.app_actions.push(AppAction::StatusBarKeyPress { code, modifiers });
+                Outcome::Consumed
+            }
+            Some(StatusBarAction::ClearError(id)) => {
+                ctx.app_actions.push(AppAction::ClearError(id));
+                Outcome::Consumed
+            }
+            None => Outcome::Ignored,
+        }
+    }
+
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
+        self.render_bespoke(
+            ctx.model,
+            ctx.ui,
+            ctx.in_flight,
+            ctx.theme,
+            frame,
+            area,
+            ctx.active_widget_mode,
+            ctx.active_widget_data.clone(),
+        );
+    }
+
+    fn mode_id(&self) -> ModeId {
+        ModeId::Normal
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
