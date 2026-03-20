@@ -1,5 +1,6 @@
-use std::any::Any;
+use std::{any::Any, time::Instant};
 
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     Frame,
@@ -10,8 +11,12 @@ use super::{
     work_item_table::WorkItemTable, AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext,
 };
 use crate::{
-    app::{ui_state::UiMode, RepoViewLayout, TuiModel, UiState},
+    app::{
+        ui_state::{DragState, UiMode},
+        RepoViewLayout, TabId, TuiModel, UiState,
+    },
     keymap::{Action, ModeId},
+    status_bar::StatusBarAction,
     theme::Theme,
     ui_helpers,
 };
@@ -71,12 +76,27 @@ fn resolve_auto_preview_position(area: Rect) -> ResolvedPreviewPosition {
 /// Sits at `widget_stack[0]` and handles all Normal-mode actions that the
 /// previous `WorkItemTable` widget handled. Modal widgets are pushed on top
 /// and rendered after BaseView.
+/// Double-click detection state for table row clicks.
+#[derive(Default)]
+pub struct DoubleClickState {
+    pub last_time: Option<Instant>,
+    pub last_selectable_idx: Option<usize>,
+}
+
 pub struct BaseView {
     pub tab_bar: TabBar,
     pub status_bar: StatusBarWidget,
     pub table: WorkItemTable,
     pub preview: PreviewPanel,
     pub event_log: EventLogWidget,
+    /// Stored from render for mouse click hit-testing.
+    table_area: Rect,
+    /// Gear icon area, captured from layout after table render.
+    pub(crate) gear_area: Option<Rect>,
+    /// Double-click detection for table rows.
+    double_click: DoubleClickState,
+    /// Tab drag-reorder state.
+    pub drag: DragState,
 }
 
 impl Default for BaseView {
@@ -93,6 +113,10 @@ impl BaseView {
             table: WorkItemTable::new(),
             preview: PreviewPanel::new(),
             event_log: EventLogWidget::new(),
+            table_area: Rect::default(),
+            gear_area: None,
+            double_click: DoubleClickState::default(),
+            drag: DragState::default(),
         }
     }
 
@@ -100,11 +124,15 @@ impl BaseView {
 
     fn render_content(&mut self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
         if ui.mode.is_config() {
+            self.table_area = Rect::default();
+            ui.layout.table_area = Rect::default();
             self.event_log.render_config_screen(model, theme, frame, area);
             return;
         }
 
         let Some(position) = resolve_preview_position(area, ui.view_layout) else {
+            self.table_area = area;
+            ui.layout.table_area = area;
             self.table.render(model, ui, theme, frame, area);
             return;
         };
@@ -126,8 +154,32 @@ impl BaseView {
                 .split(area),
         };
 
+        self.table_area = chunks[0];
+        ui.layout.table_area = chunks[0];
         self.table.render(model, ui, theme, frame, chunks[0]);
         self.preview.render(model, ui, theme, frame, chunks[1]);
+    }
+
+    // ── Mouse helpers ──
+
+    /// Hit-test a mouse position against the table area to find which
+    /// selectable row (if any) was clicked.
+    fn row_at_mouse(&self, x: u16, y: u16, ctx: &WidgetContext) -> Option<usize> {
+        let ta = self.table_area;
+        if x >= ta.x && x < ta.x + ta.width && y >= ta.y && y < ta.y + ta.height {
+            let row_in_table = (y - ta.y) as usize;
+            if row_in_table < 2 {
+                return None;
+            }
+            let data_row = row_in_table - 2;
+            let repo_key = &ctx.repo_order[ctx.active_repo];
+            let rui = &ctx.repo_ui[repo_key];
+            let offset = rui.table_state.offset();
+            let actual_row = data_row + offset;
+            rui.table_view.selectable_indices.iter().position(|&idx| idx == actual_row)
+        } else {
+            None
+        }
     }
 
     // ── Action helpers ──
@@ -253,12 +305,180 @@ impl InteractiveWidget for BaseView {
         }
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent, ctx: &mut WidgetContext) -> Outcome {
+        let x = mouse.column;
+        let y = mouse.row;
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // 1. Event log filter area
+                if self.event_log.handle_click(x, y) {
+                    return Outcome::Consumed;
+                }
+
+                // 2. Tab bar
+                let is_config = ctx.mode.is_config();
+                let tab_action = self.tab_bar.handle_click(x, y, is_config);
+                match tab_action {
+                    super::tab_bar::TabBarAction::SwitchToConfig => {
+                        self.drag.dragging_tab = None;
+                        ctx.app_actions.push(AppAction::SwitchToConfig);
+                        return Outcome::Consumed;
+                    }
+                    super::tab_bar::TabBarAction::SwitchToRepo(i) => {
+                        ctx.app_actions.push(AppAction::SwitchToRepo(i));
+                        // Start potential drag
+                        self.drag.dragging_tab = Some(i);
+                        self.drag.start_x = x;
+                        self.drag.active = false;
+                        return Outcome::Consumed;
+                    }
+                    super::tab_bar::TabBarAction::OpenFilePicker => {
+                        ctx.app_actions.push(AppAction::OpenFilePicker);
+                        return Outcome::Consumed;
+                    }
+                    super::tab_bar::TabBarAction::None => {}
+                }
+
+                // 3. Status bar
+                if let Some(sb_action) = self.status_bar.handle_click(x, y) {
+                    match sb_action {
+                        StatusBarAction::KeyPress { code, modifiers } => {
+                            ctx.app_actions.push(AppAction::StatusBarKeyPress { code, modifiers });
+                        }
+                        StatusBarAction::ClearError(id) => {
+                            ctx.app_actions.push(AppAction::ClearError(id));
+                        }
+                    }
+                    return Outcome::Consumed;
+                }
+
+                // Clear drag if click didn't hit tab bar
+                self.drag.dragging_tab = None;
+
+                // 4. Table area (Normal mode only)
+                if matches!(*ctx.mode, UiMode::Normal) {
+                    // Gear icon in the table border area
+                    if let Some(gear_area) = self.gear_area {
+                        if x >= gear_area.x && x < gear_area.x + gear_area.width && y >= gear_area.y && y < gear_area.y + gear_area.height {
+                            ctx.app_actions.push(AppAction::ToggleProviders);
+                            return Outcome::Consumed;
+                        }
+                    }
+
+                    if let Some(si) = self.row_at_mouse(x, y, ctx) {
+                        let now = Instant::now();
+                        let is_double_click = self.double_click.last_time.map(|t| now.duration_since(t).as_millis() < 400).unwrap_or(false)
+                            && self.double_click.last_selectable_idx == Some(si);
+
+                        let repo_key = &ctx.repo_order[ctx.active_repo];
+                        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
+                        let table_idx = rui.table_view.selectable_indices[si];
+                        rui.selected_selectable_idx = Some(si);
+                        rui.table_state.select(Some(table_idx));
+
+                        if is_double_click {
+                            ctx.app_actions.push(AppAction::ActionEnter);
+                            self.double_click.last_time = None;
+                            self.double_click.last_selectable_idx = None;
+                        } else {
+                            self.double_click.last_time = Some(now);
+                            self.double_click.last_selectable_idx = Some(si);
+                        }
+                        return Outcome::Consumed;
+                    }
+                }
+
+                Outcome::Ignored
+            }
+
+            MouseEventKind::Down(MouseButton::Right) => {
+                if matches!(*ctx.mode, UiMode::Normal) {
+                    if let Some(si) = self.row_at_mouse(x, y, ctx) {
+                        let repo_key = &ctx.repo_order[ctx.active_repo];
+                        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
+                        let table_idx = rui.table_view.selectable_indices[si];
+                        rui.selected_selectable_idx = Some(si);
+                        rui.table_state.select(Some(table_idx));
+                        ctx.app_actions.push(AppAction::OpenActionMenu);
+                        return Outcome::Consumed;
+                    }
+                }
+                Outcome::Ignored
+            }
+
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.drag.dragging_tab.is_some() {
+                    // Tab drag — we can't mutate model.repo_order through ctx
+                    // (it's read-only), so we need to signal the App.
+                    // But actually, we CAN read tab_bar areas and compute the swap.
+                    // The actual repo_order mutation will be done via AppAction.
+
+                    if !self.drag.active {
+                        let dx = (x as i16 - self.drag.start_x as i16).unsigned_abs();
+                        if dx >= 2 {
+                            self.drag.active = true;
+                        }
+                    }
+
+                    // Note: actual repo_order swap happens in App because model is read-only.
+                    // We emit a TabDragMove that the App will process.
+                    // For now, keep it simple: the drag visual is handled by the active flag,
+                    // and tab_bar.handle_drag does the swap in App context.
+                    // We return Consumed to prevent other handlers from processing.
+                    return Outcome::Consumed;
+                }
+                Outcome::Ignored
+            }
+
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.drag.dragging_tab.take().is_some() {
+                    if self.drag.active {
+                        ctx.app_actions.push(AppAction::SaveTabOrder);
+                    }
+                    self.drag.active = false;
+                    return Outcome::Consumed;
+                }
+                Outcome::Ignored
+            }
+
+            MouseEventKind::ScrollDown => {
+                if matches!(*ctx.mode, UiMode::Normal | UiMode::Config) {
+                    if matches!(*ctx.mode, UiMode::Config) {
+                        self.event_log.select_next();
+                    } else {
+                        self.table.select_next(ctx);
+                    }
+                    return Outcome::Consumed;
+                }
+                Outcome::Ignored
+            }
+
+            MouseEventKind::ScrollUp => {
+                if matches!(*ctx.mode, UiMode::Normal | UiMode::Config) {
+                    if matches!(*ctx.mode, UiMode::Config) {
+                        self.event_log.select_prev();
+                    } else {
+                        self.table.select_prev(ctx);
+                    }
+                    return Outcome::Consumed;
+                }
+                Outcome::Ignored
+            }
+
+            _ => Outcome::Ignored,
+        }
+    }
+
     fn render(&mut self, frame: &mut Frame, _area: Rect, ctx: &mut RenderContext) {
         let constraints = vec![Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)];
         let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(frame.area());
 
-        self.tab_bar.render(ctx.model, ctx.ui, ctx.theme, frame, chunks[0]);
+        self.tab_bar.render(ctx.model, ctx.ui, self.drag.active, ctx.theme, frame, chunks[0]);
         self.render_content(ctx.model, ctx.ui, ctx.theme, frame, chunks[1]);
+
+        // Capture gear icon area from layout (set by work_item_table render).
+        self.gear_area = ctx.ui.layout.tab_areas.get(&TabId::Gear).copied();
 
         // When the palette is active, move the status bar to the top of the overlay so the
         // input sits above the results instead of being pinned to the bottom of the screen.

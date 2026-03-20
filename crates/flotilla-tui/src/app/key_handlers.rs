@@ -1,14 +1,9 @@
-use std::time::Instant;
-
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use flotilla_core::data::GroupEntry;
 use flotilla_protocol::{Command, CommandAction, WorkItem};
 
-use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent, TabId, UiMode};
-use crate::{
-    keymap::{Action, ModeId},
-    status_bar::StatusBarAction,
-};
+use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent, UiMode};
+use crate::keymap::{Action, ModeId};
 
 impl App {
     // ── Key handling ──
@@ -191,7 +186,6 @@ impl App {
         // mouse events that it doesn't consume must NOT fall through to the
         // base table layer. Only dispatch to the top widget when modals are
         // present; skip the base widget entirely.
-        let has_modal = self.widget_stack.len() > 1;
         let mut stack = std::mem::take(&mut self.widget_stack);
         let (outcome_action, app_actions) = {
             let mut ctx = self.build_widget_context();
@@ -215,72 +209,28 @@ impl App {
         self.process_app_actions(app_actions);
         if let Some((index, outcome)) = outcome_action {
             self.apply_outcome(index, outcome);
-            return;
         }
 
-        // A modal was open but didn't consume the mouse event — block it
-        // from reaching the table. This prevents scroll-wheel input from
-        // moving the table selection while a popup is visible.
-        if has_modal {
-            return;
-        }
-
-        // No widget consumed the mouse event and no modal is active — legacy mouse handling.
-        if self.handle_status_bar_mouse(mouse) {
-            return;
-        }
-
-        if !matches!(self.ui.mode, UiMode::Config | UiMode::Normal) {
-            return;
-        }
-
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                // Gear icon is rendered in the table border area — check it first.
-                if let Some(gear_area) = self.ui.layout.tab_areas.get(&TabId::Gear) {
-                    if mouse.column >= gear_area.x
-                        && mouse.column < gear_area.x + gear_area.width
-                        && mouse.row >= gear_area.y
-                        && mouse.row < gear_area.y + gear_area.height
-                        && !self.ui.mode.is_config()
-                    {
-                        let sp = self.active_ui().show_providers;
-                        self.active_ui_mut().show_providers = !sp;
-                        return;
-                    }
-                }
-
-                if let Some(si) = self.row_at_mouse(mouse.column, mouse.row) {
-                    let now = Instant::now();
-                    let is_double_click = self.ui.double_click.last_time.map(|t| now.duration_since(t).as_millis() < 400).unwrap_or(false)
-                        && self.ui.double_click.last_selectable_idx == Some(si);
-
-                    let table_idx = self.active_ui().table_view.selectable_indices[si];
-                    self.active_ui_mut().selected_selectable_idx = Some(si);
-                    self.active_ui_mut().table_state.select(Some(table_idx));
-
-                    if is_double_click {
-                        self.action_enter();
-                        self.ui.double_click.last_time = None;
-                        self.ui.double_click.last_selectable_idx = None;
-                    } else {
-                        self.ui.double_click.last_time = Some(now);
-                        self.ui.double_click.last_selectable_idx = Some(si);
-                    }
-                }
+        // ── Tab drag handling ──
+        // The BaseView owns the drag state but can't mutate model.repo_order
+        // (read-only in WidgetContext). Perform the actual swap here.
+        if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) {
+            let drag_active = self.with_base_view(|bv| bv.drag.dragging_tab.is_some() && bv.drag.active);
+            if drag_active {
+                let mut stack = std::mem::take(&mut self.widget_stack);
+                let base = stack[0]
+                    .as_any_mut()
+                    .downcast_mut::<crate::widgets::base_view::BaseView>()
+                    .expect("widget_stack[0] is always BaseView");
+                base.tab_bar.handle_drag(mouse.column, mouse.row, &mut base.drag, &mut self.model.repo_order, &mut self.model.active_repo);
+                self.widget_stack = stack;
             }
-            MouseEventKind::Down(MouseButton::Right) => {
-                if let Some(si) = self.row_at_mouse(mouse.column, mouse.row) {
-                    let table_idx = self.active_ui().table_view.selectable_indices[si];
-                    self.active_ui_mut().selected_selectable_idx = Some(si);
-                    self.active_ui_mut().table_state.select(Some(table_idx));
-                    self.open_action_menu();
-                }
-            }
-            MouseEventKind::ScrollDown => self.select_next(),
-            MouseEventKind::ScrollUp => self.select_prev(),
-            _ => {}
         }
+
+        // ── Infinite scroll check ──
+        // After mouse scroll or click that changed selection, check if we
+        // need to fetch more issues. This is cheap (just reads position).
+        self.check_infinite_scroll();
     }
 
     // ── Private helpers ──
@@ -313,28 +263,7 @@ impl App {
         }
     }
 
-    fn handle_status_bar_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-            return false;
-        }
-
-        let action = self.with_base_view(|bv| bv.status_bar.handle_click(mouse.column, mouse.row));
-        if let Some(action) = action {
-            self.dispatch_status_bar_action(action);
-            return true;
-        }
-
-        false
-    }
-
-    fn dispatch_status_bar_action(&mut self, action: StatusBarAction) {
-        match action {
-            StatusBarAction::KeyPress { code, modifiers } => self.handle_key(KeyEvent::new(code, modifiers)),
-            StatusBarAction::ClearError(id) => self.dismiss_status_item(id),
-        }
-    }
-
-    fn action_enter(&mut self) {
+    pub(super) fn action_enter(&mut self) {
         if !self.active_ui().multi_selected.is_empty() {
             self.action_enter_multi_select();
             return;
@@ -1087,8 +1016,8 @@ mod tests {
     #[test]
     fn clicking_gear_icon_toggles_providers() {
         let mut app = stub_app();
-        // Place the gear hitbox where render_unified_table would put it
-        app.ui.layout.tab_areas.insert(TabId::Gear, Rect::new(75, 2, 3, 1));
+        // Place the gear hitbox where render would put it — on BaseView
+        app.with_base_view(|bv| bv.gear_area = Some(Rect::new(75, 2, 3, 1)));
         assert!(!app.active_ui().show_providers);
 
         app.handle_mouse(left_click(76, 2));
@@ -1101,7 +1030,7 @@ mod tests {
     #[test]
     fn clicking_gear_icon_ignored_in_config_mode() {
         let mut app = stub_app();
-        app.ui.layout.tab_areas.insert(TabId::Gear, Rect::new(75, 2, 3, 1));
+        app.with_base_view(|bv| bv.gear_area = Some(Rect::new(75, 2, 3, 1)));
         app.ui.mode = UiMode::Config;
 
         app.handle_mouse(left_click(76, 2));

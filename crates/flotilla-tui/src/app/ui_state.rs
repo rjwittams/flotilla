@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    time::Instant,
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use flotilla_core::data::{GroupEntry, GroupedWorkItems};
 use flotilla_protocol::{HostName, RepoIdentity, WorkItemIdentity};
@@ -191,12 +188,6 @@ pub struct DragState {
     pub active: bool,
 }
 
-#[derive(Default)]
-pub struct DoubleClickState {
-    pub last_time: Option<Instant>,
-    pub last_selectable_idx: Option<usize>,
-}
-
 pub struct UiState {
     pub mode: UiMode,
     pub repo_ui: HashMap<RepoIdentity, RepoUiState>,
@@ -204,8 +195,6 @@ pub struct UiState {
     pub view_layout: RepoViewLayout,
     pub status_bar: StatusBarUiState,
     pub layout: LayoutAreas,
-    pub drag: DragState,
-    pub double_click: DoubleClickState,
     pub show_debug: bool,
     pub help_scroll: u16,
 }
@@ -220,8 +209,6 @@ impl UiState {
             view_layout: RepoViewLayout::default(),
             status_bar: StatusBarUiState::default(),
             layout: LayoutAreas::default(),
-            drag: DragState::default(),
-            double_click: DoubleClickState::default(),
             show_debug: false,
             help_scroll: 0,
         }

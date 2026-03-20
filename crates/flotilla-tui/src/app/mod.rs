@@ -516,6 +516,29 @@ impl App {
                 AppAction::OpenActionMenu => {
                     self.open_action_menu();
                 }
+                AppAction::ActionEnter => {
+                    self.action_enter();
+                }
+                AppAction::StatusBarKeyPress { code, modifiers } => {
+                    self.handle_key(crossterm::event::KeyEvent::new(code, modifiers));
+                }
+                AppAction::ClearError(id) => {
+                    self.dismiss_status_item(id);
+                }
+                AppAction::SwitchToConfig => {
+                    self.dismiss_modals();
+                    self.ui.mode = UiMode::Config;
+                }
+                AppAction::SwitchToRepo(i) => {
+                    self.dismiss_modals();
+                    self.switch_tab(i);
+                }
+                AppAction::SaveTabOrder => {
+                    self.config.save_tab_order(&self.persisted_tab_order_paths());
+                }
+                AppAction::OpenFilePicker => {
+                    self.open_file_picker_from_active_repo_parent();
+                }
             }
         }
     }

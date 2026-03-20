@@ -45,7 +45,7 @@ impl TabBar {
     /// The caller should also pass `ui` so the tab areas are written back
     /// into `ui.layout.tab_areas` (shared with other components that still
     /// read from there).
-    pub fn render(&mut self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, model: &TuiModel, ui: &mut UiState, drag_active: bool, theme: &Theme, frame: &mut Frame, area: Rect) {
         let mut items = Vec::new();
         let mut tab_ids = Vec::new();
 
@@ -74,7 +74,7 @@ impl TabBar {
                 label,
                 key_hint: None,
                 active: is_active,
-                dragging: is_active && ui.drag.active,
+                dragging: is_active && drag_active,
                 style_override: None,
             });
             tab_ids.push(TabId::Repo(i));

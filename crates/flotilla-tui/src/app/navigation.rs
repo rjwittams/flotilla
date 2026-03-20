@@ -70,6 +70,7 @@ impl App {
         true
     }
 
+    #[cfg(test)]
     pub(super) fn select_next(&mut self) {
         let indices = &self.active_ui().table_view.selectable_indices;
         if indices.is_empty() {
@@ -102,6 +103,7 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn select_prev(&mut self) {
         let indices = &self.active_ui().table_view.selectable_indices;
         if indices.is_empty() {
@@ -118,6 +120,7 @@ impl App {
         self.active_ui_mut().table_state.select(Some(table_idx));
     }
 
+    #[cfg(test)]
     pub(super) fn row_at_mouse(&self, x: u16, y: u16) -> Option<usize> {
         let ta = self.ui.layout.table_area;
         if x >= ta.x && x < ta.x + ta.width && y >= ta.y && y < ta.y + ta.height {

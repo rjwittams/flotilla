@@ -57,6 +57,13 @@ pub enum AppAction {
     ToggleProviders,
     ToggleMultiSelect,
     OpenActionMenu,
+    ActionEnter,
+    StatusBarKeyPress { code: crossterm::event::KeyCode, modifiers: crossterm::event::KeyModifiers },
+    ClearError(usize),
+    SwitchToConfig,
+    SwitchToRepo(usize),
+    SaveTabOrder,
+    OpenFilePicker,
 }
 
 /// Result of handling an event in a widget.

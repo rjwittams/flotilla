@@ -2,14 +2,13 @@ use std::{io::stdout, time::Duration};
 
 use color_eyre::Result;
 use crossterm::{
-    event::{EnableMouseCapture, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
+    event::{EnableMouseCapture, KeyCode, KeyModifiers, MouseEventKind},
     execute,
 };
 
 use crate::{
     app::{self, App, UiMode},
     event::{self, Event},
-    widgets::tab_bar::TabBarAction,
 };
 
 /// Run the TUI event loop: replay initial state, then process events until quit.
@@ -112,75 +111,9 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
                         app.handle_key(k);
                     }
                 }
-                Event::Mouse(m) => match m.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        let x = m.column;
-                        let y = m.row;
-                        // Check event log filter click first (owned by EventLogWidget on BaseView)
-                        let log_clicked = app.with_base_view(|bv| bv.event_log.handle_click(x, y));
-                        if log_clicked {
-                            continue;
-                        }
-                        let is_config = app.ui.mode.is_config();
-                        let action = app.with_base_view(|bv| bv.tab_bar.handle_click(x, y, is_config));
-                        let tab_clicked = match action {
-                            TabBarAction::SwitchToConfig => {
-                                app.dismiss_modals();
-                                app.ui.mode = UiMode::Config;
-                                app.ui.drag.dragging_tab = None;
-                                true
-                            }
-                            TabBarAction::SwitchToRepo(i) => {
-                                app.dismiss_modals();
-                                app.switch_tab(i);
-                                app.ui.drag.dragging_tab = Some(i);
-                                app.ui.drag.start_x = x;
-                                app.ui.drag.active = false;
-                                true
-                            }
-                            TabBarAction::OpenFilePicker => {
-                                app.open_file_picker_from_active_repo_parent();
-                                true
-                            }
-                            TabBarAction::None => false,
-                        };
-                        if !tab_clicked {
-                            app.ui.drag.dragging_tab = None;
-                            app.handle_mouse(m);
-                        }
-                    }
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        if app.ui.drag.dragging_tab.is_some() {
-                            // Take stack + drag state to avoid borrow conflicts with model fields.
-                            let mut stack = std::mem::take(&mut app.widget_stack);
-                            let base = stack[0]
-                                .as_any_mut()
-                                .downcast_mut::<crate::widgets::base_view::BaseView>()
-                                .expect("widget_stack[0] is always BaseView");
-                            base.tab_bar.handle_drag(
-                                m.column,
-                                m.row,
-                                &mut app.ui.drag,
-                                &mut app.model.repo_order,
-                                &mut app.model.active_repo,
-                            );
-                            app.widget_stack = stack;
-                        } else {
-                            app.handle_mouse(m);
-                        }
-                    }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        if app.ui.drag.dragging_tab.take().is_some() {
-                            if app.ui.drag.active {
-                                app.config.save_tab_order(&app.persisted_tab_order_paths());
-                            }
-                            app.ui.drag.active = false;
-                        }
-                    }
-                    _ => {
-                        app.handle_mouse(m);
-                    }
-                },
+                Event::Mouse(m) => {
+                    app.handle_mouse(m);
+                }
                 Event::Tick => {} // already filtered out
             }
         }
