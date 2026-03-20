@@ -7,7 +7,7 @@ const DA1_QUERY: &[u8] = b"\x1b[c";
 const DA1_QUERY_EXPLICIT: &[u8] = b"\x1b[0c";
 const DA2_QUERY: &[u8] = b"\x1b[>c";
 const DA2_QUERY_EXPLICIT: &[u8] = b"\x1b[>0c";
-const MAX_QUERY_LEN: usize = 4;
+const MAX_QUERY_LEN: usize = 5;
 
 pub fn device_attribute_replies(data: &[u8]) -> Vec<Vec<u8>> {
     scan_device_attribute_replies(data, 0)
@@ -51,6 +51,8 @@ fn scan_device_attribute_replies(data: &[u8], min_match_end: usize) -> Vec<Vec<u
                 if i + len > min_match_end {
                     replies.push(reply.to_vec());
                 }
+                i += len;
+                continue;
             }
         }
         i += 1;
@@ -59,21 +61,17 @@ fn scan_device_attribute_replies(data: &[u8], min_match_end: usize) -> Vec<Vec<u
 }
 
 fn detect_query(data: &[u8]) -> Option<(&'static [u8], usize)> {
-    if matches_at(data, DA2_QUERY_EXPLICIT) {
+    if data.starts_with(DA2_QUERY_EXPLICIT) {
         Some((DA2_RESPONSE, DA2_QUERY_EXPLICIT.len()))
-    } else if matches_at(data, DA2_QUERY) {
+    } else if data.starts_with(DA2_QUERY) {
         Some((DA2_RESPONSE, DA2_QUERY.len()))
-    } else if matches_at(data, DA1_QUERY_EXPLICIT) {
+    } else if data.starts_with(DA1_QUERY_EXPLICIT) {
         Some((DA1_RESPONSE, DA1_QUERY_EXPLICIT.len()))
-    } else if matches_at(data, DA1_QUERY) {
+    } else if data.starts_with(DA1_QUERY) {
         Some((DA1_RESPONSE, DA1_QUERY.len()))
     } else {
         None
     }
-}
-
-fn matches_at(data: &[u8], needle: &[u8]) -> bool {
-    data.starts_with(needle)
 }
 
 #[cfg(test)]
@@ -87,5 +85,7 @@ mod tests {
         assert_eq!(tracker.push(b"c"), vec![DA1_RESPONSE.to_vec()]);
         assert!(tracker.push(b"\x1b[>").is_empty());
         assert_eq!(tracker.push(b"0c"), vec![DA2_RESPONSE.to_vec()]);
+        assert!(tracker.push(b"\x1b[>0").is_empty());
+        assert_eq!(tracker.push(b"c"), vec![DA2_RESPONSE.to_vec()]);
     }
 }
