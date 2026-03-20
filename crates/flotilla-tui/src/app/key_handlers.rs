@@ -1031,7 +1031,7 @@ mod tests {
     fn clicking_gear_icon_toggles_providers() {
         let mut app = stub_app();
         // Place the gear hitbox where render would put it — on BaseView
-        app.with_base_view(|bv| bv.gear_area = Some(Rect::new(75, 2, 3, 1)));
+        app.with_base_view(|bv| bv.table.gear_area = Some(Rect::new(75, 2, 3, 1)));
         assert!(!app.active_ui().show_providers);
 
         app.handle_mouse(left_click(76, 2));
@@ -1044,7 +1044,7 @@ mod tests {
     #[test]
     fn clicking_gear_icon_ignored_in_config_mode() {
         let mut app = stub_app();
-        app.with_base_view(|bv| bv.gear_area = Some(Rect::new(75, 2, 3, 1)));
+        app.with_base_view(|bv| bv.table.gear_area = Some(Rect::new(75, 2, 3, 1)));
         app.ui.mode = UiMode::Config;
 
         app.handle_mouse(left_click(76, 2));

@@ -13,11 +13,10 @@ use super::{
 use crate::{
     app::{
         ui_state::{DragState, UiMode},
-        RepoViewLayout, TabId, TuiModel, UiState,
+        RepoViewLayout,
     },
     keymap::{Action, ModeId},
     status_bar::StatusBarAction,
-    theme::Theme,
     ui_helpers,
 };
 
@@ -89,10 +88,6 @@ pub struct BaseView {
     pub table: WorkItemTable,
     pub preview: PreviewPanel,
     pub event_log: EventLogWidget,
-    /// Stored from render for mouse click hit-testing.
-    table_area: Rect,
-    /// Gear icon area, captured from layout after table render.
-    pub(crate) gear_area: Option<Rect>,
     /// Double-click detection for table rows.
     double_click: DoubleClickState,
     /// Tab drag-reorder state.
@@ -113,8 +108,6 @@ impl BaseView {
             table: WorkItemTable::new(),
             preview: PreviewPanel::new(),
             event_log: EventLogWidget::new(),
-            table_area: Rect::default(),
-            gear_area: None,
             double_click: DoubleClickState::default(),
             drag: DragState::default(),
         }
@@ -122,18 +115,16 @@ impl BaseView {
 
     // ── Rendering helpers ──
 
-    fn render_content(&mut self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
-        if ui.mode.is_config() {
-            self.table_area = Rect::default();
-            ui.layout.table_area = Rect::default();
-            self.event_log.render_config_screen(model, theme, frame, area);
+    fn render_content(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
+        if ctx.ui.mode.is_config() {
+            self.table.table_area = Rect::default();
+            ctx.ui.layout.table_area = Rect::default();
+            self.event_log.render_config_screen(ctx.model, ctx.theme, frame, area);
             return;
         }
 
-        let Some(position) = resolve_preview_position(area, ui.view_layout) else {
-            self.table_area = area;
-            ui.layout.table_area = area;
-            self.table.render(model, ui, theme, frame, area);
+        let Some(position) = resolve_preview_position(area, ctx.ui.view_layout) else {
+            InteractiveWidget::render(&mut self.table, frame, area, ctx);
             return;
         };
 
@@ -154,42 +145,11 @@ impl BaseView {
                 .split(area),
         };
 
-        self.table_area = chunks[0];
-        ui.layout.table_area = chunks[0];
-        self.table.render(model, ui, theme, frame, chunks[0]);
-        self.preview.render(model, ui, theme, frame, chunks[1]);
-    }
-
-    // ── Mouse helpers ──
-
-    /// Hit-test a mouse position against the table area to find which
-    /// selectable row (if any) was clicked.
-    fn row_at_mouse(&self, x: u16, y: u16, ctx: &WidgetContext) -> Option<usize> {
-        let ta = self.table_area;
-        if x >= ta.x && x < ta.x + ta.width && y >= ta.y && y < ta.y + ta.height {
-            let row_in_table = (y - ta.y) as usize;
-            if row_in_table < 2 {
-                return None;
-            }
-            let data_row = row_in_table - 2;
-            let repo_key = &ctx.repo_order[ctx.active_repo];
-            let rui = &ctx.repo_ui[repo_key];
-            let offset = rui.table_state.offset();
-            let actual_row = data_row + offset;
-            rui.table_view.selectable_indices.iter().position(|&idx| idx == actual_row)
-        } else {
-            None
-        }
+        InteractiveWidget::render(&mut self.table, frame, chunks[0], ctx);
+        self.preview.render(ctx.model, ctx.ui, ctx.theme, frame, chunks[1]);
     }
 
     // ── Action helpers ──
-
-    fn toggle_providers(ctx: &mut WidgetContext) -> Outcome {
-        let repo_key = &ctx.repo_order[ctx.active_repo];
-        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-        rui.show_providers = !rui.show_providers;
-        Outcome::Consumed
-    }
 
     fn dismiss(ctx: &mut WidgetContext) -> Outcome {
         // Cancellation takes priority over other dismiss actions while a command is running.
@@ -222,9 +182,10 @@ impl BaseView {
 
 impl InteractiveWidget for BaseView {
     fn handle_action(&mut self, action: Action, ctx: &mut WidgetContext) -> Outcome {
-        // Config mode: handle event-log navigation and dismiss.
-        if matches!(*ctx.mode, UiMode::Config) {
-            return match action {
+        // Phase 1: delegate to focused child.
+        let outcome = if ctx.mode.is_config() {
+            // Config mode: event-log navigation (Task 3 will move into EventLogWidget).
+            match action {
                 Action::SelectNext => {
                     self.event_log.select_next();
                     Outcome::Consumed
@@ -238,53 +199,23 @@ impl InteractiveWidget for BaseView {
                     Outcome::Consumed
                 }
                 _ => Outcome::Ignored,
-            };
+            }
+        } else {
+            self.table.handle_action(action, ctx)
+        };
+        if !matches!(outcome, Outcome::Ignored) {
+            return outcome;
         }
 
-        // Normal mode: handle table actions, modal opens, and toggles.
-        if !matches!(*ctx.mode, UiMode::Normal) {
-            return Outcome::Ignored;
-        }
-
+        // Phase 2: cross-cutting concerns that stay on BaseView.
         match action {
-            Action::SelectNext => {
-                self.table.select_next(ctx);
-                Outcome::Consumed
-            }
-            Action::SelectPrev => {
-                self.table.select_prev(ctx);
-                Outcome::Consumed
-            }
-            Action::ToggleMultiSelect => {
-                self.table.toggle_multi_select(ctx);
-                Outcome::Consumed
-            }
-            Action::ToggleProviders => Self::toggle_providers(ctx),
             Action::Dismiss => Self::dismiss(ctx),
             Action::Quit => {
                 ctx.app_actions.push(AppAction::Quit);
                 Outcome::Consumed
             }
-            // Open modal widgets -- return Push outcomes
-            Action::ToggleHelp => Outcome::Push(Box::new(super::help::HelpWidget::new())),
-
-            Action::OpenBranchInput => {
-                Outcome::Push(Box::new(super::branch_input::BranchInputWidget::new(crate::app::BranchInputKind::Manual)))
-            }
-
-            Action::OpenIssueSearch => {
-                *ctx.mode = UiMode::IssueSearch { input: tui_input::Input::default() };
-                Outcome::Push(Box::new(super::issue_search::IssueSearchWidget::new()))
-            }
-
-            Action::OpenCommandPalette => Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new())),
-
             // Actions that need &App context -- fall through to legacy dispatch
             Action::Confirm | Action::OpenActionMenu | Action::OpenFilePicker | Action::Dispatch(_) => Outcome::Ignored,
-
-            // Global actions (tab nav, theme, layout, host, debug, status bar keys,
-            // refresh) are pre-dispatched before the widget stack. If they somehow
-            // reach here, ignore them.
             _ => Outcome::Ignored,
         }
     }
@@ -341,36 +272,31 @@ impl InteractiveWidget for BaseView {
                 // Clear drag if click didn't hit tab bar
                 self.drag.dragging_tab = None;
 
-                // 4. Table area (Normal mode only)
+                // 4. Table area (Normal mode only): double-click detection, then delegate
                 if matches!(*ctx.mode, UiMode::Normal) {
-                    // Gear icon in the table border area
-                    if let Some(gear_area) = self.gear_area {
-                        if x >= gear_area.x && x < gear_area.x + gear_area.width && y >= gear_area.y && y < gear_area.y + gear_area.height {
-                            ctx.app_actions.push(AppAction::ToggleProviders);
-                            return Outcome::Consumed;
-                        }
-                    }
-
-                    if let Some(si) = self.row_at_mouse(x, y, ctx) {
+                    // Check for double-click before delegating single click to table
+                    if let Some(si) = self.table.row_at_mouse(x, y, ctx) {
                         let now = Instant::now();
                         let is_double_click = self.double_click.last_time.map(|t| now.duration_since(t).as_millis() < 400).unwrap_or(false)
                             && self.double_click.last_selectable_idx == Some(si);
 
-                        let repo_key = &ctx.repo_order[ctx.active_repo];
-                        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-                        let table_idx = rui.table_view.selectable_indices[si];
-                        rui.selected_selectable_idx = Some(si);
-                        rui.table_state.select(Some(table_idx));
-
                         if is_double_click {
+                            // Select the row (via table), then trigger double-click action
+                            let _ = self.table.handle_mouse(mouse, ctx);
                             ctx.app_actions.push(AppAction::ActionEnter);
                             self.double_click.last_time = None;
                             self.double_click.last_selectable_idx = None;
-                        } else {
-                            self.double_click.last_time = Some(now);
-                            self.double_click.last_selectable_idx = Some(si);
+                            return Outcome::Consumed;
                         }
-                        return Outcome::Consumed;
+
+                        self.double_click.last_time = Some(now);
+                        self.double_click.last_selectable_idx = Some(si);
+                    }
+
+                    // Delegate to table for single click, gear icon, etc.
+                    let outcome = self.table.handle_mouse(mouse, ctx);
+                    if !matches!(outcome, Outcome::Ignored) {
+                        return outcome;
                     }
                 }
 
@@ -379,38 +305,19 @@ impl InteractiveWidget for BaseView {
 
             MouseEventKind::Down(MouseButton::Right) => {
                 if matches!(*ctx.mode, UiMode::Normal) {
-                    if let Some(si) = self.row_at_mouse(x, y, ctx) {
-                        let repo_key = &ctx.repo_order[ctx.active_repo];
-                        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-                        let table_idx = rui.table_view.selectable_indices[si];
-                        rui.selected_selectable_idx = Some(si);
-                        rui.table_state.select(Some(table_idx));
-                        ctx.app_actions.push(AppAction::OpenActionMenu);
-                        return Outcome::Consumed;
-                    }
+                    return self.table.handle_mouse(mouse, ctx);
                 }
                 Outcome::Ignored
             }
 
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.drag.dragging_tab.is_some() {
-                    // Tab drag — we can't mutate model.repo_order through ctx
-                    // (it's read-only), so we need to signal the App.
-                    // But actually, we CAN read tab_bar areas and compute the swap.
-                    // The actual repo_order mutation will be done via AppAction.
-
                     if !self.drag.active {
                         let dx = (x as i16 - self.drag.start_x as i16).unsigned_abs();
                         if dx >= 2 {
                             self.drag.active = true;
                         }
                     }
-
-                    // Note: actual repo_order swap happens in App because model is read-only.
-                    // We emit a TabDragMove that the App will process.
-                    // For now, keep it simple: the drag visual is handled by the active flag,
-                    // and tab_bar.handle_drag does the swap in App context.
-                    // We return Consumed to prevent other handlers from processing.
                     return Outcome::Consumed;
                 }
                 Outcome::Ignored
@@ -432,7 +339,7 @@ impl InteractiveWidget for BaseView {
                     if matches!(*ctx.mode, UiMode::Config) {
                         self.event_log.select_next();
                     } else {
-                        self.table.select_next(ctx);
+                        return self.table.handle_mouse(mouse, ctx);
                     }
                     return Outcome::Consumed;
                 }
@@ -444,7 +351,7 @@ impl InteractiveWidget for BaseView {
                     if matches!(*ctx.mode, UiMode::Config) {
                         self.event_log.select_prev();
                     } else {
-                        self.table.select_prev(ctx);
+                        return self.table.handle_mouse(mouse, ctx);
                     }
                     return Outcome::Consumed;
                 }
@@ -460,10 +367,7 @@ impl InteractiveWidget for BaseView {
         let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(frame.area());
 
         self.tab_bar.render(ctx.model, ctx.ui, self.drag.active, ctx.theme, frame, chunks[0]);
-        self.render_content(ctx.model, ctx.ui, ctx.theme, frame, chunks[1]);
-
-        // Capture gear icon area from layout (set by work_item_table render).
-        self.gear_area = ctx.ui.layout.tab_areas.get(&TabId::Gear).copied();
+        self.render_content(frame, chunks[1], ctx);
 
         // When the palette is active, move the status bar to the top of the overlay so the
         // input sits above the results instead of being pinned to the bottom of the screen.

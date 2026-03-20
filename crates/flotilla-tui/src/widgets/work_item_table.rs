@@ -1,8 +1,10 @@
 use std::{
+    any::Any,
     collections::HashMap,
     path::{Path, PathBuf},
 };
 
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use flotilla_core::data::{GroupEntry, SectionHeader};
 use flotilla_protocol::{HostName, ProviderData, WorkItem};
 use ratatui::{
@@ -13,12 +15,13 @@ use ratatui::{
     Frame,
 };
 
-use super::WidgetContext;
+use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext};
 use crate::{
     app::{
-        ui_state::{PendingAction, PendingStatus},
+        ui_state::{BranchInputKind, PendingAction, PendingStatus, UiMode},
         ProviderStatus, TabId, TuiModel, UiState,
     },
+    keymap::{Action, ModeId},
     shimmer::Shimmer,
     theme::Theme,
     ui_helpers,
@@ -37,13 +40,18 @@ const PROVIDER_CATEGORIES: [(&str, &str); 8] = [
     ("Terminal pool", "terminal_pool"),
 ];
 
-/// The work-item table component. Owned by `BaseView` and called via
-/// direct methods — it does **not** implement `InteractiveWidget`.
-pub struct WorkItemTable;
+/// The work-item table component. Owned by `BaseView` and implements
+/// `InteractiveWidget` for uniform action/mouse/render dispatch.
+pub struct WorkItemTable {
+    /// Stored from render for mouse hit-testing.
+    pub(crate) table_area: Rect,
+    /// Gear icon area, captured from layout after table render.
+    pub(crate) gear_area: Option<Rect>,
+}
 
 impl WorkItemTable {
     pub fn new() -> Self {
-        Self
+        Self { table_area: Rect::default(), gear_area: None }
     }
 
     // ── Selection helpers ────────────────────────────────────────────
@@ -101,7 +109,7 @@ impl WorkItemTable {
 
     // ── Rendering ────────────────────────────────────────────────────
 
-    pub fn render(&self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+    fn render_table(&self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
         ui.layout.table_area = area;
 
         let rui = active_rui(model, ui);
@@ -238,7 +246,7 @@ impl WorkItemTable {
         }
     }
 
-    pub fn render_providers(&self, model: &TuiModel, _ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+    fn render_providers(&self, model: &TuiModel, _ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
         let repo_identity = &model.repo_order[model.active_repo];
         let rm = &model.repos[repo_identity];
 
@@ -260,6 +268,140 @@ impl WorkItemTable {
             .header(provider_table_header(theme))
             .block(Block::bordered().style(theme.block_style()).title_top(Line::from(" ✕ ").right_aligned()));
         frame.render_widget(table, area);
+    }
+}
+
+impl WorkItemTable {
+    // ── Mouse helpers ──
+
+    /// Hit-test a mouse position against the table area to find which
+    /// selectable row (if any) was clicked.
+    pub(crate) fn row_at_mouse(&self, x: u16, y: u16, ctx: &WidgetContext) -> Option<usize> {
+        let ta = self.table_area;
+        if x >= ta.x && x < ta.x + ta.width && y >= ta.y && y < ta.y + ta.height {
+            let row_in_table = (y - ta.y) as usize;
+            if row_in_table < 2 {
+                return None;
+            }
+            let data_row = row_in_table - 2;
+            let repo_key = &ctx.repo_order[ctx.active_repo];
+            let rui = &ctx.repo_ui[repo_key];
+            let offset = rui.table_state.offset();
+            let actual_row = data_row + offset;
+            rui.table_view.selectable_indices.iter().position(|&idx| idx == actual_row)
+        } else {
+            None
+        }
+    }
+
+    // ── Action helpers ──
+
+    fn toggle_providers(ctx: &mut WidgetContext) -> Outcome {
+        let repo_key = &ctx.repo_order[ctx.active_repo];
+        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
+        rui.show_providers = !rui.show_providers;
+        Outcome::Consumed
+    }
+}
+
+impl InteractiveWidget for WorkItemTable {
+    fn handle_action(&mut self, action: Action, ctx: &mut WidgetContext) -> Outcome {
+        match action {
+            Action::SelectNext => {
+                self.select_next(ctx);
+                Outcome::Consumed
+            }
+            Action::SelectPrev => {
+                self.select_prev(ctx);
+                Outcome::Consumed
+            }
+            Action::ToggleMultiSelect => {
+                self.toggle_multi_select(ctx);
+                Outcome::Consumed
+            }
+            Action::ToggleProviders => Self::toggle_providers(ctx),
+            Action::ToggleHelp => Outcome::Push(Box::new(super::help::HelpWidget::new())),
+            Action::OpenBranchInput => Outcome::Push(Box::new(super::branch_input::BranchInputWidget::new(BranchInputKind::Manual))),
+            Action::OpenIssueSearch => {
+                *ctx.mode = UiMode::IssueSearch { input: tui_input::Input::default() };
+                Outcome::Push(Box::new(super::issue_search::IssueSearchWidget::new()))
+            }
+            Action::OpenCommandPalette => Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new())),
+            _ => Outcome::Ignored,
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent, ctx: &mut WidgetContext) -> Outcome {
+        let x = mouse.column;
+        let y = mouse.row;
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Gear icon in the table border area
+                if let Some(gear_area) = self.gear_area {
+                    if x >= gear_area.x && x < gear_area.x + gear_area.width && y >= gear_area.y && y < gear_area.y + gear_area.height {
+                        ctx.app_actions.push(AppAction::ToggleProviders);
+                        return Outcome::Consumed;
+                    }
+                }
+
+                if let Some(si) = self.row_at_mouse(x, y, ctx) {
+                    let repo_key = &ctx.repo_order[ctx.active_repo];
+                    let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
+                    let table_idx = rui.table_view.selectable_indices[si];
+                    rui.selected_selectable_idx = Some(si);
+                    rui.table_state.select(Some(table_idx));
+                    return Outcome::Consumed;
+                }
+
+                Outcome::Ignored
+            }
+
+            MouseEventKind::Down(MouseButton::Right) => {
+                if let Some(si) = self.row_at_mouse(x, y, ctx) {
+                    let repo_key = &ctx.repo_order[ctx.active_repo];
+                    let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
+                    let table_idx = rui.table_view.selectable_indices[si];
+                    rui.selected_selectable_idx = Some(si);
+                    rui.table_state.select(Some(table_idx));
+                    ctx.app_actions.push(AppAction::OpenActionMenu);
+                    return Outcome::Consumed;
+                }
+                Outcome::Ignored
+            }
+
+            MouseEventKind::ScrollDown => {
+                self.select_next(ctx);
+                Outcome::Consumed
+            }
+
+            MouseEventKind::ScrollUp => {
+                self.select_prev(ctx);
+                Outcome::Consumed
+            }
+
+            _ => Outcome::Ignored,
+        }
+    }
+
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
+        // Store area for mouse hit-testing
+        self.table_area = area;
+        self.render_table(ctx.model, ctx.ui, ctx.theme, frame, area);
+        // Capture gear icon area from layout (set during render_table)
+        self.gear_area = ctx.ui.layout.tab_areas.get(&TabId::Gear).copied();
+    }
+
+    fn mode_id(&self) -> ModeId {
+        ModeId::Normal
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
