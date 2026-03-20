@@ -140,14 +140,16 @@ impl App {
         self.process_app_actions(app_actions);
 
         // ── Tab drag handling ──
-        // The BaseView owns the drag state but can't mutate model.repo_order
+        // The Tabs widget owns the drag state but can't mutate model.repo_order
         // (read-only in WidgetContext). Perform the actual swap here.
         if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) {
-            let base = &mut self.screen.base_view;
-            let drag_active = base.drag.dragging_tab.is_some() && base.drag.active;
-            if drag_active {
-                let base = &mut self.screen.base_view;
-                base.tab_bar.handle_drag(mouse.column, mouse.row, &mut base.drag, &mut self.model.repo_order, &mut self.model.active_repo);
+            let tabs = &mut self.screen.tabs;
+            if tabs.drag.dragging_tab.is_some()
+                && tabs.drag.active
+                && tabs.handle_drag(mouse.column, mouse.row, &mut self.model.repo_order, &mut self.model.active_repo)
+            {
+                // Update drag index to the new position after the swap
+                tabs.update_drag_index(self.model.active_repo);
             }
         }
 
@@ -909,8 +911,7 @@ mod tests {
     #[test]
     fn clicking_search_status_target_opens_command_palette() {
         let mut app = stub_app();
-        app.screen.base_view.status_bar.key_targets =
-            vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
+        app.screen.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
 
         app.handle_mouse(left_click(12, 29));
 
@@ -921,8 +922,7 @@ mod tests {
     fn clicking_layout_status_cycles_layout() {
         let mut app = stub_app();
         assert_eq!(app.ui.view_layout, RepoViewLayout::Auto);
-        app.screen.base_view.status_bar.key_targets =
-            vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
+        app.screen.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
 
         app.handle_mouse(left_click(4, 29));
 
@@ -933,8 +933,7 @@ mod tests {
     fn clicking_host_status_target_cycles_target_host() {
         let mut app = stub_app();
         insert_peer_host(&mut app.model, "alpha");
-        app.screen.base_view.status_bar.key_targets =
-            vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
+        app.screen.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
 
         app.handle_mouse(left_click(4, 29));
 
@@ -945,8 +944,7 @@ mod tests {
     fn clicking_dismiss_status_target_hides_visible_error() {
         let mut app = stub_app();
         app.model.status_message = Some("boom".into());
-        app.screen.base_view.status_bar.dismiss_targets =
-            vec![StatusBarTarget::new(Rect::new(20, 29, 1, 1), StatusBarAction::ClearError(0))];
+        app.screen.status_bar.dismiss_targets = vec![StatusBarTarget::new(Rect::new(20, 29, 1, 1), StatusBarAction::ClearError(0))];
 
         app.handle_mouse(left_click(20, 29));
 

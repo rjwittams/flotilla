@@ -7,17 +7,12 @@ use ratatui::{
 };
 
 use super::{
-    event_log::EventLogWidget, preview_panel::PreviewPanel, status_bar_widget::StatusBarWidget, tab_bar::TabBar,
-    work_item_table::WorkItemTable, AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext,
+    event_log::EventLogWidget, preview_panel::PreviewPanel, work_item_table::WorkItemTable, AppAction, InteractiveWidget, Outcome,
+    RenderContext, WidgetContext,
 };
 use crate::{
-    app::{
-        ui_state::{DragState, UiMode},
-        RepoViewLayout,
-    },
+    app::{ui_state::UiMode, RepoViewLayout},
     keymap::{Action, ModeId},
-    status_bar::StatusBarAction,
-    ui_helpers,
 };
 
 // ── Preview layout constants ──
@@ -79,22 +74,20 @@ pub struct DoubleClickState {
     pub last_selectable_idx: Option<usize>,
 }
 
-/// Root widget that composes the base layer: tab bar, content area (table +
-/// preview), status bar, and event log.
+/// Content area widget: table + preview panel in Normal mode, event log in
+/// Config mode.
 ///
 /// Owned by `Screen` as the base layer and handles all Normal-mode actions via
 /// two-phase dispatch (focused child first, then cross-cutting concerns).
 /// Modal widgets are pushed onto Screen's modal_stack and rendered after BaseView.
+///
+/// The tab bar and status bar are owned by `Screen`, not `BaseView`.
 pub struct BaseView {
-    pub tab_bar: TabBar,
-    pub status_bar: StatusBarWidget,
     pub table: WorkItemTable,
     pub preview: PreviewPanel,
     pub event_log: EventLogWidget,
     /// Double-click detection for table rows.
     double_click: DoubleClickState,
-    /// Tab drag-reorder state.
-    pub drag: DragState,
 }
 
 impl Default for BaseView {
@@ -106,13 +99,10 @@ impl Default for BaseView {
 impl BaseView {
     pub fn new() -> Self {
         Self {
-            tab_bar: TabBar::new(),
-            status_bar: StatusBarWidget::new(),
             table: WorkItemTable::new(),
             preview: PreviewPanel::new(),
             event_log: EventLogWidget::new(),
             double_click: DoubleClickState::default(),
-            drag: DragState::default(),
         }
     }
 
@@ -219,9 +209,6 @@ impl InteractiveWidget for BaseView {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, ctx: &mut WidgetContext) -> Outcome {
-        let x = mouse.column;
-        let y = mouse.row;
-
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // 1. Event log filter area (delegate to event_log in Config mode —
@@ -233,48 +220,11 @@ impl InteractiveWidget for BaseView {
                     }
                 }
 
-                // 2. Tab bar
-                let is_config = ctx.mode.is_config();
-                let tab_action = self.tab_bar.handle_click(x, y, is_config);
-                match tab_action {
-                    super::tab_bar::TabBarAction::SwitchToConfig => {
-                        self.drag.dragging_tab = None;
-                        ctx.app_actions.push(AppAction::SwitchToConfig);
-                        return Outcome::Consumed;
-                    }
-                    super::tab_bar::TabBarAction::SwitchToRepo(i) => {
-                        ctx.app_actions.push(AppAction::SwitchToRepo(i));
-                        // Start potential drag
-                        self.drag.dragging_tab = Some(i);
-                        self.drag.start_x = x;
-                        self.drag.active = false;
-                        return Outcome::Consumed;
-                    }
-                    super::tab_bar::TabBarAction::OpenFilePicker => {
-                        ctx.app_actions.push(AppAction::OpenFilePicker);
-                        return Outcome::Consumed;
-                    }
-                    super::tab_bar::TabBarAction::None => {}
-                }
-
-                // 3. Status bar
-                if let Some(sb_action) = self.status_bar.handle_click(x, y) {
-                    match sb_action {
-                        StatusBarAction::KeyPress { code, modifiers } => {
-                            ctx.app_actions.push(AppAction::StatusBarKeyPress { code, modifiers });
-                        }
-                        StatusBarAction::ClearError(id) => {
-                            ctx.app_actions.push(AppAction::ClearError(id));
-                        }
-                    }
-                    return Outcome::Consumed;
-                }
-
-                // Clear drag if click didn't hit tab bar
-                self.drag.dragging_tab = None;
-
-                // 4. Table area (Normal mode only): double-click detection, then delegate
+                // 2. Table area (Normal mode only): double-click detection, then delegate
                 if matches!(*ctx.mode, UiMode::Normal) {
+                    let x = mouse.column;
+                    let y = mouse.row;
+
                     // Check for double-click before delegating single click to table
                     if let Some(si) = self.table.row_at_mouse(x, y, ctx) {
                         let now = Instant::now();
@@ -311,30 +261,6 @@ impl InteractiveWidget for BaseView {
                 Outcome::Ignored
             }
 
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if self.drag.dragging_tab.is_some() {
-                    if !self.drag.active {
-                        let dx = (x as i16 - self.drag.start_x as i16).unsigned_abs();
-                        if dx >= 2 {
-                            self.drag.active = true;
-                        }
-                    }
-                    return Outcome::Consumed;
-                }
-                Outcome::Ignored
-            }
-
-            MouseEventKind::Up(MouseButton::Left) => {
-                if self.drag.dragging_tab.take().is_some() {
-                    if self.drag.active {
-                        ctx.app_actions.push(AppAction::SaveTabOrder);
-                    }
-                    self.drag.active = false;
-                    return Outcome::Consumed;
-                }
-                Outcome::Ignored
-            }
-
             MouseEventKind::ScrollDown => {
                 if matches!(*ctx.mode, UiMode::Normal | UiMode::Config) {
                     if matches!(*ctx.mode, UiMode::Config) {
@@ -363,31 +289,8 @@ impl InteractiveWidget for BaseView {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, _area: Rect, ctx: &mut RenderContext) {
-        let constraints = vec![Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)];
-        let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(frame.area());
-
-        self.tab_bar.drag_active = self.drag.active;
-        self.tab_bar.render_bespoke(ctx.model, ctx.ui, self.drag.active, ctx.theme, frame, chunks[0]);
-        self.render_content(frame, chunks[1], ctx);
-
-        // When the palette is active, move the status bar to the top of the overlay so the
-        // input sits above the results instead of being pinned to the bottom of the screen.
-        let status_bar_area = if ctx.active_widget_mode == Some(ModeId::CommandPalette) {
-            ui_helpers::bottom_anchored_overlay(frame.area(), 1, crate::palette::MAX_PALETTE_ROWS as u16).status_row
-        } else {
-            chunks[2]
-        };
-        self.status_bar.render_bespoke(
-            ctx.model,
-            ctx.ui,
-            ctx.in_flight,
-            ctx.theme,
-            frame,
-            status_bar_area,
-            ctx.active_widget_mode,
-            ctx.active_widget_data.clone(),
-        );
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
+        self.render_content(frame, area, ctx);
     }
 
     fn mode_id(&self) -> ModeId {

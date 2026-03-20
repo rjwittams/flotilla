@@ -1,16 +1,26 @@
 use std::any::Any;
 
-use crossterm::event::{KeyEvent, MouseEvent};
-use ratatui::{layout::Rect, Frame};
+use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    Frame,
+};
 
-use super::{base_view::BaseView, AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext, WidgetStatusData};
-use crate::keymap::{Action, ModeId};
+use super::{
+    base_view::BaseView, status_bar_widget::StatusBarWidget, tabs::Tabs, AppAction, InteractiveWidget, Outcome, RenderContext,
+    WidgetContext, WidgetStatusData,
+};
+use crate::{
+    keymap::{Action, ModeId},
+    status_bar::StatusBarAction,
+    ui_helpers,
+};
 
-/// Root widget that owns the base layer and the modal stack.
+/// Root widget that owns the base layer, tab bar, status bar, and modal stack.
 ///
-/// Renders the base view first, then any modals on top. Owns the
-/// `has_modal()`, `dismiss_modals()`, and `apply_outcome()` helpers
-/// that previously lived on `App`.
+/// Renders the tab bar (via `Tabs`), base view content, status bar, and then
+/// any modals on top. Owns the `has_modal()`, `dismiss_modals()`, and
+/// `apply_outcome()` helpers that previously lived on `App`.
 ///
 /// Modal dispatch is handled internally: `handle_action`, `handle_raw_key`,
 /// and `handle_mouse` route events to the top modal when one exists, with
@@ -18,6 +28,8 @@ use crate::keymap::{Action, ModeId};
 /// to the base layer).
 pub struct Screen {
     pub base_view: BaseView,
+    pub tabs: Tabs,
+    pub status_bar: StatusBarWidget,
     pub modal_stack: Vec<Box<dyn InteractiveWidget>>,
 }
 
@@ -29,7 +41,7 @@ impl Default for Screen {
 
 impl Screen {
     pub fn new() -> Self {
-        Self { base_view: BaseView::new(), modal_stack: Vec::new() }
+        Self { base_view: BaseView::new(), tabs: Tabs::new(), status_bar: StatusBarWidget::new(), modal_stack: Vec::new() }
     }
 
     /// Returns true if a modal widget is on the stack above the base layer.
@@ -171,7 +183,54 @@ impl InteractiveWidget for Screen {
             return Outcome::Ignored;
         }
 
-        // No modal — dispatch to base_view
+        // No modal — handle tab bar mouse events first
+        let x = mouse.column;
+        let y = mouse.row;
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Tab bar click
+                let tab_actions = self.tabs.handle_mouse(mouse);
+                if !tab_actions.is_empty() {
+                    ctx.app_actions.extend(tab_actions);
+                    return Outcome::Consumed;
+                }
+
+                // Status bar click
+                if let Some(sb_action) = self.status_bar.handle_click(x, y) {
+                    match sb_action {
+                        StatusBarAction::KeyPress { code, modifiers } => {
+                            ctx.app_actions.push(AppAction::StatusBarKeyPress { code, modifiers });
+                        }
+                        StatusBarAction::ClearError(id) => {
+                            ctx.app_actions.push(AppAction::ClearError(id));
+                        }
+                    }
+                    return Outcome::Consumed;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.tabs.drag.dragging_tab.is_some() {
+                    let tab_actions = self.tabs.handle_mouse(mouse);
+                    if !tab_actions.is_empty() {
+                        ctx.app_actions.extend(tab_actions);
+                    }
+                    return Outcome::Consumed;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.tabs.drag.dragging_tab.is_some() {
+                    let tab_actions = self.tabs.handle_mouse(mouse);
+                    if !tab_actions.is_empty() {
+                        ctx.app_actions.extend(tab_actions);
+                    }
+                    return Outcome::Consumed;
+                }
+            }
+            _ => {}
+        }
+
+        // Dispatch to base_view for content area mouse events
         let outcome = self.base_view.handle_mouse(mouse, ctx);
         if !matches!(outcome, Outcome::Ignored) {
             self.apply_outcome(outcome);
@@ -180,10 +239,36 @@ impl InteractiveWidget for Screen {
         Outcome::Ignored
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
-        self.base_view.render(frame, area, ctx);
+    fn render(&mut self, frame: &mut Frame, _area: Rect, ctx: &mut RenderContext) {
+        let constraints = vec![Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)];
+        let chunks = Layout::default().direction(Direction::Vertical).constraints(constraints).split(frame.area());
+
+        // 1. Tab bar
+        self.tabs.render(ctx.model, ctx.ui, ctx.theme, frame, chunks[0]);
+
+        // 2. Content (table/preview/event log)
+        self.base_view.render(frame, chunks[1], ctx);
+
+        // 3. Status bar — when the palette is active, move it to the overlay position
+        let status_bar_area = if ctx.active_widget_mode == Some(ModeId::CommandPalette) {
+            ui_helpers::bottom_anchored_overlay(frame.area(), 1, crate::palette::MAX_PALETTE_ROWS as u16).status_row
+        } else {
+            chunks[2]
+        };
+        self.status_bar.render_bespoke(
+            ctx.model,
+            ctx.ui,
+            ctx.in_flight,
+            ctx.theme,
+            frame,
+            status_bar_area,
+            ctx.active_widget_mode,
+            ctx.active_widget_data.clone(),
+        );
+
+        // 4. Modals on top
         for modal in &mut self.modal_stack {
-            modal.render(frame, area, ctx);
+            modal.render(frame, frame.area(), ctx);
         }
     }
 
