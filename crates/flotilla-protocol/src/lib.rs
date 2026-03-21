@@ -34,9 +34,12 @@ pub(crate) mod test_helpers {
 }
 
 pub use commands::{
-    CheckoutSelector, CheckoutStatus, CheckoutTarget, Command, CommandAction, CommandResult, PreparedTerminalCommand, RepoSelector,
+    CheckoutSelector, CheckoutStatus, CheckoutTarget, Command, CommandAction, CommandValue, PreparedTerminalCommand, RepoSelector,
     StepStatus,
 };
+
+/// Deprecated alias — use CommandValue.
+pub type CommandResult = CommandValue;
 pub use delta::{Branch, BranchStatus, Change, DeltaEntry, EntryOp};
 pub use provider_data::{
     Agent, AgentContext, AgentEventType, AgentHarness, AgentHookEvent, AgentStatus, AheadBehind, AssociationKey, AttachableId,
@@ -189,7 +192,7 @@ pub enum DaemonEvent {
         host: HostName,
         repo_identity: RepoIdentity,
         repo: std::path::PathBuf,
-        result: commands::CommandResult,
+        result: commands::CommandValue,
     },
     #[serde(rename = "command_step_update")]
     CommandStepUpdate {
