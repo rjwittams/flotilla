@@ -51,7 +51,7 @@ impl TestHarness {
                 issue_search_active: false,
                 loading: rm.loading,
             });
-            let page = flotilla_tui::widgets::repo_page::RepoPage::new(identity.clone(), shared);
+            let page = flotilla_tui::widgets::repo_page::RepoPage::new(identity.clone(), shared, ui.view_layout);
             screen.repo_pages.insert(identity.clone(), page);
         }
         Self { model, ui, in_flight: HashMap::new(), screen, theme: None, width: WIDTH, height: HEIGHT }

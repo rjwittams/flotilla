@@ -124,7 +124,7 @@ pub struct RepoPage {
 }
 
 impl RepoPage {
-    pub fn new(repo_identity: RepoIdentity, repo_data: Shared<RepoData>) -> Self {
+    pub fn new(repo_identity: RepoIdentity, repo_data: Shared<RepoData>, layout: RepoViewLayout) -> Self {
         Self {
             repo_identity,
             repo_data,
@@ -132,7 +132,7 @@ impl RepoPage {
             preview: PreviewPanel::new(),
             multi_selected: HashSet::new(),
             pending_actions: HashMap::new(),
-            layout: RepoViewLayout::default(),
+            layout,
             show_providers: false,
             active_search_query: None,
             last_seen_generation: 0,
@@ -442,7 +442,7 @@ mod tests {
 
     fn page_with_items(items: Vec<WorkItem>) -> RepoPage {
         let data = test_repo_data(items);
-        let mut page = RepoPage::new(test_repo_identity(), data);
+        let mut page = RepoPage::new(test_repo_identity(), data, RepoViewLayout::Auto);
         page.reconcile_if_changed();
         page
     }
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn reconcile_rebuilds_table_on_data_change() {
         let data = test_repo_data(vec![issue_item("1"), issue_item("2")]);
-        let mut page = RepoPage::new(test_repo_identity(), data.clone());
+        let mut page = RepoPage::new(test_repo_identity(), data.clone(), RepoViewLayout::Auto);
 
         // First reconciliation should pick up initial data.
         page.reconcile_if_changed();
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn reconcile_is_noop_when_unchanged() {
         let data = test_repo_data(vec![issue_item("1")]);
-        let mut page = RepoPage::new(test_repo_identity(), data);
+        let mut page = RepoPage::new(test_repo_identity(), data, RepoViewLayout::Auto);
 
         page.reconcile_if_changed();
         let gen_after_first = page.last_seen_generation;
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn reconcile_prunes_stale_multi_select() {
         let data = test_repo_data(vec![issue_item("1"), issue_item("2"), issue_item("3")]);
-        let mut page = RepoPage::new(test_repo_identity(), data.clone());
+        let mut page = RepoPage::new(test_repo_identity(), data.clone(), RepoViewLayout::Auto);
         page.reconcile_if_changed();
 
         // Multi-select items 1 and 3.
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn reconcile_prunes_stale_pending_actions() {
         let data = test_repo_data(vec![issue_item("1"), issue_item("2")]);
-        let mut page = RepoPage::new(test_repo_identity(), data.clone());
+        let mut page = RepoPage::new(test_repo_identity(), data.clone(), RepoViewLayout::Auto);
         page.reconcile_if_changed();
 
         page.pending_actions.insert(WorkItemIdentity::Issue("1".into()), PendingAction {

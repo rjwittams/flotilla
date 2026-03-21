@@ -300,7 +300,7 @@ impl App {
                 issue_search_active: false,
                 loading: rm.loading,
             });
-            let page = RepoPage::new(identity.clone(), shared.clone());
+            let page = RepoPage::new(identity.clone(), shared.clone(), ui.view_layout);
             repo_data_map.insert(identity.clone(), shared);
             screen.repo_pages.insert(identity.clone(), page);
         }
@@ -483,7 +483,14 @@ impl App {
                     self.theme = (themes[next].1)();
                 }
                 AppAction::CycleLayout => {
-                    self.ui.cycle_layout();
+                    // RepoPage already cycled its own layout in handle_action.
+                    // Sync the page's layout to the global ui field and persist.
+                    if !self.model.repo_order.is_empty() {
+                        let identity = &self.model.repo_order[self.model.active_repo];
+                        if let Some(page) = self.screen.repo_pages.get(identity) {
+                            self.ui.view_layout = page.layout;
+                        }
+                    }
                     self.persist_layout();
                 }
                 AppAction::CycleHost => {
@@ -884,7 +891,7 @@ impl App {
             issue_search_active: false,
             loading: info.loading,
         });
-        let page = RepoPage::new(identity.clone(), shared.clone());
+        let page = RepoPage::new(identity.clone(), shared.clone(), self.ui.view_layout);
         self.repo_data.insert(identity.clone(), shared);
         self.screen.repo_pages.insert(identity.clone(), page);
 
