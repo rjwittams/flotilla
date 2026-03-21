@@ -253,6 +253,12 @@ impl RepoPage {
                 action: flotilla_protocol::CommandAction::ClearIssueSearch { repo: flotilla_protocol::RepoSelector::Path(repo_path) },
             });
             self.active_search_query = None;
+            // Also clear on rui so the status bar sees it immediately
+            // (status bar reads rui.active_search_query).
+            let repo_key = &ctx.repo_order[ctx.active_repo];
+            if let Some(rui) = ctx.repo_ui.get_mut(repo_key) {
+                rui.active_search_query = None;
+            }
         } else if self.show_providers {
             self.show_providers = false;
         } else if !self.multi_selected.is_empty() {

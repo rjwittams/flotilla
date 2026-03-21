@@ -3,14 +3,29 @@ use super::App;
 impl App {
     pub fn switch_tab(&mut self, idx: usize) {
         self.screen.tabs.switch_to(idx, &mut self.model, &mut self.ui);
+        self.sync_layout_from_active_page();
     }
 
     pub fn next_tab(&mut self) {
         self.screen.tabs.next_tab(&mut self.model, &mut self.ui);
+        self.sync_layout_from_active_page();
     }
 
     pub fn prev_tab(&mut self) {
         self.screen.tabs.prev_tab(&mut self.model, &mut self.ui);
+        self.sync_layout_from_active_page();
+    }
+
+    /// Update `ui.view_layout` from the newly-active RepoPage so the
+    /// status bar shows the correct layout indicator after a tab switch.
+    fn sync_layout_from_active_page(&mut self) {
+        if self.model.repo_order.is_empty() {
+            return;
+        }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        if let Some(page) = self.screen.repo_pages.get(identity) {
+            self.ui.view_layout = page.layout;
+        }
     }
 
     pub fn move_tab(&mut self, delta: isize) -> bool {

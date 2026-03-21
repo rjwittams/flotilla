@@ -37,12 +37,13 @@ pub async fn dispatch(cmd: Command, app: &mut App, pending_ctx: Option<PendingAc
     match app.daemon.execute(cmd).await {
         Ok(command_id) => {
             if let Some(ctx) = pending_ctx {
+                let action = PendingAction { command_id, status: PendingStatus::InFlight, description: ctx.description };
+                // Dual-write: rui (for status bar / needs_animation) and RepoPage (for rendering)
                 if let Some(rui) = app.ui.repo_ui.get_mut(&ctx.repo_identity) {
-                    rui.pending_actions.insert(ctx.identity, PendingAction {
-                        command_id,
-                        status: PendingStatus::InFlight,
-                        description: ctx.description,
-                    });
+                    rui.pending_actions.insert(ctx.identity.clone(), action.clone());
+                }
+                if let Some(page) = app.screen.repo_pages.get_mut(&ctx.repo_identity) {
+                    page.pending_actions.insert(ctx.identity, action);
                 }
             }
         }

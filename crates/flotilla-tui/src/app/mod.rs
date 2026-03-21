@@ -613,13 +613,25 @@ impl App {
                     });
 
                     if let Some((repo_identity, identity)) = found {
-                        let rui = self.ui.repo_ui.get_mut(&repo_identity).expect("repo exists");
-                        if let Some(message) = error_message {
-                            if let Some(entry) = rui.pending_actions.get_mut(&identity) {
-                                entry.status = PendingStatus::Failed(message);
+                        // Dual-write: update both rui and RepoPage
+                        if let Some(ref message) = error_message {
+                            if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
+                                if let Some(entry) = rui.pending_actions.get_mut(&identity) {
+                                    entry.status = PendingStatus::Failed(message.clone());
+                                }
+                            }
+                            if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
+                                if let Some(entry) = page.pending_actions.get_mut(&identity) {
+                                    entry.status = PendingStatus::Failed(message.clone());
+                                }
                             }
                         } else {
-                            rui.pending_actions.remove(&identity);
+                            if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
+                                rui.pending_actions.remove(&identity);
+                            }
+                            if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
+                                page.pending_actions.remove(&identity);
+                            }
                         }
                     }
                 }

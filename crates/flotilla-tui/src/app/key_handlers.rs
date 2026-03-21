@@ -185,12 +185,14 @@ impl App {
     }
 
     /// Sync fields written by modal widgets (IssueSearch, CommandPalette)
-    /// and the executor into the active RepoPage before dispatch.
+    /// into the active RepoPage before dispatch.
     ///
     /// `active_search_query` is written by IssueSearchWidget and
-    /// CommandPaletteWidget via `ctx.repo_ui`. `pending_actions` is written
-    /// by the executor via `ctx.repo_ui`. This ensures the RepoPage picks
-    /// up those changes before the widget stack processes the next event.
+    /// CommandPaletteWidget via `ctx.repo_ui`. This ensures the RepoPage
+    /// picks up those changes before the widget stack processes the next event.
+    ///
+    /// `pending_actions` is NOT synced here — the executor and daemon-event
+    /// handler dual-write to both rui and RepoPage directly.
     fn sync_ui_state_to_repo_page(&mut self) {
         if self.ui.mode.is_config() || self.model.repo_order.is_empty() {
             return;
@@ -199,7 +201,6 @@ impl App {
         if let Some(rui) = self.ui.repo_ui.get(identity) {
             if let Some(page) = self.screen.repo_pages.get_mut(identity) {
                 page.active_search_query.clone_from(&rui.active_search_query);
-                page.pending_actions.clone_from(&rui.pending_actions);
             }
         }
     }
