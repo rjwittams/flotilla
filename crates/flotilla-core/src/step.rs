@@ -11,6 +11,8 @@ pub enum StepOutcome {
     Completed,
     /// Step completed and wants to override the final CommandValue.
     CompletedWith(CommandValue),
+    /// Inter-step data visible to later steps but excluded from the final result.
+    Produced(CommandValue),
     /// Step determined its work was already done and skipped.
     Skipped,
 }
@@ -363,6 +365,31 @@ mod tests {
             host: StepHost::Local,
             action: StepAction::Closure(Box::new(|_prior: Vec<StepOutcome>| Box::pin(async { Ok(StepOutcome::Completed) }))),
         }]);
+
+        let result = run_step_plan(
+            plan,
+            1,
+            HostName::local(),
+            RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+            PathBuf::from("/repo"),
+            cancel,
+            tx,
+            None,
+        )
+        .await;
+        assert_eq!(result, CommandValue::Ok);
+    }
+
+    #[tokio::test]
+    async fn produced_does_not_override_final_result() {
+        let (cancel, tx) = setup();
+        let plan = StepPlan::new(vec![
+            make_step(
+                "step-a",
+                Ok(StepOutcome::Produced(CommandValue::AttachCommandResolved { command: "attach cmd".into() })),
+            ),
+            make_step("step-b", Ok(StepOutcome::Completed)),
+        ]);
 
         let result = run_step_plan(
             plan,
