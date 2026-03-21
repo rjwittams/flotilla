@@ -18,7 +18,7 @@ use ratatui::{
 use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext, PROVIDER_CATEGORIES};
 use crate::{
     app::{
-        ui_state::{BranchInputKind, PendingAction, PendingStatus, UiMode},
+        ui_state::{BranchInputKind, PendingAction, PendingStatus},
         ProviderStatus, TuiModel, UiState,
     },
     binding_table::{BindingModeId, KeyBindingMode},
@@ -451,10 +451,7 @@ impl InteractiveWidget for WorkItemTable {
             Action::ToggleProviders => Self::toggle_providers(ctx),
             Action::ToggleHelp => Outcome::Push(Box::new(super::help::HelpWidget::new())),
             Action::OpenBranchInput => Outcome::Push(Box::new(super::branch_input::BranchInputWidget::new(BranchInputKind::Manual))),
-            Action::OpenIssueSearch => {
-                *ctx.mode = UiMode::IssueSearch { input: tui_input::Input::default() };
-                Outcome::Push(Box::new(super::issue_search::IssueSearchWidget::new()))
-            }
+            Action::OpenIssueSearch => Outcome::Push(Box::new(super::issue_search::IssueSearchWidget::new())),
             Action::OpenCommandPalette => Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new())),
             _ => Outcome::Ignored,
         }

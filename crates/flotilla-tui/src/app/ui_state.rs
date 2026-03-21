@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use flotilla_core::data::{GroupEntry, GroupedWorkItems};
 use flotilla_protocol::{HostName, RepoIdentity, WorkItemIdentity};
 use ratatui::{layout::Rect, widgets::TableState};
-use tui_input::Input;
 
 use crate::status_bar::StatusBarTarget;
 
@@ -29,9 +28,6 @@ pub enum UiMode {
     #[default]
     Normal,
     Config,
-    IssueSearch {
-        input: Input,
-    },
 }
 
 impl UiMode {
@@ -252,8 +248,7 @@ mod tests {
 
     #[test]
     fn is_config_returns_true_only_for_config_variant() {
-        let cases: Vec<(UiMode, bool)> =
-            vec![(UiMode::Normal, false), (UiMode::Config, true), (UiMode::IssueSearch { input: Input::default() }, false)];
+        let cases: Vec<(UiMode, bool)> = vec![(UiMode::Normal, false), (UiMode::Config, true)];
         for (mode, expected) in &cases {
             assert_eq!(mode.is_config(), *expected, "failed for mode variant");
         }

@@ -230,7 +230,6 @@ impl From<&UiMode> for BindingModeId {
         match mode {
             UiMode::Normal => BindingModeId::Normal,
             UiMode::Config => BindingModeId::Overview,
-            UiMode::IssueSearch { .. } => BindingModeId::IssueSearch,
         }
     }
 }
@@ -733,7 +732,6 @@ mod tests {
     fn binding_mode_id_from_ui_mode() {
         assert_eq!(BindingModeId::from(&UiMode::Normal), BindingModeId::Normal);
         assert_eq!(BindingModeId::from(&UiMode::Config), BindingModeId::Overview);
-        assert_eq!(BindingModeId::from(&UiMode::IssueSearch { input: tui_input::Input::default() }), BindingModeId::IssueSearch);
     }
 
     // ── help_sections tests ──

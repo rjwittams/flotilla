@@ -419,8 +419,6 @@ mod tests {
         });
     }
 
-    use tui_input::Input;
-
     fn make_work_item(id: &str) -> flotilla_protocol::WorkItem {
         checkout_item(&format!("feat/{id}"), &format!("/tmp/{id}"), false)
     }
@@ -1259,14 +1257,12 @@ mod tests {
     // ── IssueSearch integration (via widget stack) ──────────────────
 
     fn push_issue_search_widget(app: &mut App) {
-        app.ui.mode = UiMode::IssueSearch { input: Input::default() };
         app.screen.modal_stack.push(Box::new(crate::widgets::issue_search::IssueSearchWidget::new()));
     }
 
     fn push_issue_search_widget_with_text(app: &mut App, text: &str) {
         // We can't set text directly on the widget from outside, so we simulate
         // by typing each character through the widget stack.
-        app.ui.mode = UiMode::IssueSearch { input: Input::default() };
         app.screen.modal_stack.push(Box::new(crate::widgets::issue_search::IssueSearchWidget::new()));
         for ch in text.chars() {
             app.handle_key(key(KeyCode::Char(ch)));

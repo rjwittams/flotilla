@@ -325,10 +325,7 @@ impl InteractiveWidget for RepoPage {
             Action::OpenBranchInput => {
                 Outcome::Push(Box::new(super::branch_input::BranchInputWidget::new(crate::app::ui_state::BranchInputKind::Manual)))
             }
-            Action::OpenIssueSearch => {
-                *ctx.mode = UiMode::IssueSearch { input: tui_input::Input::default() };
-                Outcome::Push(Box::new(super::issue_search::IssueSearchWidget::new()))
-            }
+            Action::OpenIssueSearch => Outcome::Push(Box::new(super::issue_search::IssueSearchWidget::new())),
             Action::OpenCommandPalette => Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new())),
             // Actions handled at the App level — return Ignored so they bubble up.
             Action::Confirm | Action::OpenActionMenu | Action::OpenFilePicker | Action::Dispatch(_) => Outcome::Ignored,
@@ -802,7 +799,6 @@ mod tests {
 
         let outcome = page.handle_action(Action::OpenIssueSearch, &mut ctx);
         assert!(matches!(outcome, Outcome::Push(_)));
-        assert!(matches!(harness.mode, UiMode::IssueSearch { .. }));
     }
 
     #[test]

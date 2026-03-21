@@ -103,7 +103,6 @@ impl Screen {
             repo_order.get(active_repo)
         }
     }
-
 }
 
 impl InteractiveWidget for Screen {

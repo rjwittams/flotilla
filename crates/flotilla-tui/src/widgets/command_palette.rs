@@ -13,7 +13,6 @@ use tui_input::{backend::crossterm::EventHandler as InputEventHandler, Input};
 
 use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext};
 use crate::{
-    app::ui_state::UiMode,
     binding_table::{BindingModeId, KeyBindingMode, StatusContent, StatusFragment},
     keymap::Action,
     palette::{self, PaletteEntry, MAX_PALETTE_ROWS},
@@ -100,11 +99,7 @@ impl CommandPaletteWidget {
                 let widget = super::branch_input::BranchInputWidget::new(crate::app::ui_state::BranchInputKind::Manual);
                 Outcome::Swap(Box::new(widget))
             }
-            Action::OpenIssueSearch => {
-                let widget = super::issue_search::IssueSearchWidget::new();
-                *ctx.mode = UiMode::IssueSearch { input: Input::default() };
-                Outcome::Swap(Box::new(widget))
-            }
+            Action::OpenIssueSearch => Outcome::Swap(Box::new(super::issue_search::IssueSearchWidget::new())),
             Action::OpenFilePicker => {
                 // Build the file picker from the active repo parent
                 let parent_path = ctx.model.active_repo_root().parent().map(|p| format!("{}/", p.display()));
