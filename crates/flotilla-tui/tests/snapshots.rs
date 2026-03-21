@@ -478,7 +478,6 @@ fn providers_overlay() {
         .with_provider_status("my-project", "cloud_agent", "Claude", ProviderStatus::Ok)
         .with_provider_status("my-project", "change_request", "GitHub", ProviderStatus::Error);
     let repo = harness.model.repo_order[0].clone();
-    harness.ui.repo_ui.get_mut(&repo).unwrap().show_providers = true;
     harness.screen.repo_pages.get_mut(&repo).expect("repo page exists").show_providers = true;
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);

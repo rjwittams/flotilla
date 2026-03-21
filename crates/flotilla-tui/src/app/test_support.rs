@@ -15,15 +15,15 @@ use flotilla_core::{
 };
 use flotilla_protocol::{
     Change, Command, DaemonEvent, HostListResponse, HostName, HostProvidersResponse, HostStatusResponse, ProviderData, ProviderError,
-    RepoDelta, RepoDetailResponse, RepoIdentity, RepoInfo, RepoLabels, RepoProvidersResponse, RepoSnapshot, RepoWorkResponse,
-    StatusResponse, StreamKey, TopologyResponse, WorkItem,
+    RepoDelta, RepoDetailResponse, RepoInfo, RepoLabels, RepoProvidersResponse, RepoSnapshot, RepoWorkResponse, StatusResponse, StreamKey,
+    TopologyResponse, WorkItem,
 };
 use tokio::sync::broadcast;
 use tui_input::Input;
 
 // Re-export shared builders so unit tests can use `test_support::checkout_item` etc.
 pub(crate) use super::test_builders::*;
-use super::{App, CommandQueue, DirEntry, InFlightCommand, RepoUiState, TuiModel, UiMode};
+use super::{App, CommandQueue, DirEntry, InFlightCommand, TuiModel, UiMode};
 use crate::{keymap::Keymap, widgets::WidgetContext};
 
 pub(crate) struct StubDaemon {
@@ -219,7 +219,6 @@ pub(crate) struct TestWidgetHarness {
     pub config: Arc<ConfigStore>,
     pub in_flight: HashMap<u64, InFlightCommand>,
     pub commands: CommandQueue,
-    pub repo_ui: HashMap<RepoIdentity, RepoUiState>,
     pub target_host: Option<HostName>,
     pub mode: UiMode,
 }
@@ -233,7 +232,6 @@ impl TestWidgetHarness {
             config: app.config,
             in_flight: app.in_flight,
             commands: app.proto_commands,
-            repo_ui: app.ui.repo_ui,
             target_host: app.ui.target_host,
             mode: UiMode::Normal,
         }
@@ -249,7 +247,6 @@ impl TestWidgetHarness {
             active_repo: self.model.active_repo,
             repo_order: &self.model.repo_order,
             commands: &mut self.commands,
-            repo_ui: &mut self.repo_ui,
             mode: &mut self.mode,
             app_actions: Vec::new(),
         }

@@ -26,7 +26,7 @@ use flotilla_protocol::{
 pub use intent::Intent;
 use tui_input::Input;
 use ui_state::PendingStatus;
-pub use ui_state::{BranchInputKind, DirEntry, RepoUiState, RepoViewLayout, TabId, UiMode, UiState};
+pub use ui_state::{BranchInputKind, DirEntry, RepoViewLayout, TabId, UiMode, UiState};
 
 use crate::{
     keymap::Keymap,
@@ -465,7 +465,6 @@ impl App {
             active_repo: self.model.active_repo,
             repo_order: &self.model.repo_order,
             commands: &mut self.proto_commands,
-            repo_ui: &mut self.ui.repo_ui,
             mode: &mut self.ui.mode,
             app_actions: Vec::new(),
         }
@@ -895,14 +894,12 @@ impl App {
             issue_initial_requested: false,
             has_unseen_changes: false,
         });
-        self.model.repo_order.push(identity.clone());
-        self.ui.repo_ui.insert(identity, RepoUiState::default());
+        self.model.repo_order.push(identity);
     }
 
     fn handle_repo_removed(&mut self, repo_identity: &RepoIdentity) {
         self.model.repos.remove(repo_identity);
         self.model.repo_order.retain(|repo| repo != repo_identity);
-        self.ui.repo_ui.remove(repo_identity);
         self.repo_data.remove(repo_identity);
         self.screen.repo_pages.remove(repo_identity);
         if self.model.repo_order.is_empty() {
@@ -918,17 +915,6 @@ impl App {
         if let Some(page) = self.screen.repo_pages.get(identity) {
             self.ui.view_layout = page.layout;
         }
-    }
-
-    // ── Convenience accessors ──
-
-    pub fn active_ui(&self) -> &RepoUiState {
-        self.ui.active_repo_ui(&self.model.repo_order, self.model.active_repo)
-    }
-
-    pub fn active_ui_mut(&mut self) -> &mut RepoUiState {
-        let key = &self.model.repo_order[self.model.active_repo];
-        self.ui.repo_ui.get_mut(key).expect("active repo must have UI state")
     }
 
     pub fn selected_work_item(&self) -> Option<&WorkItem> {

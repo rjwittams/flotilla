@@ -220,7 +220,7 @@ impl RepoPage {
         self.preview.render_with_item(ctx.model, ctx.ui, selected_item, ctx.theme, frame, chunks[1]);
     }
 
-    /// Render the table using RepoPage-owned state, bypassing RepoUiState.
+    /// Render the table using RepoPage-owned state, 
     fn render_table(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
         self.table.table_area = area;
         self.table.render_table_owned(

@@ -1,8 +1,7 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
-use flotilla_core::data::GroupedWorkItems;
 use flotilla_protocol::{HostName, RepoIdentity, WorkItemIdentity};
-use ratatui::{layout::Rect, widgets::TableState};
+use ratatui::layout::Rect;
 
 use crate::status_bar::StatusBarTarget;
 
@@ -65,17 +64,6 @@ pub struct PendingActionContext {
     pub repo_identity: RepoIdentity,
 }
 
-/// Per-repo UI state (selection, table widget state, visual flags).
-#[derive(Default)]
-pub struct RepoUiState {
-    pub table_view: GroupedWorkItems,
-    pub table_state: TableState,
-    pub selected_selectable_idx: Option<usize>,
-    pub multi_selected: HashSet<WorkItemIdentity>,
-    pub show_providers: bool,
-    pub active_search_query: Option<String>,
-}
-
 /// Identifies a clickable tab in the tab bar.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TabId {
@@ -131,7 +119,6 @@ pub struct DragState {
 
 pub struct UiState {
     pub mode: UiMode,
-    pub repo_ui: HashMap<RepoIdentity, RepoUiState>,
     pub target_host: Option<HostName>,
     pub view_layout: RepoViewLayout,
     pub status_bar: StatusBarUiState,
@@ -141,11 +128,9 @@ pub struct UiState {
 }
 
 impl UiState {
-    pub fn new(repo_ids: &[RepoIdentity]) -> Self {
-        let repo_ui = repo_ids.iter().map(|repo_id| (repo_id.clone(), RepoUiState::default())).collect();
+    pub fn new(_repo_ids: &[RepoIdentity]) -> Self {
         Self {
             mode: UiMode::default(),
-            repo_ui,
             target_host: None,
             view_layout: RepoViewLayout::default(),
             status_bar: StatusBarUiState::default(),
@@ -153,10 +138,6 @@ impl UiState {
             show_debug: false,
             help_scroll: 0,
         }
-    }
-
-    pub fn active_repo_ui(&self, repo_order: &[RepoIdentity], active_repo: usize) -> &RepoUiState {
-        &self.repo_ui[&repo_order[active_repo]]
     }
 
     pub fn cycle_layout(&mut self) {
@@ -188,10 +169,6 @@ mod tests {
 
     use super::*;
 
-    fn repo_id(path: &str) -> RepoIdentity {
-        RepoIdentity { authority: "local".into(), path: path.into() }
-    }
-
     // ── UiMode tests ──────────────────────────────────────────────────
 
     #[test]
@@ -212,28 +189,9 @@ mod tests {
     #[test]
     fn new_with_empty_paths() {
         let state = UiState::new(&[]);
-        assert!(state.repo_ui.is_empty());
         assert!(matches!(state.mode, UiMode::Normal));
         assert!(!state.show_debug);
         assert_eq!(state.view_layout, RepoViewLayout::Auto);
-    }
-
-    #[test]
-    fn new_with_single_path_creates_one_repo() {
-        let paths = vec![repo_id("/repo/a")];
-        let state = UiState::new(&paths);
-        assert_eq!(state.repo_ui.len(), 1);
-        assert!(state.repo_ui.contains_key(&repo_id("/repo/a")));
-    }
-
-    #[test]
-    fn new_with_multiple_paths_creates_correct_count() {
-        let paths = vec![repo_id("/repo/a"), repo_id("/repo/b"), repo_id("/repo/c")];
-        let state = UiState::new(&paths);
-        assert_eq!(state.repo_ui.len(), 3);
-        for p in &paths {
-            assert!(state.repo_ui.contains_key(p));
-        }
     }
 
     #[test]
@@ -298,35 +256,5 @@ mod tests {
         state.cycle_target_host(&[]);
 
         assert_eq!(state.target_host, None);
-    }
-
-    // ── active_repo_ui tests ──────────────────────────────────────────
-
-    #[test]
-    fn active_repo_ui_returns_repos_for_valid_indices() {
-        let paths = vec![repo_id("/repo/a"), repo_id("/repo/b")];
-        let state = UiState::new(&paths);
-        for idx in 0..paths.len() {
-            let repo_ui = state.active_repo_ui(&paths, idx);
-            assert_eq!(repo_ui.selected_selectable_idx, None);
-        }
-    }
-
-    #[test]
-    #[should_panic]
-    fn active_repo_ui_panics_on_out_of_bounds_index() {
-        let paths = vec![repo_id("/repo/a")];
-        let state = UiState::new(&paths);
-        let _ = state.active_repo_ui(&paths, 5);
-    }
-
-    // ── RepoUiState default tests ─────────────────────────────────────
-
-    #[test]
-    fn repo_ui_state_default() {
-        let state = RepoUiState::default();
-        assert_eq!(state.selected_selectable_idx, None);
-        assert!(state.multi_selected.is_empty());
-        assert!(!state.show_providers);
     }
 }
