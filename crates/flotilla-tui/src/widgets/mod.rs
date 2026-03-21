@@ -8,6 +8,7 @@ pub mod event_log;
 pub mod file_picker;
 pub mod help;
 pub mod issue_search;
+pub mod overview_page;
 pub mod preview_panel;
 pub mod repo_page;
 pub mod screen;

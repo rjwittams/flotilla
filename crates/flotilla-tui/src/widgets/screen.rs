@@ -8,8 +8,8 @@ use ratatui::{
 };
 
 use super::{
-    base_view::BaseView, repo_page::RepoPage, status_bar_widget::StatusBarWidget, tabs::Tabs, AppAction, InteractiveWidget, Outcome,
-    RenderContext, WidgetContext, WidgetStatusData,
+    base_view::BaseView, overview_page::OverviewPage, repo_page::RepoPage, status_bar_widget::StatusBarWidget, tabs::Tabs, AppAction,
+    InteractiveWidget, Outcome, RenderContext, WidgetContext, WidgetStatusData,
 };
 use crate::{
     keymap::{Action, ModeId},
@@ -33,6 +33,7 @@ pub struct Screen {
     pub status_bar: StatusBarWidget,
     pub modal_stack: Vec<Box<dyn InteractiveWidget>>,
     pub repo_pages: HashMap<RepoIdentity, RepoPage>,
+    pub overview_page: OverviewPage,
 }
 
 impl Default for Screen {
@@ -49,6 +50,7 @@ impl Screen {
             status_bar: StatusBarWidget::new(),
             modal_stack: Vec::new(),
             repo_pages: HashMap::new(),
+            overview_page: OverviewPage::new(),
         }
     }
 
@@ -163,9 +165,12 @@ impl InteractiveWidget for Screen {
             return Outcome::Ignored;
         }
 
-        // Phase 3: No modal — dispatch to repo page or base_view
-        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, ctx.mode.is_config()).cloned();
-        let outcome = if let Some(ref identity) = active_identity {
+        // Phase 3: No modal — dispatch to overview page, repo page, or base_view
+        let is_config = ctx.mode.is_config();
+        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, is_config).cloned();
+        let outcome = if is_config {
+            self.overview_page.handle_action(action, ctx)
+        } else if let Some(ref identity) = active_identity {
             if let Some(page) = self.repo_pages.get_mut(identity) {
                 page.handle_action(action, ctx)
             } else {
@@ -192,9 +197,12 @@ impl InteractiveWidget for Screen {
             return Outcome::Ignored;
         }
 
-        // No modal — dispatch to repo page or base_view
-        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, ctx.mode.is_config()).cloned();
-        let outcome = if let Some(ref identity) = active_identity {
+        // No modal — dispatch to overview page, repo page, or base_view
+        let is_config = ctx.mode.is_config();
+        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, is_config).cloned();
+        let outcome = if is_config {
+            self.overview_page.handle_raw_key(key, ctx)
+        } else if let Some(ref identity) = active_identity {
             if let Some(page) = self.repo_pages.get_mut(identity) {
                 page.handle_raw_key(key, ctx)
             } else {
@@ -268,9 +276,12 @@ impl InteractiveWidget for Screen {
             _ => {}
         }
 
-        // Dispatch to repo page or base_view for content area mouse events
-        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, ctx.mode.is_config()).cloned();
-        let outcome = if let Some(ref identity) = active_identity {
+        // Dispatch to overview page, repo page, or base_view for content area mouse events
+        let is_config = ctx.mode.is_config();
+        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, is_config).cloned();
+        let outcome = if is_config {
+            self.overview_page.handle_mouse(mouse, ctx)
+        } else if let Some(ref identity) = active_identity {
             if let Some(page) = self.repo_pages.get_mut(identity) {
                 page.handle_mouse(mouse, ctx)
             } else {
@@ -293,9 +304,12 @@ impl InteractiveWidget for Screen {
         // 1. Tab bar
         self.tabs.render(ctx.model, ctx.ui, ctx.theme, frame, chunks[0]);
 
-        // 2. Content: dispatch to repo page for repo tabs, base_view for config/overview
-        let active_identity = self.active_repo_identity(&ctx.model.repo_order, ctx.model.active_repo, ctx.ui.mode.is_config()).cloned();
-        if let Some(ref identity) = active_identity {
+        // 2. Content: dispatch to overview page for Flotilla tab, repo page for repo tabs
+        let is_config = ctx.ui.mode.is_config();
+        let active_identity = self.active_repo_identity(&ctx.model.repo_order, ctx.model.active_repo, is_config).cloned();
+        if is_config {
+            self.overview_page.render(frame, chunks[1], ctx);
+        } else if let Some(ref identity) = active_identity {
             if let Some(page) = self.repo_pages.get_mut(identity) {
                 page.render(frame, chunks[1], ctx);
             } else {

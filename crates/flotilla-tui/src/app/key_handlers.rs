@@ -454,14 +454,14 @@ mod tests {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
         {
-            let bv = &mut app.screen.base_view;
-            bv.event_log.count = 3;
-            bv.event_log.selected = Some(0);
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 3;
+            ov.event_log.selected = Some(0);
         }
 
         app.handle_key(key(KeyCode::Char('j')));
 
-        assert_eq!(app.screen.base_view.event_log.selected, Some(1));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(1));
     }
 
     #[test]
@@ -668,6 +668,7 @@ mod tests {
         app.handle_key(key(KeyCode::Char('q')));
         assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(!app.should_quit);
+        assert!(matches!(app.ui.mode, UiMode::Normal));
     }
 
     #[test]
@@ -677,6 +678,7 @@ mod tests {
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(!app.should_quit);
+        assert!(matches!(app.ui.mode, UiMode::Normal));
     }
 
     #[test]
@@ -684,12 +686,12 @@ mod tests {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
         {
-            let bv = &mut app.screen.base_view;
-            bv.event_log.count = 5;
-            bv.event_log.selected = Some(0);
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 5;
+            ov.event_log.selected = Some(0);
         }
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.screen.base_view.event_log.selected, Some(1));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(1));
     }
 
     #[test]
@@ -697,12 +699,12 @@ mod tests {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
         {
-            let bv = &mut app.screen.base_view;
-            bv.event_log.count = 5;
-            bv.event_log.selected = Some(3);
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 5;
+            ov.event_log.selected = Some(3);
         }
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.screen.base_view.event_log.selected, Some(2));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(2));
     }
 
     #[test]
@@ -710,12 +712,12 @@ mod tests {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
         {
-            let bv = &mut app.screen.base_view;
-            bv.event_log.count = 5;
-            bv.event_log.selected = None;
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 5;
+            ov.event_log.selected = None;
         }
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.screen.base_view.event_log.selected, Some(4));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(4));
     }
 
     #[test]
@@ -723,12 +725,12 @@ mod tests {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
         {
-            let bv = &mut app.screen.base_view;
-            bv.event_log.count = 3;
-            bv.event_log.selected = Some(2);
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 3;
+            ov.event_log.selected = Some(2);
         }
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.screen.base_view.event_log.selected, Some(2));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(2));
     }
 
     #[test]
@@ -736,12 +738,12 @@ mod tests {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
         {
-            let bv = &mut app.screen.base_view;
-            bv.event_log.count = 5;
-            bv.event_log.selected = Some(0);
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 5;
+            ov.event_log.selected = Some(0);
         }
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.screen.base_view.event_log.selected, Some(0));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(0));
     }
 
     #[test]
