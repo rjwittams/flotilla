@@ -1315,6 +1315,30 @@ mod tests {
         std::fs::write(&socket_path, b"").expect("create fake socket");
         std::fs::write(&pid_path, pid.to_string()).expect("write pid file");
 
+        // Wait for sysinfo to see the process by name, ensuring the
+        // name-mismatch check in is_expected_process is actually exercised
+        // (not just returning false because the process isn't visible yet).
+        {
+            use sysinfo::{Pid, System};
+            let sysinfo_pid = Pid::from(pid as usize);
+            let mut sys = System::new();
+            for _ in 0..50 {
+                sys.refresh_processes_specifics(
+                    sysinfo::ProcessesToUpdate::Some(&[sysinfo_pid]),
+                    true,
+                    sysinfo::ProcessRefreshKind::nothing(),
+                );
+                if sys.process(sysinfo_pid).map(|p| p.name().to_string_lossy().contains("sleep")).unwrap_or(false) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(
+                sys.process(sysinfo_pid).map(|p| p.name().to_string_lossy().contains("sleep")).unwrap_or(false),
+                "sysinfo should see the sleep process by name before testing stop_daemon"
+            );
+        }
+
         // Should detect PID reuse (sleep != shpool), clean up files,
         // but NOT kill the process.
         let stopped = ShpoolTerminalPool::stop_daemon(&socket_path, "shpool").await;

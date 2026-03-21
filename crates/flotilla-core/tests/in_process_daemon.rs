@@ -1034,6 +1034,139 @@ async fn replay_since_includes_peer_checkouts_with_correct_host() {
     assert!(!snap.providers.checkouts.contains_key(&ghost), "replay snapshot must not re-attribute peer checkout to local host");
 }
 
+/// Unknown-seq fallback should include peer checkouts with correct host attribution,
+/// not just local provider data.
+#[tokio::test]
+async fn replay_since_unknown_seq_includes_peer_checkouts_with_correct_host() {
+    let (_temp, repo, daemon, identity) = daemon_for_git_repo().await;
+    let mut rx = daemon.subscribe();
+
+    // Initial refresh so daemon has state
+    let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+
+    // Add peer providers
+    let peer_host = HostName::new("remote-peer-host");
+    let peer_checkout_path = HostPath::new(peer_host.clone(), "/srv/remote/repo");
+    let mut peer_data = ProviderData::default();
+    peer_data.checkouts.insert(peer_checkout_path.clone(), Checkout {
+        branch: "peer-feature".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+    });
+
+    daemon.set_peer_providers(&repo, vec![(peer_host.clone(), peer_data)], 0).await;
+    let _ = recv_event(&mut rx).await;
+    let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+
+    // Request replay with a seq that can never appear in the delta log
+    let last_seen = HashMap::from([(StreamKey::Repo { identity }, u64::MAX)]);
+    let events = daemon.replay_since(&last_seen).await.expect("replay_since");
+
+    let snap = events
+        .iter()
+        .find_map(|e| match e {
+            DaemonEvent::RepoSnapshot(s) if s.repo == repo => Some(s),
+            _ => None,
+        })
+        .expect("unknown-seq fallback should produce a RepoSnapshot");
+
+    // Peer checkout must be present with remote host attribution
+    assert!(
+        snap.providers.checkouts.contains_key(&peer_checkout_path),
+        "unknown-seq snapshot must include peer checkout under remote-peer-host, got keys: {:?}",
+        snap.providers.checkouts.keys().collect::<Vec<_>>()
+    );
+
+    // No ghost checkout under local host
+    let local_host = HostName::local();
+    let ghost = HostPath::new(local_host, PathBuf::from("/srv/remote/repo"));
+    assert!(!snap.providers.checkouts.contains_key(&ghost), "snapshot must not re-attribute peer checkout to local host");
+}
+
+/// Delta replay path should include peer checkout changes in the replayed
+/// deltas, and the full snapshot (used for issue metadata in replay_since)
+/// should reflect the peer-merged view.
+#[tokio::test]
+async fn replay_since_delta_replay_includes_peer_data() {
+    let (_temp, repo, daemon, identity) = daemon_for_git_repo().await;
+    let mut rx = daemon.subscribe();
+
+    // First refresh — establishes seq in delta log
+    let event = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+    let first_seq = match event {
+        DaemonEvent::RepoSnapshot(snap) => snap.seq,
+        DaemonEvent::RepoDelta(delta) => delta.seq,
+        other => panic!("expected snapshot event, got {:?}", other),
+    };
+
+    // Add peer providers with a checkout
+    let peer_host = HostName::new("delta-peer-host");
+    let peer_checkout_path = HostPath::new(peer_host.clone(), "/srv/delta-peer/repo");
+    let mut peer_data = ProviderData::default();
+    peer_data.checkouts.insert(peer_checkout_path.clone(), Checkout {
+        branch: "delta-feature".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+    });
+
+    daemon.set_peer_providers(&repo, vec![(peer_host.clone(), peer_data)], 0).await;
+    let _ = recv_event(&mut rx).await;
+
+    // Second refresh — creates a delta entry from first_seq to new seq
+    let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
+
+    // Replay from first_seq — should get delta entries (not full snapshot)
+    let last_seen = HashMap::from([(StreamKey::Repo { identity }, first_seq)]);
+    let events = daemon.replay_since(&last_seen).await.expect("replay_since");
+
+    // Should get RepoDelta(s), not a full RepoSnapshot
+    let deltas: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            DaemonEvent::RepoDelta(d) if d.repo == repo => Some(d),
+            _ => None,
+        })
+        .collect();
+    assert!(!deltas.is_empty(), "delta replay should produce RepoDelta events");
+
+    // The delta's changes should include the peer checkout being added
+    let has_peer_checkout_change = deltas.iter().any(|d| {
+        d.changes.iter().any(|c| match c {
+            Change::Checkout { key, op: flotilla_protocol::EntryOp::Added(_) } => key.path == Path::new("/srv/delta-peer/repo"),
+            _ => false,
+        })
+    });
+    assert!(has_peer_checkout_change, "delta replay should include an Added checkout change for the peer checkout");
+
+    // Verify the full snapshot (built by replay_since via
+    // build_repo_snapshot_with_peers) also contains the peer checkout.
+    // This confirms the snapshot used for issue metadata on the delta
+    // replay path is peer-merged, not local-only.
+    let full_events = daemon.replay_since(&HashMap::new()).await.expect("replay_since full");
+    let full_snap = full_events
+        .iter()
+        .find_map(|e| match e {
+            DaemonEvent::RepoSnapshot(s) if s.repo == repo => Some(s),
+            _ => None,
+        })
+        .expect("full replay should produce RepoSnapshot");
+
+    assert!(
+        full_snap.providers.checkouts.contains_key(&peer_checkout_path),
+        "full snapshot must include peer checkout, confirming build_repo_snapshot_with_peers is used on replay"
+    );
+}
+
 #[tokio::test]
 async fn add_and_remove_repo_updates_state_and_emits_events() {
     let temp = tempfile::tempdir().unwrap();
