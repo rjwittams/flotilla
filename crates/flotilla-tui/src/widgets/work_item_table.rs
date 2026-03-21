@@ -1,17 +1,17 @@
 use std::{
     any::Any,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use flotilla_core::data::{GroupEntry, SectionHeader};
-use flotilla_protocol::{HostName, ProviderData, WorkItem};
+use flotilla_core::data::{GroupEntry, GroupedWorkItems, SectionHeader};
+use flotilla_protocol::{HostName, ProviderData, WorkItem, WorkItemIdentity};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Cell, HighlightSpacing, Row, Table},
+    widgets::{Block, Cell, HighlightSpacing, Row, Table, TableState},
     Frame,
 };
 
@@ -40,21 +40,142 @@ const PROVIDER_CATEGORIES: [(&str, &str); 8] = [
     ("Terminal pool", "terminal_pool"),
 ];
 
-/// The work-item table component. Owned by `BaseView` and implements
+/// The work-item table component. Owned by `RepoPage` and implements
 /// `InteractiveWidget` for uniform action/mouse/render dispatch.
 pub struct WorkItemTable {
     /// Stored from render for mouse hit-testing.
     pub(crate) table_area: Rect,
     /// Gear icon area, captured from layout after table render.
     pub(crate) gear_area: Option<Rect>,
+    // ── Owned selection state (for future RepoPage use) ──────────────
+    /// Ratatui table widget state (tracks selected row and scroll offset).
+    pub table_state: TableState,
+    /// Index into `grouped_items.selectable_indices` for the currently
+    /// highlighted row, or `None` when the table is empty.
+    pub selected_selectable_idx: Option<usize>,
+    /// The grouped work items displayed in this table.
+    pub grouped_items: GroupedWorkItems,
 }
 
 impl WorkItemTable {
     pub fn new() -> Self {
-        Self { table_area: Rect::default(), gear_area: None }
+        Self {
+            table_area: Rect::default(),
+            gear_area: None,
+            table_state: TableState::default(),
+            selected_selectable_idx: None,
+            grouped_items: GroupedWorkItems::default(),
+        }
     }
 
-    // ── Selection helpers ────────────────────────────────────────────
+    // ── Owned data + selection ──────────────────────────────────────
+
+    /// Replace the grouped items and restore selection by work item identity.
+    ///
+    /// After the update, if the previously-selected item still exists in the
+    /// new data it remains selected. Otherwise selection falls back to the
+    /// first selectable row, or `None` if the table is empty.
+    pub fn update_items(&mut self, items: GroupedWorkItems) {
+        let prev_identity =
+            self.selected_selectable_idx.and_then(|si| self.grouped_items.selectable_indices.get(si).copied()).and_then(|ti| {
+                match self.grouped_items.table_entries.get(ti) {
+                    Some(GroupEntry::Item(item)) => Some(item.identity.clone()),
+                    _ => None,
+                }
+            });
+
+        self.grouped_items = items;
+
+        if self.grouped_items.selectable_indices.is_empty() {
+            self.selected_selectable_idx = None;
+            self.table_state.select(None);
+        } else if let Some(ref identity) = prev_identity {
+            let found = self.grouped_items.selectable_indices.iter().enumerate().find(|(_, &ti)| {
+                matches!(
+                    self.grouped_items.table_entries.get(ti),
+                    Some(GroupEntry::Item(item)) if item.identity == *identity
+                )
+            });
+            if let Some((si, &ti)) = found {
+                self.selected_selectable_idx = Some(si);
+                self.table_state.select(Some(ti));
+            } else {
+                self.selected_selectable_idx = Some(0);
+                self.table_state.select(Some(self.grouped_items.selectable_indices[0]));
+            }
+        } else {
+            self.selected_selectable_idx = Some(0);
+            self.table_state.select(Some(self.grouped_items.selectable_indices[0]));
+        }
+    }
+
+    /// Move selection down one row using owned state.
+    pub fn select_next_self(&mut self) {
+        let indices = &self.grouped_items.selectable_indices;
+        if indices.is_empty() {
+            return;
+        }
+        let next = match self.selected_selectable_idx {
+            Some(si) if si + 1 < indices.len() => si + 1,
+            Some(si) => si,
+            None => 0,
+        };
+        let table_idx = indices[next];
+        self.selected_selectable_idx = Some(next);
+        self.table_state.select(Some(table_idx));
+    }
+
+    /// Move selection up one row using owned state.
+    pub fn select_prev_self(&mut self) {
+        let indices = &self.grouped_items.selectable_indices;
+        if indices.is_empty() {
+            return;
+        }
+        let prev = match self.selected_selectable_idx {
+            Some(si) if si > 0 => si - 1,
+            Some(si) => si,
+            None => 0,
+        };
+        let table_idx = indices[prev];
+        self.selected_selectable_idx = Some(prev);
+        self.table_state.select(Some(table_idx));
+    }
+
+    /// Hit-test a mouse position using owned table state (no ctx needed).
+    pub fn row_at_mouse_self(&self, x: u16, y: u16) -> Option<usize> {
+        let ta = self.table_area;
+        if x >= ta.x && x < ta.x + ta.width && y >= ta.y && y < ta.y + ta.height {
+            let row_in_table = (y - ta.y) as usize;
+            if row_in_table < 2 {
+                return None;
+            }
+            let data_row = row_in_table - 2;
+            let offset = self.table_state.offset();
+            let actual_row = data_row + offset;
+            self.grouped_items.selectable_indices.iter().position(|&idx| idx == actual_row)
+        } else {
+            None
+        }
+    }
+
+    /// Select a row by selectable index using owned state.
+    pub fn select_row_self(&mut self, si: usize) {
+        if let Some(&table_idx) = self.grouped_items.selectable_indices.get(si) {
+            self.selected_selectable_idx = Some(si);
+            self.table_state.select(Some(table_idx));
+        }
+    }
+
+    /// The currently selected work item from owned state, if any.
+    pub fn selected_work_item(&self) -> Option<&WorkItem> {
+        let table_idx = self.table_state.selected()?;
+        match self.grouped_items.table_entries.get(table_idx)? {
+            GroupEntry::Item(item) => Some(item),
+            GroupEntry::Header(_) => None,
+        }
+    }
+
+    // ── Selection helpers (ctx-based, for current callers) ───────────
 
     pub fn select_next(&self, ctx: &mut WidgetContext) {
         let repo_key = &ctx.repo_order[ctx.active_repo];
@@ -109,11 +230,23 @@ impl WorkItemTable {
 
     // ── Rendering ────────────────────────────────────────────────────
 
-    fn render_table(&mut self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+    /// Render the table using self-owned data. Called by `RepoPage` which passes
+    /// its owned multi-select and pending-action state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_table_owned(
+        &mut self,
+        model: &TuiModel,
+        ui: &mut UiState,
+        theme: &Theme,
+        frame: &mut Frame,
+        area: Rect,
+        show_providers: bool,
+        multi_selected: &HashSet<WorkItemIdentity>,
+        pending_actions: &HashMap<WorkItemIdentity, PendingAction>,
+    ) {
         ui.layout.table_area = area;
 
-        let rui = active_rui(model, ui);
-        if rui.show_providers {
+        if show_providers {
             let close_x = area.x + area.width.saturating_sub(5);
             self.gear_area = Some(Rect::new(close_x, area.y, 3, 1));
             self.render_providers(model, ui, theme, frame, area);
@@ -160,13 +293,12 @@ impl WorkItemTable {
 
         // Build rows from active repo (immutable borrows)
         let rm = model.active();
-        let rui = active_rui(model, ui);
 
         // Precompute per-host repo root from main checkouts so remote worktree
         // paths get the same sibling/child indentation as local ones.
         let local_repo_root = model.active_repo_root().clone();
         let mut host_repo_roots: HashMap<HostName, PathBuf> = HashMap::new();
-        for entry in &rui.table_view.table_entries {
+        for entry in &self.grouped_items.table_entries {
             if let GroupEntry::Item(item) = entry {
                 if item.is_main_checkout {
                     if let Some(co) = item.checkout_key() {
@@ -177,13 +309,13 @@ impl WorkItemTable {
         }
 
         let mut prev_source: Option<String> = None;
-        let rows: Vec<Row> = rui
-            .table_view
+        let rows: Vec<Row> = self
+            .grouped_items
             .table_entries
             .iter()
             .map(|entry| {
                 let is_multi_selected =
-                    if let GroupEntry::Item(ref item) = entry { rui.multi_selected.contains(&item.identity) } else { false };
+                    if let GroupEntry::Item(ref item) = entry { multi_selected.contains(&item.identity) } else { false };
 
                 match entry {
                     GroupEntry::Header(header) => {
@@ -191,7 +323,7 @@ impl WorkItemTable {
                         build_header_row(header)
                     }
                     GroupEntry::Item(item) => {
-                        let pending = rui.pending_actions.get(&item.identity);
+                        let pending = pending_actions.get(&item.identity);
                         let is_local_item = item
                             .checkout_key()
                             .is_none_or(|co| model.my_host().is_some_and(|my| *my == co.host) || !model.hosts.contains_key(&co.host));
@@ -221,29 +353,35 @@ impl WorkItemTable {
             .highlight_symbol(HIGHLIGHT_SYMBOL)
             .highlight_spacing(HighlightSpacing::Always);
 
-        // Now mutably borrow for stateful render
-        let key = &model.repo_order[model.active_repo];
-        let rui = ui.repo_ui.get_mut(key).expect("active repo must have UI state");
-        frame.render_stateful_widget(table, area, &mut rui.table_state);
+        // Render with owned table_state
+        frame.render_stateful_widget(table, area, &mut self.table_state);
 
         // Overlay section headers so they span the full row width
-        let offset = rui.table_state.offset();
+        let offset = self.table_state.offset();
         let visible_rows = area.height.saturating_sub(3) as usize;
         let header_x = area.x + 1 + HIGHLIGHT_SYMBOL_WIDTH + col_widths[0] + 1;
         let header_w = (area.x + area.width).saturating_sub(header_x + 1);
         let header_style = theme.header_style();
 
         for i in 0..visible_rows {
-            if let Some(GroupEntry::Header(h)) = rui.table_view.table_entries.get(offset + i) {
+            if let Some(GroupEntry::Header(h)) = self.grouped_items.table_entries.get(offset + i) {
                 let y = area.y + 2 + i as u16;
                 frame.render_widget(Span::styled(format!("── {h} ──"), header_style), Rect::new(header_x, y, header_w, 1));
             }
         }
 
         // Back up offset if it lands right after a section header
-        if offset > 0 && matches!(rui.table_view.table_entries.get(offset - 1), Some(GroupEntry::Header(_))) {
-            *rui.table_state.offset_mut() = offset - 1;
+        if offset > 0 && matches!(self.grouped_items.table_entries.get(offset - 1), Some(GroupEntry::Header(_))) {
+            *self.table_state.offset_mut() = offset - 1;
         }
+    }
+
+    fn render_table(&mut self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+        let rui = active_rui(model, ui);
+        let show_providers = rui.show_providers;
+        let multi_selected = rui.multi_selected.clone();
+        let pending_actions = rui.pending_actions.clone();
+        self.render_table_owned(model, ui, theme, frame, area, show_providers, &multi_selected, &pending_actions);
     }
 
     fn render_providers(&self, model: &TuiModel, _ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
@@ -622,4 +760,141 @@ fn build_item_row<'a>(
         Cell::from(Span::styled(issues_display, Style::default().fg(theme.issue))),
         Cell::from(Span::styled(git_display, Style::default().fg(theme.git_status))),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::{checkout_item, grouped_items, issue_item};
+
+    #[test]
+    fn update_items_preserves_selection_by_identity() {
+        let mut table = WorkItemTable::new();
+
+        let items_v1 = grouped_items(vec![
+            checkout_item("feat/a", "/tmp/a", false),
+            checkout_item("feat/b", "/tmp/b", false),
+            checkout_item("feat/c", "/tmp/c", false),
+        ]);
+        table.update_items(items_v1);
+
+        // Select the second item (feat/b)
+        table.select_next_self();
+        assert_eq!(table.selected_selectable_idx, Some(1));
+
+        // Update with reordered items — feat/b is now at index 2
+        let items_v2 = grouped_items(vec![
+            checkout_item("feat/a", "/tmp/a", false),
+            checkout_item("feat/c", "/tmp/c", false),
+            checkout_item("feat/b", "/tmp/b", false),
+        ]);
+        table.update_items(items_v2);
+
+        // Selection should follow feat/b to its new position
+        assert_eq!(table.selected_selectable_idx, Some(2));
+        assert_eq!(table.table_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn update_items_falls_back_to_first_when_selected_removed() {
+        let mut table = WorkItemTable::new();
+
+        let items_v1 = grouped_items(vec![checkout_item("feat/a", "/tmp/a", false), checkout_item("feat/b", "/tmp/b", false)]);
+        table.update_items(items_v1);
+
+        // Select the second item (feat/b)
+        table.select_next_self();
+        assert_eq!(table.selected_selectable_idx, Some(1));
+
+        // Update without feat/b
+        let items_v2 = grouped_items(vec![checkout_item("feat/a", "/tmp/a", false), checkout_item("feat/c", "/tmp/c", false)]);
+        table.update_items(items_v2);
+
+        // Selection should fall back to first item
+        assert_eq!(table.selected_selectable_idx, Some(0));
+        assert_eq!(table.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn update_items_clears_selection_when_empty() {
+        let mut table = WorkItemTable::new();
+
+        let items_v1 = grouped_items(vec![checkout_item("feat/a", "/tmp/a", false)]);
+        table.update_items(items_v1);
+        assert_eq!(table.selected_selectable_idx, Some(0));
+
+        // Update with empty table
+        table.update_items(GroupedWorkItems::default());
+
+        assert_eq!(table.selected_selectable_idx, None);
+        assert_eq!(table.table_state.selected(), None);
+    }
+
+    #[test]
+    fn select_next_self_advances_through_items() {
+        let mut table = WorkItemTable::new();
+        let items = grouped_items(vec![issue_item("1"), issue_item("2"), issue_item("3")]);
+        table.update_items(items);
+
+        // Starts at 0
+        assert_eq!(table.selected_selectable_idx, Some(0));
+
+        table.select_next_self();
+        assert_eq!(table.selected_selectable_idx, Some(1));
+
+        table.select_next_self();
+        assert_eq!(table.selected_selectable_idx, Some(2));
+
+        // At last item, stays put
+        table.select_next_self();
+        assert_eq!(table.selected_selectable_idx, Some(2));
+    }
+
+    #[test]
+    fn select_prev_self_retreats_through_items() {
+        let mut table = WorkItemTable::new();
+        let items = grouped_items(vec![issue_item("1"), issue_item("2"), issue_item("3")]);
+        table.update_items(items);
+
+        // Move to last
+        table.select_next_self();
+        table.select_next_self();
+        assert_eq!(table.selected_selectable_idx, Some(2));
+
+        table.select_prev_self();
+        assert_eq!(table.selected_selectable_idx, Some(1));
+
+        table.select_prev_self();
+        assert_eq!(table.selected_selectable_idx, Some(0));
+
+        // At first item, stays put
+        table.select_prev_self();
+        assert_eq!(table.selected_selectable_idx, Some(0));
+    }
+
+    #[test]
+    fn select_next_self_noop_on_empty() {
+        let mut table = WorkItemTable::new();
+        table.select_next_self();
+        assert_eq!(table.selected_selectable_idx, None);
+    }
+
+    #[test]
+    fn select_prev_self_noop_on_empty() {
+        let mut table = WorkItemTable::new();
+        table.select_prev_self();
+        assert_eq!(table.selected_selectable_idx, None);
+    }
+
+    #[test]
+    fn update_items_selects_first_when_no_prior_selection() {
+        let mut table = WorkItemTable::new();
+        assert_eq!(table.selected_selectable_idx, None);
+
+        let items = grouped_items(vec![issue_item("1"), issue_item("2")]);
+        table.update_items(items);
+
+        assert_eq!(table.selected_selectable_idx, Some(0));
+        assert_eq!(table.table_state.selected(), Some(0));
+    }
 }

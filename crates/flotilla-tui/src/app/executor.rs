@@ -5,6 +5,7 @@ use super::{
     ui_state::{PendingAction, PendingActionContext, PendingStatus},
     App,
 };
+use crate::widgets::{branch_input::BranchInputWidget, delete_confirm::DeleteConfirmWidget};
 
 /// Dispatch a single protocol command through the daemon.
 ///
@@ -37,12 +38,13 @@ pub async fn dispatch(cmd: Command, app: &mut App, pending_ctx: Option<PendingAc
     match app.daemon.execute(cmd).await {
         Ok(command_id) => {
             if let Some(ctx) = pending_ctx {
+                let action = PendingAction { command_id, status: PendingStatus::InFlight, description: ctx.description };
+                // Dual-write: rui (for status bar / needs_animation) and RepoPage (for rendering)
                 if let Some(rui) = app.ui.repo_ui.get_mut(&ctx.repo_identity) {
-                    rui.pending_actions.insert(ctx.identity, PendingAction {
-                        command_id,
-                        status: PendingStatus::InFlight,
-                        description: ctx.description,
-                    });
+                    rui.pending_actions.insert(ctx.identity.clone(), action.clone());
+                }
+                if let Some(page) = app.screen.repo_pages.get_mut(&ctx.repo_identity) {
+                    page.pending_actions.insert(ctx.identity, action);
                 }
             }
         }
@@ -61,19 +63,19 @@ pub async fn dispatch(cmd: Command, app: &mut App, pending_ctx: Option<PendingAc
 /// `DeleteConfirm { loading: true }` must be cleared so the user
 /// can see the error message and isn't stuck in a loading state.
 fn reset_loading_mode(app: &mut App) {
-    // Pop loading widgets from the widget stack on error.
-    if let Some(widget) = app.widget_stack.last_mut() {
-        if let Some(dcw) = widget.as_any_mut().downcast_mut::<crate::widgets::delete_confirm::DeleteConfirmWidget>() {
+    // Pop loading widgets from the modal stack on error.
+    if let Some(widget) = app.screen.modal_stack.last_mut() {
+        if let Some(dcw) = widget.as_any_mut().downcast_mut::<DeleteConfirmWidget>() {
             if dcw.loading {
-                app.widget_stack.pop();
+                app.screen.modal_stack.pop();
                 return;
             }
         }
     }
-    if let Some(widget) = app.widget_stack.last_mut() {
-        if let Some(biw) = widget.as_any_mut().downcast_mut::<crate::widgets::branch_input::BranchInputWidget>() {
+    if let Some(widget) = app.screen.modal_stack.last_mut() {
+        if let Some(biw) = widget.as_any_mut().downcast_mut::<BranchInputWidget>() {
             if biw.is_generating() {
-                app.widget_stack.pop();
+                app.screen.modal_stack.pop();
             }
         }
     }
@@ -114,10 +116,7 @@ pub fn handle_result(result: CommandResult, app: &mut App) {
             }
         }
         CommandResult::BranchNameGenerated { name, issue_ids } => {
-            let updated = app
-                .widget_stack
-                .last_mut()
-                .and_then(|widget| widget.as_any_mut().downcast_mut::<crate::widgets::branch_input::BranchInputWidget>());
+            let updated = app.screen.modal_stack.last_mut().and_then(|widget| widget.as_any_mut().downcast_mut::<BranchInputWidget>());
             if let Some(biw) = updated {
                 biw.prefill(&name, issue_ids);
             } else {
@@ -125,10 +124,7 @@ pub fn handle_result(result: CommandResult, app: &mut App) {
             }
         }
         CommandResult::CheckoutStatus(info) => {
-            let updated = app
-                .widget_stack
-                .last_mut()
-                .and_then(|widget| widget.as_any_mut().downcast_mut::<crate::widgets::delete_confirm::DeleteConfirmWidget>());
+            let updated = app.screen.modal_stack.last_mut().and_then(|widget| widget.as_any_mut().downcast_mut::<DeleteConfirmWidget>());
             if let Some(dcw) = updated {
                 dcw.update_info(info);
             } else {

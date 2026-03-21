@@ -1,5 +1,4 @@
 pub mod action_menu;
-pub mod base_view;
 pub mod branch_input;
 pub mod close_confirm;
 pub mod command_palette;
@@ -8,9 +7,12 @@ pub mod event_log;
 pub mod file_picker;
 pub mod help;
 pub mod issue_search;
+pub mod overview_page;
 pub mod preview_panel;
+pub mod repo_page;
+pub mod screen;
 pub mod status_bar_widget;
-pub mod tab_bar;
+pub mod tabs;
 pub mod work_item_table;
 
 use std::{any::Any, collections::HashMap};
@@ -64,6 +66,11 @@ pub enum AppAction {
     SwitchToRepo(usize),
     SaveTabOrder,
     OpenFilePicker,
+    PrevTab,
+    NextTab,
+    MoveTabLeft,
+    MoveTabRight,
+    Refresh,
 }
 
 /// Result of handling an event in a widget.

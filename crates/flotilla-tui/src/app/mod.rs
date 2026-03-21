@@ -18,7 +18,7 @@ use std::{
 use flotilla_core::{
     config::{ConfigStore, RepoViewLayoutConfig},
     daemon::DaemonHandle,
-    data::{self, GroupEntry, SectionLabels},
+    data::{self, SectionLabels},
 };
 use flotilla_protocol::{
     Command, CommandAction, CommandResult, DaemonEvent, HostName, HostSummary, PeerConnectionState, ProviderData, ProviderError, RepoDelta,
@@ -29,7 +29,12 @@ use tui_input::Input;
 use ui_state::PendingStatus;
 pub use ui_state::{BranchInputKind, DirEntry, RepoUiState, RepoViewLayout, TabId, UiMode, UiState};
 
-use crate::{keymap::Keymap, theme::Theme};
+use crate::{
+    keymap::Keymap,
+    shared::Shared,
+    theme::Theme,
+    widgets::repo_page::{RepoData, RepoPage},
+};
 
 /// Per-provider auth/health status from last refresh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,7 +265,10 @@ pub struct App {
     pub in_flight: HashMap<u64, InFlightCommand>,
     pub pending_cancel: Option<u64>,
     pub should_quit: bool,
-    pub widget_stack: Vec<Box<dyn crate::widgets::InteractiveWidget>>,
+    pub screen: crate::widgets::screen::Screen,
+    /// Per-repo shared data handles. Written by `apply_snapshot()`/`apply_delta()`,
+    /// read by `RepoPage` widgets during reconciliation and rendering.
+    pub repo_data: HashMap<RepoIdentity, Shared<RepoData>>,
 }
 
 impl App {
@@ -275,6 +283,28 @@ impl App {
             RepoViewLayoutConfig::Below => RepoViewLayout::Below,
         };
         let keymap = Keymap::from_config(&loaded_config.ui.keys);
+
+        // Create Shared<RepoData> handles and RepoPage instances for each repo
+        let mut repo_data_map = HashMap::new();
+        let mut screen = crate::widgets::screen::Screen::new();
+        for (identity, rm) in &model.repos {
+            let shared = Shared::new(RepoData {
+                path: rm.path.clone(),
+                providers: Arc::new(ProviderData::default()),
+                labels: rm.labels.clone(),
+                provider_names: rm.provider_names.clone(),
+                provider_health: rm.provider_health.clone(),
+                work_items: Vec::new(),
+                issue_has_more: false,
+                issue_total: None,
+                issue_search_active: false,
+                loading: rm.loading,
+            });
+            let page = RepoPage::new(identity.clone(), shared.clone(), ui.view_layout);
+            repo_data_map.insert(identity.clone(), shared);
+            screen.repo_pages.insert(identity.clone(), page);
+        }
+
         Self {
             daemon,
             config,
@@ -286,7 +316,8 @@ impl App {
             in_flight: HashMap::new(),
             pending_cancel: None,
             should_quit: false,
-            widget_stack: vec![Box::new(crate::widgets::base_view::BaseView::new())],
+            screen,
+            repo_data: repo_data_map,
         }
     }
 
@@ -298,8 +329,8 @@ impl App {
         if self.ui.repo_ui.values().any(|rui| rui.pending_actions.values().any(|a| matches!(a.status, PendingStatus::InFlight))) {
             return true;
         }
-        // Check widget stack for loading states
-        if let Some(widget) = self.widget_stack.last() {
+        // Check modal stack for loading states
+        if let Some(widget) = self.screen.modal_stack.last() {
             if let Some(biw) = widget.as_any().downcast_ref::<crate::widgets::branch_input::BranchInputWidget>() {
                 if biw.is_generating() {
                     return true;
@@ -410,27 +441,16 @@ impl App {
 
     // ── Widget stack helpers ──
 
-    /// Temporarily extract the widget stack so the caller can downcast and
-    /// mutate the `BaseView` at `stack[0]` without conflicting borrows on
-    /// other `App` fields. The stack is restored after the closure returns.
-    pub fn with_base_view<R>(&mut self, f: impl FnOnce(&mut crate::widgets::base_view::BaseView) -> R) -> R {
-        let mut stack = std::mem::take(&mut self.widget_stack);
-        let base = stack[0].as_any_mut().downcast_mut::<crate::widgets::base_view::BaseView>().expect("widget_stack[0] is always BaseView");
-        let result = f(base);
-        self.widget_stack = stack;
-        result
-    }
-
-    /// Pop all modal widgets from the stack, leaving only the base BaseView.
+    /// Pop all modal widgets from the stack.
     /// Called when the user switches tabs or navigates away, so stale modals
     /// don't linger across context changes.
     pub fn dismiss_modals(&mut self) {
-        self.widget_stack.truncate(1);
+        self.screen.dismiss_modals();
     }
 
     /// Returns true if a modal widget is on the stack above the base layer.
     pub fn has_modal(&self) -> bool {
-        self.widget_stack.len() > 1
+        self.screen.has_modal()
     }
 
     pub fn build_widget_context(&mut self) -> crate::widgets::WidgetContext<'_> {
@@ -449,24 +469,6 @@ impl App {
         }
     }
 
-    pub fn apply_outcome(&mut self, index: usize, outcome: crate::widgets::Outcome) {
-        match outcome {
-            crate::widgets::Outcome::Consumed => {}
-            // Callers only invoke apply_outcome for non-Ignored outcomes; this arm is unreachable today.
-            crate::widgets::Outcome::Ignored => {}
-            crate::widgets::Outcome::Finished => {
-                self.widget_stack.remove(index);
-            }
-            crate::widgets::Outcome::Push(widget) => {
-                self.widget_stack.push(widget);
-            }
-            crate::widgets::Outcome::Swap(widget) => {
-                self.widget_stack.remove(index);
-                self.widget_stack.insert(index, widget);
-            }
-        }
-    }
-
     pub fn process_app_actions(&mut self, actions: Vec<crate::widgets::AppAction>) {
         use crate::widgets::AppAction;
         for action in actions {
@@ -481,7 +483,16 @@ impl App {
                     self.theme = (themes[next].1)();
                 }
                 AppAction::CycleLayout => {
-                    self.ui.cycle_layout();
+                    // Cycle the active page's layout (handles both the direct
+                    // repo_page path where the page already cycled, and the
+                    // command palette path where only the AppAction was emitted).
+                    if !self.model.repo_order.is_empty() {
+                        let identity = &self.model.repo_order[self.model.active_repo];
+                        if let Some(page) = self.screen.repo_pages.get_mut(identity) {
+                            page.cycle_layout();
+                            self.ui.view_layout = page.layout;
+                        }
+                    }
                     self.persist_layout();
                 }
                 AppAction::CycleHost => {
@@ -495,19 +506,34 @@ impl App {
                     self.ui.status_bar.show_keys = !self.ui.status_bar.show_keys;
                 }
                 AppAction::ToggleProviders => {
-                    let sp = self.active_ui().show_providers;
-                    self.active_ui_mut().show_providers = !sp;
+                    let identity = &self.model.repo_order[self.model.active_repo];
+                    if let Some(page) = self.screen.repo_pages.get_mut(identity) {
+                        page.show_providers = !page.show_providers;
+                    }
+                    // Keep RepoUiState in sync for status bar
+                    let identity = &self.model.repo_order[self.model.active_repo];
+                    if let Some(page) = self.screen.repo_pages.get(identity) {
+                        let sp = page.show_providers;
+                        self.active_ui_mut().show_providers = sp;
+                    }
                 }
                 AppAction::ToggleMultiSelect => {
-                    if let Some(si) = self.active_ui().selected_selectable_idx {
-                        if let Some(&table_idx) = self.active_ui().table_view.selectable_indices.get(si) {
-                            if let Some(flotilla_core::data::GroupEntry::Item(item)) =
-                                self.active_ui().table_view.table_entries.get(table_idx)
-                            {
-                                let identity = item.identity.clone();
-                                let rui = self.active_ui_mut();
-                                if !rui.multi_selected.remove(&identity) {
-                                    rui.multi_selected.insert(identity);
+                    let repo_identity = self.model.repo_order[self.model.active_repo].clone();
+                    if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
+                        if let Some(si) = page.table.selected_selectable_idx {
+                            if let Some(&table_idx) = page.table.grouped_items.selectable_indices.get(si) {
+                                if let Some(flotilla_core::data::GroupEntry::Item(item)) =
+                                    page.table.grouped_items.table_entries.get(table_idx)
+                                {
+                                    let item_identity = item.identity.clone();
+                                    if !page.multi_selected.remove(&item_identity) {
+                                        page.multi_selected.insert(item_identity.clone());
+                                    }
+                                    // Keep RepoUiState in sync for status bar
+                                    let rui = self.ui.repo_ui.get_mut(&repo_identity).expect("active repo must have UI state");
+                                    if !rui.multi_selected.remove(&item_identity) {
+                                        rui.multi_selected.insert(item_identity);
+                                    }
                                 }
                             }
                         }
@@ -538,6 +564,28 @@ impl App {
                 }
                 AppAction::OpenFilePicker => {
                     self.open_file_picker_from_active_repo_parent();
+                }
+                AppAction::PrevTab => {
+                    self.dismiss_modals();
+                    self.prev_tab();
+                }
+                AppAction::NextTab => {
+                    self.dismiss_modals();
+                    self.next_tab();
+                }
+                AppAction::MoveTabLeft => {
+                    if !self.ui.mode.is_config() && self.move_tab(-1) {
+                        self.config.save_tab_order(&self.persisted_tab_order_paths());
+                    }
+                }
+                AppAction::MoveTabRight => {
+                    if !self.ui.mode.is_config() && self.move_tab(1) {
+                        self.config.save_tab_order(&self.persisted_tab_order_paths());
+                    }
+                }
+                AppAction::Refresh => {
+                    let repo = self.model.active_repo_root().clone();
+                    self.proto_commands.push(self.command(CommandAction::Refresh { repo: Some(RepoSelector::Path(repo)) }));
                 }
             }
         }
@@ -573,13 +621,26 @@ impl App {
                     });
 
                     if let Some((repo_identity, identity)) = found {
-                        let rui = self.ui.repo_ui.get_mut(&repo_identity).expect("repo exists");
-                        if let Some(message) = error_message {
-                            if let Some(entry) = rui.pending_actions.get_mut(&identity) {
-                                entry.status = PendingStatus::Failed(message);
+                        // Dual-write: rui for status bar / needs_animation, RepoPage for row rendering.
+                        // See also: executor::dispatch() in executor.rs.
+                        if let Some(ref message) = error_message {
+                            if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
+                                if let Some(entry) = rui.pending_actions.get_mut(&identity) {
+                                    entry.status = PendingStatus::Failed(message.clone());
+                                }
+                            }
+                            if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
+                                if let Some(entry) = page.pending_actions.get_mut(&identity) {
+                                    entry.status = PendingStatus::Failed(message.clone());
+                                }
                             }
                         } else {
-                            rui.pending_actions.remove(&identity);
+                            if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
+                                rui.pending_actions.remove(&identity);
+                            }
+                            if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
+                                page.pending_actions.remove(&identity);
+                            }
                         }
                     }
                 }
@@ -688,6 +749,23 @@ impl App {
             rui.update_table_view(table_view);
         }
 
+        // Feed data into Shared<RepoData> for RepoPage rendering
+        if let Some(handle) = self.repo_data.get(&repo_identity) {
+            let rm = &self.model.repos[&repo_identity];
+            handle.mutate(|d| {
+                d.path = path.clone();
+                d.providers = rm.providers.clone();
+                d.labels = rm.labels.clone();
+                d.provider_names = rm.provider_names.clone();
+                d.provider_health = rm.provider_health.clone();
+                d.work_items = snap.work_items;
+                d.issue_has_more = rm.issue_has_more;
+                d.issue_total = rm.issue_total.map(|v| v as usize);
+                d.issue_search_active = rm.issue_search_active;
+                d.loading = false;
+            });
+        }
+
         // Log and display errors (clears status when errors resolve)
         self.set_status_message(format_error_status(&snap.errors, &path));
 
@@ -793,6 +871,23 @@ impl App {
             rui.update_table_view(table_view);
         }
 
+        // Feed data into Shared<RepoData> for RepoPage rendering
+        if let Some(handle) = self.repo_data.get(&repo_identity) {
+            let rm = &self.model.repos[&repo_identity];
+            handle.mutate(|d| {
+                d.path = path.clone();
+                d.providers = rm.providers.clone();
+                d.labels = rm.labels.clone();
+                d.provider_names = rm.provider_names.clone();
+                d.provider_health = rm.provider_health.clone();
+                d.work_items = delta.work_items;
+                d.issue_has_more = rm.issue_has_more;
+                d.issue_total = rm.issue_total.map(|v| v as usize);
+                d.issue_search_active = rm.issue_search_active;
+                d.loading = false;
+            });
+        }
+
         if let Some(status_message) = status_message_update {
             self.set_status_message(status_message);
         }
@@ -803,6 +898,24 @@ impl App {
         if self.model.repos.contains_key(&identity) {
             return;
         }
+
+        // Create Shared<RepoData> and RepoPage for the new repo
+        let shared = Shared::new(RepoData {
+            path: info.path.clone(),
+            providers: Arc::new(ProviderData::default()),
+            labels: info.labels.clone(),
+            provider_names: info.provider_names.clone(),
+            provider_health: info.provider_health.clone(),
+            work_items: Vec::new(),
+            issue_has_more: false,
+            issue_total: None,
+            issue_search_active: false,
+            loading: info.loading,
+        });
+        let page = RepoPage::new(identity.clone(), shared.clone(), self.ui.view_layout);
+        self.repo_data.insert(identity.clone(), shared);
+        self.screen.repo_pages.insert(identity.clone(), page);
+
         self.model.repos.insert(identity.clone(), TuiRepoModel {
             identity: info.identity,
             path: info.path,
@@ -825,12 +938,20 @@ impl App {
         self.model.repos.remove(repo_identity);
         self.model.repo_order.retain(|repo| repo != repo_identity);
         self.ui.repo_ui.remove(repo_identity);
+        self.repo_data.remove(repo_identity);
+        self.screen.repo_pages.remove(repo_identity);
         if self.model.repo_order.is_empty() {
             self.should_quit = true;
             return;
         }
         if self.model.active_repo >= self.model.repo_order.len() {
             self.model.active_repo = self.model.repo_order.len() - 1;
+        }
+        // Sync layout from the now-active page so the status bar indicator
+        // reflects the correct repo after removal.
+        let identity = &self.model.repo_order[self.model.active_repo];
+        if let Some(page) = self.screen.repo_pages.get(identity) {
+            self.ui.view_layout = page.layout;
         }
     }
 
@@ -846,11 +967,11 @@ impl App {
     }
 
     pub fn selected_work_item(&self) -> Option<&WorkItem> {
-        let table_idx = self.active_ui().table_state.selected()?;
-        match self.active_ui().table_view.table_entries.get(table_idx)? {
-            GroupEntry::Item(item) => Some(item),
-            GroupEntry::Header(_) => None,
+        if self.model.repo_order.is_empty() {
+            return None;
         }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        self.screen.repo_pages.get(identity).and_then(|page| page.table.selected_work_item())
     }
 
     pub(super) fn open_file_picker_from_active_repo_parent(&mut self) {
@@ -860,7 +981,7 @@ impl App {
             input = Input::from(parent_str.as_str());
         }
         let dir_entries = crate::widgets::command_palette::refresh_dir_listing_standalone(input.value(), &self.model);
-        self.widget_stack.push(Box::new(crate::widgets::file_picker::FilePickerWidget::new(input, dir_entries)));
+        self.screen.modal_stack.push(Box::new(crate::widgets::file_picker::FilePickerWidget::new(input, dir_entries)));
     }
 }
 
@@ -1371,6 +1492,24 @@ mod tests {
         assert_eq!(app.model.active_repo, 1);
     }
 
+    #[test]
+    fn handle_repo_removed_syncs_layout_from_new_active_page() {
+        let mut app = stub_app_with_repos(2);
+        // Give the two repo pages different layouts.
+        let repo0 = app.model.repo_order[0].clone();
+        let repo1 = app.model.repo_order[1].clone();
+        app.screen.repo_pages.get_mut(&repo0).expect("page 0").layout = RepoViewLayout::Zoom;
+        app.screen.repo_pages.get_mut(&repo1).expect("page 1").layout = RepoViewLayout::Below;
+
+        // Active repo is 1 (Below layout). Remove it.
+        app.model.active_repo = 1;
+        app.handle_repo_removed(&repo1);
+
+        // Active repo should now be 0, and ui.view_layout should match its page.
+        assert_eq!(app.model.active_repo, 0);
+        assert_eq!(app.ui.view_layout, RepoViewLayout::Zoom);
+    }
+
     // -- handle_daemon_event --
 
     #[test]
@@ -1467,7 +1606,7 @@ mod tests {
             WorkItemIdentity::Session("test".into()),
             Command { host: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: id.into() } },
         );
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
     }
 
     #[test]
@@ -1475,7 +1614,7 @@ mod tests {
         let mut app = stub_app();
         push_close_confirm_widget(&mut app, "42");
         app.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         let cmd = app.proto_commands.take_next();
         assert!(matches!(cmd, Some((Command { action: CommandAction::CloseChangeRequest { id }, .. }, _)) if id == "42"));
     }
@@ -1485,7 +1624,7 @@ mod tests {
         let mut app = stub_app();
         push_close_confirm_widget(&mut app, "42");
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         let cmd = app.proto_commands.take_next();
         assert!(matches!(cmd, Some((Command { action: CommandAction::CloseChangeRequest { id }, .. }, _)) if id == "42"));
     }
@@ -1495,7 +1634,7 @@ mod tests {
         let mut app = stub_app();
         push_close_confirm_widget(&mut app, "42");
         app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(app.proto_commands.take_next().is_none());
     }
 
@@ -1504,7 +1643,7 @@ mod tests {
         let mut app = stub_app();
         push_close_confirm_widget(&mut app, "42");
         app.handle_key(key(KeyCode::Char('n')));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(app.proto_commands.take_next().is_none());
     }
 

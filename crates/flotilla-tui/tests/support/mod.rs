@@ -10,7 +10,9 @@ pub use flotilla_tui::app::test_builders::{checkout_item, issue_item, pr_item, r
 use flotilla_tui::{
     app::{InFlightCommand, ProviderStatus, RepoViewLayout, TuiModel, UiMode, UiState},
     keymap::Keymap,
+    shared::Shared,
     theme::Theme,
+    widgets::{repo_page::RepoData, InteractiveWidget},
 };
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
@@ -25,59 +27,55 @@ pub struct TestHarness {
     pub model: TuiModel,
     pub ui: UiState,
     pub in_flight: HashMap<u64, InFlightCommand>,
-    pub widget_stack: Vec<Box<dyn flotilla_tui::widgets::InteractiveWidget>>,
+    pub screen: flotilla_tui::widgets::screen::Screen,
     theme: Option<Theme>,
     width: u16,
     height: u16,
 }
 
 impl TestHarness {
+    /// Create a `TestHarness` from a pre-built model, populating RepoPages.
+    fn from_model(model: TuiModel) -> Self {
+        let ui = UiState::new(&model.repo_order);
+        let mut screen = flotilla_tui::widgets::screen::Screen::new();
+        for (identity, rm) in &model.repos {
+            let shared = Shared::new(RepoData {
+                path: rm.path.clone(),
+                providers: Arc::new(ProviderData::default()),
+                labels: rm.labels.clone(),
+                provider_names: rm.provider_names.clone(),
+                provider_health: rm.provider_health.clone(),
+                work_items: Vec::new(),
+                issue_has_more: false,
+                issue_total: None,
+                issue_search_active: false,
+                loading: rm.loading,
+            });
+            let page = flotilla_tui::widgets::repo_page::RepoPage::new(identity.clone(), shared, ui.view_layout);
+            screen.repo_pages.insert(identity.clone(), page);
+        }
+        Self { model, ui, in_flight: HashMap::new(), screen, theme: None, width: WIDTH, height: HEIGHT }
+    }
+
     /// Empty state: single repo with no data (the UI requires at least one repo).
     pub fn empty() -> Self {
         let info = test_repo_info("empty");
         let model = TuiModel::from_repo_info(vec![info]);
-        let ui = UiState::new(&model.repo_order);
-        Self {
-            model,
-            ui,
-            in_flight: HashMap::new(),
-            widget_stack: vec![Box::new(flotilla_tui::widgets::base_view::BaseView::new())],
-            theme: None,
-            width: WIDTH,
-            height: HEIGHT,
-        }
+        Self::from_model(model)
     }
 
     /// Single repo with given name, empty data.
     pub fn single_repo(name: &str) -> Self {
         let info = test_repo_info(name);
         let model = TuiModel::from_repo_info(vec![info]);
-        let ui = UiState::new(&model.repo_order);
-        Self {
-            model,
-            ui,
-            in_flight: HashMap::new(),
-            widget_stack: vec![Box::new(flotilla_tui::widgets::base_view::BaseView::new())],
-            theme: None,
-            width: WIDTH,
-            height: HEIGHT,
-        }
+        Self::from_model(model)
     }
 
     /// Multiple repos by name, all with empty data.
     pub fn multi_repo(names: &[&str]) -> Self {
         let infos = names.iter().map(|n| test_repo_info(n)).collect();
         let model = TuiModel::from_repo_info(infos);
-        let ui = UiState::new(&model.repo_order);
-        Self {
-            model,
-            ui,
-            in_flight: HashMap::new(),
-            widget_stack: vec![Box::new(flotilla_tui::widgets::base_view::BaseView::new())],
-            theme: None,
-            width: WIDTH,
-            height: HEIGHT,
-        }
+        Self::from_model(model)
     }
 
     /// Override the terminal height for this test.
@@ -105,12 +103,18 @@ impl TestHarness {
 
     pub fn with_layout(mut self, layout: RepoViewLayout) -> Self {
         self.ui.view_layout = layout;
+        // Also set the layout on the active repo's RepoPage.
+        if let Some(identity) = self.model.repo_order.first() {
+            if let Some(page) = self.screen.repo_pages.get_mut(identity) {
+                page.layout = layout;
+            }
+        }
         self
     }
 
-    /// Push an interactive widget onto the widget stack for rendering.
+    /// Push an interactive widget onto the modal stack for rendering.
     pub fn with_widget(mut self, widget: Box<dyn flotilla_tui::widgets::InteractiveWidget>) -> Self {
-        self.widget_stack.push(widget);
+        self.screen.modal_stack.push(widget);
         self
     }
 
@@ -141,8 +145,10 @@ impl TestHarness {
     pub fn with_provider_data(mut self, providers: ProviderData, items: Vec<WorkItem>) -> Self {
         let repo_identity = self.model.repo_order[0].clone();
         let rm = self.model.repos.get_mut(&repo_identity).unwrap();
-        rm.providers = Arc::new(providers);
+        let providers_arc = Arc::new(providers);
+        rm.providers = providers_arc.clone();
 
+        // Update the legacy UiState table view (still used by some rendering paths).
         let section_labels = SectionLabels {
             checkouts: rm.labels.checkouts.section.clone(),
             change_requests: rm.labels.change_requests.section.clone(),
@@ -150,9 +156,16 @@ impl TestHarness {
             sessions: rm.labels.cloud_agents.section.clone(),
         };
         let table_view = group_work_items(&items, &rm.providers, &section_labels, &rm.path);
-
         let rui = self.ui.repo_ui.get_mut(&repo_identity).unwrap();
         rui.update_table_view(table_view);
+
+        // Update the RepoPage's shared data so reconciliation picks up the items.
+        if let Some(page) = self.screen.repo_pages.get(&repo_identity) {
+            page.repo_data().mutate(|d| {
+                d.providers = providers_arc;
+                d.work_items = items;
+            });
+        }
         self
     }
 
@@ -168,8 +181,8 @@ impl TestHarness {
         let mut terminal = Terminal::new(backend).expect("failed to create test terminal");
         let theme = self.theme.clone().unwrap_or_else(Theme::classic);
         let keymap = Keymap::defaults();
-        let active_widget_mode = self.widget_stack.last().map(|w| w.mode_id());
-        let active_widget_data = self.widget_stack.last().map(|w| w.status_data()).unwrap_or_default();
+        let active_widget_mode = self.screen.active_mode_id();
+        let active_widget_data = self.screen.active_status_data();
         terminal
             .draw(|frame| {
                 let area = frame.area();
@@ -182,9 +195,7 @@ impl TestHarness {
                     active_widget_mode,
                     active_widget_data: active_widget_data.clone(),
                 };
-                for widget in &mut self.widget_stack {
-                    widget.render(frame, area, &mut ctx);
-                }
+                self.screen.render(frame, area, &mut ctx);
             })
             .expect("failed to draw test frame");
         terminal.backend().buffer().clone()

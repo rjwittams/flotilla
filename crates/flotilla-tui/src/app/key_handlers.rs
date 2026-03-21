@@ -3,7 +3,10 @@ use flotilla_core::data::GroupEntry;
 use flotilla_protocol::{Command, CommandAction, WorkItem};
 
 use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent, UiMode};
-use crate::keymap::{Action, ModeId};
+use crate::{
+    keymap::{Action, ModeId},
+    widgets::InteractiveWidget,
+};
 
 impl App {
     // ── Key handling ──
@@ -15,53 +18,6 @@ impl App {
     fn resolve_action(&self, key: KeyEvent) -> Option<Action> {
         let mode_id = ModeId::from(&self.ui.mode);
         self.keymap.resolve(mode_id, crokey::KeyCombination::from(key))
-    }
-
-    /// Handle global actions that bypass the widget stack entirely.
-    ///
-    /// These are app-level operations (tab switching, theme/layout cycling,
-    /// debug toggle, etc.) that don't depend on the focused widget.
-    pub(super) fn handle_global_action(&mut self, action: Action) {
-        match action {
-            Action::PrevTab => self.prev_tab(),
-            Action::NextTab => self.next_tab(),
-            Action::MoveTabLeft => {
-                if !self.ui.mode.is_config() && self.move_tab(-1) {
-                    self.config.save_tab_order(&self.persisted_tab_order_paths());
-                }
-            }
-            Action::MoveTabRight => {
-                if !self.ui.mode.is_config() && self.move_tab(1) {
-                    self.config.save_tab_order(&self.persisted_tab_order_paths());
-                }
-            }
-            Action::CycleTheme => {
-                let themes = crate::theme::available_themes();
-                let current = self.theme.name;
-                let idx = themes.iter().position(|(name, _)| *name == current).unwrap_or(0);
-                let next = (idx + 1) % themes.len();
-                self.theme = (themes[next].1)();
-            }
-            Action::CycleLayout => {
-                self.ui.cycle_layout();
-                self.persist_layout();
-            }
-            Action::CycleHost => {
-                let peer_hosts = self.model.peer_host_names();
-                self.ui.cycle_target_host(&peer_hosts);
-            }
-            Action::ToggleDebug => {
-                self.ui.show_debug = !self.ui.show_debug;
-            }
-            Action::ToggleStatusBarKeys => {
-                self.ui.status_bar.show_keys = !self.ui.status_bar.show_keys;
-            }
-            Action::Refresh => {
-                let repo = self.model.active_repo_root().clone();
-                self.proto_commands.push(self.command(CommandAction::Refresh { repo: Some(flotilla_protocol::RepoSelector::Path(repo)) }));
-            }
-            _ => {}
-        }
     }
 
     /// Handle actions that the widget stack returned `Ignored` for.
@@ -90,19 +46,23 @@ impl App {
                     self.dispatch_if_available(intent);
                 }
             }
-            // Handled by the widget stack (BaseView or modal widgets) or
+            // Handled by the widget stack (page widgets or modals) or
             // pre-dispatched as global actions. No-op if they reach here.
             _ => {}
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
-        // Snapshot selection so we can detect changes for infinite scroll.
-        let prev_selection = self.active_ui().selected_selectable_idx;
+        // Sync any RepoUiState changes into RepoPage before dispatch.
+        self.sync_ui_state_to_repo_page();
 
-        // The widget stack is always non-empty (BaseView is the base layer).
-        let captures_raw = self.widget_stack.last().expect("stack is never empty").captures_raw_keys();
-        let mode_id = self.widget_stack.last().expect("stack is never empty").mode_id();
+        // Snapshot selection so we can detect changes for infinite scroll.
+        let prev_selection = self.active_page_selection();
+
+        // Determine the topmost widget's mode. Screen delegates to the
+        // top modal (if any) for mode_id / captures_raw_keys.
+        let captures_raw = self.screen.captures_raw_keys();
+        let mode_id = self.screen.mode_id();
 
         let action = if captures_raw {
             match key.code {
@@ -137,55 +97,37 @@ impl App {
             }
         };
 
-        // Global actions bypass the widget stack — but only when no modal is
-        // open. Modals act as focus barriers: they must trap all input,
-        // including globals like tab switching or theme cycling, to prevent
-        // unexpected state changes while a confirm dialog is visible.
-        if let Some(action) = action {
-            if action.is_global() && !self.has_modal() {
-                self.handle_global_action(action);
-                return;
-            }
-        }
-
-        let mut stack = std::mem::take(&mut self.widget_stack);
-        let (outcome_action, app_actions) = {
+        // Dispatch to Screen, which handles modal routing internally.
+        // Take the screen out to avoid borrow conflicts between the widget
+        // dispatch (`&mut Screen`) and the `WidgetContext` (borrows other `App` fields).
+        let mut screen = std::mem::take(&mut self.screen);
+        let (outcome_is_ignored, app_actions) = {
             let mut ctx = self.build_widget_context();
-            let mut result: Option<(usize, crate::widgets::Outcome)> = None;
-            // Dispatch to the top widget first. Only propagate down to the
-            // base widget (index 0) when it IS the top widget. Modal widgets
-            // above the base layer act as focus barriers — their Ignored
-            // result does not cascade further.
-            let top = stack.len() - 1;
-            let stop_at = if stack.len() > 1 { 1 } else { 0 };
-            for i in (stop_at..=top).rev() {
-                let outcome = if let Some(action) = action {
-                    stack[i].handle_action(action, &mut ctx)
-                } else {
-                    stack[i].handle_raw_key(key, &mut ctx)
-                };
-                if !matches!(outcome, crate::widgets::Outcome::Ignored) {
-                    result = Some((i, outcome));
-                    break;
-                }
-            }
-            let app_actions = std::mem::take(&mut ctx.app_actions);
-            (result, app_actions)
+            let outcome =
+                if let Some(action) = action { screen.handle_action(action, &mut ctx) } else { screen.handle_raw_key(key, &mut ctx) };
+            (matches!(outcome, crate::widgets::Outcome::Ignored), std::mem::take(&mut ctx.app_actions))
         };
+        self.screen = screen;
 
-        self.widget_stack = stack;
-        if let Some((index, outcome)) = outcome_action {
-            self.apply_outcome(index, outcome);
-        } else if let Some(action) = action {
-            // No widget consumed the action — fall through to legacy dispatch
-            self.dispatch_action(action);
+        // Fall through if unhandled — these are actions that need &mut App
+        // context the widget stack doesn't have. Only when no modal is active:
+        // modals are focus barriers, so their Ignored should not leak through
+        // to app-level dispatch.
+        if outcome_is_ignored && !self.screen.has_modal() {
+            if let Some(action) = action {
+                self.dispatch_action(action);
+            }
         }
         self.process_app_actions(app_actions);
+
+        // Sync RepoPage state back into RepoUiState so legacy code
+        // (rendering via status bar, tests) continues to work.
+        self.sync_repo_page_state();
 
         // Post-dispatch: check for infinite scroll only if the selection
         // actually changed. This avoids spurious fetches from unrelated
         // key presses that happen to fire when the selection is near the bottom.
-        if self.active_ui().selected_selectable_idx != prev_selection {
+        if self.active_page_selection() != prev_selection {
             self.check_infinite_scroll();
         }
     }
@@ -193,61 +135,104 @@ impl App {
     // ── Mouse handling ──
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Sync any RepoUiState changes into RepoPage before dispatch.
+        self.sync_ui_state_to_repo_page();
+
         // Snapshot selection so we can detect changes for infinite scroll.
-        let prev_selection = self.active_ui().selected_selectable_idx;
+        let prev_selection = self.active_page_selection();
 
-        // ── Widget stack mouse dispatch ──
-        // The stack is always non-empty (BaseView is the base layer).
-        // Modal widgets on top act as focus barriers — if a modal is present,
-        // mouse events that it doesn't consume must NOT fall through to the
-        // base table layer. Only dispatch to the top widget when modals are
-        // present; skip the base widget entirely.
-        let mut stack = std::mem::take(&mut self.widget_stack);
-        let (outcome_action, app_actions) = {
+        // Dispatch to Screen, which handles modal routing internally.
+        let mut screen = std::mem::take(&mut self.screen);
+        let app_actions = {
             let mut ctx = self.build_widget_context();
-            let mut result: Option<(usize, crate::widgets::Outcome)> = None;
-            let top = stack.len() - 1;
-            // Only try the top modal widget, not the base layer underneath.
-            // When no modal is present, the base widget (index 0) gets the event.
-            let stop_at = if stack.len() > 1 { top } else { 0 };
-            for i in (stop_at..=top).rev() {
-                let outcome = stack[i].handle_mouse(mouse, &mut ctx);
-                if !matches!(outcome, crate::widgets::Outcome::Ignored) {
-                    result = Some((i, outcome));
-                    break;
-                }
-            }
-            let app_actions = std::mem::take(&mut ctx.app_actions);
-            (result, app_actions)
+            screen.handle_mouse(mouse, &mut ctx);
+            std::mem::take(&mut ctx.app_actions)
         };
-
-        self.widget_stack = stack;
+        self.screen = screen;
         self.process_app_actions(app_actions);
-        if let Some((index, outcome)) = outcome_action {
-            self.apply_outcome(index, outcome);
-        }
+
+        // Sync RepoPage state back into RepoUiState for legacy code
+        // (status bar, tests that still read from active_ui()).
+        self.sync_repo_page_state();
 
         // ── Tab drag handling ──
-        // The BaseView owns the drag state but can't mutate model.repo_order
+        // The Tabs widget owns the drag state but can't mutate model.repo_order
         // (read-only in WidgetContext). Perform the actual swap here.
         if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) {
-            let drag_active = self.with_base_view(|bv| bv.drag.dragging_tab.is_some() && bv.drag.active);
-            if drag_active {
-                let mut stack = std::mem::take(&mut self.widget_stack);
-                let base = stack[0]
-                    .as_any_mut()
-                    .downcast_mut::<crate::widgets::base_view::BaseView>()
-                    .expect("widget_stack[0] is always BaseView");
-                base.tab_bar.handle_drag(mouse.column, mouse.row, &mut base.drag, &mut self.model.repo_order, &mut self.model.active_repo);
-                self.widget_stack = stack;
+            let tabs = &mut self.screen.tabs;
+            if tabs.drag.dragging_tab.is_some()
+                && tabs.drag.active
+                && tabs.handle_drag(mouse.column, mouse.row, &mut self.model.repo_order, &mut self.model.active_repo)
+            {
+                // Update drag index to the new position after the swap
+                tabs.update_drag_index(self.model.active_repo);
             }
         }
 
         // ── Infinite scroll check ──
         // Only if the selection actually changed — avoids spurious fetches
         // from tab bar clicks, status bar clicks, etc.
-        if self.active_ui().selected_selectable_idx != prev_selection {
+        if self.active_page_selection() != prev_selection {
             self.check_infinite_scroll();
+        }
+    }
+
+    /// Get the current selection index from the active RepoPage, if any.
+    fn active_page_selection(&self) -> Option<usize> {
+        if self.model.repo_order.is_empty() {
+            return None;
+        }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        self.screen.repo_pages.get(identity).and_then(|page| page.table.selected_selectable_idx)
+    }
+
+    /// Sync fields written by modal widgets (IssueSearch, CommandPalette)
+    /// into the active RepoPage before dispatch.
+    ///
+    /// `active_search_query` is written by IssueSearchWidget and
+    /// CommandPaletteWidget via `ctx.repo_ui`. This ensures the RepoPage
+    /// picks up those changes before the widget stack processes the next event.
+    ///
+    /// `pending_actions` is NOT synced here — the executor and daemon-event
+    /// handler dual-write to both rui and RepoPage directly.
+    fn sync_ui_state_to_repo_page(&mut self) {
+        if self.ui.mode.is_config() || self.model.repo_order.is_empty() {
+            return;
+        }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        if let Some(rui) = self.ui.repo_ui.get(identity) {
+            if let Some(page) = self.screen.repo_pages.get_mut(identity) {
+                page.active_search_query.clone_from(&rui.active_search_query);
+            }
+        }
+    }
+
+    /// Sync the active RepoPage's state back into RepoUiState.
+    ///
+    /// RepoPage is authoritative for selection, multi-select, and
+    /// show_providers. `active_search_query` and `pending_actions` flow
+    /// rui→page only (written by modals and the executor respectively).
+    /// This sync keeps RepoUiState in sync for status bar rendering and
+    /// tests that still read from `active_ui()`.
+    fn sync_repo_page_state(&mut self) {
+        if self.ui.mode.is_config() || self.model.repo_order.is_empty() {
+            return;
+        }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        if let Some(page) = self.screen.repo_pages.get(identity) {
+            if let Some(rui) = self.ui.repo_ui.get_mut(identity) {
+                rui.selected_selectable_idx = page.table.selected_selectable_idx;
+                rui.table_state = page.table.table_state;
+                rui.table_view = page.table.grouped_items.clone();
+                rui.multi_selected.clone_from(&page.multi_selected);
+                rui.show_providers = page.show_providers;
+                // active_search_query is NOT synced page→rui here because
+                // modal widgets (IssueSearch, CommandPalette) write it to rui
+                // during dispatch. The canonical direction is rui→page via
+                // sync_ui_state_to_repo_page. Similarly, pending_actions is
+                // written by the executor to rui, so the canonical direction
+                // is rui→page.
+            }
         }
     }
 
@@ -262,11 +247,14 @@ impl App {
         if self.model.repo_order.is_empty() {
             return;
         }
-        let rui = self.active_ui();
-        let Some(next) = rui.selected_selectable_idx else {
+        let identity = &self.model.repo_order[self.model.active_repo];
+        let Some(page) = self.screen.repo_pages.get(identity) else {
             return;
         };
-        let total = rui.table_view.selectable_indices.len();
+        let Some(next) = page.table.selected_selectable_idx else {
+            return;
+        };
+        let total = page.table.grouped_items.selectable_indices.len();
         if next + 5 >= total && self.model.active().issue_has_more && !self.model.active().issue_fetch_pending {
             let repo = self.model.active_repo_root().clone();
             let issue_count = self.model.active().providers.issues.len();
@@ -282,7 +270,9 @@ impl App {
     }
 
     pub(super) fn action_enter(&mut self) {
-        if !self.active_ui().multi_selected.is_empty() {
+        let identity = &self.model.repo_order[self.model.active_repo];
+        let has_multi = self.screen.repo_pages.get(identity).is_some_and(|p| !p.multi_selected.is_empty());
+        if has_multi {
             self.action_enter_multi_select();
             return;
         }
@@ -301,11 +291,15 @@ impl App {
     }
 
     fn action_enter_multi_select(&mut self) {
-        let multi_selected = self.active_ui().multi_selected.clone();
+        let identity = &self.model.repo_order[self.model.active_repo];
+        let Some(page) = self.screen.repo_pages.get(identity) else {
+            return;
+        };
+        let multi_selected = page.multi_selected.clone();
         let mut all_issue_keys: Vec<String> = Vec::new();
 
         // Collect issues from multi-selected items
-        for entry in &self.active_ui().table_view.table_entries {
+        for entry in &page.table.grouped_items.table_entries {
             if let GroupEntry::Item(item) = entry {
                 if multi_selected.contains(&item.identity) {
                     all_issue_keys.extend(item.issue_keys.iter().cloned());
@@ -323,10 +317,13 @@ impl App {
         all_issue_keys.sort();
         all_issue_keys.dedup();
         if !all_issue_keys.is_empty() {
-            self.widget_stack.push(Box::new(crate::widgets::branch_input::BranchInputWidget::new(BranchInputKind::Generating)));
+            self.screen.modal_stack.push(Box::new(crate::widgets::branch_input::BranchInputWidget::new(BranchInputKind::Generating)));
             self.proto_commands.push(self.targeted_repo_command(CommandAction::GenerateBranchName { issue_keys: all_issue_keys }));
         }
-        self.active_ui_mut().multi_selected.clear();
+        let identity = identity.clone();
+        if let Some(page) = self.screen.repo_pages.get_mut(&identity) {
+            page.multi_selected.clear();
+        }
     }
 
     fn dispatch_if_available(&mut self, intent: Intent) {
@@ -359,10 +356,12 @@ impl App {
                         self.item_execution_host(item),
                         checkout_path,
                     );
-                    self.widget_stack.push(Box::new(widget));
+                    self.screen.modal_stack.push(Box::new(widget));
                 }
                 Intent::GenerateBranchName => {
-                    self.widget_stack.push(Box::new(crate::widgets::branch_input::BranchInputWidget::new(BranchInputKind::Generating)));
+                    self.screen
+                        .modal_stack
+                        .push(Box::new(crate::widgets::branch_input::BranchInputWidget::new(BranchInputKind::Generating)));
                 }
                 Intent::CloseChangeRequest => {
                     let id = match &cmd {
@@ -371,7 +370,7 @@ impl App {
                     };
                     let widget =
                         crate::widgets::close_confirm::CloseConfirmWidget::new(id, item.description.clone(), item.identity.clone(), cmd);
-                    self.widget_stack.push(Box::new(widget));
+                    self.screen.modal_stack.push(Box::new(widget));
                     return;
                 }
                 _ => {}
@@ -407,7 +406,7 @@ impl App {
             return;
         }
 
-        self.widget_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
+        self.screen.modal_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
     }
 }
 
@@ -478,15 +477,15 @@ mod tests {
     fn config_select_next_moves_event_log_via_widget() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.with_base_view(|bv| {
-            bv.event_log.count = 3;
-            bv.event_log.selected = Some(0);
-        });
+        {
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 3;
+            ov.event_log.selected = Some(0);
+        }
 
         app.handle_key(key(KeyCode::Char('j')));
 
-        let selected = app.with_base_view(|bv| bv.event_log.selected);
-        assert_eq!(selected, Some(1));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(1));
     }
 
     #[test]
@@ -498,7 +497,7 @@ mod tests {
 
         app.handle_key(key(KeyCode::Down));
 
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::FilePicker);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::FilePicker);
     }
 
     // dispatch_action_confirm_submits_delete_confirm — moved to widget tests
@@ -513,7 +512,7 @@ mod tests {
 
         app.handle_key(key(KeyCode::Enter));
 
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         let (cmd, _) = app.proto_commands.take_next().expect("expected checkout command");
         match cmd {
             Command { action: CommandAction::Checkout { target, .. }, .. } => {
@@ -532,7 +531,7 @@ mod tests {
 
         app.handle_key(key(KeyCode::Enter));
 
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert_eq!(app.active_ui().active_search_query.as_deref(), Some("bug fix"));
         let (cmd, _) = app.proto_commands.take_next().expect("expected search command");
         match cmd {
@@ -559,7 +558,7 @@ mod tests {
 
         app.handle_key(key(KeyCode::Enter));
 
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         let (cmd, _) = app.proto_commands.take_next().expect("expected track repo command");
         match cmd {
             Command { action: CommandAction::TrackRepoPath { path }, .. } => {
@@ -612,17 +611,17 @@ mod tests {
     #[test]
     fn question_mark_toggles_help_from_normal() {
         let mut app = stub_app();
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         app.handle_key(key(KeyCode::Char('?')));
-        assert!(app.widget_stack.len() > 1, "expected modal widget pushed on stack");
+        assert!(!app.screen.modal_stack.is_empty(), "expected modal widget pushed on stack");
     }
 
     #[test]
     fn question_mark_toggles_help_back_to_normal() {
         let mut app = stub_app();
-        app.widget_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
+        app.screen.modal_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
         app.handle_key(key(KeyCode::Char('?')));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
     }
 
     #[test]
@@ -635,10 +634,10 @@ mod tests {
             intent: Intent::OpenChangeRequest,
             command: Command { host: None, context_repo: None, action: CommandAction::OpenChangeRequest { id: "1".into() } },
         }];
-        app.widget_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
+        app.screen.modal_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
         app.handle_key(key(KeyCode::Char('?')));
         // Widget stack should still have exactly 1 widget (the action menu)
-        assert_eq!(app.widget_stack.len(), 2);
+        assert_eq!(app.screen.modal_stack.len(), 1);
     }
 
     #[test]
@@ -679,9 +678,23 @@ mod tests {
     #[test]
     fn esc_in_help_returns_to_normal() {
         let mut app = stub_app();
-        app.widget_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
+        app.screen.modal_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
         app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
+    }
+
+    #[test]
+    fn tab_switch_blocked_while_modal_open() {
+        let mut app = stub_app_with_repos(2);
+        setup_table(&mut app, vec![make_work_item("a")]);
+        let initial_tab = app.model.active_repo;
+        app.screen.modal_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
+
+        // Press ] to switch tabs — should be blocked by the modal focus barrier
+        app.handle_key(key(KeyCode::Char(']')));
+
+        assert_eq!(app.screen.modal_stack.len(), 1, "modal should remain on stack");
+        assert_eq!(app.model.active_repo, initial_tab, "tab should not have changed");
     }
 
     // ── handle_config_key ────────────────────────────────────────────
@@ -691,8 +704,9 @@ mod tests {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
         app.handle_key(key(KeyCode::Char('q')));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(!app.should_quit);
+        assert!(matches!(app.ui.mode, UiMode::Normal));
     }
 
     #[test]
@@ -700,68 +714,74 @@ mod tests {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
         app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(!app.should_quit);
+        assert!(matches!(app.ui.mode, UiMode::Normal));
     }
 
     #[test]
     fn config_j_navigates_event_log_down() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.with_base_view(|bv| {
-            bv.event_log.count = 5;
-            bv.event_log.selected = Some(0);
-        });
+        {
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 5;
+            ov.event_log.selected = Some(0);
+        }
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.with_base_view(|bv| bv.event_log.selected), Some(1));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(1));
     }
 
     #[test]
     fn config_k_navigates_event_log_up() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.with_base_view(|bv| {
-            bv.event_log.count = 5;
-            bv.event_log.selected = Some(3);
-        });
+        {
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 5;
+            ov.event_log.selected = Some(3);
+        }
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.with_base_view(|bv| bv.event_log.selected), Some(2));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(2));
     }
 
     #[test]
     fn config_j_when_no_selection_jumps_to_last() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.with_base_view(|bv| {
-            bv.event_log.count = 5;
-            bv.event_log.selected = None;
-        });
+        {
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 5;
+            ov.event_log.selected = None;
+        }
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.with_base_view(|bv| bv.event_log.selected), Some(4));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(4));
     }
 
     #[test]
     fn config_j_at_end_stays() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.with_base_view(|bv| {
-            bv.event_log.count = 3;
-            bv.event_log.selected = Some(2);
-        });
+        {
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 3;
+            ov.event_log.selected = Some(2);
+        }
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.with_base_view(|bv| bv.event_log.selected), Some(2));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(2));
     }
 
     #[test]
     fn config_k_at_zero_stays() {
         let mut app = stub_app();
         app.ui.mode = UiMode::Config;
-        app.with_base_view(|bv| {
-            bv.event_log.count = 5;
-            bv.event_log.selected = Some(0);
-        });
+        {
+            let ov = &mut app.screen.overview_page;
+            ov.event_log.count = 5;
+            ov.event_log.selected = Some(0);
+        }
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.with_base_view(|bv| bv.event_log.selected), Some(0));
+        assert_eq!(app.screen.overview_page.event_log.selected, Some(0));
     }
 
     #[test]
@@ -770,7 +790,7 @@ mod tests {
         app.ui.mode = UiMode::Config;
         // ] in Config mode should switch to Normal mode + first repo
         app.handle_key(key(KeyCode::Char(']')));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert_eq!(app.model.active_repo, 0);
 
         // [ from first repo (index 0) goes back to Config
@@ -786,12 +806,12 @@ mod tests {
             intent: Intent::OpenChangeRequest,
             command: Command { host: None, context_repo: None, action: CommandAction::OpenChangeRequest { id: "1".into() } },
         }];
-        app.widget_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
+        app.screen.modal_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
 
         app.handle_key(key(KeyCode::Char(']')));
 
         // Widget should still be on the stack, tab should not have switched
-        assert_eq!(app.widget_stack.len(), 2);
+        assert_eq!(app.screen.modal_stack.len(), 1);
         assert_eq!(app.model.active_repo, 0);
     }
 
@@ -802,21 +822,21 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char(']')));
 
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::BranchInput);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::BranchInput);
         assert_eq!(app.model.active_repo, 0);
     }
 
     // ── dismiss_modals ─────────────────────────────────────────────
 
     #[test]
-    fn dismiss_modals_clears_widget_stack_to_base() {
+    fn dismiss_modals_clears_modal_stack() {
         let mut app = stub_app();
-        app.widget_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
-        assert_eq!(app.widget_stack.len(), 2);
+        app.screen.modal_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
+        assert_eq!(app.screen.modal_stack.len(), 1);
 
         app.dismiss_modals();
 
-        assert_eq!(app.widget_stack.len(), 1, "only base BaseView should remain");
+        assert!(app.screen.modal_stack.is_empty(), "modal stack should be empty");
     }
 
     #[test]
@@ -824,7 +844,7 @@ mod tests {
         let mut app = stub_app();
         assert!(!app.has_modal());
 
-        app.widget_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
+        app.screen.modal_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
         assert!(app.has_modal());
 
         app.dismiss_modals();
@@ -835,7 +855,7 @@ mod tests {
     fn global_tab_switch_blocked_when_modal_is_open() {
         let mut app = stub_app_with_repos(2);
         let before = app.model.active_repo;
-        app.widget_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
+        app.screen.modal_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
         app.handle_key(key(KeyCode::Char(']'))); // NextTab
         assert_eq!(app.model.active_repo, before, "tab switch must not fire through modal");
     }
@@ -852,19 +872,20 @@ mod tests {
     #[test]
     fn help_q_returns_to_normal_and_resets_scroll() {
         let mut app = stub_app();
-        app.widget_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
+        app.screen.modal_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
 
         app.handle_key(key(KeyCode::Char('q')));
 
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
     }
 
     #[test]
     fn normal_esc_clears_providers_first() {
         let mut app = stub_app();
-        app.active_ui_mut().show_providers = true;
+        let identity = app.model.repo_order[0].clone();
+        app.screen.repo_pages.get_mut(&identity).expect("repo page exists").show_providers = true;
         app.handle_key(key(KeyCode::Esc));
-        assert!(!app.active_ui().show_providers);
+        assert!(!app.screen.repo_pages.get(&identity).expect("repo page exists").show_providers);
         assert!(!app.should_quit);
     }
 
@@ -872,10 +893,11 @@ mod tests {
     fn normal_esc_clears_multi_select_second() {
         let mut app = stub_app();
         setup_table(&mut app, vec![make_work_item("a")]);
-        app.active_ui_mut().multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
-        assert!(!app.active_ui().multi_selected.is_empty());
+        let identity = app.model.repo_order[0].clone();
+        app.screen.repo_pages.get_mut(&identity).expect("repo page exists").multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
+        assert!(!app.screen.repo_pages.get(&identity).expect("repo page exists").multi_selected.is_empty());
         app.handle_key(key(KeyCode::Esc));
-        assert!(app.active_ui().multi_selected.is_empty());
+        assert!(app.screen.repo_pages.get(&identity).expect("repo page exists").multi_selected.is_empty());
         assert!(!app.should_quit);
     }
 
@@ -891,7 +913,7 @@ mod tests {
     fn normal_n_enters_branch_input() {
         let mut app = stub_app();
         app.handle_key(key(KeyCode::Char('n')));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::BranchInput);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::BranchInput);
     }
 
     #[test]
@@ -900,8 +922,8 @@ mod tests {
         setup_table(&mut app, vec![make_work_item("a")]);
         app.handle_key(key(KeyCode::Char('d')));
         // RemoveCheckout pushes a DeleteConfirmWidget onto the widget stack
-        assert_eq!(app.widget_stack.len(), 2);
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), crate::keymap::ModeId::DeleteConfirm);
+        assert_eq!(app.screen.modal_stack.len(), 1);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), crate::keymap::ModeId::DeleteConfirm);
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::FetchCheckoutStatus { .. }, .. }));
     }
@@ -915,7 +937,7 @@ mod tests {
         setup_table(&mut app, vec![item]);
         app.handle_key(key(KeyCode::Char('d')));
         // Should NOT dispatch — main checkout is not removable
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(app.proto_commands.take_next().is_none());
     }
 
@@ -933,7 +955,7 @@ mod tests {
     fn normal_slash_opens_command_palette() {
         let mut app = stub_app();
         app.handle_key(key(KeyCode::Char('/')));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::CommandPalette);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::CommandPalette);
     }
 
     #[test]
@@ -988,28 +1010,24 @@ mod tests {
         let item = make_work_item("a");
         setup_table(&mut app, vec![item]);
         app.handle_key(key(KeyCode::Char('.')));
-        assert!(app.widget_stack.len() > 1, "expected ActionMenuWidget on the widget stack");
+        assert!(!app.screen.modal_stack.is_empty(), "expected ActionMenuWidget on the modal stack");
     }
 
     #[test]
     fn clicking_search_status_target_opens_command_palette() {
         let mut app = stub_app();
-        app.with_base_view(|bv| {
-            bv.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
-        });
+        app.screen.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(10, 29, 12, 1), StatusBarAction::key(KeyCode::Char('/')))];
 
         app.handle_mouse(left_click(12, 29));
 
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::CommandPalette);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::CommandPalette);
     }
 
     #[test]
     fn clicking_layout_status_cycles_layout() {
         let mut app = stub_app();
         assert_eq!(app.ui.view_layout, RepoViewLayout::Auto);
-        app.with_base_view(|bv| {
-            bv.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
-        });
+        app.screen.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 12, 1), StatusBarAction::key(KeyCode::Char('l')))];
 
         app.handle_mouse(left_click(4, 29));
 
@@ -1020,9 +1038,7 @@ mod tests {
     fn clicking_host_status_target_cycles_target_host() {
         let mut app = stub_app();
         insert_peer_host(&mut app.model, "alpha");
-        app.with_base_view(|bv| {
-            bv.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
-        });
+        app.screen.status_bar.key_targets = vec![StatusBarTarget::new(Rect::new(0, 29, 16, 1), StatusBarAction::key(KeyCode::Char('h')))];
 
         app.handle_mouse(left_click(4, 29));
 
@@ -1033,9 +1049,7 @@ mod tests {
     fn clicking_dismiss_status_target_hides_visible_error() {
         let mut app = stub_app();
         app.model.status_message = Some("boom".into());
-        app.with_base_view(|bv| {
-            bv.status_bar.dismiss_targets = vec![StatusBarTarget::new(Rect::new(20, 29, 1, 1), StatusBarAction::ClearError(0))];
-        });
+        app.screen.status_bar.dismiss_targets = vec![StatusBarTarget::new(Rect::new(20, 29, 1, 1), StatusBarAction::ClearError(0))];
 
         app.handle_mouse(left_click(20, 29));
 
@@ -1045,8 +1059,9 @@ mod tests {
     #[test]
     fn clicking_gear_icon_toggles_providers() {
         let mut app = stub_app();
-        // Place the gear hitbox where render would put it — on BaseView
-        app.with_base_view(|bv| bv.table.gear_area = Some(Rect::new(75, 2, 3, 1)));
+        // Place the gear hitbox on the active RepoPage's table
+        let repo_key = app.model.repo_order[0].clone();
+        app.screen.repo_pages.get_mut(&repo_key).expect("repo page").table.gear_area = Some(Rect::new(75, 2, 3, 1));
         assert!(!app.active_ui().show_providers);
 
         app.handle_mouse(left_click(76, 2));
@@ -1059,7 +1074,10 @@ mod tests {
     #[test]
     fn clicking_gear_icon_ignored_in_config_mode() {
         let mut app = stub_app();
-        app.with_base_view(|bv| bv.table.gear_area = Some(Rect::new(75, 2, 3, 1)));
+        // Set gear area on the repo page's table — in Config mode the overview
+        // page handles events, so the gear click should not toggle providers.
+        let repo_key = app.model.repo_order[0].clone();
+        app.screen.repo_pages.get_mut(&repo_key).expect("repo page").table.gear_area = Some(Rect::new(75, 2, 3, 1));
         app.ui.mode = UiMode::Config;
 
         app.handle_mouse(left_click(76, 2));
@@ -1071,12 +1089,12 @@ mod tests {
         let mut app = stub_app();
         setup_table(&mut app, vec![make_work_item("a"), make_work_item("b")]);
         app.ui.layout.table_area = Rect::new(0, 2, 80, 10);
-        app.widget_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
+        app.screen.modal_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
 
         app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: 5, row: 5, modifiers: KeyModifiers::NONE });
 
         assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
-        assert_eq!(app.widget_stack.len(), 2, "expected help widget to remain on stack");
+        assert_eq!(app.screen.modal_stack.len(), 1, "expected help widget to remain on stack");
     }
 
     #[test]
@@ -1089,7 +1107,22 @@ mod tests {
         app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: 5, row: 5, modifiers: KeyModifiers::NONE });
 
         assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
-        assert_eq!(app.widget_stack.len(), 2, "expected action menu to remain on stack");
+        assert_eq!(app.screen.modal_stack.len(), 1, "expected action menu to remain on stack");
+    }
+
+    #[test]
+    fn enter_while_help_open_does_not_trigger_action_enter() {
+        let mut app = stub_app();
+        setup_table(&mut app, vec![make_work_item("a")]);
+        app.screen.modal_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
+
+        // Help ignores Confirm, which used to leak through to dispatch_action
+        // and trigger action_enter on the selected item behind the modal.
+        app.handle_key(key(KeyCode::Enter));
+
+        // Help should still be on the stack, and no commands should have been dispatched.
+        assert_eq!(app.screen.modal_stack.len(), 1, "help widget should remain on stack");
+        assert!(app.proto_commands.take_next().is_none(), "no commands should be dispatched while help is open");
     }
 
     // ── handle_menu_key (through widget stack) ─────────────────────
@@ -1118,7 +1151,7 @@ mod tests {
                 },
             },
         ];
-        app.widget_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
+        app.screen.modal_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
     }
 
     #[test]
@@ -1126,7 +1159,7 @@ mod tests {
         let mut app = stub_app();
         push_action_menu_widget(&mut app);
         app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
     }
 
     #[test]
@@ -1134,7 +1167,7 @@ mod tests {
         let mut app = stub_app();
         push_action_menu_widget(&mut app);
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         let (cmd, _) = app.proto_commands.take_next().expect("expected command");
         assert!(matches!(cmd.action, CommandAction::CreateWorkspaceForCheckout { .. }));
     }
@@ -1143,19 +1176,19 @@ mod tests {
 
     fn push_branch_input_widget(app: &mut App, kind: BranchInputKind) {
         let widget = crate::widgets::branch_input::BranchInputWidget::new(kind);
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
     }
 
     fn push_branch_input_widget_with_text(app: &mut App, text: &str) {
         let mut widget = crate::widgets::branch_input::BranchInputWidget::new(BranchInputKind::Manual);
         widget.prefill(text, vec![]);
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
     }
 
     fn push_branch_input_widget_with_issues(app: &mut App, text: &str, issue_ids: Vec<(String, String)>) {
         let mut widget = crate::widgets::branch_input::BranchInputWidget::new(BranchInputKind::Manual);
         widget.prefill(text, issue_ids);
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
     }
 
     #[test]
@@ -1163,7 +1196,7 @@ mod tests {
         let mut app = stub_app();
         push_branch_input_widget_with_text(&mut app, "my-branch");
         app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
     }
 
     #[test]
@@ -1171,7 +1204,7 @@ mod tests {
         let mut app = stub_app();
         push_branch_input_widget_with_text(&mut app, "my-branch");
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::Checkout { target, issue_ids, .. }, .. } => {
@@ -1201,7 +1234,7 @@ mod tests {
         let mut app = stub_app();
         push_branch_input_widget(&mut app, BranchInputKind::Manual);
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(app.proto_commands.take_next().is_none());
     }
 
@@ -1211,13 +1244,13 @@ mod tests {
         push_branch_input_widget(&mut app, BranchInputKind::Generating);
         // Enter should be ignored (consumed, but widget stays)
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::BranchInput);
-        assert_eq!(app.widget_stack.len(), 2);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::BranchInput);
+        assert_eq!(app.screen.modal_stack.len(), 1);
         assert!(app.proto_commands.take_next().is_none());
 
         // Esc should dismiss the generating prompt
         app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
     }
 
     #[test]
@@ -1228,21 +1261,21 @@ mod tests {
         app.handle_key(key(KeyCode::Char('q')));
 
         // Widget should remain on stack (typing doesn't dismiss)
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::BranchInput);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::BranchInput);
     }
 
     // ── IssueSearch integration (via widget stack) ──────────────────
 
     fn push_issue_search_widget(app: &mut App) {
         app.ui.mode = UiMode::IssueSearch { input: Input::default() };
-        app.widget_stack.push(Box::new(crate::widgets::issue_search::IssueSearchWidget::new()));
+        app.screen.modal_stack.push(Box::new(crate::widgets::issue_search::IssueSearchWidget::new()));
     }
 
     fn push_issue_search_widget_with_text(app: &mut App, text: &str) {
         // We can't set text directly on the widget from outside, so we simulate
         // by typing each character through the widget stack.
         app.ui.mode = UiMode::IssueSearch { input: Input::default() };
-        app.widget_stack.push(Box::new(crate::widgets::issue_search::IssueSearchWidget::new()));
+        app.screen.modal_stack.push(Box::new(crate::widgets::issue_search::IssueSearchWidget::new()));
         for ch in text.chars() {
             app.handle_key(key(KeyCode::Char(ch)));
         }
@@ -1253,7 +1286,7 @@ mod tests {
         let mut app = stub_app();
         push_issue_search_widget_with_text(&mut app, "some query");
         app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::ClearIssueSearch { .. }, .. }));
     }
@@ -1263,7 +1296,7 @@ mod tests {
         let mut app = stub_app();
         push_issue_search_widget_with_text(&mut app, "bug fix");
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::SearchIssues { query, .. }, .. } => {
@@ -1278,7 +1311,7 @@ mod tests {
         let mut app = stub_app();
         push_issue_search_widget(&mut app);
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(app.proto_commands.take_next().is_none());
     }
 
@@ -1296,7 +1329,7 @@ mod tests {
             uncommitted_files: vec![],
             base_detection_warning: None,
         });
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
     }
 
     #[test]
@@ -1304,7 +1337,7 @@ mod tests {
         let mut app = stub_app();
         push_delete_confirm_widget(&mut app, "feat/x");
         app.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::RemoveCheckout { checkout, .. }, .. } => {
@@ -1319,7 +1352,7 @@ mod tests {
         let mut app = stub_app();
         push_delete_confirm_widget(&mut app, "feat/y");
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::RemoveCheckout { checkout, .. }, .. } => {
@@ -1343,7 +1376,7 @@ mod tests {
             uncommitted_files: vec![],
             base_detection_warning: None,
         });
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
         app.handle_key(key(KeyCode::Char('y')));
         let (_, ctx) = app.proto_commands.take_next().expect("should have command");
         let ctx = ctx.expect("should have pending context");
@@ -1369,7 +1402,7 @@ mod tests {
             uncommitted_files: vec![],
             base_detection_warning: None,
         });
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
         app.handle_key(key(KeyCode::Char('y')));
         let (cmd, _) = app.proto_commands.take_next().expect("command");
         assert_eq!(cmd.host, Some(hostname));
@@ -1381,10 +1414,10 @@ mod tests {
         let mut app = stub_app();
         // Loading widget — no info yet
         let widget = crate::widgets::delete_confirm::DeleteConfirmWidget::new(vec![], WorkItemIdentity::Session("test".into()), None, None);
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
         app.handle_key(key(KeyCode::Char('y')));
         // Widget should still be on the stack (Consumed, not Finished)
-        assert_eq!(app.widget_stack.len(), 2);
+        assert_eq!(app.screen.modal_stack.len(), 1);
         assert!(app.proto_commands.take_next().is_none());
     }
 
@@ -1393,7 +1426,7 @@ mod tests {
         let mut app = stub_app();
         push_delete_confirm_widget(&mut app, "feat/z");
         app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(app.proto_commands.take_next().is_none());
     }
 
@@ -1402,7 +1435,7 @@ mod tests {
         let mut app = stub_app();
         push_delete_confirm_widget(&mut app, "feat/z");
         app.handle_key(key(KeyCode::Char('n')));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(app.proto_commands.take_next().is_none());
     }
 
@@ -1415,8 +1448,8 @@ mod tests {
         let item = make_work_item("a");
         setup_table(&mut app, vec![item]);
         app.open_action_menu();
-        assert_eq!(app.widget_stack.len(), 2);
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::ActionMenu);
+        assert_eq!(app.screen.modal_stack.len(), 1);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::ActionMenu);
     }
 
     #[test]
@@ -1424,7 +1457,7 @@ mod tests {
         let mut app = stub_app();
         // No items in table, no selection
         app.open_action_menu();
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
     }
 
     // ── action_enter ─────────────────────────────────────────────────
@@ -1508,8 +1541,8 @@ mod tests {
         let mut app = stub_app();
         let item = make_work_item("a");
         app.resolve_and_push(Intent::RemoveCheckout, &item);
-        assert_eq!(app.widget_stack.len(), 2);
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::DeleteConfirm);
+        assert_eq!(app.screen.modal_stack.len(), 1);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::DeleteConfirm);
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         assert!(matches!(cmd, Command { action: CommandAction::FetchCheckoutStatus { .. }, .. }));
     }
@@ -1520,9 +1553,9 @@ mod tests {
         let mut item = make_work_item("a");
         item.issue_keys = vec!["ISSUE-1".into()];
         app.resolve_and_push(Intent::GenerateBranchName, &item);
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::BranchInput);
-        assert_eq!(app.widget_stack.len(), 2);
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::BranchInput);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::BranchInput);
+        assert_eq!(app.screen.modal_stack.len(), 1);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::BranchInput);
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::GenerateBranchName { issue_keys }, .. } => {
@@ -1540,7 +1573,7 @@ mod tests {
         push_action_menu_widget(&mut app);
         app.handle_key(key(KeyCode::Enter));
         // Widget should be popped, command should be pushed
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
     }
 
     #[test]
@@ -1559,11 +1592,11 @@ mod tests {
                 },
             },
         }];
-        app.widget_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
+        app.screen.modal_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
         app.handle_key(key(KeyCode::Enter));
         // RemoveCheckout swaps ActionMenu for DeleteConfirmWidget
-        assert_eq!(app.widget_stack.len(), 2);
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::DeleteConfirm);
+        assert_eq!(app.screen.modal_stack.len(), 1);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::DeleteConfirm);
     }
 
     // ── j/k navigation in normal mode ────────────────────────────────
@@ -1601,16 +1634,18 @@ mod tests {
         item_b.issue_keys = vec!["ISSUE-2".into()];
         setup_table(&mut app, vec![item_a, item_b]);
 
-        // Multi-select both items
-        app.active_ui_mut().multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
-        app.active_ui_mut().multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/b")));
+        // Multi-select both items on the RepoPage
+        let identity = app.model.repo_order[0].clone();
+        let page = app.screen.repo_pages.get_mut(&identity).expect("page exists");
+        page.multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
+        page.multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/b")));
 
         app.action_enter();
 
         // Should set BranchInput with generating=true and push widget
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::BranchInput);
-        assert_eq!(app.widget_stack.len(), 2);
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::BranchInput);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::BranchInput);
+        assert_eq!(app.screen.modal_stack.len(), 1);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::BranchInput);
         let (cmd, _) = app.proto_commands.take_next().unwrap();
         match cmd {
             Command { action: CommandAction::GenerateBranchName { issue_keys }, .. } => {
@@ -1619,8 +1654,10 @@ mod tests {
             }
             other => panic!("expected GenerateBranchName, got {:?}", other),
         }
-        // Multi-select should be cleared
-        assert!(app.active_ui().multi_selected.is_empty());
+        // Multi-select should be cleared on the page
+        let identity = app.model.repo_order[0].clone();
+        let page = app.screen.repo_pages.get(&identity).expect("page exists");
+        assert!(page.multi_selected.is_empty());
     }
 
     #[test]
@@ -1629,14 +1666,18 @@ mod tests {
         let item_a = make_work_item("a"); // no issue_keys
         setup_table(&mut app, vec![item_a]);
 
-        app.active_ui_mut().multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
+        let identity = app.model.repo_order[0].clone();
+        let page = app.screen.repo_pages.get_mut(&identity).expect("page exists");
+        page.multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
 
         app.action_enter();
 
         // No issues, so no GenerateBranchName — stays in Normal, multi_selected cleared
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(app.proto_commands.take_next().is_none());
-        assert!(app.active_ui().multi_selected.is_empty());
+        let identity = app.model.repo_order[0].clone();
+        let page = app.screen.repo_pages.get(&identity).expect("page exists");
+        assert!(page.multi_selected.is_empty());
     }
 
     // ── delete_confirm_y_with_no_info ────────────────────────────────
@@ -1647,9 +1688,9 @@ mod tests {
         let mut widget =
             crate::widgets::delete_confirm::DeleteConfirmWidget::new(vec![], WorkItemIdentity::Session("test".into()), None, None);
         widget.loading = false; // not loading, but no info either
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
         app.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         // No info means no branch to extract, so no command pushed
         assert!(app.proto_commands.take_next().is_none());
     }
@@ -1663,8 +1704,8 @@ mod tests {
         item.change_request_key = Some("PR#10".into());
         setup_table(&mut app, vec![item]);
         app.open_action_menu();
-        assert_eq!(app.widget_stack.len(), 2);
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::ActionMenu);
+        assert_eq!(app.screen.modal_stack.len(), 1);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::ActionMenu);
     }
 
     // ── space toggles multi-select ───────────────────────────────────
@@ -1687,19 +1728,19 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char('l')));
         assert_eq!(app.ui.view_layout, RepoViewLayout::Zoom);
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
 
         app.handle_key(key(KeyCode::Char('l')));
         assert_eq!(app.ui.view_layout, RepoViewLayout::Right);
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
 
         app.handle_key(key(KeyCode::Char('l')));
         assert_eq!(app.ui.view_layout, RepoViewLayout::Below);
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
 
         app.handle_key(key(KeyCode::Char('l')));
         assert_eq!(app.ui.view_layout, RepoViewLayout::Auto);
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
     }
 
     // ── normal p dispatches open change request ──────────────────────
@@ -1751,7 +1792,7 @@ mod tests {
             context_repo: None,
             action: CommandAction::CloseChangeRequest { id: "PR-1".into() },
         });
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
         // Simulate pressing 'y' to confirm
         app.handle_key(key(KeyCode::Char('y')));
         let (_, ctx) = app.proto_commands.take_next().expect("should have command");
@@ -1773,7 +1814,7 @@ mod tests {
             WorkItemIdentity::ChangeRequest("PR-1".into()),
             expected.clone(),
         );
-        app.widget_stack.push(Box::new(widget));
+        app.screen.modal_stack.push(Box::new(widget));
 
         app.handle_key(key(KeyCode::Char('y')));
 
@@ -1787,10 +1828,10 @@ mod tests {
     fn double_slash_fills_search() {
         let mut app = stub_app();
         app.handle_key(key(KeyCode::Char('/')));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::CommandPalette);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::CommandPalette);
         // Typing '/' inside the palette fills "search "
         app.handle_key(key(KeyCode::Char('/')));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::CommandPalette);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::CommandPalette);
     }
 
     #[test]
@@ -1800,7 +1841,7 @@ mod tests {
         // First entry is "search" — Tab should fill it
         app.handle_key(key(KeyCode::Tab));
         // Widget should remain on stack
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::CommandPalette);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::CommandPalette);
     }
 
     #[test]
@@ -1811,7 +1852,7 @@ mod tests {
             app.handle_key(key(KeyCode::Char(c)));
         }
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert_eq!(app.active_ui().active_search_query.as_deref(), Some("auth"));
     }
 
@@ -1823,7 +1864,7 @@ mod tests {
             app.handle_key(key(KeyCode::Char(c)));
         }
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert_eq!(app.active_ui().active_search_query, None);
     }
 
@@ -1833,16 +1874,16 @@ mod tests {
         app.handle_key(key(KeyCode::Char('/')));
         // First entry is "search" which dispatches OpenIssueSearch → Swap
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::IssueSearch);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::IssueSearch);
     }
 
     #[test]
     fn command_palette_esc_dismisses() {
         let mut app = stub_app();
         app.handle_key(key(KeyCode::Char('/')));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::CommandPalette);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::CommandPalette);
         app.handle_key(key(KeyCode::Esc));
-        assert_eq!(app.widget_stack.len(), 1, "expected only base widget on stack");
+        assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
     }
 
     #[test]
@@ -1851,12 +1892,12 @@ mod tests {
         app.handle_key(key(KeyCode::Char('/')));
         // Down from 0, Up from 0 — widget should remain on stack
         app.handle_key(key(KeyCode::Down));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::CommandPalette);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::CommandPalette);
         app.handle_key(key(KeyCode::Up));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::CommandPalette);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::CommandPalette);
         // Up again wraps to last — detailed wrap behavior tested in widget unit tests
         app.handle_key(key(KeyCode::Up));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::CommandPalette);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::CommandPalette);
     }
 
     #[test]
@@ -1867,6 +1908,6 @@ mod tests {
         app.handle_key(key(KeyCode::Down));
         // Now type a char — widget should still be on stack; detailed selection reset tested in widget unit tests
         app.handle_key(key(KeyCode::Char('h')));
-        assert_eq!(app.widget_stack.last().expect("stack non-empty").mode_id(), ModeId::CommandPalette);
+        assert_eq!(app.screen.modal_stack.last().expect("modal stack non-empty").mode_id(), ModeId::CommandPalette);
     }
 }

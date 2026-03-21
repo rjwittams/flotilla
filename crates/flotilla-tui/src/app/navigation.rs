@@ -1,73 +1,35 @@
-use super::{App, UiMode};
-
-enum TabDirection {
-    Forward,
-    Backward,
-}
+use super::App;
 
 impl App {
-    fn step_tab(&mut self, direction: TabDirection) {
-        if self.model.repo_order.is_empty() {
-            return;
-        }
-        if self.ui.mode.is_config() {
-            self.ui.mode = UiMode::Normal;
-            self.model.active_repo = match direction {
-                TabDirection::Forward => 0,
-                TabDirection::Backward => self.model.repo_order.len() - 1,
-            };
-            return;
-        }
-
-        match direction {
-            TabDirection::Forward => {
-                if self.model.active_repo + 1 < self.model.repo_order.len() {
-                    self.switch_tab(self.model.active_repo + 1);
-                } else {
-                    self.ui.mode = UiMode::Config;
-                }
-            }
-            TabDirection::Backward => {
-                if self.model.active_repo > 0 {
-                    self.switch_tab(self.model.active_repo - 1);
-                } else {
-                    self.ui.mode = UiMode::Config;
-                }
-            }
-        }
-    }
-
     pub fn switch_tab(&mut self, idx: usize) {
-        if idx < self.model.repo_order.len() {
-            self.ui.mode = UiMode::Normal;
-            self.model.active_repo = idx;
-            let key = &self.model.repo_order[idx];
-            self.ui.repo_ui.get_mut(key).expect("active repo must have UI state").has_unseen_changes = false;
-        }
+        self.screen.tabs.switch_to(idx, &mut self.model, &mut self.ui);
+        self.sync_layout_from_active_page();
     }
 
     pub fn next_tab(&mut self) {
-        self.step_tab(TabDirection::Forward);
+        self.screen.tabs.next_tab(&mut self.model, &mut self.ui);
+        self.sync_layout_from_active_page();
     }
 
     pub fn prev_tab(&mut self) {
-        self.step_tab(TabDirection::Backward);
+        self.screen.tabs.prev_tab(&mut self.model, &mut self.ui);
+        self.sync_layout_from_active_page();
+    }
+
+    /// Update `ui.view_layout` from the newly-active RepoPage so the
+    /// status bar shows the correct layout indicator after a tab switch.
+    fn sync_layout_from_active_page(&mut self) {
+        if self.model.repo_order.is_empty() {
+            return;
+        }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        if let Some(page) = self.screen.repo_pages.get(identity) {
+            self.ui.view_layout = page.layout;
+        }
     }
 
     pub fn move_tab(&mut self, delta: isize) -> bool {
-        let len = self.model.repo_order.len();
-        if len < 2 {
-            return false;
-        }
-        let cur = self.model.active_repo;
-        let new_idx = cur as isize + delta;
-        if new_idx < 0 || new_idx >= len as isize {
-            return false;
-        }
-        let new_idx = new_idx as usize;
-        self.model.repo_order.swap(cur, new_idx);
-        self.model.active_repo = new_idx;
-        true
+        self.screen.tabs.move_tab(delta, &mut self.model)
     }
 
     #[cfg(test)]
@@ -143,8 +105,10 @@ mod tests {
     use flotilla_core::data::{GroupEntry, GroupedWorkItems};
     use ratatui::layout::Rect;
 
-    use super::*;
-    use crate::app::test_support::{issue_item, issue_table_entries, set_active_table_view, stub_app_with_repos};
+    use crate::app::{
+        test_support::{issue_item, issue_table_entries, set_active_table_view, stub_app_with_repos},
+        UiMode,
+    };
 
     // ── switch_tab tests ─────────────────────────────────────────────
 

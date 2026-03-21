@@ -165,6 +165,7 @@ pub(crate) fn set_active_table_view(app: &mut App, table_view: GroupedWorkItems)
 }
 
 pub(crate) fn setup_selectable_table(app: &mut App, items: Vec<WorkItem>) {
+    let items_clone = items.clone();
     set_active_table_view(app, grouped_items(items));
     if app.active_ui().table_view.selectable_indices.is_empty() {
         app.active_ui_mut().selected_selectable_idx = None;
@@ -173,10 +174,26 @@ pub(crate) fn setup_selectable_table(app: &mut App, items: Vec<WorkItem>) {
         app.active_ui_mut().selected_selectable_idx = Some(0);
         app.active_ui_mut().table_state.select(Some(0));
     }
+
+    // Also populate the Shared<RepoData> so RepoPage picks up the items
+    let repo_key = app.model.repo_order[app.model.active_repo].clone();
+    if let Some(handle) = app.repo_data.get(&repo_key) {
+        handle.mutate(|d| {
+            d.work_items = items_clone;
+        });
+    }
+    // Trigger reconciliation on the RepoPage so its table is populated
+    if let Some(page) = app.screen.repo_pages.get_mut(&repo_key) {
+        page.reconcile_if_changed();
+        // Sync selection state to match RepoUiState
+        if let Some(si) = app.ui.repo_ui.get(&repo_key).and_then(|rui| rui.selected_selectable_idx) {
+            page.table.select_row_self(si);
+        }
+    }
 }
 
 pub(crate) fn enter_file_picker(app: &mut App, path: &str, entries: Vec<DirEntry>) {
-    app.widget_stack.push(Box::new(crate::widgets::file_picker::FilePickerWidget::new(Input::from(path), entries)));
+    app.screen.modal_stack.push(Box::new(crate::widgets::file_picker::FilePickerWidget::new(Input::from(path), entries)));
 }
 
 pub(crate) fn dir_entry(name: &str, is_git_repo: bool, is_added: bool) -> DirEntry {
