@@ -1,14 +1,15 @@
-use std::any::Any;
+use std::{any::Any, collections::HashMap};
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use flotilla_protocol::RepoIdentity;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     Frame,
 };
 
 use super::{
-    base_view::BaseView, status_bar_widget::StatusBarWidget, tabs::Tabs, AppAction, InteractiveWidget, Outcome, RenderContext,
-    WidgetContext, WidgetStatusData,
+    base_view::BaseView, repo_page::RepoPage, status_bar_widget::StatusBarWidget, tabs::Tabs, AppAction, InteractiveWidget, Outcome,
+    RenderContext, WidgetContext, WidgetStatusData,
 };
 use crate::{
     keymap::{Action, ModeId},
@@ -31,6 +32,7 @@ pub struct Screen {
     pub tabs: Tabs,
     pub status_bar: StatusBarWidget,
     pub modal_stack: Vec<Box<dyn InteractiveWidget>>,
+    pub repo_pages: HashMap<RepoIdentity, RepoPage>,
 }
 
 impl Default for Screen {
@@ -41,7 +43,13 @@ impl Default for Screen {
 
 impl Screen {
     pub fn new() -> Self {
-        Self { base_view: BaseView::new(), tabs: Tabs::new(), status_bar: StatusBarWidget::new(), modal_stack: Vec::new() }
+        Self {
+            base_view: BaseView::new(),
+            tabs: Tabs::new(),
+            status_bar: StatusBarWidget::new(),
+            modal_stack: Vec::new(),
+            repo_pages: HashMap::new(),
+        }
     }
 
     /// Returns true if a modal widget is on the stack above the base layer.
@@ -86,6 +94,18 @@ impl Screen {
     /// Extra status data from the topmost widget.
     pub fn active_status_data(&self) -> WidgetStatusData {
         self.modal_stack.last().map(|w| w.status_data()).unwrap_or_default()
+    }
+
+    /// Resolve the active repo identity from model state.
+    ///
+    /// Returns `Some(identity)` when the UI is on a repo tab (not Config mode),
+    /// `None` when on the Flotilla (overview) tab.
+    fn active_repo_identity<'a>(&self, repo_order: &'a [RepoIdentity], active_repo: usize, is_config: bool) -> Option<&'a RepoIdentity> {
+        if is_config || repo_order.is_empty() {
+            None
+        } else {
+            repo_order.get(active_repo)
+        }
     }
 }
 
@@ -143,8 +163,17 @@ impl InteractiveWidget for Screen {
             return Outcome::Ignored;
         }
 
-        // Phase 3: No modal — dispatch to base_view
-        let outcome = self.base_view.handle_action(action, ctx);
+        // Phase 3: No modal — dispatch to repo page or base_view
+        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, ctx.mode.is_config()).cloned();
+        let outcome = if let Some(ref identity) = active_identity {
+            if let Some(page) = self.repo_pages.get_mut(identity) {
+                page.handle_action(action, ctx)
+            } else {
+                self.base_view.handle_action(action, ctx)
+            }
+        } else {
+            self.base_view.handle_action(action, ctx)
+        };
         if !matches!(outcome, Outcome::Ignored) {
             self.apply_outcome(outcome);
             return Outcome::Consumed;
@@ -163,8 +192,17 @@ impl InteractiveWidget for Screen {
             return Outcome::Ignored;
         }
 
-        // No modal — dispatch to base_view
-        let outcome = self.base_view.handle_raw_key(key, ctx);
+        // No modal — dispatch to repo page or base_view
+        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, ctx.mode.is_config()).cloned();
+        let outcome = if let Some(ref identity) = active_identity {
+            if let Some(page) = self.repo_pages.get_mut(identity) {
+                page.handle_raw_key(key, ctx)
+            } else {
+                self.base_view.handle_raw_key(key, ctx)
+            }
+        } else {
+            self.base_view.handle_raw_key(key, ctx)
+        };
         if !matches!(outcome, Outcome::Ignored) {
             self.apply_outcome(outcome);
             return Outcome::Consumed;
@@ -230,8 +268,17 @@ impl InteractiveWidget for Screen {
             _ => {}
         }
 
-        // Dispatch to base_view for content area mouse events
-        let outcome = self.base_view.handle_mouse(mouse, ctx);
+        // Dispatch to repo page or base_view for content area mouse events
+        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, ctx.mode.is_config()).cloned();
+        let outcome = if let Some(ref identity) = active_identity {
+            if let Some(page) = self.repo_pages.get_mut(identity) {
+                page.handle_mouse(mouse, ctx)
+            } else {
+                self.base_view.handle_mouse(mouse, ctx)
+            }
+        } else {
+            self.base_view.handle_mouse(mouse, ctx)
+        };
         if !matches!(outcome, Outcome::Ignored) {
             self.apply_outcome(outcome);
             return Outcome::Consumed;
@@ -246,8 +293,17 @@ impl InteractiveWidget for Screen {
         // 1. Tab bar
         self.tabs.render(ctx.model, ctx.ui, ctx.theme, frame, chunks[0]);
 
-        // 2. Content (table/preview/event log)
-        self.base_view.render(frame, chunks[1], ctx);
+        // 2. Content: dispatch to repo page for repo tabs, base_view for config/overview
+        let active_identity = self.active_repo_identity(&ctx.model.repo_order, ctx.model.active_repo, ctx.ui.mode.is_config()).cloned();
+        if let Some(ref identity) = active_identity {
+            if let Some(page) = self.repo_pages.get_mut(identity) {
+                page.render(frame, chunks[1], ctx);
+            } else {
+                self.base_view.render(frame, chunks[1], ctx);
+            }
+        } else {
+            self.base_view.render(frame, chunks[1], ctx);
+        }
 
         // 3. Status bar — when the palette is active, move it to the overlay position
         let status_bar_area = if ctx.active_widget_mode == Some(ModeId::CommandPalette) {

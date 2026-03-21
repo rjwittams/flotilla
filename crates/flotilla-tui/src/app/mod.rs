@@ -29,7 +29,12 @@ use tui_input::Input;
 use ui_state::PendingStatus;
 pub use ui_state::{BranchInputKind, DirEntry, RepoUiState, RepoViewLayout, TabId, UiMode, UiState};
 
-use crate::{keymap::Keymap, theme::Theme};
+use crate::{
+    keymap::Keymap,
+    shared::Shared,
+    theme::Theme,
+    widgets::repo_page::{RepoData, RepoPage},
+};
 
 /// Per-provider auth/health status from last refresh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,6 +266,9 @@ pub struct App {
     pub pending_cancel: Option<u64>,
     pub should_quit: bool,
     pub screen: crate::widgets::screen::Screen,
+    /// Per-repo shared data handles. Written by `apply_snapshot()`/`apply_delta()`,
+    /// read by `RepoPage` widgets during reconciliation and rendering.
+    pub repo_data: HashMap<RepoIdentity, Shared<RepoData>>,
 }
 
 impl App {
@@ -275,6 +283,28 @@ impl App {
             RepoViewLayoutConfig::Below => RepoViewLayout::Below,
         };
         let keymap = Keymap::from_config(&loaded_config.ui.keys);
+
+        // Create Shared<RepoData> handles and RepoPage instances for each repo
+        let mut repo_data_map = HashMap::new();
+        let mut screen = crate::widgets::screen::Screen::new();
+        for (identity, rm) in &model.repos {
+            let shared = Shared::new(RepoData {
+                path: rm.path.clone(),
+                providers: Arc::new(ProviderData::default()),
+                labels: rm.labels.clone(),
+                provider_names: rm.provider_names.clone(),
+                provider_health: rm.provider_health.clone(),
+                work_items: Vec::new(),
+                issue_has_more: false,
+                issue_total: None,
+                issue_search_active: false,
+                loading: rm.loading,
+            });
+            let page = RepoPage::new(identity.clone(), shared.clone());
+            repo_data_map.insert(identity.clone(), shared);
+            screen.repo_pages.insert(identity.clone(), page);
+        }
+
         Self {
             daemon,
             config,
@@ -286,7 +316,8 @@ impl App {
             in_flight: HashMap::new(),
             pending_cancel: None,
             should_quit: false,
-            screen: crate::widgets::screen::Screen::new(),
+            screen,
+            repo_data: repo_data_map,
         }
     }
 
@@ -468,6 +499,11 @@ impl App {
                 AppAction::ToggleProviders => {
                     let sp = self.active_ui().show_providers;
                     self.active_ui_mut().show_providers = !sp;
+                    // Also sync to RepoPage
+                    let identity = &self.model.repo_order[self.model.active_repo];
+                    if let Some(page) = self.screen.repo_pages.get_mut(identity) {
+                        page.show_providers = !sp;
+                    }
                 }
                 AppAction::ToggleMultiSelect => {
                     if let Some(si) = self.active_ui().selected_selectable_idx {
@@ -478,7 +514,14 @@ impl App {
                                 let identity = item.identity.clone();
                                 let rui = self.active_ui_mut();
                                 if !rui.multi_selected.remove(&identity) {
-                                    rui.multi_selected.insert(identity);
+                                    rui.multi_selected.insert(identity.clone());
+                                }
+                                // Also sync to RepoPage
+                                let repo_identity = &self.model.repo_order[self.model.active_repo];
+                                if let Some(page) = self.screen.repo_pages.get_mut(repo_identity) {
+                                    if !page.multi_selected.remove(&identity) {
+                                        page.multi_selected.insert(identity);
+                                    }
                                 }
                             }
                         }
@@ -675,6 +718,23 @@ impl App {
             rui.update_table_view(table_view);
         }
 
+        // Feed data into Shared<RepoData> for RepoPage rendering
+        if let Some(handle) = self.repo_data.get(&repo_identity) {
+            let rm = &self.model.repos[&repo_identity];
+            handle.mutate(|d| {
+                d.path = path.clone();
+                d.providers = rm.providers.clone();
+                d.labels = rm.labels.clone();
+                d.provider_names = rm.provider_names.clone();
+                d.provider_health = rm.provider_health.clone();
+                d.work_items = snap.work_items;
+                d.issue_has_more = rm.issue_has_more;
+                d.issue_total = rm.issue_total.map(|v| v as usize);
+                d.issue_search_active = rm.issue_search_active;
+                d.loading = false;
+            });
+        }
+
         // Log and display errors (clears status when errors resolve)
         self.set_status_message(format_error_status(&snap.errors, &path));
 
@@ -780,6 +840,23 @@ impl App {
             rui.update_table_view(table_view);
         }
 
+        // Feed data into Shared<RepoData> for RepoPage rendering
+        if let Some(handle) = self.repo_data.get(&repo_identity) {
+            let rm = &self.model.repos[&repo_identity];
+            handle.mutate(|d| {
+                d.path = path.clone();
+                d.providers = rm.providers.clone();
+                d.labels = rm.labels.clone();
+                d.provider_names = rm.provider_names.clone();
+                d.provider_health = rm.provider_health.clone();
+                d.work_items = delta.work_items;
+                d.issue_has_more = rm.issue_has_more;
+                d.issue_total = rm.issue_total.map(|v| v as usize);
+                d.issue_search_active = rm.issue_search_active;
+                d.loading = false;
+            });
+        }
+
         if let Some(status_message) = status_message_update {
             self.set_status_message(status_message);
         }
@@ -790,6 +867,24 @@ impl App {
         if self.model.repos.contains_key(&identity) {
             return;
         }
+
+        // Create Shared<RepoData> and RepoPage for the new repo
+        let shared = Shared::new(RepoData {
+            path: info.path.clone(),
+            providers: Arc::new(ProviderData::default()),
+            labels: info.labels.clone(),
+            provider_names: info.provider_names.clone(),
+            provider_health: info.provider_health.clone(),
+            work_items: Vec::new(),
+            issue_has_more: false,
+            issue_total: None,
+            issue_search_active: false,
+            loading: info.loading,
+        });
+        let page = RepoPage::new(identity.clone(), shared.clone());
+        self.repo_data.insert(identity.clone(), shared);
+        self.screen.repo_pages.insert(identity.clone(), page);
+
         self.model.repos.insert(identity.clone(), TuiRepoModel {
             identity: info.identity,
             path: info.path,
@@ -812,6 +907,8 @@ impl App {
         self.model.repos.remove(repo_identity);
         self.model.repo_order.retain(|repo| repo != repo_identity);
         self.ui.repo_ui.remove(repo_identity);
+        self.repo_data.remove(repo_identity);
+        self.screen.repo_pages.remove(repo_identity);
         if self.model.repo_order.is_empty() {
             self.should_quit = true;
             return;

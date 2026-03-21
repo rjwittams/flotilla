@@ -53,6 +53,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Sync any RepoUiState changes into RepoPage before dispatch.
+        self.sync_ui_state_to_repo_page();
+
         // Snapshot selection so we can detect changes for infinite scroll.
         let prev_selection = self.active_ui().selected_selectable_idx;
 
@@ -115,6 +118,10 @@ impl App {
         }
         self.process_app_actions(app_actions);
 
+        // Sync RepoPage state back into RepoUiState so legacy code
+        // (infinite scroll, selected_work_item, action_enter) continues to work.
+        self.sync_repo_page_state();
+
         // Post-dispatch: check for infinite scroll only if the selection
         // actually changed. This avoids spurious fetches from unrelated
         // key presses that happen to fire when the selection is near the bottom.
@@ -126,6 +133,9 @@ impl App {
     // ── Mouse handling ──
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Sync any RepoUiState changes into RepoPage before dispatch.
+        self.sync_ui_state_to_repo_page();
+
         // Snapshot selection so we can detect changes for infinite scroll.
         let prev_selection = self.active_ui().selected_selectable_idx;
 
@@ -138,6 +148,9 @@ impl App {
         };
         self.screen = screen;
         self.process_app_actions(app_actions);
+
+        // Sync RepoPage state back into RepoUiState for legacy code.
+        self.sync_repo_page_state();
 
         // ── Tab drag handling ──
         // The Tabs widget owns the drag state but can't mutate model.repo_order
@@ -158,6 +171,56 @@ impl App {
         // from tab bar clicks, status bar clicks, etc.
         if self.active_ui().selected_selectable_idx != prev_selection {
             self.check_infinite_scroll();
+        }
+    }
+
+    /// Sync RepoUiState into the active RepoPage before dispatch.
+    ///
+    /// External code (tests, AppAction handlers) may write directly to
+    /// RepoUiState. This ensures the RepoPage picks up those changes
+    /// before the widget stack processes the next event.
+    fn sync_ui_state_to_repo_page(&mut self) {
+        if self.ui.mode.is_config() || self.model.repo_order.is_empty() {
+            return;
+        }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        if let Some(rui) = self.ui.repo_ui.get(identity) {
+            if let Some(page) = self.screen.repo_pages.get_mut(identity) {
+                page.multi_selected.clone_from(&rui.multi_selected);
+                page.show_providers = rui.show_providers;
+                page.active_search_query.clone_from(&rui.active_search_query);
+            }
+        }
+    }
+
+    /// Sync the active RepoPage's state back into RepoUiState.
+    ///
+    /// During the transition period, both RepoPage (via WorkItemTable) and
+    /// RepoUiState track selection, multi-select, and other fields. After
+    /// dispatching through the widget stack (which now routes repo tab actions
+    /// to RepoPage), this method copies the RepoPage state back into
+    /// RepoUiState so legacy code (infinite scroll, action_enter,
+    /// selected_work_item, etc.) continues to work.
+    ///
+    /// **Only syncs fields that RepoPage is authoritative for.** Fields like
+    /// `active_search_query` and `pending_actions` are written by other
+    /// widgets via `ctx.repo_ui` and should not be overwritten from the
+    /// RepoPage's copy.
+    fn sync_repo_page_state(&mut self) {
+        if self.ui.mode.is_config() || self.model.repo_order.is_empty() {
+            return;
+        }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        if let Some(page) = self.screen.repo_pages.get(identity) {
+            if let Some(rui) = self.ui.repo_ui.get_mut(identity) {
+                rui.selected_selectable_idx = page.table.selected_selectable_idx;
+                rui.table_state = page.table.table_state;
+                rui.table_view = page.table.grouped_items.clone();
+                rui.multi_selected.clone_from(&page.multi_selected);
+                rui.show_providers = page.show_providers;
+                // Note: active_search_query and pending_actions are NOT synced here
+                // because they're written by IssueSearchWidget and executor via ctx.repo_ui.
+            }
         }
     }
 
@@ -954,8 +1017,9 @@ mod tests {
     #[test]
     fn clicking_gear_icon_toggles_providers() {
         let mut app = stub_app();
-        // Place the gear hitbox where render would put it — on BaseView
-        app.screen.base_view.table.gear_area = Some(Rect::new(75, 2, 3, 1));
+        // Place the gear hitbox on the active RepoPage's table
+        let repo_key = app.model.repo_order[0].clone();
+        app.screen.repo_pages.get_mut(&repo_key).expect("repo page").table.gear_area = Some(Rect::new(75, 2, 3, 1));
         assert!(!app.active_ui().show_providers);
 
         app.handle_mouse(left_click(76, 2));
