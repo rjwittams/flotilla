@@ -61,6 +61,10 @@ pub enum Change {
         key: String,
         op: EntryOp<Branch>,
     },
+    ManagedTerminal {
+        key: String,
+        op: EntryOp<crate::provider_data::ManagedTerminal>,
+    },
     WorkItem {
         identity: WorkItemIdentity,
         op: EntryOp<WorkItem>,

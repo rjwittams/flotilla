@@ -2629,7 +2629,8 @@ impl DaemonHandle for InProcessDaemon {
 
     async fn get_topology(&self) -> Result<TopologyResponse, String> {
         let routes = self.topology_routes.read().await.clone();
-        Ok(crate::host_queries::build_topology(&self.host_name, &routes))
+        let configured = self.configured_peer_names.read().await.clone();
+        Ok(crate::host_queries::build_topology(&self.host_name, &routes, &configured))
     }
 }
 
