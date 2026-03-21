@@ -329,7 +329,7 @@ impl App {
         if !self.in_flight.is_empty() {
             return true;
         }
-        if self.ui.repo_ui.values().any(|rui| rui.pending_actions.values().any(|a| matches!(a.status, PendingStatus::InFlight))) {
+        if self.screen.repo_pages.values().any(|page| page.pending_actions.values().any(|a| matches!(a.status, PendingStatus::InFlight))) {
             return true;
         }
         // Check modal stack for loading states
@@ -626,34 +626,23 @@ impl App {
                     executor::handle_result(result, self);
 
                     // Find which repo+identity has this command_id
-                    let found: Option<(RepoIdentity, WorkItemIdentity)> = self.ui.repo_ui.iter().find_map(|(repo_identity, rui)| {
-                        rui.pending_actions
-                            .iter()
-                            .find(|(_, a)| a.command_id == command_id)
-                            .map(|(id, _)| (repo_identity.clone(), id.clone()))
-                    });
+                    let found: Option<(RepoIdentity, WorkItemIdentity)> =
+                        self.screen.repo_pages.iter().find_map(|(repo_identity, page)| {
+                            page.pending_actions
+                                .iter()
+                                .find(|(_, a)| a.command_id == command_id)
+                                .map(|(id, _)| (repo_identity.clone(), id.clone()))
+                        });
 
                     if let Some((repo_identity, identity)) = found {
-                        // Dual-write: rui for status bar / needs_animation, RepoPage for row rendering.
-                        // See also: executor::dispatch() in executor.rs.
                         if let Some(ref message) = error_message {
-                            if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-                                if let Some(entry) = rui.pending_actions.get_mut(&identity) {
-                                    entry.status = PendingStatus::Failed(message.clone());
-                                }
-                            }
                             if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
                                 if let Some(entry) = page.pending_actions.get_mut(&identity) {
                                     entry.status = PendingStatus::Failed(message.clone());
                                 }
                             }
-                        } else {
-                            if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-                                rui.pending_actions.remove(&identity);
-                            }
-                            if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
-                                page.pending_actions.remove(&identity);
-                            }
+                        } else if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
+                            page.pending_actions.remove(&identity);
                         }
                     }
                 }
@@ -1699,7 +1688,7 @@ mod tests {
         let repo_path = app.model.repos[&repo].path.clone();
         let identity = WorkItemIdentity::Session("s1".into());
 
-        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+        app.screen.repo_pages.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
             command_id: 42,
             status: PendingStatus::InFlight,
             description: "test".into(),
@@ -1714,7 +1703,7 @@ mod tests {
             result: CommandValue::Ok,
         });
 
-        assert!(!app.ui.repo_ui[&repo].pending_actions.contains_key(&identity));
+        assert!(!app.screen.repo_pages[&repo].pending_actions.contains_key(&identity));
     }
 
     #[test]
@@ -1726,7 +1715,7 @@ mod tests {
         let repo_path = app.model.repos[&repo].path.clone();
         let identity = WorkItemIdentity::Session("s1".into());
 
-        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+        app.screen.repo_pages.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
             command_id: 42,
             status: PendingStatus::InFlight,
             description: "test".into(),
@@ -1741,7 +1730,7 @@ mod tests {
             result: CommandValue::Error { message: "boom".into() },
         });
 
-        let pending = &app.ui.repo_ui[&repo].pending_actions[&identity];
+        let pending = &app.screen.repo_pages[&repo].pending_actions[&identity];
         assert!(matches!(pending.status, PendingStatus::Failed(ref msg) if msg == "boom"));
     }
 
@@ -1754,7 +1743,7 @@ mod tests {
         let repo_path = app.model.repos[&repo].path.clone();
         let identity = WorkItemIdentity::Session("s1".into());
 
-        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+        app.screen.repo_pages.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
             command_id: 42,
             status: PendingStatus::InFlight,
             description: "test".into(),
@@ -1769,7 +1758,7 @@ mod tests {
             result: CommandValue::Cancelled,
         });
 
-        assert!(!app.ui.repo_ui[&repo].pending_actions.contains_key(&identity));
+        assert!(!app.screen.repo_pages[&repo].pending_actions.contains_key(&identity));
     }
 
     #[test]
@@ -1782,7 +1771,7 @@ mod tests {
         let identity = WorkItemIdentity::Session("s1".into());
 
         // Insert pending action with command_id 99 (different from finished event)
-        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+        app.screen.repo_pages.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
             command_id: 99,
             status: PendingStatus::InFlight,
             description: "test".into(),
@@ -1798,7 +1787,7 @@ mod tests {
         });
 
         // The pending action with command_id 99 should still be there
-        assert!(app.ui.repo_ui[&repo].pending_actions.contains_key(&identity));
+        assert!(app.screen.repo_pages[&repo].pending_actions.contains_key(&identity));
     }
 
     #[test]

@@ -72,7 +72,6 @@ pub struct RepoUiState {
     pub table_state: TableState,
     pub selected_selectable_idx: Option<usize>,
     pub multi_selected: HashSet<WorkItemIdentity>,
-    pub pending_actions: HashMap<WorkItemIdentity, PendingAction>,
     pub show_providers: bool,
     pub active_search_query: Option<String>,
 }
@@ -123,7 +122,6 @@ impl RepoUiState {
             })
             .collect();
         self.multi_selected.retain(|id| current_identities.contains(id));
-        self.pending_actions.retain(|id, _| current_identities.contains(id));
     }
 }
 
@@ -379,62 +377,5 @@ mod tests {
         assert_eq!(state.selected_selectable_idx, None);
         assert!(state.multi_selected.is_empty());
         assert!(!state.show_providers);
-    }
-
-    // ── PendingAction tests ──────────────────────────────────────────
-
-    #[test]
-    fn pending_actions_default_is_empty() {
-        let state = RepoUiState::default();
-        assert!(state.pending_actions.is_empty());
-    }
-
-    #[test]
-    fn pending_actions_cleaned_on_table_view_update() {
-        use flotilla_protocol::{HostName, HostPath};
-
-        let mut state = RepoUiState::default();
-
-        let identity_a = WorkItemIdentity::Checkout(HostPath { host: HostName::new("local"), path: "/tmp/a".into() });
-        let identity_b = WorkItemIdentity::Checkout(HostPath { host: HostName::new("local"), path: "/tmp/b".into() });
-
-        state.pending_actions.insert(identity_a.clone(), PendingAction {
-            command_id: 1,
-            status: PendingStatus::InFlight,
-            description: "test".into(),
-        });
-        state.pending_actions.insert(identity_b.clone(), PendingAction {
-            command_id: 2,
-            status: PendingStatus::InFlight,
-            description: "test".into(),
-        });
-
-        // Build a table view that only contains identity_a
-        let mut table_view = GroupedWorkItems::default();
-        let item_a = flotilla_protocol::WorkItem {
-            kind: flotilla_protocol::WorkItemKind::Checkout,
-            identity: identity_a.clone(),
-            host: HostName::new("local"),
-            branch: None,
-            description: String::new(),
-            checkout: None,
-            change_request_key: None,
-            session_key: None,
-            issue_keys: Vec::new(),
-            workspace_refs: Vec::new(),
-            is_main_checkout: false,
-            debug_group: Vec::new(),
-            source: None,
-            terminal_keys: Vec::new(),
-            attachable_set_id: None,
-            agent_keys: vec![],
-        };
-        table_view.table_entries.push(GroupEntry::Item(Box::new(item_a)));
-        table_view.selectable_indices.push(0);
-
-        state.update_table_view(table_view);
-
-        assert!(state.pending_actions.contains_key(&identity_a));
-        assert!(!state.pending_actions.contains_key(&identity_b));
     }
 }

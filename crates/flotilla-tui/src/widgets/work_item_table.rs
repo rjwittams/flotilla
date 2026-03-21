@@ -371,8 +371,7 @@ impl WorkItemTable {
         let rui = active_rui(model, ui);
         let show_providers = rui.show_providers;
         let multi_selected = rui.multi_selected.clone();
-        let pending_actions = rui.pending_actions.clone();
-        self.render_table_owned(model, ui, theme, frame, area, show_providers, &multi_selected, &pending_actions);
+        self.render_table_owned(model, ui, theme, frame, area, show_providers, &multi_selected, &HashMap::new());
     }
 
     fn render_providers(&self, model: &TuiModel, _ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
