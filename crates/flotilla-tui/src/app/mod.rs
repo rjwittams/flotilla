@@ -18,7 +18,6 @@ use std::{
 use flotilla_core::{
     config::{ConfigStore, RepoViewLayoutConfig},
     daemon::DaemonHandle,
-    data::{self, SectionLabels},
 };
 use flotilla_protocol::{
     Command, CommandAction, CommandValue, DaemonEvent, HostName, HostSummary, PeerConnectionState, ProviderData, ProviderError, RepoDelta,
@@ -702,15 +701,6 @@ impl App {
         rm.issue_search_active = snap.issue_search_results.is_some();
         rm.issue_fetch_pending = false;
 
-        // Build table view
-        let section_labels = SectionLabels {
-            checkouts: rm.labels.checkouts.section.clone(),
-            change_requests: rm.labels.change_requests.section.clone(),
-            issues: rm.labels.issues.section.clone(),
-            sessions: rm.labels.cloud_agents.section.clone(),
-        };
-        let table_view = data::group_work_items(&snap.work_items, &rm.providers, &section_labels, &path);
-
         // Provider health -> model-level statuses (now 1:1)
         for (category, providers) in &rm.provider_health {
             for (provider_name, &healthy) in providers {
@@ -734,10 +724,6 @@ impl App {
                     repo_model.has_unseen_changes = true;
                 }
             }
-        }
-
-        if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-            rui.update_table_view(table_view);
         }
 
         // Feed data into Shared<RepoData> for RepoPage rendering
@@ -818,15 +804,6 @@ impl App {
             }
         }
 
-        // Use daemon's pre-correlated work items directly (no re-correlation)
-        let section_labels = SectionLabels {
-            checkouts: rm.labels.checkouts.section.clone(),
-            change_requests: rm.labels.change_requests.section.clone(),
-            issues: rm.labels.issues.section.clone(),
-            sessions: rm.labels.cloud_agents.section.clone(),
-        };
-        let table_view = data::group_work_items(&delta.work_items, &rm.providers, &section_labels, &path);
-
         // Provider health -> model-level statuses (now 1:1)
         for (category, providers) in &rm.provider_health {
             for (provider_name, &healthy) in providers {
@@ -856,10 +833,6 @@ impl App {
                     }
                 }
             }
-        }
-
-        if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-            rui.update_table_view(table_view);
         }
 
         // Feed data into Shared<RepoData> for RepoPage rendering

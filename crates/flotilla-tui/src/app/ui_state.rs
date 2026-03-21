@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use flotilla_core::data::{GroupEntry, GroupedWorkItems};
+use flotilla_core::data::GroupedWorkItems;
 use flotilla_protocol::{HostName, RepoIdentity, WorkItemIdentity};
 use ratatui::{layout::Rect, widgets::TableState};
 
@@ -74,55 +74,6 @@ pub struct RepoUiState {
     pub multi_selected: HashSet<WorkItemIdentity>,
     pub show_providers: bool,
     pub active_search_query: Option<String>,
-}
-
-impl RepoUiState {
-    /// Replace the table view and restore selection by work item identity.
-    pub fn update_table_view(&mut self, table_view: GroupedWorkItems) {
-        let prev_identity =
-            self.selected_selectable_idx.and_then(|si| self.table_view.selectable_indices.get(si).copied()).and_then(|ti| {
-                match self.table_view.table_entries.get(ti) {
-                    Some(GroupEntry::Item(item)) => Some(item.identity.clone()),
-                    _ => None,
-                }
-            });
-
-        self.table_view = table_view;
-
-        if self.table_view.selectable_indices.is_empty() {
-            self.selected_selectable_idx = None;
-            self.table_state.select(None);
-        } else if let Some(ref identity) = prev_identity {
-            let found = self.table_view.selectable_indices.iter().enumerate().find(|(_, &ti)| {
-                matches!(
-                    self.table_view.table_entries.get(ti),
-                    Some(GroupEntry::Item(item)) if item.identity == *identity
-                )
-            });
-            if let Some((si, &ti)) = found {
-                self.selected_selectable_idx = Some(si);
-                self.table_state.select(Some(ti));
-            } else {
-                self.selected_selectable_idx = Some(0);
-                self.table_state.select(Some(self.table_view.selectable_indices[0]));
-            }
-        } else {
-            self.selected_selectable_idx = Some(0);
-            self.table_state.select(Some(self.table_view.selectable_indices[0]));
-        }
-
-        // Clean up stale multi-select identities
-        let current_identities: HashSet<WorkItemIdentity> = self
-            .table_view
-            .table_entries
-            .iter()
-            .filter_map(|e| match e {
-                GroupEntry::Item(item) => Some(item.identity.clone()),
-                _ => None,
-            })
-            .collect();
-        self.multi_selected.retain(|id| current_identities.contains(id));
-    }
 }
 
 /// Identifies a clickable tab in the tab bar.
