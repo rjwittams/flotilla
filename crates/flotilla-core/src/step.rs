@@ -63,6 +63,8 @@ pub enum StepAction {
         initial_path: Option<PathBuf>,
     },
     CreateTeleportWorkspace {
+        /// Unused by the current resolver, but kept for batch 2: remote step
+        /// routing may need it to re-resolve the attach command on the target host.
         session_id: String,
         branch: Option<String>,
     },
@@ -74,6 +76,10 @@ pub enum StepAction {
     GenerateBranchName {
         issue_keys: Vec<String>,
     },
+
+    /// Test-only no-op action resolved by test harness resolvers.
+    #[cfg(test)]
+    Noop,
 }
 
 /// Resolves symbolic step actions into outcomes.
@@ -216,7 +222,7 @@ mod tests {
     }
 
     fn make_step(desc: &str) -> Step {
-        Step { description: desc.to_string(), host: StepHost::Local, action: StepAction::ArchiveSession { session_id: String::new() } }
+        Step { description: desc.to_string(), host: StepHost::Local, action: StepAction::Noop }
     }
 
     fn setup() -> (CancellationToken, broadcast::Sender<DaemonEvent>) {

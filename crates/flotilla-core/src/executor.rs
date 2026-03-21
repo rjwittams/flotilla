@@ -481,6 +481,8 @@ impl StepResolver for ExecutorStepResolver {
                     None => Ok(StepOutcome::Skipped),
                 }
             }
+            #[cfg(test)]
+            StepAction::Noop => Ok(StepOutcome::Completed),
         }
     }
 }
