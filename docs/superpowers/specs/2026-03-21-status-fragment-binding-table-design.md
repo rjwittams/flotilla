@@ -38,9 +38,11 @@ const BINDINGS: &[Binding] = &[
 ```
 
 At startup, this table compiles into efficient lookup structures:
-- `HashMap<KeyBindingMode, HashMap<KeyCombination, Action>>` — for key resolution
-- `HashMap<KeyBindingMode, Vec<KeyChip>>` — for status bar hints
+- `HashMap<BindingModeId, HashMap<KeyCombination, Action>>` — for key resolution
+- `HashMap<BindingModeId, Vec<KeyChip>>` — for status bar hints
 - Help sections for the help screen
+
+Only flat `BindingModeId` variants appear as keys in these maps. `Composed` modes are resolved at query time by looking up each constituent mode and merging results (see below).
 
 User config overrides apply on top of the compiled table, same as today.
 
@@ -48,13 +50,16 @@ The binding table is the single source of truth for keymap resolution, status ba
 
 ### KeyBindingMode
 
-Replaces `ModeId`. Most widgets return a single variant. The `Composed` variant handles the rare case where a widget layers additional bindings on top of a base mode.
+Replaces `ModeId`. Two types work together:
+
+`BindingModeId` is a flat, hashable enum used as keys in the compiled lookup tables:
 
 ```rust
-enum KeyBindingMode {
+#[derive(Clone, Copy, Hash, Eq, PartialEq)]
+enum BindingModeId {
     Shared,
     Normal,
-    Config,
+    Overview,
     Help,
     ActionMenu,
     DeleteConfirm,
@@ -64,13 +69,25 @@ enum KeyBindingMode {
     CommandPalette,
     FilePicker,
     SearchActive,
-    Composed(Vec<KeyBindingMode>),
 }
 ```
 
-Resolution for composed modes: flatten the list, apply later-wins for key conflicts and hint overrides. `Shared` is always implicitly at the bottom.
+`KeyBindingMode` is what widgets return from `binding_mode()`. It is either a single `BindingModeId` or a composed list:
 
-Common case is zero-ceremony — just return a single variant. Composed is for cases like `RepoPage` with an active search query, which returns `Composed(vec![Normal, SearchActive])`.
+```rust
+enum KeyBindingMode {
+    Single(BindingModeId),
+    Composed(Vec<BindingModeId>),
+}
+```
+
+With a `From<BindingModeId>` impl so the common case is zero-ceremony — just return a single variant and `.into()` handles it.
+
+**Resolution for single modes:** Look up the mode's bindings, layer on top of `Shared`.
+
+**Resolution for composed modes:** Flatten the list, look up each `BindingModeId` in the compiled table, merge with later-wins for key conflicts. `Shared` is always implicitly at the bottom. For key chips, later modes override earlier modes for the same key — so `SearchActive`'s `ESC → Clear` replaces `Shared`'s `ESC → Dismiss` in the chip list. Chips for keys not overridden are kept.
+
+Common case: `KeyBindingMode::from(BindingModeId::Normal)`. Composed case: `KeyBindingMode::Composed(vec![BindingModeId::Normal, BindingModeId::SearchActive])`.
 
 ### StatusFragment
 
@@ -94,6 +111,8 @@ enum StatusContent {
 Key chips are NOT part of the fragment — they are derived from the widget's `binding_mode()` via the compiled binding table.
 
 **Cascade:** Screen walks the widget stack top-down (modals first, then the active page). For `status`, it takes the first `Some` it finds. If nothing provides one, the default is `Label("/ for commands")`.
+
+`RepoPage` can answer `status_fragment()` from its own fields — it already owns `multi_selected`, `show_providers`, and `active_search_query`. No access to `RepoUiState` or shared state is needed.
 
 ### InteractiveWidget Trait Changes
 
@@ -132,6 +151,8 @@ fn render_bespoke(
     key_chips: Vec<KeyChip>,
     task: Option<TaskSection>,
     error_items: Vec<VisibleStatusItem>,
+    mode_indicators: Vec<ModeIndicator>,
+    show_keys: bool,
     theme: &Theme,
     frame: &mut Frame,
     area: Rect,
@@ -140,7 +161,11 @@ fn render_bespoke(
 
 The ~200 lines of `status_bar_content()` with its `ModeId` matching, `UiMode` fallback, and `RepoUiState` reads are replaced by the resolution logic in Screen.
 
-Error status items (provider errors with dismiss buttons) and the task spinner remain app-level concerns — Screen passes them alongside the fragment-derived content.
+Error status items (provider errors with dismiss buttons) and the task spinner remain app-level concerns — Screen passes them alongside the fragment-derived content. Errors take priority: when a visible error exists, it replaces the fragment's status content in the left section. The status bar renderer handles this — if `error_items` is non-empty, it displays the error instead of the `StatusContent`.
+
+**Mode indicators** (layout icon, host label) remain app-level. Screen passes them to the status bar alongside the other resolved content. They are not part of `StatusFragment` — they reflect app-wide state, not widget state.
+
+**`show_keys` toggle** remains as-is. Screen passes the flag to the status bar, which uses it to decide whether to render the key chips. This is orthogonal to how chips are derived.
 
 ### IssueSearchWidget / CommandPaletteWidget Migration
 
@@ -164,7 +189,7 @@ With the status bar no longer reading `RepoUiState`, and modal widgets no longer
 | Widget | `binding_mode()` | `status_fragment()` |
 |--------|------------------|---------------------|
 | RepoPage | `Normal` or `Composed([Normal, SearchActive])` | `Label("3 SELECTED")`, `Label("SEARCH \"q\"")`, or default |
-| OverviewPage | `Config` | `Label("FLOTILLA")` or default |
+| OverviewPage | `Overview` | `Label("FLOTILLA")` or default |
 | HelpWidget | `Help` | default |
 | ActionMenuWidget | `ActionMenu` | default |
 | DeleteConfirmWidget | `DeleteConfirm` | default |
