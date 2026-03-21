@@ -111,7 +111,9 @@ pub(crate) fn build_host_providers(
 pub(crate) fn build_topology(local_host: &HostName, routes: &[TopologyRoute], configured_peers: &HashSet<HostName>) -> TopologyResponse {
     let mut all_routes = routes.to_vec();
 
-    // Include configured peers that have no routes (never connected)
+    // Include configured peers that have no routes (never connected).
+    // `direct: true` is a placeholder — no relay is known yet.
+    // Clients should treat `direct` as meaningless when `connected` is false.
     for peer in configured_peers {
         if peer == local_host {
             continue;
