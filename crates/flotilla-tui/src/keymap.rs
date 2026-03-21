@@ -299,6 +299,9 @@ impl Keymap {
             }
         }
 
+        // Rebuild hints so status bar chips and click targets reflect user overrides.
+        keymap.compiled.rebuild_hints();
+
         keymap
     }
 

@@ -170,28 +170,71 @@ pub static BINDINGS: &[Binding] = &[
 pub struct CompiledBindings {
     pub key_map: HashMap<BindingModeId, HashMap<KeyCombination, Action>>,
     pub hints: HashMap<BindingModeId, Vec<KeyChip>>,
+    /// The original binding table entries that had hints, used to rebuild
+    /// hints after user config overrides change the key_map.
+    /// Each entry stores (original_key_combo, action, hint_label).
+    hint_entries: HashMap<BindingModeId, Vec<(KeyCombination, Action, &'static str)>>,
 }
 
 impl CompiledBindings {
     /// Parse key strings and build both the key map and hint maps.
     pub fn from_table(bindings: &[Binding]) -> Self {
         let mut key_map: HashMap<BindingModeId, HashMap<KeyCombination, Action>> = HashMap::new();
-        let mut hints: HashMap<BindingModeId, Vec<KeyChip>> = HashMap::new();
+        let mut hint_entries: HashMap<BindingModeId, Vec<(KeyCombination, Action, &'static str)>> = HashMap::new();
 
         for binding in bindings {
             let combo = parse_key_string(binding.key);
             key_map.entry(binding.mode).or_default().insert(combo, binding.action);
 
             if let Some(hint_label) = binding.hint {
-                let (code, modifiers) = key_code_for_hint(binding.key);
-                let action = if modifiers == KeyModifiers::NONE { StatusBarAction::key(code) } else { StatusBarAction::shifted(code) };
-                let display_key = binding.hint_key.unwrap_or(binding.key);
-                let chip = KeyChip::new(display_key, hint_label, action);
-                hints.entry(binding.mode).or_default().push(chip);
+                hint_entries.entry(binding.mode).or_default().push((combo, binding.action, hint_label));
             }
         }
 
-        CompiledBindings { key_map, hints }
+        let hints = Self::build_hints(&key_map, &hint_entries);
+        CompiledBindings { key_map, hints, hint_entries }
+    }
+
+    /// Rebuild hints from the current key_map. Called after user config
+    /// overrides to keep chips and click targets in sync with actual bindings.
+    pub fn rebuild_hints(&mut self) {
+        self.hints = Self::build_hints(&self.key_map, &self.hint_entries);
+    }
+
+    /// Build hint chips from hint entries and the current key_map.
+    ///
+    /// For each hinted entry, check if the original key still maps to the
+    /// same action. If so, use that key (possibly rebound). If the original
+    /// key was rebound to a different action, search for the action's new key.
+    fn build_hints(
+        key_map: &HashMap<BindingModeId, HashMap<KeyCombination, Action>>,
+        hint_entries: &HashMap<BindingModeId, Vec<(KeyCombination, Action, &'static str)>>,
+    ) -> HashMap<BindingModeId, Vec<KeyChip>> {
+        let mut hints: HashMap<BindingModeId, Vec<KeyChip>> = HashMap::new();
+
+        for (mode, entries) in hint_entries {
+            if let Some(mode_map) = key_map.get(mode) {
+                for (original_combo, action, label) in entries {
+                    // Check if the original key still maps to this action
+                    let combo = if mode_map.get(original_combo) == Some(action) {
+                        *original_combo
+                    } else {
+                        // Key was rebound — search for where the action moved
+                        match mode_map.iter().find(|(_, a)| *a == action) {
+                            Some((c, _)) => *c,
+                            None => continue, // action has no key in this mode
+                        }
+                    };
+
+                    let (display, code, modifiers) = display_for_combo(&combo);
+                    let click_action =
+                        if modifiers == KeyModifiers::NONE { StatusBarAction::key(code) } else { StatusBarAction::shifted(code) };
+                    hints.entry(*mode).or_default().push(KeyChip::new(&display, label, click_action));
+                }
+            }
+        }
+
+        hints
     }
 
     /// Resolve a key combination against the given binding mode.
@@ -337,34 +380,39 @@ fn parse_key_string(s: &str) -> KeyCombination {
     KeyCombination::from(crossterm::event::KeyEvent::new(code, modifiers))
 }
 
-/// Extract `KeyCode` and `KeyModifiers` for hint chip construction.
-fn key_code_for_hint(s: &str) -> (KeyCode, KeyModifiers) {
-    if let Some(rest) = s.strip_prefix("S-") {
-        if rest.len() == 1 {
-            let ch = rest.chars().next().expect("non-empty rest after S- prefix");
-            return (KeyCode::Char(ch), KeyModifiers::SHIFT);
-        }
-    }
+/// Convert a `KeyCombination` back to a display string, KeyCode, and KeyModifiers.
+/// Used to rebuild hint chips after user config overrides.
+fn display_for_combo(combo: &KeyCombination) -> (String, KeyCode, KeyModifiers) {
+    let code = match combo.codes {
+        crokey::OneToThree::One(c) => c,
+        crokey::OneToThree::Two(c, _) => c,
+        crokey::OneToThree::Three(c, _, _) => c,
+    };
+    let modifiers = combo.modifiers;
 
-    match s {
-        "enter" => (KeyCode::Enter, KeyModifiers::NONE),
-        "esc" => (KeyCode::Esc, KeyModifiers::NONE),
-        "space" => (KeyCode::Char(' '), KeyModifiers::NONE),
-        "tab" => (KeyCode::Tab, KeyModifiers::NONE),
-        "up" => (KeyCode::Up, KeyModifiers::NONE),
-        "down" => (KeyCode::Down, KeyModifiers::NONE),
-        "left" => (KeyCode::Left, KeyModifiers::NONE),
-        "right" => (KeyCode::Right, KeyModifiers::NONE),
-        _ => {
-            if s.len() == 1 {
-                let ch = s.chars().next().expect("non-empty single-char key string");
-                (KeyCode::Char(ch), KeyModifiers::NONE)
-            } else {
-                panic!("unknown key string for hint: {s}");
-            }
+    let display = if modifiers.contains(KeyModifiers::SHIFT) {
+        match code {
+            KeyCode::Char(c) => format!("S-{}", c.to_uppercase()),
+            _ => format!("{code:?}"),
         }
-    }
+    } else {
+        match code {
+            KeyCode::Char(' ') => "SPACE".into(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Enter => "ENT".into(),
+            KeyCode::Esc => "ESC".into(),
+            KeyCode::Tab => "TAB".into(),
+            KeyCode::Up => "UP".into(),
+            KeyCode::Down => "DOWN".into(),
+            KeyCode::Left => "LEFT".into(),
+            KeyCode::Right => "RIGHT".into(),
+            _ => format!("{code:?}"),
+        }
+    };
+
+    (display, code, modifiers)
 }
+
 
 // ── Tests ────────────────────────────────────────────────────────────
 

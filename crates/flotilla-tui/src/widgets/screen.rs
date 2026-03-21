@@ -383,20 +383,15 @@ impl InteractiveWidget for Screen {
         // 3. Status bar — resolve all content, then call the pure renderer.
 
         // 3a. Resolve binding mode and status fragment.
-        // Modal stack takes priority; otherwise use the active page or UiMode.
+        // Modal stack takes priority; otherwise ask the active page directly.
         let (binding_mode, fragment) = if let Some(modal) = self.modal_stack.last() {
             (modal.binding_mode(), modal.status_fragment())
         } else if is_config {
             (self.overview_page.binding_mode(), self.overview_page.status_fragment())
+        } else if let Some(page) = active_identity.as_ref().and_then(|id| self.repo_pages.get(id)) {
+            (page.binding_mode(), page.status_fragment())
         } else {
-            // Check for legacy UiMode (IssueSearch) before falling back to Normal.
-            let mode: KeyBindingMode = BindingModeId::from(&ctx.ui.mode).into();
-            let frag = if let Some(ref identity) = active_identity {
-                self.repo_pages.get(identity).map(|p| p.status_fragment()).unwrap_or_default()
-            } else {
-                StatusFragment::default()
-            };
-            (mode, frag)
+            (BindingModeId::Normal.into(), StatusFragment::default())
         };
 
         let active_mode = primary_mode(&binding_mode);

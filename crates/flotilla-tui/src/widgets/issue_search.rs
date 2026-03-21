@@ -26,6 +26,11 @@ impl IssueSearchWidget {
     pub fn new() -> Self {
         Self { input: Input::default() }
     }
+
+    /// Pre-fill the input with a value (for testing).
+    pub fn prefill(&mut self, text: &str) {
+        self.input = Input::from(text);
+    }
 }
 
 impl InteractiveWidget for IssueSearchWidget {
