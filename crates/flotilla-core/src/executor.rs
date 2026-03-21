@@ -3,7 +3,7 @@
 //! Takes a `Command`, the repo context, and returns a `CommandValue`.
 //! No UI state mutation — all results are carried in the return value.
 
-mod checkout;
+pub(crate) mod checkout;
 mod session_actions;
 mod terminals;
 mod workspace;
@@ -538,6 +538,14 @@ impl StepResolver for ExecutorStepResolver {
     async fn resolve(&self, _description: &str, action: StepAction, prior: &[StepOutcome]) -> Result<StepOutcome, String> {
         match action {
             StepAction::Closure(_) => unreachable!("closures handled by stepper directly"),
+            StepAction::CreateCheckout { .. } => todo!("task 7"),
+            StepAction::LinkIssuesToBranch { .. } => todo!("task 7"),
+            StepAction::RemoveCheckout { .. } => todo!("task 9"),
+            StepAction::ResolveAttachCommand { .. } => todo!("task 8"),
+            StepAction::EnsureCheckoutForTeleport { .. } => todo!("task 8"),
+            StepAction::CreateTeleportWorkspace { .. } => todo!("task 8"),
+            StepAction::ArchiveSession { .. } => todo!("task 9"),
+            StepAction::GenerateBranchName { .. } => todo!("task 9"),
             StepAction::CreateWorkspaceForCheckout { label } => {
                 let path = prior.iter().find_map(|o| match o {
                     StepOutcome::CompletedWith(CommandValue::CheckoutCreated { path, .. }) => Some(path.clone()),

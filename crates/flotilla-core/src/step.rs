@@ -1,8 +1,10 @@
 use std::{future::Future, path::PathBuf, pin::Pin};
 
-use flotilla_protocol::{CommandValue, DaemonEvent, HostName, RepoIdentity, StepStatus};
+use flotilla_protocol::{CommandValue, DaemonEvent, HostName, HostPath, ManagedTerminalId, RepoIdentity, StepStatus};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+
+use crate::executor::checkout::CheckoutIntent;
 
 /// Outcome of a single step execution.
 #[derive(Debug, Clone)]
@@ -31,10 +33,45 @@ pub enum StepHost {
 
 /// A symbolic action that the step runner resolves at execution time.
 pub enum StepAction {
-    /// An opaque async closure (existing pattern).
+    /// Opaque closure — removed after all plans are converted.
     Closure(Box<dyn FnOnce(Vec<StepOutcome>) -> StepFuture + Send>),
+
+    // Checkout lifecycle
+    CreateCheckout {
+        branch: String,
+        create_branch: bool,
+        intent: CheckoutIntent,
+        issue_ids: Vec<(String, String)>,
+    },
+    LinkIssuesToBranch {
+        branch: String,
+        issue_ids: Vec<(String, String)>,
+    },
+    RemoveCheckout {
+        branch: String,
+        terminal_keys: Vec<ManagedTerminalId>,
+        deleted_checkout_paths: Vec<HostPath>,
+    },
+
+    // Workspace (existing)
     /// Create a workspace for a checkout path produced by a prior step.
     CreateWorkspaceForCheckout { label: String },
+
+    // Teleport
+    ResolveAttachCommand { session_id: String },
+    EnsureCheckoutForTeleport {
+        branch: Option<String>,
+        checkout_key: Option<PathBuf>,
+        initial_path: Option<PathBuf>,
+    },
+    CreateTeleportWorkspace {
+        session_id: String,
+        branch: Option<String>,
+    },
+
+    // Session
+    ArchiveSession { session_id: String },
+    GenerateBranchName { issue_keys: Vec<String> },
 }
 
 /// Resolves symbolic step actions into outcomes.
