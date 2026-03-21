@@ -22,7 +22,7 @@ use crate::{
         ui_state::{PendingAction, UiMode},
         RepoViewLayout,
     },
-    binding_table::{BindingModeId, KeyBindingMode},
+    binding_table::{BindingModeId, KeyBindingMode, StatusContent, StatusFragment},
     keymap::Action,
     shared::Shared,
 };
@@ -424,7 +424,24 @@ impl InteractiveWidget for RepoPage {
     }
 
     fn binding_mode(&self) -> KeyBindingMode {
-        BindingModeId::Normal.into()
+        if self.active_search_query.is_some() {
+            KeyBindingMode::Composed(vec![BindingModeId::Normal, BindingModeId::SearchActive])
+        } else {
+            BindingModeId::Normal.into()
+        }
+    }
+
+    fn status_fragment(&self) -> StatusFragment {
+        let status = if self.show_providers {
+            Some(StatusContent::Label("PROVIDERS".into()))
+        } else if let Some(query) = &self.active_search_query {
+            Some(StatusContent::Label(format!("SEARCH \"{query}\"")))
+        } else if !self.multi_selected.is_empty() {
+            Some(StatusContent::Label(format!("{} SELECTED", self.multi_selected.len())))
+        } else {
+            None
+        };
+        StatusFragment { status }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -824,12 +841,65 @@ mod tests {
         assert!(matches!(outcome, Outcome::Ignored));
     }
 
-    // ── mode_id ──
+    // ── binding_mode ──
 
     #[test]
-    fn binding_mode_is_normal() {
+    fn binding_mode_normal_when_no_search() {
         let page = page_with_items(vec![]);
         assert_eq!(page.binding_mode(), KeyBindingMode::from(BindingModeId::Normal));
+    }
+
+    #[test]
+    fn binding_mode_composed_when_search_active() {
+        let mut page = page_with_items(vec![]);
+        page.active_search_query = Some("test".into());
+        match page.binding_mode() {
+            KeyBindingMode::Composed(ids) => {
+                assert_eq!(ids, vec![BindingModeId::Normal, BindingModeId::SearchActive]);
+            }
+            other => panic!("expected Composed, got {:?}", other),
+        }
+    }
+
+    // ── status_fragment ──
+
+    #[test]
+    fn status_fragment_default_when_nothing_active() {
+        let page = page_with_items(vec![]);
+        assert!(page.status_fragment().status.is_none());
+    }
+
+    #[test]
+    fn status_fragment_shows_selected_count() {
+        let mut page = page_with_items(vec![issue_item("1")]);
+        page.multi_selected.insert(WorkItemIdentity::Issue("1".into()));
+        let fragment = page.status_fragment();
+        match fragment.status {
+            Some(StatusContent::Label(s)) => assert!(s.contains("SELECTED")),
+            other => panic!("expected Label with SELECTED, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn status_fragment_shows_search_query() {
+        let mut page = page_with_items(vec![]);
+        page.active_search_query = Some("auth".into());
+        let fragment = page.status_fragment();
+        match fragment.status {
+            Some(StatusContent::Label(s)) => assert!(s.contains("auth")),
+            other => panic!("expected Label with query, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn status_fragment_shows_providers() {
+        let mut page = page_with_items(vec![]);
+        page.show_providers = true;
+        let fragment = page.status_fragment();
+        match fragment.status {
+            Some(StatusContent::Label(s)) => assert_eq!(s, "PROVIDERS"),
+            other => panic!("expected Label PROVIDERS, got {:?}", other),
+        }
     }
 
     // ── preview position resolution ──
