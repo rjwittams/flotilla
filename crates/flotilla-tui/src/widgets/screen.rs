@@ -92,11 +92,6 @@ impl Screen {
         }
     }
 
-    /// Status fragment from the topmost widget.
-    pub fn active_status_fragment(&self) -> StatusFragment {
-        self.modal_stack.last().map(|w| w.status_fragment()).unwrap_or_default()
-    }
-
     /// Resolve the active repo identity from model state.
     ///
     /// Returns `Some(identity)` when the UI is on a repo tab (not Config mode),
@@ -109,48 +104,6 @@ impl Screen {
         }
     }
 
-    /// Compute the fallback status label used when the active widget's
-    /// `status_fragment()` has no explicit status content.
-    ///
-    /// For Normal mode (no modal), this examines RepoUiState to determine
-    /// contextual labels (providers, search, multi-select, default).
-    /// For Overview/Config, returns "FLOTILLA".
-    /// For modals, returns mode-specific fallback labels.
-    fn status_fallback_label(&self, ctx: &RenderContext) -> String {
-        // If a modal is on the stack, use the modal's mode for the fallback.
-        if let Some(modal) = self.modal_stack.last() {
-            let mode = modal.binding_mode().primary();
-            return match mode {
-                BindingModeId::Help => "HELP".into(),
-                BindingModeId::ActionMenu => "ACTIONS".into(),
-                BindingModeId::DeleteConfirm => "CONFIRM DELETE".into(),
-                BindingModeId::CloseConfirm => "CONFIRM CLOSE".into(),
-                BindingModeId::BranchInput => "NEW BRANCH".into(),
-                BindingModeId::IssueSearch => "SEARCH".into(),
-                BindingModeId::CommandPalette => "/".into(),
-                BindingModeId::FilePicker => "ADD REPO".into(),
-                _ => "/ for commands".into(),
-            };
-        }
-
-        // No modal — check UiMode for legacy modes.
-        match &ctx.ui.mode {
-            crate::app::UiMode::Normal => {
-                let rui = ctx.ui.active_repo_ui(&ctx.model.repo_order, ctx.model.active_repo);
-                if rui.show_providers {
-                    "PROVIDERS".into()
-                } else if let Some(query) = rui.active_search_query.as_deref() {
-                    format!("SEARCH \"{query}\"")
-                } else if !rui.multi_selected.is_empty() {
-                    format!("{} SELECTED", rui.multi_selected.len())
-                } else {
-                    "/ for commands".into()
-                }
-            }
-            crate::app::UiMode::Config => "FLOTILLA".into(),
-            crate::app::UiMode::IssueSearch { input } => format!("SEARCH {}", input.value()),
-        }
-    }
 }
 
 impl InteractiveWidget for Screen {
@@ -379,8 +332,8 @@ impl InteractiveWidget for Screen {
         };
 
         // 3c. Resolve status section from fragment (with fallback)
-        let fallback_label = self.status_fallback_label(ctx);
-        let status = status_bar_widget::resolve_status_section(&fragment, &fallback_label);
+        let fallback_label = "/ for commands";
+        let status = status_bar_widget::resolve_status_section(&fragment, fallback_label);
 
         // 3d. Task spinner — fragment progress takes priority over in-flight commands.
         //     Only Normal/Overview modes show in-flight tasks.
