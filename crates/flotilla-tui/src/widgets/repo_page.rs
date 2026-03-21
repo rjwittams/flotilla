@@ -193,7 +193,7 @@ impl RepoPage {
 
     fn render_content(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
         let Some(position) = resolve_preview_position(area, self.layout) else {
-            InteractiveWidget::render(&mut self.table, frame, area, ctx);
+            self.render_table(frame, area, ctx);
             return;
         };
 
@@ -214,8 +214,24 @@ impl RepoPage {
                 .split(area),
         };
 
-        InteractiveWidget::render(&mut self.table, frame, chunks[0], ctx);
-        self.preview.render_bespoke(ctx.model, ctx.ui, ctx.theme, frame, chunks[1]);
+        self.render_table(frame, chunks[0], ctx);
+        let selected_item = self.table.selected_work_item();
+        self.preview.render_with_item(ctx.model, ctx.ui, selected_item, ctx.theme, frame, chunks[1]);
+    }
+
+    /// Render the table using RepoPage-owned state, bypassing RepoUiState.
+    fn render_table(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
+        self.table.table_area = area;
+        self.table.render_table_owned(
+            ctx.model,
+            ctx.ui,
+            ctx.theme,
+            frame,
+            area,
+            self.show_providers,
+            &self.multi_selected,
+            &self.pending_actions,
+        );
     }
 
     // ── Action helpers ──

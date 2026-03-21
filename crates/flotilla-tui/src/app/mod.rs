@@ -18,7 +18,7 @@ use std::{
 use flotilla_core::{
     config::{ConfigStore, RepoViewLayoutConfig},
     daemon::DaemonHandle,
-    data::{self, GroupEntry, SectionLabels},
+    data::{self, SectionLabels},
 };
 use flotilla_protocol::{
     Command, CommandAction, CommandResult, DaemonEvent, HostName, HostSummary, PeerConnectionState, ProviderData, ProviderError, RepoDelta,
@@ -497,30 +497,33 @@ impl App {
                     self.ui.status_bar.show_keys = !self.ui.status_bar.show_keys;
                 }
                 AppAction::ToggleProviders => {
-                    let sp = self.active_ui().show_providers;
-                    self.active_ui_mut().show_providers = !sp;
-                    // Also sync to RepoPage
                     let identity = &self.model.repo_order[self.model.active_repo];
                     if let Some(page) = self.screen.repo_pages.get_mut(identity) {
-                        page.show_providers = !sp;
+                        page.show_providers = !page.show_providers;
+                    }
+                    // Keep RepoUiState in sync for status bar
+                    let identity = &self.model.repo_order[self.model.active_repo];
+                    if let Some(page) = self.screen.repo_pages.get(identity) {
+                        let sp = page.show_providers;
+                        self.active_ui_mut().show_providers = sp;
                     }
                 }
                 AppAction::ToggleMultiSelect => {
-                    if let Some(si) = self.active_ui().selected_selectable_idx {
-                        if let Some(&table_idx) = self.active_ui().table_view.selectable_indices.get(si) {
-                            if let Some(flotilla_core::data::GroupEntry::Item(item)) =
-                                self.active_ui().table_view.table_entries.get(table_idx)
-                            {
-                                let identity = item.identity.clone();
-                                let rui = self.active_ui_mut();
-                                if !rui.multi_selected.remove(&identity) {
-                                    rui.multi_selected.insert(identity.clone());
-                                }
-                                // Also sync to RepoPage
-                                let repo_identity = &self.model.repo_order[self.model.active_repo];
-                                if let Some(page) = self.screen.repo_pages.get_mut(repo_identity) {
-                                    if !page.multi_selected.remove(&identity) {
-                                        page.multi_selected.insert(identity);
+                    let repo_identity = self.model.repo_order[self.model.active_repo].clone();
+                    if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
+                        if let Some(si) = page.table.selected_selectable_idx {
+                            if let Some(&table_idx) = page.table.grouped_items.selectable_indices.get(si) {
+                                if let Some(flotilla_core::data::GroupEntry::Item(item)) =
+                                    page.table.grouped_items.table_entries.get(table_idx)
+                                {
+                                    let item_identity = item.identity.clone();
+                                    if !page.multi_selected.remove(&item_identity) {
+                                        page.multi_selected.insert(item_identity.clone());
+                                    }
+                                    // Keep RepoUiState in sync for status bar
+                                    let rui = self.ui.repo_ui.get_mut(&repo_identity).expect("active repo must have UI state");
+                                    if !rui.multi_selected.remove(&item_identity) {
+                                        rui.multi_selected.insert(item_identity);
                                     }
                                 }
                             }
@@ -930,11 +933,11 @@ impl App {
     }
 
     pub fn selected_work_item(&self) -> Option<&WorkItem> {
-        let table_idx = self.active_ui().table_state.selected()?;
-        match self.active_ui().table_view.table_entries.get(table_idx)? {
-            GroupEntry::Item(item) => Some(item),
-            GroupEntry::Header(_) => None,
+        if self.model.repo_order.is_empty() {
+            return None;
         }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        self.screen.repo_pages.get(identity).and_then(|page| page.table.selected_work_item())
     }
 
     pub(super) fn open_file_picker_from_active_repo_parent(&mut self) {

@@ -29,21 +29,27 @@ impl PreviewPanel {
 
     /// Render the preview panel, optionally splitting for the debug overlay.
     pub fn render_bespoke(&self, model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+        let item = selected_work_item(model, ui);
+        self.render_with_item(model, ui, item, theme, frame, area);
+    }
+
+    /// Render the preview panel using an explicitly provided selected item.
+    /// Called by RepoPage with the item from its own table, bypassing RepoUiState.
+    pub fn render_with_item(&self, model: &TuiModel, ui: &UiState, item: Option<&WorkItem>, theme: &Theme, frame: &mut Frame, area: Rect) {
         if ui.show_debug {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
-            self.render_content(model, ui, theme, frame, chunks[0]);
-            self.render_debug(model, ui, theme, frame, chunks[1]);
+            self.render_content_for(model, item, theme, frame, chunks[0]);
+            self.render_debug_for(item, theme, frame, chunks[1]);
         } else {
-            self.render_content(model, ui, theme, frame, area);
+            self.render_content_for(model, item, theme, frame, area);
         }
     }
 
-    /// Render the preview content for the selected work item.
-    fn render_content(&self, model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
-        let text = if let Some(item) = selected_work_item(model, ui) {
+    fn render_content_for(&self, model: &TuiModel, item: Option<&WorkItem>, theme: &Theme, frame: &mut Frame, area: Rect) {
+        let text = if let Some(item) = item {
             let rm = model.active();
             let providers = &rm.providers;
             let mut lines = Vec::new();
@@ -147,9 +153,8 @@ impl PreviewPanel {
         frame.render_widget(preview, area);
     }
 
-    /// Render the debug correlation overlay.
-    fn render_debug(&self, model: &TuiModel, ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
-        let text = if let Some(item) = selected_work_item(model, ui) {
+    fn render_debug_for(&self, item: Option<&WorkItem>, theme: &Theme, frame: &mut Frame, area: Rect) {
+        let text = if let Some(item) = item {
             if !item.debug_group.is_empty() {
                 item.debug_group.join("\n")
             } else {

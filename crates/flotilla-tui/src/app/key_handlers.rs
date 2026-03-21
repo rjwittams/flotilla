@@ -57,7 +57,7 @@ impl App {
         self.sync_ui_state_to_repo_page();
 
         // Snapshot selection so we can detect changes for infinite scroll.
-        let prev_selection = self.active_ui().selected_selectable_idx;
+        let prev_selection = self.active_page_selection();
 
         // Determine the topmost widget's mode. Screen delegates to the
         // top modal (if any) for mode_id / captures_raw_keys.
@@ -119,13 +119,13 @@ impl App {
         self.process_app_actions(app_actions);
 
         // Sync RepoPage state back into RepoUiState so legacy code
-        // (infinite scroll, selected_work_item, action_enter) continues to work.
+        // (rendering via status bar, tests) continues to work.
         self.sync_repo_page_state();
 
         // Post-dispatch: check for infinite scroll only if the selection
         // actually changed. This avoids spurious fetches from unrelated
         // key presses that happen to fire when the selection is near the bottom.
-        if self.active_ui().selected_selectable_idx != prev_selection {
+        if self.active_page_selection() != prev_selection {
             self.check_infinite_scroll();
         }
     }
@@ -137,7 +137,7 @@ impl App {
         self.sync_ui_state_to_repo_page();
 
         // Snapshot selection so we can detect changes for infinite scroll.
-        let prev_selection = self.active_ui().selected_selectable_idx;
+        let prev_selection = self.active_page_selection();
 
         // Dispatch to Screen, which handles modal routing internally.
         let mut screen = std::mem::take(&mut self.screen);
@@ -149,7 +149,8 @@ impl App {
         self.screen = screen;
         self.process_app_actions(app_actions);
 
-        // Sync RepoPage state back into RepoUiState for legacy code.
+        // Sync RepoPage state back into RepoUiState for legacy code
+        // (status bar, tests that still read from active_ui()).
         self.sync_repo_page_state();
 
         // ── Tab drag handling ──
@@ -169,16 +170,26 @@ impl App {
         // ── Infinite scroll check ──
         // Only if the selection actually changed — avoids spurious fetches
         // from tab bar clicks, status bar clicks, etc.
-        if self.active_ui().selected_selectable_idx != prev_selection {
+        if self.active_page_selection() != prev_selection {
             self.check_infinite_scroll();
         }
     }
 
-    /// Sync RepoUiState into the active RepoPage before dispatch.
+    /// Get the current selection index from the active RepoPage, if any.
+    fn active_page_selection(&self) -> Option<usize> {
+        if self.model.repo_order.is_empty() {
+            return None;
+        }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        self.screen.repo_pages.get(identity).and_then(|page| page.table.selected_selectable_idx)
+    }
+
+    /// Sync fields written by modal widgets (IssueSearch, CommandPalette)
+    /// and the executor into the active RepoPage before dispatch.
     ///
-    /// External code (tests, AppAction handlers) may write directly to
-    /// RepoUiState. This ensures the RepoPage picks up those changes
-    /// before the widget stack processes the next event.
+    /// `active_search_query` is written by IssueSearchWidget and
+    /// CommandPaletteWidget via `ctx.repo_ui`. This ensures the RepoPage
+    /// picks up those changes before the widget stack processes the next event.
     fn sync_ui_state_to_repo_page(&mut self) {
         if self.ui.mode.is_config() || self.model.repo_order.is_empty() {
             return;
@@ -186,8 +197,6 @@ impl App {
         let identity = &self.model.repo_order[self.model.active_repo];
         if let Some(rui) = self.ui.repo_ui.get(identity) {
             if let Some(page) = self.screen.repo_pages.get_mut(identity) {
-                page.multi_selected.clone_from(&rui.multi_selected);
-                page.show_providers = rui.show_providers;
                 page.active_search_query.clone_from(&rui.active_search_query);
             }
         }
@@ -195,17 +204,9 @@ impl App {
 
     /// Sync the active RepoPage's state back into RepoUiState.
     ///
-    /// During the transition period, both RepoPage (via WorkItemTable) and
-    /// RepoUiState track selection, multi-select, and other fields. After
-    /// dispatching through the widget stack (which now routes repo tab actions
-    /// to RepoPage), this method copies the RepoPage state back into
-    /// RepoUiState so legacy code (infinite scroll, action_enter,
-    /// selected_work_item, etc.) continues to work.
-    ///
-    /// **Only syncs fields that RepoPage is authoritative for.** Fields like
-    /// `active_search_query` and `pending_actions` are written by other
-    /// widgets via `ctx.repo_ui` and should not be overwritten from the
-    /// RepoPage's copy.
+    /// RepoPage is authoritative for selection, multi-select, and
+    /// show_providers. This sync keeps RepoUiState in sync for status bar
+    /// rendering and tests that still read from `active_ui()`.
     fn sync_repo_page_state(&mut self) {
         if self.ui.mode.is_config() || self.model.repo_order.is_empty() {
             return;
@@ -218,8 +219,6 @@ impl App {
                 rui.table_view = page.table.grouped_items.clone();
                 rui.multi_selected.clone_from(&page.multi_selected);
                 rui.show_providers = page.show_providers;
-                // Note: active_search_query and pending_actions are NOT synced here
-                // because they're written by IssueSearchWidget and executor via ctx.repo_ui.
             }
         }
     }
@@ -235,11 +234,14 @@ impl App {
         if self.model.repo_order.is_empty() {
             return;
         }
-        let rui = self.active_ui();
-        let Some(next) = rui.selected_selectable_idx else {
+        let identity = &self.model.repo_order[self.model.active_repo];
+        let Some(page) = self.screen.repo_pages.get(identity) else {
             return;
         };
-        let total = rui.table_view.selectable_indices.len();
+        let Some(next) = page.table.selected_selectable_idx else {
+            return;
+        };
+        let total = page.table.grouped_items.selectable_indices.len();
         if next + 5 >= total && self.model.active().issue_has_more && !self.model.active().issue_fetch_pending {
             let repo = self.model.active_repo_root().clone();
             let issue_count = self.model.active().providers.issues.len();
@@ -255,7 +257,9 @@ impl App {
     }
 
     pub(super) fn action_enter(&mut self) {
-        if !self.active_ui().multi_selected.is_empty() {
+        let identity = &self.model.repo_order[self.model.active_repo];
+        let has_multi = self.screen.repo_pages.get(identity).is_some_and(|p| !p.multi_selected.is_empty());
+        if has_multi {
             self.action_enter_multi_select();
             return;
         }
@@ -274,11 +278,15 @@ impl App {
     }
 
     fn action_enter_multi_select(&mut self) {
-        let multi_selected = self.active_ui().multi_selected.clone();
+        let identity = &self.model.repo_order[self.model.active_repo];
+        let Some(page) = self.screen.repo_pages.get(identity) else {
+            return;
+        };
+        let multi_selected = page.multi_selected.clone();
         let mut all_issue_keys: Vec<String> = Vec::new();
 
         // Collect issues from multi-selected items
-        for entry in &self.active_ui().table_view.table_entries {
+        for entry in &page.table.grouped_items.table_entries {
             if let GroupEntry::Item(item) = entry {
                 if multi_selected.contains(&item.identity) {
                     all_issue_keys.extend(item.issue_keys.iter().cloned());
@@ -299,7 +307,10 @@ impl App {
             self.screen.modal_stack.push(Box::new(crate::widgets::branch_input::BranchInputWidget::new(BranchInputKind::Generating)));
             self.proto_commands.push(self.targeted_repo_command(CommandAction::GenerateBranchName { issue_keys: all_issue_keys }));
         }
-        self.active_ui_mut().multi_selected.clear();
+        let identity = identity.clone();
+        if let Some(page) = self.screen.repo_pages.get_mut(&identity) {
+            page.multi_selected.clear();
+        }
     }
 
     fn dispatch_if_available(&mut self, intent: Intent) {
@@ -844,9 +855,10 @@ mod tests {
     #[test]
     fn normal_esc_clears_providers_first() {
         let mut app = stub_app();
-        app.active_ui_mut().show_providers = true;
+        let identity = app.model.repo_order[0].clone();
+        app.screen.repo_pages.get_mut(&identity).unwrap().show_providers = true;
         app.handle_key(key(KeyCode::Esc));
-        assert!(!app.active_ui().show_providers);
+        assert!(!app.screen.repo_pages.get(&identity).unwrap().show_providers);
         assert!(!app.should_quit);
     }
 
@@ -854,10 +866,11 @@ mod tests {
     fn normal_esc_clears_multi_select_second() {
         let mut app = stub_app();
         setup_table(&mut app, vec![make_work_item("a")]);
-        app.active_ui_mut().multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
-        assert!(!app.active_ui().multi_selected.is_empty());
+        let identity = app.model.repo_order[0].clone();
+        app.screen.repo_pages.get_mut(&identity).unwrap().multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
+        assert!(!app.screen.repo_pages.get(&identity).unwrap().multi_selected.is_empty());
         app.handle_key(key(KeyCode::Esc));
-        assert!(app.active_ui().multi_selected.is_empty());
+        assert!(app.screen.repo_pages.get(&identity).unwrap().multi_selected.is_empty());
         assert!(!app.should_quit);
     }
 
@@ -1579,9 +1592,11 @@ mod tests {
         item_b.issue_keys = vec!["ISSUE-2".into()];
         setup_table(&mut app, vec![item_a, item_b]);
 
-        // Multi-select both items
-        app.active_ui_mut().multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
-        app.active_ui_mut().multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/b")));
+        // Multi-select both items on the RepoPage
+        let identity = app.model.repo_order[0].clone();
+        let page = app.screen.repo_pages.get_mut(&identity).expect("page exists");
+        page.multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
+        page.multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/b")));
 
         app.action_enter();
 
@@ -1597,8 +1612,10 @@ mod tests {
             }
             other => panic!("expected GenerateBranchName, got {:?}", other),
         }
-        // Multi-select should be cleared
-        assert!(app.active_ui().multi_selected.is_empty());
+        // Multi-select should be cleared on the page
+        let identity = app.model.repo_order[0].clone();
+        let page = app.screen.repo_pages.get(&identity).expect("page exists");
+        assert!(page.multi_selected.is_empty());
     }
 
     #[test]
@@ -1607,14 +1624,18 @@ mod tests {
         let item_a = make_work_item("a"); // no issue_keys
         setup_table(&mut app, vec![item_a]);
 
-        app.active_ui_mut().multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
+        let identity = app.model.repo_order[0].clone();
+        let page = app.screen.repo_pages.get_mut(&identity).expect("page exists");
+        page.multi_selected.insert(WorkItemIdentity::Checkout(hp("/tmp/a")));
 
         app.action_enter();
 
         // No issues, so no GenerateBranchName — stays in Normal, multi_selected cleared
         assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(app.proto_commands.take_next().is_none());
-        assert!(app.active_ui().multi_selected.is_empty());
+        let identity = app.model.repo_order[0].clone();
+        let page = app.screen.repo_pages.get(&identity).expect("page exists");
+        assert!(page.multi_selected.is_empty());
     }
 
     // ── delete_confirm_y_with_no_info ────────────────────────────────

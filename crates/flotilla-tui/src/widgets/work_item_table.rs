@@ -1,12 +1,12 @@
 use std::{
     any::Any,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use flotilla_core::data::{GroupEntry, GroupedWorkItems, SectionHeader};
-use flotilla_protocol::{HostName, ProviderData, WorkItem};
+use flotilla_protocol::{HostName, ProviderData, WorkItem, WorkItemIdentity};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -166,6 +166,15 @@ impl WorkItemTable {
         }
     }
 
+    /// The currently selected work item from owned state, if any.
+    pub fn selected_work_item(&self) -> Option<&WorkItem> {
+        let table_idx = self.table_state.selected()?;
+        match self.grouped_items.table_entries.get(table_idx)? {
+            GroupEntry::Item(item) => Some(item),
+            GroupEntry::Header(_) => None,
+        }
+    }
+
     // ── Selection helpers (ctx-based, for current callers) ───────────
 
     pub fn select_next(&self, ctx: &mut WidgetContext) {
@@ -221,11 +230,23 @@ impl WorkItemTable {
 
     // ── Rendering ────────────────────────────────────────────────────
 
-    fn render_table(&mut self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+    /// Render the table using self-owned data. Called by `RepoPage` which passes
+    /// its owned multi-select and pending-action state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_table_owned(
+        &mut self,
+        model: &TuiModel,
+        ui: &mut UiState,
+        theme: &Theme,
+        frame: &mut Frame,
+        area: Rect,
+        show_providers: bool,
+        multi_selected: &HashSet<WorkItemIdentity>,
+        pending_actions: &HashMap<WorkItemIdentity, PendingAction>,
+    ) {
         ui.layout.table_area = area;
 
-        let rui = active_rui(model, ui);
-        if rui.show_providers {
+        if show_providers {
             let close_x = area.x + area.width.saturating_sub(5);
             self.gear_area = Some(Rect::new(close_x, area.y, 3, 1));
             self.render_providers(model, ui, theme, frame, area);
@@ -272,13 +293,12 @@ impl WorkItemTable {
 
         // Build rows from active repo (immutable borrows)
         let rm = model.active();
-        let rui = active_rui(model, ui);
 
         // Precompute per-host repo root from main checkouts so remote worktree
         // paths get the same sibling/child indentation as local ones.
         let local_repo_root = model.active_repo_root().clone();
         let mut host_repo_roots: HashMap<HostName, PathBuf> = HashMap::new();
-        for entry in &rui.table_view.table_entries {
+        for entry in &self.grouped_items.table_entries {
             if let GroupEntry::Item(item) = entry {
                 if item.is_main_checkout {
                     if let Some(co) = item.checkout_key() {
@@ -289,13 +309,13 @@ impl WorkItemTable {
         }
 
         let mut prev_source: Option<String> = None;
-        let rows: Vec<Row> = rui
-            .table_view
+        let rows: Vec<Row> = self
+            .grouped_items
             .table_entries
             .iter()
             .map(|entry| {
                 let is_multi_selected =
-                    if let GroupEntry::Item(ref item) = entry { rui.multi_selected.contains(&item.identity) } else { false };
+                    if let GroupEntry::Item(ref item) = entry { multi_selected.contains(&item.identity) } else { false };
 
                 match entry {
                     GroupEntry::Header(header) => {
@@ -303,7 +323,7 @@ impl WorkItemTable {
                         build_header_row(header)
                     }
                     GroupEntry::Item(item) => {
-                        let pending = rui.pending_actions.get(&item.identity);
+                        let pending = pending_actions.get(&item.identity);
                         let is_local_item = item
                             .checkout_key()
                             .is_none_or(|co| model.my_host().is_some_and(|my| *my == co.host) || !model.hosts.contains_key(&co.host));
@@ -333,29 +353,35 @@ impl WorkItemTable {
             .highlight_symbol(HIGHLIGHT_SYMBOL)
             .highlight_spacing(HighlightSpacing::Always);
 
-        // Now mutably borrow for stateful render
-        let key = &model.repo_order[model.active_repo];
-        let rui = ui.repo_ui.get_mut(key).expect("active repo must have UI state");
-        frame.render_stateful_widget(table, area, &mut rui.table_state);
+        // Render with owned table_state
+        frame.render_stateful_widget(table, area, &mut self.table_state);
 
         // Overlay section headers so they span the full row width
-        let offset = rui.table_state.offset();
+        let offset = self.table_state.offset();
         let visible_rows = area.height.saturating_sub(3) as usize;
         let header_x = area.x + 1 + HIGHLIGHT_SYMBOL_WIDTH + col_widths[0] + 1;
         let header_w = (area.x + area.width).saturating_sub(header_x + 1);
         let header_style = theme.header_style();
 
         for i in 0..visible_rows {
-            if let Some(GroupEntry::Header(h)) = rui.table_view.table_entries.get(offset + i) {
+            if let Some(GroupEntry::Header(h)) = self.grouped_items.table_entries.get(offset + i) {
                 let y = area.y + 2 + i as u16;
                 frame.render_widget(Span::styled(format!("── {h} ──"), header_style), Rect::new(header_x, y, header_w, 1));
             }
         }
 
         // Back up offset if it lands right after a section header
-        if offset > 0 && matches!(rui.table_view.table_entries.get(offset - 1), Some(GroupEntry::Header(_))) {
-            *rui.table_state.offset_mut() = offset - 1;
+        if offset > 0 && matches!(self.grouped_items.table_entries.get(offset - 1), Some(GroupEntry::Header(_))) {
+            *self.table_state.offset_mut() = offset - 1;
         }
+    }
+
+    fn render_table(&mut self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+        let rui = active_rui(model, ui);
+        let show_providers = rui.show_providers;
+        let multi_selected = rui.multi_selected.clone();
+        let pending_actions = rui.pending_actions.clone();
+        self.render_table_owned(model, ui, theme, frame, area, show_providers, &multi_selected, &pending_actions);
     }
 
     fn render_providers(&self, model: &TuiModel, _ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
