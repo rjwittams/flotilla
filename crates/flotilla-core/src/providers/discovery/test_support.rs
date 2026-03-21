@@ -257,6 +257,8 @@ pub struct FakeIssueTracker {
     pub issues: Arc<TokioMutex<Vec<(String, Issue)>>>,
     /// IDs that were requested via `fetch_issues_by_id`, for test assertions.
     pub fetched_by_id: Arc<TokioMutex<Vec<Vec<String>>>>,
+    /// Page numbers fetched via `list_issues_page`, for test assertions.
+    pub pages_fetched: Arc<TokioMutex<Vec<u32>>>,
     /// When true, `list_issues_changed_since` returns `has_more: true` to
     /// trigger the escalation path in `refresh_issues_incremental`.
     pub force_escalation: Arc<AtomicBool>,
@@ -273,6 +275,7 @@ impl FakeIssueTracker {
         Self {
             issues: Arc::new(TokioMutex::new(Vec::new())),
             fetched_by_id: Arc::new(TokioMutex::new(Vec::new())),
+            pages_fetched: Arc::new(TokioMutex::new(Vec::new())),
             force_escalation: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -302,6 +305,7 @@ impl IssueTracker for FakeIssueTracker {
     }
 
     async fn list_issues_page(&self, _repo_root: &Path, page: u32, per_page: usize) -> Result<IssuePage, String> {
+        self.pages_fetched.lock().await.push(page);
         let store = self.issues.lock().await;
         let start = (page.saturating_sub(1) as usize) * per_page;
         let issues: Vec<_> = store.iter().skip(start).take(per_page).cloned().collect();
