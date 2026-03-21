@@ -110,8 +110,10 @@ impl App {
         self.screen = screen;
 
         // Fall through if unhandled — these are actions that need &mut App
-        // context the widget stack doesn't have.
-        if outcome_is_ignored {
+        // context the widget stack doesn't have. Only when no modal is active:
+        // modals are focus barriers, so their Ignored should not leak through
+        // to app-level dispatch.
+        if outcome_is_ignored && !self.screen.has_modal() {
             if let Some(action) = action {
                 self.dispatch_action(action);
             }
@@ -1091,6 +1093,21 @@ mod tests {
 
         assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
         assert_eq!(app.screen.modal_stack.len(), 1, "expected action menu to remain on stack");
+    }
+
+    #[test]
+    fn enter_while_help_open_does_not_trigger_action_enter() {
+        let mut app = stub_app();
+        setup_table(&mut app, vec![make_work_item("a")]);
+        app.screen.modal_stack.push(Box::new(crate::widgets::help::HelpWidget::new()));
+
+        // Help ignores Confirm, which used to leak through to dispatch_action
+        // and trigger action_enter on the selected item behind the modal.
+        app.handle_key(key(KeyCode::Enter));
+
+        // Help should still be on the stack, and no commands should have been dispatched.
+        assert_eq!(app.screen.modal_stack.len(), 1, "help widget should remain on stack");
+        assert!(app.proto_commands.take_next().is_none(), "no commands should be dispatched while help is open");
     }
 
     // ── handle_menu_key (through widget stack) ─────────────────────

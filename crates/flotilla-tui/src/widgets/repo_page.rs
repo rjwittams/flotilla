@@ -365,10 +365,18 @@ impl InteractiveWidget for RepoPage {
                         self.double_click.last_selectable_idx = Some(si);
                     }
 
-                    // Delegate to table for single click, gear icon, etc.
-                    let outcome = self.table.handle_mouse(mouse, ctx);
-                    if !matches!(outcome, Outcome::Ignored) {
-                        return outcome;
+                    // Gear icon click (still needs ctx for the AppAction)
+                    if let Some(gear_area) = self.table.gear_area {
+                        if x >= gear_area.x && x < gear_area.x + gear_area.width && y >= gear_area.y && y < gear_area.y + gear_area.height {
+                            ctx.app_actions.push(AppAction::ToggleProviders);
+                            return Outcome::Consumed;
+                        }
+                    }
+
+                    // Single click: select row using owned state
+                    if let Some(si) = self.table.row_at_mouse_self(x, y) {
+                        self.table.select_row_self(si);
+                        return Outcome::Consumed;
                     }
                 }
 
@@ -377,7 +385,12 @@ impl InteractiveWidget for RepoPage {
 
             MouseEventKind::Down(MouseButton::Right) => {
                 if matches!(*ctx.mode, UiMode::Normal) {
-                    return self.table.handle_mouse(mouse, ctx);
+                    // Right-click: select row using owned state, then open action menu
+                    if let Some(si) = self.table.row_at_mouse_self(mouse.column, mouse.row) {
+                        self.table.select_row_self(si);
+                        ctx.app_actions.push(AppAction::OpenActionMenu);
+                        return Outcome::Consumed;
+                    }
                 }
                 Outcome::Ignored
             }
