@@ -513,12 +513,6 @@ impl App {
                     if let Some(page) = self.screen.repo_pages.get_mut(identity) {
                         page.show_providers = !page.show_providers;
                     }
-                    // Keep RepoUiState in sync for status bar
-                    let identity = &self.model.repo_order[self.model.active_repo];
-                    if let Some(page) = self.screen.repo_pages.get(identity) {
-                        let sp = page.show_providers;
-                        self.active_ui_mut().show_providers = sp;
-                    }
                 }
                 AppAction::ToggleMultiSelect => {
                     let repo_identity = self.model.repo_order[self.model.active_repo].clone();
@@ -531,11 +525,6 @@ impl App {
                                     let item_identity = item.identity.clone();
                                     if !page.multi_selected.remove(&item_identity) {
                                         page.multi_selected.insert(item_identity.clone());
-                                    }
-                                    // Keep RepoUiState in sync for status bar
-                                    let rui = self.ui.repo_ui.get_mut(&repo_identity).expect("active repo must have UI state");
-                                    if !rui.multi_selected.remove(&item_identity) {
-                                        rui.multi_selected.insert(item_identity);
                                     }
                                 }
                             }
