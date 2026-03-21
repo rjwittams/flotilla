@@ -71,7 +71,6 @@ pub struct RepoUiState {
     pub table_view: GroupedWorkItems,
     pub table_state: TableState,
     pub selected_selectable_idx: Option<usize>,
-    pub has_unseen_changes: bool,
     pub multi_selected: HashSet<WorkItemIdentity>,
     pub pending_actions: HashMap<WorkItemIdentity, PendingAction>,
     pub show_providers: bool,
@@ -361,7 +360,6 @@ mod tests {
         for idx in 0..paths.len() {
             let repo_ui = state.active_repo_ui(&paths, idx);
             assert_eq!(repo_ui.selected_selectable_idx, None);
-            assert!(!repo_ui.has_unseen_changes);
         }
     }
 
@@ -379,7 +377,6 @@ mod tests {
     fn repo_ui_state_default() {
         let state = RepoUiState::default();
         assert_eq!(state.selected_selectable_idx, None);
-        assert!(!state.has_unseen_changes);
         assert!(state.multi_selected.is_empty());
         assert!(!state.show_providers);
     }

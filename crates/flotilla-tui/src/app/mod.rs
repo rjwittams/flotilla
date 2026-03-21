@@ -109,6 +109,8 @@ pub struct TuiRepoModel {
     pub issue_fetch_pending: bool,
     /// Whether the initial issue fetch has been requested for this repo.
     pub issue_initial_requested: bool,
+    /// Whether this inactive tab has received data updates since last viewed.
+    pub has_unseen_changes: bool,
 }
 
 /// TUI-side domain model. Mirrors the shape of core's `AppModel` but without
@@ -146,6 +148,7 @@ impl TuiModel {
                 issue_search_active: false,
                 issue_fetch_pending: false,
                 issue_initial_requested: false,
+                has_unseen_changes: false,
             });
         }
         Self { repos, repo_order: order, active_repo: 0, provider_statuses: HashMap::new(), status_message: None, hosts: HashMap::new() }
@@ -749,8 +752,8 @@ impl App {
         let i = self.model.repo_order.iter().position(|repo| repo == &repo_identity);
         if let Some(idx) = i {
             if idx != active_idx && *old_providers != *rm.providers {
-                if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-                    rui.has_unseen_changes = true;
+                if let Some(repo_model) = self.model.repos.get_mut(&repo_identity) {
+                    repo_model.has_unseen_changes = true;
                 }
             }
         }
@@ -870,8 +873,8 @@ impl App {
             let i = self.model.repo_order.iter().position(|repo| repo == &repo_identity);
             if let Some(idx) = i {
                 if idx != active_idx {
-                    if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-                        rui.has_unseen_changes = true;
+                    if let Some(repo_model) = self.model.repos.get_mut(&repo_identity) {
+                        repo_model.has_unseen_changes = true;
                     }
                 }
             }
@@ -939,6 +942,7 @@ impl App {
             issue_search_active: false,
             issue_fetch_pending: false,
             issue_initial_requested: false,
+            has_unseen_changes: false,
         });
         self.model.repo_order.push(identity.clone());
         self.ui.repo_ui.insert(identity, RepoUiState::default());
@@ -1326,7 +1330,7 @@ mod tests {
         snap2.providers = different_providers;
         app.apply_snapshot(snap2);
 
-        assert!(app.ui.repo_ui[&inactive_repo].has_unseen_changes);
+        assert!(app.model.repos[&inactive_repo].has_unseen_changes);
     }
 
     // -- apply_delta --
@@ -1424,7 +1428,7 @@ mod tests {
         }]);
         app.apply_delta(change);
 
-        assert!(app.ui.repo_ui[&inactive_repo].has_unseen_changes);
+        assert!(app.model.repos[&inactive_repo].has_unseen_changes);
     }
 
     #[test]
@@ -1440,7 +1444,7 @@ mod tests {
         }]);
         app.apply_delta(change);
 
-        assert!(!app.ui.repo_ui[&inactive_repo].has_unseen_changes);
+        assert!(!app.model.repos[&inactive_repo].has_unseen_changes);
     }
 
     // -- handle_repo_added / handle_repo_removed --

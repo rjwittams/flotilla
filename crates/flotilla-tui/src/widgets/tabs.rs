@@ -70,11 +70,10 @@ impl Tabs {
         // Repo tabs
         for (i, repo_identity) in model.repo_order.iter().enumerate() {
             let rm = &model.repos[repo_identity];
-            let rui = &ui.repo_ui[repo_identity];
             let name = TuiModel::repo_name(&rm.path);
             let is_active = !ui.mode.is_config() && i == model.active_repo;
             let loading = if rm.loading { " ⟳" } else { "" };
-            let changed = if rui.has_unseen_changes { "*" } else { "" };
+            let changed = if rm.has_unseen_changes { "*" } else { "" };
             let label = format!("{name}{changed}{loading}");
 
             items.push(segment_bar::SegmentItem {
@@ -238,7 +237,7 @@ impl Tabs {
             ui.mode = UiMode::Normal;
             model.active_repo = idx;
             let key = &model.repo_order[idx];
-            ui.repo_ui.get_mut(key).expect("active repo must have UI state").has_unseen_changes = false;
+            model.repos.get_mut(key).expect("active repo must have model entry").has_unseen_changes = false;
         }
     }
 
@@ -420,9 +419,9 @@ mod tests {
         let mut app = stub_app_with_repos(2);
         let tabs = Tabs::new();
         let key = app.model.repo_order[1].clone();
-        app.ui.repo_ui.get_mut(&key).expect("repo ui").has_unseen_changes = true;
+        app.model.repos.get_mut(&key).expect("repo model").has_unseen_changes = true;
         tabs.switch_to(1, &mut app.model, &mut app.ui);
-        assert!(!app.ui.repo_ui[&key].has_unseen_changes);
+        assert!(!app.model.repos[&key].has_unseen_changes);
     }
 
     #[test]

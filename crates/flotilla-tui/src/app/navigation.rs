@@ -126,9 +126,9 @@ mod tests {
         let mut app = stub_app_with_repos(2);
         // Mark repo-1 as having unseen changes
         let key = app.model.repo_order[1].clone();
-        app.ui.repo_ui.get_mut(&key).unwrap().has_unseen_changes = true;
+        app.model.repos.get_mut(&key).unwrap().has_unseen_changes = true;
         app.switch_tab(1);
-        assert!(!app.ui.repo_ui[&key].has_unseen_changes);
+        assert!(!app.model.repos[&key].has_unseen_changes);
     }
 
     #[test]
