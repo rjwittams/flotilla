@@ -383,6 +383,37 @@ async fn list_hosts_counts_remote_repo_overlay_and_get_topology_returns_mirrored
     assert_eq!(topology.routes[0].next_hop, HostName::new("relay"));
 }
 
+#[tokio::test]
+async fn get_topology_includes_configured_but_disconnected_peers() {
+    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo().await;
+
+    // Configure two peers but only set routes for one
+    daemon.set_configured_peer_names(vec![HostName::new("connected"), HostName::new("unreachable")]).await;
+    daemon
+        .set_topology_routes(vec![TopologyRoute {
+            target: HostName::new("connected"),
+            next_hop: HostName::new("connected"),
+            direct: true,
+            connected: true,
+            fallbacks: vec![],
+        }])
+        .await;
+
+    let topology = daemon.get_topology().await.expect("topology");
+
+    // Should have entries for both peers
+    assert_eq!(topology.routes.len(), 2, "should include both connected and disconnected peers");
+
+    let connected = topology.routes.iter().find(|r| r.target == HostName::new("connected")).expect("connected peer");
+    assert!(connected.connected);
+    assert!(connected.direct);
+
+    let unreachable = topology.routes.iter().find(|r| r.target == HostName::new("unreachable")).expect("unreachable peer");
+    assert!(!unreachable.connected, "configured-but-never-connected peer should show as disconnected");
+    assert!(unreachable.direct, "disconnected peer should show as direct (no relay known)");
+    assert!(unreachable.fallbacks.is_empty());
+}
+
 async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>) -> DaemonEvent {
     tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await.expect("timeout waiting for event").expect("recv error")
 }

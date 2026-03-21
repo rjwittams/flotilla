@@ -108,6 +108,27 @@ pub(crate) fn build_host_providers(
     }
 }
 
-pub(crate) fn build_topology(local_host: &HostName, routes: &[TopologyRoute]) -> TopologyResponse {
-    TopologyResponse { local_host: local_host.clone(), routes: routes.to_vec() }
+pub(crate) fn build_topology(local_host: &HostName, routes: &[TopologyRoute], configured_peers: &HashSet<HostName>) -> TopologyResponse {
+    let mut all_routes = routes.to_vec();
+
+    // Include configured peers that have no routes (never connected).
+    // `direct: true` is a placeholder — no relay is known yet.
+    // Clients should treat `direct` as meaningless when `connected` is false.
+    for peer in configured_peers {
+        if peer == local_host {
+            continue;
+        }
+        if !routes.iter().any(|r| r.target == *peer) {
+            all_routes.push(TopologyRoute {
+                target: peer.clone(),
+                next_hop: peer.clone(),
+                direct: true,
+                connected: false,
+                fallbacks: vec![],
+            });
+        }
+    }
+
+    all_routes.sort_by(|a, b| a.target.cmp(&b.target));
+    TopologyResponse { local_host: local_host.clone(), routes: all_routes }
 }
