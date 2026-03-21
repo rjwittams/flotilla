@@ -938,6 +938,12 @@ impl App {
         if self.model.active_repo >= self.model.repo_order.len() {
             self.model.active_repo = self.model.repo_order.len() - 1;
         }
+        // Sync layout from the now-active page so the status bar indicator
+        // reflects the correct repo after removal.
+        let identity = &self.model.repo_order[self.model.active_repo];
+        if let Some(page) = self.screen.repo_pages.get(identity) {
+            self.ui.view_layout = page.layout;
+        }
     }
 
     // ── Convenience accessors ──
