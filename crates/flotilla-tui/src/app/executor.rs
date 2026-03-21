@@ -116,11 +116,7 @@ pub fn handle_result(result: CommandResult, app: &mut App) {
             }
         }
         CommandResult::BranchNameGenerated { name, issue_ids } => {
-            let updated = app
-                .screen
-                .modal_stack
-                .last_mut()
-                .and_then(|widget| widget.as_any_mut().downcast_mut::<BranchInputWidget>());
+            let updated = app.screen.modal_stack.last_mut().and_then(|widget| widget.as_any_mut().downcast_mut::<BranchInputWidget>());
             if let Some(biw) = updated {
                 biw.prefill(&name, issue_ids);
             } else {
@@ -128,11 +124,7 @@ pub fn handle_result(result: CommandResult, app: &mut App) {
             }
         }
         CommandResult::CheckoutStatus(info) => {
-            let updated = app
-                .screen
-                .modal_stack
-                .last_mut()
-                .and_then(|widget| widget.as_any_mut().downcast_mut::<DeleteConfirmWidget>());
+            let updated = app.screen.modal_stack.last_mut().and_then(|widget| widget.as_any_mut().downcast_mut::<DeleteConfirmWidget>());
             if let Some(dcw) = updated {
                 dcw.update_info(info);
             } else {
