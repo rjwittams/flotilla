@@ -547,8 +547,8 @@ mod tests {
     fn parse_key_string_combined_modifiers() {
         let combo = parse_key_string("C-S-k");
         let (display, code, modifiers) = display_for_combo(&combo);
-        // crokey normalizes Shift+char to uppercase
-        assert!(code == KeyCode::Char('k') || code == KeyCode::Char('K'));
+        // crokey normalizes Shift+char to uppercase KeyCode
+        assert_eq!(code, KeyCode::Char('K'));
         assert!(modifiers.contains(KeyModifiers::CONTROL));
         assert!(modifiers.contains(KeyModifiers::SHIFT));
         assert_eq!(display, "C-S-K");
