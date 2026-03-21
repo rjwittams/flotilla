@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{InteractiveWidget, Outcome, RenderContext, WidgetContext};
+use super::{InteractiveWidget, Outcome, RenderContext, WidgetContext, PROVIDER_CATEGORIES};
 use crate::{
     app::{PeerStatus, ProviderStatus, TuiHostState, TuiModel},
     binding_table::{BindingModeId, KeyBindingMode},
@@ -17,17 +17,6 @@ use crate::{
     keymap::Action,
     theme::Theme,
 };
-
-const PROVIDER_CATEGORIES: [(&str, &str); 8] = [
-    ("VCS", "vcs"),
-    ("Checkout mgr", "checkout_manager"),
-    ("Change request", "change_request"),
-    ("Issue tracker", "issue_tracker"),
-    ("Cloud agents", "cloud_agent"),
-    ("AI utility", "ai_utility"),
-    ("Workspace mgr", "workspace_manager"),
-    ("Terminal pool", "terminal_pool"),
-];
 
 /// Standalone event log / config screen component.
 ///
