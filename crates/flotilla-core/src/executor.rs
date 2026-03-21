@@ -18,7 +18,7 @@ use tracing::{debug, error, info};
 
 use self::{
     checkout::{resolve_checkout_branch, write_branch_issue_links, CheckoutIntent, CheckoutService},
-    session_actions::{ReadOnlySessionActionService, TeleportFlow},
+    session_actions::{resolve_attach_command, ReadOnlySessionActionService, TeleportFlow, TeleportSessionActionService},
     terminals::TerminalPreparationService,
     workspace::WorkspaceOrchestrator,
 };
@@ -516,9 +516,57 @@ impl StepResolver for ExecutorStepResolver {
                 Ok(StepOutcome::Completed)
             }
             StepAction::RemoveCheckout { .. } => todo!("task 9"),
-            StepAction::ResolveAttachCommand { .. } => todo!("task 8"),
-            StepAction::EnsureCheckoutForTeleport { .. } => todo!("task 8"),
-            StepAction::CreateTeleportWorkspace { .. } => todo!("task 8"),
+            StepAction::ResolveAttachCommand { session_id } => {
+                let cmd = resolve_attach_command(&session_id, self.registry.as_ref(), self.providers_data.as_ref()).await?;
+                Ok(StepOutcome::Produced(CommandValue::AttachCommandResolved { command: cmd }))
+            }
+            StepAction::EnsureCheckoutForTeleport { branch, checkout_key, initial_path } => {
+                if let Some(path) = initial_path {
+                    return Ok(StepOutcome::Produced(CommandValue::CheckoutPathResolved { path }));
+                }
+                let service = TeleportSessionActionService::new(
+                    &self.repo.root,
+                    self.registry.as_ref(),
+                    self.providers_data.as_ref(),
+                    &self.config_base,
+                    &self.attachable_store,
+                    self.daemon_socket_path.as_deref(),
+                    &self.local_host,
+                );
+                match service.resolve_teleport_checkout_path(checkout_key.as_ref(), branch.as_deref()).await? {
+                    Some(path) => Ok(StepOutcome::Produced(CommandValue::CheckoutPathResolved { path })),
+                    None => Ok(StepOutcome::Skipped),
+                }
+            }
+            StepAction::CreateTeleportWorkspace { session_id: _, branch } => {
+                let cmd = prior
+                    .iter()
+                    .find_map(|o| match o {
+                        StepOutcome::Produced(CommandValue::AttachCommandResolved { command }) => Some(command.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| "attach command not resolved by prior step".to_string())?;
+
+                let path = prior
+                    .iter()
+                    .find_map(|o| match o {
+                        StepOutcome::Produced(CommandValue::CheckoutPathResolved { path }) => Some(path.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| "checkout path not resolved by prior step".to_string())?;
+
+                let service = TeleportSessionActionService::new(
+                    &self.repo.root,
+                    self.registry.as_ref(),
+                    self.providers_data.as_ref(),
+                    &self.config_base,
+                    &self.attachable_store,
+                    self.daemon_socket_path.as_deref(),
+                    &self.local_host,
+                );
+                service.create_workspace_for_teleport(&path, branch.as_deref(), &cmd).await?;
+                Ok(StepOutcome::Completed)
+            }
             StepAction::ArchiveSession { .. } => todo!("task 9"),
             StepAction::GenerateBranchName { .. } => todo!("task 9"),
             StepAction::CreateWorkspaceForCheckout { label } => {
