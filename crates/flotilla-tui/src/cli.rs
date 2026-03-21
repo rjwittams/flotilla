@@ -213,7 +213,7 @@ fn format_command_result(result: &flotilla_protocol::commands::CommandResult) ->
         CommandResult::CheckoutStatus(status) => {
             let mut parts = vec![format!("checkout status: {}", status.branch)];
             if let Some(cr) = &status.change_request_status {
-                parts.push(cr.clone());
+                parts.push(format!("PR: {cr}"));
             }
             if let Some(sha) = &status.merge_commit_sha {
                 parts.push(format!("merged via {}", &sha[..sha.len().min(7)]));
@@ -1016,7 +1016,7 @@ mod tests {
                 ..Default::default()
             });
             let output = format_command_result(&result);
-            assert_eq!(output, "checkout status: feat/x, open, 2 unpushed, uncommitted changes");
+            assert_eq!(output, "checkout status: feat/x, PR: open, 2 unpushed, uncommitted changes");
         }
 
         #[test]
@@ -1028,7 +1028,7 @@ mod tests {
                 ..Default::default()
             });
             let output = format_command_result(&result);
-            assert_eq!(output, "checkout status: feat/y, merged, merged via abc1234");
+            assert_eq!(output, "checkout status: feat/y, PR: merged, merged via abc1234");
         }
 
         #[test]
