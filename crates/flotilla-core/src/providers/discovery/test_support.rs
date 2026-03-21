@@ -8,7 +8,10 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
 };
 
 use async_trait::async_trait;
@@ -254,6 +257,9 @@ pub struct FakeIssueTracker {
     pub issues: Arc<TokioMutex<Vec<(String, Issue)>>>,
     /// IDs that were requested via `fetch_issues_by_id`, for test assertions.
     pub fetched_by_id: Arc<TokioMutex<Vec<Vec<String>>>>,
+    /// When true, `list_issues_changed_since` returns `has_more: true` to
+    /// trigger the escalation path in `refresh_issues_incremental`.
+    pub force_escalation: Arc<AtomicBool>,
 }
 
 impl Default for FakeIssueTracker {
@@ -264,12 +270,23 @@ impl Default for FakeIssueTracker {
 
 impl FakeIssueTracker {
     pub fn new() -> Self {
-        Self { issues: Arc::new(TokioMutex::new(Vec::new())), fetched_by_id: Arc::new(TokioMutex::new(Vec::new())) }
+        Self {
+            issues: Arc::new(TokioMutex::new(Vec::new())),
+            fetched_by_id: Arc::new(TokioMutex::new(Vec::new())),
+            force_escalation: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Pre-seed the issue store.
     pub async fn add_issues(&self, issues: Vec<(String, Issue)>) {
         self.issues.lock().await.extend(issues);
+    }
+
+    /// Enable forced escalation: `list_issues_changed_since` will return
+    /// `has_more: true`, causing the daemon to abandon the incremental path
+    /// and perform a full re-fetch.
+    pub fn set_force_escalation(&self, enabled: bool) {
+        self.force_escalation.store(enabled, Ordering::SeqCst);
     }
 }
 
@@ -305,6 +322,11 @@ impl IssueTracker for FakeIssueTracker {
     }
 
     async fn list_issues_changed_since(&self, repo_root: &Path, _since: &str, per_page: usize) -> Result<IssueChangeset, String> {
+        if self.force_escalation.load(Ordering::SeqCst) {
+            // Return has_more: true with an empty changeset to trigger the
+            // escalation path (full re-fetch) in refresh_issues_incremental.
+            return Ok(IssueChangeset { updated: vec![], closed_ids: vec![], has_more: true });
+        }
         let page = self.list_issues_page(repo_root, 1, per_page).await?;
         Ok(IssueChangeset { updated: page.issues, closed_ids: vec![], has_more: page.has_more })
     }

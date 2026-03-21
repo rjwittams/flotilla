@@ -2277,3 +2277,149 @@ async fn attachable_set_cascade_deletes_on_checkout_removal() {
         "attachable set should not appear in snapshot after checkout removal"
     );
 }
+
+#[tokio::test]
+async fn issue_refresh_escalation_resets_cache_and_refetches() {
+    // --- Arrange ---
+    // Seed a FakeIssueTracker with 3 initial issues.
+    let issue_tracker = Arc::new(FakeIssueTracker::new());
+    issue_tracker
+        .add_issues(vec![
+            ("1".into(), Issue {
+                title: "Issue one".into(),
+                labels: vec![],
+                association_keys: vec![],
+                provider_name: "fake-issues".into(),
+                provider_display_name: "Fake Issues".into(),
+            }),
+            ("2".into(), Issue {
+                title: "Issue two".into(),
+                labels: vec![],
+                association_keys: vec![],
+                provider_name: "fake-issues".into(),
+                provider_display_name: "Fake Issues".into(),
+            }),
+            ("3".into(), Issue {
+                title: "Issue three".into(),
+                labels: vec![],
+                association_keys: vec![],
+                provider_name: "fake-issues".into(),
+                provider_display_name: "Fake Issues".into(),
+            }),
+        ])
+        .await;
+
+    let discovery = fake_discovery_with_providers(
+        None,
+        None,
+        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueTracker>),
+    );
+
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, discovery, HostName::local()).await;
+
+    let mut rx = daemon.subscribe();
+
+    // Trigger initial refresh to populate issue cache with issues 1, 2, 3.
+    // Use FetchMoreIssues to load issues and set last_refreshed_at.
+    daemon
+        .execute(Command {
+            host: None,
+            context_repo: None,
+            action: CommandAction::FetchMoreIssues { repo: RepoSelector::Path(repo.clone()), desired_count: 10 },
+        })
+        .await
+        .expect("initial FetchMoreIssues should succeed");
+
+    // Verify initial state: issues 1, 2, 3 should be cached.
+    let initial_snapshot = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("get initial state");
+    assert_eq!(initial_snapshot.providers.issues.len(), 3, "should have 3 issues initially cached");
+    assert!(initial_snapshot.providers.issues.contains_key("1"), "issue 1 should be cached");
+    assert!(initial_snapshot.providers.issues.contains_key("2"), "issue 2 should be cached");
+    assert!(initial_snapshot.providers.issues.contains_key("3"), "issue 3 should be cached");
+
+    // --- Act ---
+    // Add new issues (simulating upstream changes) and enable forced escalation.
+    issue_tracker
+        .add_issues(vec![
+            ("4".into(), Issue {
+                title: "Issue four".into(),
+                labels: vec!["new".into()],
+                association_keys: vec![],
+                provider_name: "fake-issues".into(),
+                provider_display_name: "Fake Issues".into(),
+            }),
+            ("5".into(), Issue {
+                title: "Issue five".into(),
+                labels: vec!["new".into()],
+                association_keys: vec![],
+                provider_name: "fake-issues".into(),
+                provider_display_name: "Fake Issues".into(),
+            }),
+        ])
+        .await;
+    issue_tracker.set_force_escalation(true);
+
+    // Set last_refreshed_at to a timestamp far in the past so the
+    // MIN_INTERVAL_SECS (30s) guard in refresh_issues_incremental passes.
+    daemon.set_issue_cache_refreshed_at_for_test(&repo, "2020-01-01T00:00:00Z").await;
+
+    // Drain any pending events before triggering the escalation.
+    while rx.try_recv().is_ok() {}
+
+    // Directly invoke the incremental issue refresh. Since force_escalation
+    // is enabled, list_issues_changed_since will return has_more: true,
+    // triggering the full re-fetch escalation path.
+    daemon.refresh_issues_incremental_for_test().await;
+
+    // --- Assert ---
+    // The escalation path should have: reset the cache, fetched page 1 via
+    // list_issues_page (which now returns all 5 issues), called
+    // ensure_issues_cached for remaining pages, and broadcast a snapshot.
+    //
+    // Wait for the broadcast snapshot containing the new issues.
+    let found = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::RepoSnapshot(snap)) if snap.repo == repo => {
+                    if snap.providers.issues.contains_key("4") {
+                        return *snap;
+                    }
+                }
+                Ok(DaemonEvent::RepoDelta(ref delta)) if delta.repo == repo => {
+                    let has_new_issue = delta.changes.iter().any(|c| matches!(c, Change::Issue { key, .. } if key == "4"));
+                    if has_new_issue {
+                        let events = daemon.replay_since(&HashMap::new()).await.expect("replay_since");
+                        for event in events {
+                            if let DaemonEvent::RepoSnapshot(snap) = event {
+                                if snap.repo == repo && snap.providers.issues.contains_key("4") {
+                                    return *snap;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for snapshot with escalated issues");
+
+    // The snapshot should contain all 5 issues after the full re-fetch.
+    assert_eq!(found.providers.issues.len(), 5, "escalation should re-fetch all 5 issues");
+    assert!(found.providers.issues.contains_key("1"), "issue 1 present after escalation");
+    assert!(found.providers.issues.contains_key("2"), "issue 2 present after escalation");
+    assert!(found.providers.issues.contains_key("3"), "issue 3 present after escalation");
+    assert!(found.providers.issues.contains_key("4"), "issue 4 present after escalation");
+    assert!(found.providers.issues.contains_key("5"), "issue 5 present after escalation");
+
+    // Verify the new issues have the expected content.
+    let issue_4 = found.providers.issues.get("4").expect("issue 4 in snapshot");
+    assert_eq!(issue_4.title, "Issue four");
+    assert_eq!(issue_4.labels, vec!["new".to_string()]);
+}
