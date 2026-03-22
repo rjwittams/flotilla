@@ -2277,3 +2277,145 @@ async fn attachable_set_cascade_deletes_on_checkout_removal() {
         "attachable set should not appear in snapshot after checkout removal"
     );
 }
+
+#[tokio::test]
+async fn issue_refresh_escalation_resets_cache_and_refetches() {
+    // --- Arrange ---
+    // Seed a FakeIssueTracker with 55 initial issues. The `per_page` used by
+    // `ensure_issues_cached` is 50, so 55 issues requires two pages. After
+    // escalation, the daemon records `prev_count = 55`, resets the cache,
+    // fetches page 1 (50 issues), then `ensure_issues_cached` sees
+    // `cache.len() (50) < desired_count (55)` and fetches page 2 — proving
+    // multi-page continuation works.
+    fn make_issue(n: u32) -> (String, Issue) {
+        (n.to_string(), Issue {
+            title: format!("Issue {n}"),
+            labels: vec![],
+            association_keys: vec![],
+            provider_name: "fake-issues".into(),
+            provider_display_name: "Fake Issues".into(),
+        })
+    }
+
+    let issue_tracker = Arc::new(FakeIssueTracker::new());
+    let initial_issues: Vec<_> = (1..=55).map(make_issue).collect();
+    issue_tracker.add_issues(initial_issues).await;
+
+    let discovery = fake_discovery_with_providers(
+        None,
+        None,
+        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueTracker>),
+    );
+
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, discovery, HostName::local()).await;
+
+    let mut rx = daemon.subscribe();
+
+    // Trigger initial refresh to populate issue cache with all 55 issues.
+    // Use FetchMoreIssues with desired_count=60 so it fetches both pages.
+    daemon
+        .execute(Command {
+            host: None,
+            context_repo: None,
+            action: CommandAction::FetchMoreIssues { repo: RepoSelector::Path(repo.clone()), desired_count: 60 },
+        })
+        .await
+        .expect("initial FetchMoreIssues should succeed");
+
+    // Verify initial state: all 55 issues should be cached.
+    let initial_snapshot = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("get initial state");
+    assert_eq!(initial_snapshot.providers.issues.len(), 55, "should have 55 issues initially cached");
+
+    // --- Act ---
+    // Add 5 new issues (simulating upstream changes) and enable forced
+    // escalation. Total is now 60 issues across two pages (50 + 10).
+    let new_issues: Vec<_> = (56..=60)
+        .map(|n| {
+            (n.to_string(), Issue {
+                title: format!("Issue {n}"),
+                labels: vec!["new".into()],
+                association_keys: vec![],
+                provider_name: "fake-issues".into(),
+                provider_display_name: "Fake Issues".into(),
+            })
+        })
+        .collect();
+    issue_tracker.add_issues(new_issues).await;
+    issue_tracker.set_force_escalation(true);
+
+    // Clear pages_fetched so we can observe just the escalation fetches.
+    issue_tracker.pages_fetched.lock().await.clear();
+
+    // Set last_refreshed_at to a timestamp far in the past so the
+    // MIN_INTERVAL_SECS (30s) guard in refresh_issues_incremental passes.
+    daemon.set_issue_cache_refreshed_at_for_test(&repo, "2020-01-01T00:00:00Z").await;
+
+    // Drain any pending events before triggering the escalation.
+    while rx.try_recv().is_ok() {}
+
+    // Directly invoke the incremental issue refresh. Since force_escalation
+    // is enabled, list_issues_changed_since will return has_more: true,
+    // triggering the full re-fetch escalation path.
+    daemon.refresh_issues_incremental_for_test().await;
+
+    // --- Assert ---
+    // The escalation path should have: reset the cache, fetched page 1
+    // (50 issues) via list_issues_page, then ensure_issues_cached should
+    // have fetched page 2 (10 issues) because prev_count (55) > page 1
+    // count (50), and finally broadcast a snapshot.
+
+    // Verify multi-page fetches occurred: page 1 (escalation) + page 2
+    // (ensure_issues_cached continuation).
+    let pages = issue_tracker.pages_fetched.lock().await.clone();
+    assert!(pages.contains(&1), "escalation should fetch page 1");
+    assert!(pages.contains(&2), "ensure_issues_cached should continue to page 2");
+
+    // Wait for the broadcast snapshot containing the new issues.
+    let found = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::RepoSnapshot(snap)) if snap.repo == repo => {
+                    if snap.providers.issues.contains_key("56") {
+                        return *snap;
+                    }
+                }
+                Ok(DaemonEvent::RepoDelta(ref delta)) if delta.repo == repo => {
+                    let has_new_issue = delta.changes.iter().any(|c| matches!(c, Change::Issue { key, .. } if key == "56"));
+                    if has_new_issue {
+                        let events = daemon.replay_since(&HashMap::new()).await.expect("replay_since");
+                        for event in events {
+                            if let DaemonEvent::RepoSnapshot(snap) = event {
+                                if snap.repo == repo && snap.providers.issues.contains_key("56") {
+                                    return *snap;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for snapshot with escalated issues");
+
+    // The snapshot should contain all 60 issues from both pages after the
+    // full re-fetch with multi-page continuation.
+    assert_eq!(found.providers.issues.len(), 60, "escalation should re-fetch all 60 issues across two pages");
+
+    // Spot-check issues from page 1 (IDs 1-50) and page 2 (IDs 51-60).
+    assert!(found.providers.issues.contains_key("1"), "first issue on page 1 present");
+    assert!(found.providers.issues.contains_key("50"), "last issue on page 1 present");
+    assert!(found.providers.issues.contains_key("51"), "first issue on page 2 present");
+    assert!(found.providers.issues.contains_key("60"), "last issue on page 2 present");
+
+    // Verify the new issues added after initial fetch have expected content.
+    let issue_56 = found.providers.issues.get("56").expect("issue 56 in snapshot");
+    assert_eq!(issue_56.title, "Issue 56");
+    assert_eq!(issue_56.labels, vec!["new".to_string()]);
+}

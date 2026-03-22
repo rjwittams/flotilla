@@ -1114,6 +1114,23 @@ impl InProcessDaemon {
         self.peer_providers.read().await.get(identity).cloned().unwrap_or_default()
     }
 
+    /// Test accessor: override the issue cache's `last_refreshed_at` timestamp
+    /// for the given repo path. Useful for bypassing the MIN_INTERVAL_SECS
+    /// guard in `refresh_issues_incremental`.
+    #[cfg(feature = "test-support")]
+    pub async fn set_issue_cache_refreshed_at_for_test(&self, repo: &Path, timestamp: &str) {
+        let identity = self.tracked_repo_identity_for_path(repo).await.expect("set_issue_cache_refreshed_at_for_test: repo not tracked");
+        let mut repos = self.repos.write().await;
+        let state = repos.get_mut(&identity).expect("set_issue_cache_refreshed_at_for_test: repo state not found");
+        state.issue_cache.mark_refreshed(timestamp.to_string());
+    }
+
+    /// Test accessor: directly invoke the incremental issue refresh cycle.
+    #[cfg(feature = "test-support")]
+    pub async fn refresh_issues_incremental_for_test(&self) {
+        self.refresh_issues_incremental().await;
+    }
+
     /// Poll all repos for new refresh snapshots.
     ///
     /// For each repo whose background refresh has produced a new snapshot,
