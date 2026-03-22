@@ -20,8 +20,8 @@ use flotilla_core::{
         discovery::{
             test_support::{
                 fake_discovery, fake_discovery_with_provider_set, fake_discovery_with_providers, fake_vcs_discovery, git_process_discovery,
-                init_git_repo_with_remote, FakeCheckoutManager, FakeDiscoveryProviders, FakeIssueTracker, FakeTerminalPool, FakeVcsState,
-                FakeWorkspaceManager,
+                init_git_repo_with_remote, FakeCheckoutManager, FakeCheckoutManagerFactory, FakeDiscoveryProviders, FakeIssueTracker,
+                FakeTerminalPool, FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
             },
             DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostPlatform, ProviderCategory, ProviderDescriptor,
             RepoDetector, UnmetRequirement,
@@ -286,6 +286,7 @@ fn init_git_repo_with_local_bare_remote(path: &Path, remote_path: &Path) -> Repo
     init_git_repo_with_remote(path, remote_path.to_str().expect("remote path utf8"))
 }
 
+#[allow(dead_code)] // TODO(task-9): remove once all git-backed helpers are cleaned up
 async fn daemon_for_git_repo() -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>, RepoIdentity) {
     let temp = tempfile::tempdir().expect("create tempdir");
     let repo = temp.path().join("repo");
@@ -314,6 +315,7 @@ async fn daemon_for_fake_repo() -> (tempfile::TempDir, PathBuf, Arc<InProcessDae
     (temp, repo, daemon, identity)
 }
 
+#[allow(dead_code)] // TODO(task-9): remove once all git-backed helpers are cleaned up
 async fn daemon_for_duplicate_git_repos() -> (tempfile::TempDir, PathBuf, PathBuf, Arc<InProcessDaemon>) {
     let temp = tempfile::tempdir().expect("create tempdir");
     let repo_a = temp.path().join("repo-a");
@@ -324,6 +326,27 @@ async fn daemon_for_duplicate_git_repos() -> (tempfile::TempDir, PathBuf, PathBu
     init_git_repo_with_remote(&repo_b, remote.to_str().expect("remote path utf8"));
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
     let daemon = InProcessDaemon::new(vec![repo_a.clone(), repo_b.clone()], config, local_bare_remote_discovery(), HostName::local()).await;
+    (temp, repo_a, repo_b, daemon)
+}
+
+async fn daemon_for_duplicate_fake_repos() -> (tempfile::TempDir, PathBuf, PathBuf, Arc<InProcessDaemon>) {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    std::fs::create_dir_all(&repo_a).expect("create repo-a dir");
+    std::fs::create_dir_all(&repo_b).expect("create repo-b dir");
+
+    let state_a = FakeVcsState::builder(repo_a.clone()).branch("main", true).checkout("main").is_main(true).build().build();
+    let state_b = FakeVcsState::builder(repo_b.clone()).branch("main", true).checkout("main").is_main(true).build().build();
+
+    let mut discovery = fake_discovery(false);
+    discovery.factories.vcs = vec![Box::new(FakeVcsFactory::new(state_a.clone())), Box::new(FakeVcsFactory::new(state_b.clone()))];
+    discovery.factories.checkout_managers =
+        vec![Box::new(FakeCheckoutManagerFactory::new(state_a)), Box::new(FakeCheckoutManagerFactory::new(state_b))];
+    discovery.repo_detectors.push(Box::new(FixedRemoteHostDetector { owner: "owner", repo: "repo" }));
+
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![repo_a.clone(), repo_b.clone()], config, discovery, HostName::local()).await;
     (temp, repo_a, repo_b, daemon)
 }
 
@@ -1216,8 +1239,7 @@ async fn replay_since_delta_replay_includes_peer_data() {
 async fn add_and_remove_repo_updates_state_and_emits_events() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("new-repo");
-    let remote = temp.path().join("origin.git");
-    init_git_repo_with_local_bare_remote(&repo, &remote);
+    std::fs::create_dir_all(&repo).expect("create repo dir");
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
     let daemon = InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::local()).await;
@@ -1293,7 +1315,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
 
 #[tokio::test]
 async fn duplicate_local_roots_share_identity_but_remain_tracked() {
-    let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_git_repos().await;
+    let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_fake_repos().await;
 
     let identity_a = daemon.tracked_repo_identity_for_path(&repo_a).await.expect("identity for first repo");
     let identity_b = daemon.tracked_repo_identity_for_path(&repo_b).await.expect("identity for second repo");
@@ -1317,6 +1339,13 @@ async fn duplicate_local_roots_share_identity_but_remain_tracked() {
     assert_eq!(daemon.tracked_repo_identity_for_path(&repo_b).await, Some(identity_b));
 }
 
+// TODO(task-9): Migrate to fake VCS — this test depends on real git for two reasons:
+// 1. `normalize_repo_path` uses `GitVcs` directly to canonicalize symlinked temp paths
+//    (e.g. /var → /private/var on macOS), so `tracked_path == canonical_repo` requires
+//    a real git process to resolve the canonical form.
+// 2. The identity match relies on git reading the remote URL; `local_bare_remote_discovery`
+//    uses a real git runner to detect `github.com/owner/repo` from the remote.
+// Skipping fake migration until `normalize_repo_path` uses an injectable Vcs.
 #[tokio::test]
 async fn adding_local_clone_promotes_remote_only_identity_to_local_execution() {
     let temp = tempfile::tempdir().expect("create tempdir");
@@ -1344,7 +1373,7 @@ async fn adding_local_clone_promotes_remote_only_identity_to_local_execution() {
 
 #[tokio::test]
 async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
-    let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_git_repos().await;
+    let (_temp, repo_a, repo_b, daemon) = daemon_for_duplicate_fake_repos().await;
     let mut rx = daemon.subscribe();
 
     daemon.refresh(&RepoSelector::Path(repo_a.clone())).await.expect("refresh first repo");
