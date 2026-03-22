@@ -581,3 +581,322 @@ fn build_topology(local_host: &HostName, routes: &[TopologyRoute], configured_pe
     all_routes.sort_by(|a, b| a.target.cmp(&b.target));
     TopologyResponse { local_host: local_host.clone(), routes: all_routes }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, collections::HashMap};
+
+    use flotilla_protocol::{DaemonEvent, HostSnapshot, HostSummary, PeerConnectionState, StreamKey, SystemInfo, ToolInventory};
+
+    use super::HostRegistry;
+    use crate::HostName;
+
+    fn local_name() -> HostName {
+        HostName::new("local-host")
+    }
+
+    fn peer_name() -> HostName {
+        HostName::new("peer-host")
+    }
+
+    fn minimal_summary(name: &HostName) -> HostSummary {
+        HostSummary { host_name: name.clone(), system: SystemInfo::default(), inventory: ToolInventory::default(), providers: vec![] }
+    }
+
+    fn make_registry() -> HostRegistry {
+        HostRegistry::new(local_name(), minimal_summary(&local_name()))
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Constructor
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn new_initializes_local_host_as_connected() {
+        let registry = make_registry();
+        let status = registry.peer_connection_status(&local_name()).await;
+        assert_eq!(status, PeerConnectionState::Connected);
+    }
+
+    #[tokio::test]
+    async fn new_returns_disconnected_for_unknown_host() {
+        let registry = make_registry();
+        let status = registry.peer_connection_status(&peer_name()).await;
+        assert_eq!(status, PeerConnectionState::Disconnected);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. publish_peer_connection_status
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn publish_peer_connection_status_emits_events_and_returns_snapshot() {
+        let registry = make_registry();
+        let remote_counts = HashMap::new();
+
+        let events = RefCell::new(Vec::new());
+        let emit = |e: DaemonEvent| events.borrow_mut().push(e);
+
+        let result = registry.publish_peer_connection_status(&peer_name(), PeerConnectionState::Connected, &remote_counts, &emit).await;
+
+        assert!(result.is_some(), "first publish should return Some(snapshot)");
+        let snapshot = result.expect("checked above");
+        assert_eq!(snapshot.host_name, peer_name());
+        assert_eq!(snapshot.connection_status, PeerConnectionState::Connected);
+        assert!(!snapshot.is_local);
+
+        let captured = events.borrow();
+        let has_peer_status = captured.iter().any(|e| {
+            matches!(e, DaemonEvent::PeerStatusChanged { host, status }
+            if *host == peer_name() && *status == PeerConnectionState::Connected)
+        });
+        assert!(has_peer_status, "should emit PeerStatusChanged");
+
+        let has_host_snapshot = captured.iter().any(|e| matches!(e, DaemonEvent::HostSnapshot(snap) if snap.host_name == peer_name()));
+        assert!(has_host_snapshot, "should emit HostSnapshot");
+    }
+
+    #[tokio::test]
+    async fn publish_peer_connection_status_noop_on_same_status() {
+        let registry = make_registry();
+        let remote_counts = HashMap::new();
+
+        let events = RefCell::new(Vec::new());
+        let emit = |e: DaemonEvent| events.borrow_mut().push(e);
+
+        // First publish: establishes the status.
+        let _ = registry.publish_peer_connection_status(&peer_name(), PeerConnectionState::Connected, &remote_counts, &emit).await;
+        events.borrow_mut().clear();
+
+        // Second publish with the same status: should be a no-op.
+        let result = registry.publish_peer_connection_status(&peer_name(), PeerConnectionState::Connected, &remote_counts, &emit).await;
+        assert!(result.is_none(), "duplicate status should return None");
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. publish_peer_summary
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn publish_peer_summary_emits_host_snapshot_and_returns_snapshot() {
+        let registry = make_registry();
+        let summary = minimal_summary(&peer_name());
+
+        let events = RefCell::new(Vec::new());
+        let emit = |e: DaemonEvent| events.borrow_mut().push(e);
+
+        let result = registry.publish_peer_summary(&peer_name(), summary.clone(), &emit).await;
+
+        assert!(result.is_some(), "first summary publish should return Some");
+        let snapshot = result.expect("checked above");
+        assert_eq!(snapshot.host_name, peer_name());
+        assert_eq!(snapshot.summary, summary);
+
+        let captured = events.borrow();
+        let has_host_snapshot = captured.iter().any(|e| matches!(e, DaemonEvent::HostSnapshot(snap) if snap.host_name == peer_name()));
+        assert!(has_host_snapshot, "should emit HostSnapshot");
+    }
+
+    #[tokio::test]
+    async fn publish_peer_summary_noop_on_identical_summary() {
+        let registry = make_registry();
+        let summary = minimal_summary(&peer_name());
+
+        let events = RefCell::new(Vec::new());
+        let emit = |e: DaemonEvent| events.borrow_mut().push(e);
+
+        let _ = registry.publish_peer_summary(&peer_name(), summary.clone(), &emit).await;
+        events.borrow_mut().clear();
+
+        let result = registry.publish_peer_summary(&peer_name(), summary, &emit).await;
+        assert!(result.is_none(), "identical summary should return None");
+        assert!(events.borrow().is_empty(), "no events should be emitted for identical summary");
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. set_configured_peer_names
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn set_configured_peer_names_emits_host_snapshots_for_new_peers() {
+        let registry = make_registry();
+        let remote_counts = HashMap::new();
+        let peer_a = HostName::new("peer-a");
+        let peer_b = HostName::new("peer-b");
+
+        let events = RefCell::new(Vec::new());
+        let emit = |e: DaemonEvent| events.borrow_mut().push(e);
+
+        registry.set_configured_peer_names(vec![peer_a.clone(), peer_b.clone()], &remote_counts, &emit).await;
+
+        let captured = events.borrow();
+        let snapshot_hosts: Vec<_> = captured
+            .iter()
+            .filter_map(|e| match e {
+                DaemonEvent::HostSnapshot(snap) => Some(snap.host_name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(snapshot_hosts.contains(&peer_a), "should emit snapshot for peer-a");
+        assert!(snapshot_hosts.contains(&peer_b), "should emit snapshot for peer-b");
+    }
+
+    #[tokio::test]
+    async fn set_configured_peer_names_to_empty_emits_host_removed() {
+        let registry = make_registry();
+        let remote_counts = HashMap::new();
+        let peer_a = HostName::new("peer-a");
+
+        let events = RefCell::new(Vec::new());
+        let emit = |e: DaemonEvent| events.borrow_mut().push(e);
+
+        // First, add a configured peer.
+        registry.set_configured_peer_names(vec![peer_a.clone()], &remote_counts, &emit).await;
+        events.borrow_mut().clear();
+
+        // Now remove all configured peers.
+        registry.set_configured_peer_names(vec![], &remote_counts, &emit).await;
+
+        let captured = events.borrow();
+        let has_removed = captured.iter().any(|e| matches!(e, DaemonEvent::HostRemoved { host, .. } if *host == peer_a));
+        assert!(has_removed, "should emit HostRemoved for peer-a when unconfigured");
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. apply_event
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn apply_event_peer_status_changed() {
+        let registry = make_registry();
+
+        let event = DaemonEvent::PeerStatusChanged { host: peer_name(), status: PeerConnectionState::Connected };
+        registry.apply_event(&event);
+
+        let status = registry.peer_connection_status(&peer_name()).await;
+        assert_eq!(status, PeerConnectionState::Connected);
+    }
+
+    #[tokio::test]
+    async fn apply_event_host_snapshot() {
+        let registry = make_registry();
+
+        let snapshot = HostSnapshot {
+            seq: 5,
+            host_name: peer_name(),
+            is_local: false,
+            connection_status: PeerConnectionState::Connected,
+            summary: minimal_summary(&peer_name()),
+        };
+        registry.apply_event(&DaemonEvent::HostSnapshot(Box::new(snapshot)));
+
+        let status = registry.peer_connection_status(&peer_name()).await;
+        assert_eq!(status, PeerConnectionState::Connected);
+    }
+
+    #[tokio::test]
+    async fn apply_event_host_removed() {
+        let registry = make_registry();
+
+        // First, establish the peer as connected.
+        let connect_event = DaemonEvent::PeerStatusChanged { host: peer_name(), status: PeerConnectionState::Connected };
+        registry.apply_event(&connect_event);
+        assert_eq!(registry.peer_connection_status(&peer_name()).await, PeerConnectionState::Connected);
+
+        // Now remove the host.
+        let remove_event = DaemonEvent::HostRemoved { host: peer_name(), seq: 100 };
+        registry.apply_event(&remove_event);
+
+        let status = registry.peer_connection_status(&peer_name()).await;
+        assert_eq!(status, PeerConnectionState::Disconnected, "removed host should appear disconnected");
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. replay_host_events
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn replay_host_events_empty_last_seen_returns_all() {
+        let registry = make_registry();
+        let remote_counts = HashMap::new();
+
+        // Add a peer so there's more than just the local host.
+        let noop_emit = |_: DaemonEvent| {};
+        registry.publish_peer_connection_status(&peer_name(), PeerConnectionState::Connected, &remote_counts, &noop_emit).await;
+
+        let events = registry.replay_host_events(&HashMap::new()).await;
+
+        let hosts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                DaemonEvent::HostSnapshot(snap) => Some(snap.host_name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(hosts.contains(&local_name()), "should include local host");
+        assert!(hosts.contains(&peer_name()), "should include peer host");
+    }
+
+    #[tokio::test]
+    async fn replay_host_events_current_seqs_returns_nothing() {
+        let registry = make_registry();
+        let remote_counts = HashMap::new();
+        let noop_emit = |_: DaemonEvent| {};
+
+        registry.publish_peer_connection_status(&peer_name(), PeerConnectionState::Connected, &remote_counts, &noop_emit).await;
+
+        // First replay to discover current seqs.
+        let initial = registry.replay_host_events(&HashMap::new()).await;
+        let mut last_seen = HashMap::new();
+        for event in &initial {
+            if let DaemonEvent::HostSnapshot(snap) = event {
+                let key = StreamKey::Host { host_name: snap.host_name.clone() };
+                last_seen.insert(key, snap.seq);
+            }
+        }
+
+        // Replay with current seqs — should return nothing.
+        let events = registry.replay_host_events(&last_seen).await;
+        assert!(events.is_empty(), "up-to-date replay should return no events");
+    }
+
+    #[tokio::test]
+    async fn replay_host_events_stale_seq_returns_updated_snapshot() {
+        let registry = make_registry();
+        let remote_counts = HashMap::new();
+        let noop_emit = |_: DaemonEvent| {};
+
+        registry.publish_peer_connection_status(&peer_name(), PeerConnectionState::Connected, &remote_counts, &noop_emit).await;
+
+        // Capture current state.
+        let initial = registry.replay_host_events(&HashMap::new()).await;
+        let mut last_seen = HashMap::new();
+        for event in &initial {
+            if let DaemonEvent::HostSnapshot(snap) = event {
+                let key = StreamKey::Host { host_name: snap.host_name.clone() };
+                last_seen.insert(key, snap.seq);
+            }
+        }
+
+        // Update the peer — this bumps its seq.
+        let new_summary = HostSummary {
+            host_name: peer_name(),
+            system: SystemInfo { os: Some("linux".into()), ..Default::default() },
+            inventory: ToolInventory::default(),
+            providers: vec![],
+        };
+        registry.publish_peer_summary(&peer_name(), new_summary, &noop_emit).await;
+
+        // Replay with stale seq — should return the updated snapshot for the peer.
+        let events = registry.replay_host_events(&last_seen).await;
+        let updated_hosts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                DaemonEvent::HostSnapshot(snap) => Some(snap.host_name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(updated_hosts.contains(&peer_name()), "stale peer should be replayed");
+        assert!(!updated_hosts.contains(&local_name()), "local host with current seq should not be replayed");
+    }
+}
