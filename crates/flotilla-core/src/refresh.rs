@@ -268,7 +268,6 @@ async fn refresh_providers(
     errors
 }
 
-
 fn project_attachable_data(pd: &mut ProviderData, registry: &ProviderRegistry, attachable_store: &SharedAttachableStore) {
     let workspace_provider = registry.workspace_managers.preferred_with_desc().map(|(desc, _)| desc.implementation.clone());
     let Ok(store) = attachable_store.lock() else {
