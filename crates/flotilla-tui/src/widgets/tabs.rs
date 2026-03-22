@@ -5,10 +5,7 @@ use flotilla_protocol::RepoIdentity;
 use ratatui::{layout::Rect, style::Style, Frame};
 
 use crate::{
-    app::{
-        ui_state::{DragState, UiMode},
-        TabId, TuiModel, UiState,
-    },
+    app::{ui_state::DragState, TabId, TuiModel, UiState},
     segment_bar::{self, BarStyle, ThemedRibbonStyle, ThemedTabBarStyle},
     theme::{BarKind, Theme},
     widgets::AppAction,
@@ -57,11 +54,11 @@ impl Tabs {
         let mut tab_ids = Vec::new();
 
         // Flotilla logo tab
-        let flotilla_style = theme.logo_style(ui.mode.is_config());
+        let flotilla_style = theme.logo_style(ui.is_config);
         items.push(segment_bar::SegmentItem {
             label: TabId::FLOTILLA_LABEL.to_string(),
             key_hint: None,
-            active: ui.mode.is_config(),
+            active: ui.is_config,
             dragging: false,
             style_override: Some(flotilla_style),
         });
@@ -70,11 +67,10 @@ impl Tabs {
         // Repo tabs
         for (i, repo_identity) in model.repo_order.iter().enumerate() {
             let rm = &model.repos[repo_identity];
-            let rui = &ui.repo_ui[repo_identity];
             let name = TuiModel::repo_name(&rm.path);
-            let is_active = !ui.mode.is_config() && i == model.active_repo;
+            let is_active = !ui.is_config && i == model.active_repo;
             let loading = if rm.loading { " ⟳" } else { "" };
-            let changed = if rui.has_unseen_changes { "*" } else { "" };
+            let changed = if rm.has_unseen_changes { "*" } else { "" };
             let label = format!("{name}{changed}{loading}");
 
             items.push(segment_bar::SegmentItem {
@@ -235,10 +231,10 @@ impl Tabs {
     /// Switch directly to a specific repo tab by index.
     pub fn switch_to(&self, idx: usize, model: &mut TuiModel, ui: &mut UiState) {
         if idx < model.repo_order.len() {
-            ui.mode = UiMode::Normal;
+            ui.is_config = false;
             model.active_repo = idx;
             let key = &model.repo_order[idx];
-            ui.repo_ui.get_mut(key).expect("active repo must have UI state").has_unseen_changes = false;
+            model.repos.get_mut(key).expect("active repo must have model entry").has_unseen_changes = false;
         }
     }
 
@@ -272,8 +268,8 @@ impl Tabs {
         if model.repo_order.is_empty() {
             return;
         }
-        if ui.mode.is_config() {
-            ui.mode = UiMode::Normal;
+        if ui.is_config {
+            ui.is_config = false;
             model.active_repo = match direction {
                 TabDirection::Forward => 0,
                 TabDirection::Backward => model.repo_order.len() - 1,
@@ -286,14 +282,14 @@ impl Tabs {
                 if model.active_repo + 1 < model.repo_order.len() {
                     self.switch_to(model.active_repo + 1, model, ui);
                 } else {
-                    ui.mode = UiMode::Config;
+                    ui.is_config = true;
                 }
             }
             TabDirection::Backward => {
                 if model.active_repo > 0 {
                     self.switch_to(model.active_repo - 1, model, ui);
                 } else {
-                    ui.mode = UiMode::Config;
+                    ui.is_config = true;
                 }
             }
         }
@@ -358,17 +354,17 @@ mod tests {
         let mut tabs = Tabs::new();
         tabs.switch_to(1, &mut app.model, &mut app.ui);
         tabs.next_tab(&mut app.model, &mut app.ui);
-        assert!(app.ui.mode.is_config());
+        assert!(app.ui.is_config);
     }
 
     #[test]
     fn next_tab_from_config_goes_to_first() {
         let mut app = stub_app_with_repos(3);
         let mut tabs = Tabs::new();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         tabs.next_tab(&mut app.model, &mut app.ui);
         assert_eq!(app.model.active_repo, 0);
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(!app.ui.is_config);
     }
 
     #[test]
@@ -393,17 +389,17 @@ mod tests {
         let mut tabs = Tabs::new();
         // active_repo is 0
         tabs.prev_tab(&mut app.model, &mut app.ui);
-        assert!(app.ui.mode.is_config());
+        assert!(app.ui.is_config);
     }
 
     #[test]
     fn prev_tab_from_config_goes_to_last() {
         let mut app = stub_app_with_repos(3);
         let mut tabs = Tabs::new();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         tabs.prev_tab(&mut app.model, &mut app.ui);
         assert_eq!(app.model.active_repo, 2);
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(!app.ui.is_config);
     }
 
     #[test]
@@ -420,19 +416,19 @@ mod tests {
         let mut app = stub_app_with_repos(2);
         let tabs = Tabs::new();
         let key = app.model.repo_order[1].clone();
-        app.ui.repo_ui.get_mut(&key).expect("repo ui").has_unseen_changes = true;
+        app.model.repos.get_mut(&key).expect("repo model").has_unseen_changes = true;
         tabs.switch_to(1, &mut app.model, &mut app.ui);
-        assert!(!app.ui.repo_ui[&key].has_unseen_changes);
+        assert!(!app.model.repos[&key].has_unseen_changes);
     }
 
     #[test]
     fn switch_to_sets_active_repo_and_mode() {
         let mut app = stub_app_with_repos(3);
         let tabs = Tabs::new();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         tabs.switch_to(2, &mut app.model, &mut app.ui);
         assert_eq!(app.model.active_repo, 2);
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(!app.ui.is_config);
     }
 
     #[test]

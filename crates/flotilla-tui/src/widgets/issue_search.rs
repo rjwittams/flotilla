@@ -7,7 +7,6 @@ use tui_input::{backend::crossterm::EventHandler as InputEventHandler, Input};
 
 use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext};
 use crate::{
-    app::ui_state::UiMode,
     binding_table::{BindingModeId, KeyBindingMode, StatusContent, StatusFragment},
     keymap::Action,
 };
@@ -48,7 +47,6 @@ impl InteractiveWidget for IssueSearchWidget {
                     ctx.commands.push(cmd);
                     ctx.app_actions.push(AppAction::SetSearchQuery { repo: repo_identity, query });
                 }
-                *ctx.mode = UiMode::Normal;
                 Outcome::Finished
             }
             Action::Dismiss => {
@@ -61,7 +59,6 @@ impl InteractiveWidget for IssueSearchWidget {
                 };
                 ctx.commands.push(cmd);
                 ctx.app_actions.push(AppAction::ClearSearchQuery { repo: repo_identity });
-                *ctx.mode = UiMode::Normal;
                 Outcome::Finished
             }
             _ => Outcome::Ignored,

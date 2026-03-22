@@ -1,10 +1,8 @@
 use std::{
-    any::Any,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use flotilla_core::data::{GroupEntry, GroupedWorkItems, SectionHeader};
 use flotilla_protocol::{HostName, ProviderData, WorkItem, WorkItemIdentity};
 use ratatui::{
@@ -15,14 +13,12 @@ use ratatui::{
     Frame,
 };
 
-use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext, PROVIDER_CATEGORIES};
+use super::PROVIDER_CATEGORIES;
 use crate::{
     app::{
-        ui_state::{BranchInputKind, PendingAction, PendingStatus, UiMode},
+        ui_state::{PendingAction, PendingStatus},
         ProviderStatus, TuiModel, UiState,
     },
-    binding_table::{BindingModeId, KeyBindingMode},
-    keymap::Action,
     shimmer::Shimmer,
     theme::Theme,
     ui_helpers,
@@ -163,59 +159,6 @@ impl WorkItemTable {
         match self.grouped_items.table_entries.get(table_idx)? {
             GroupEntry::Item(item) => Some(item),
             GroupEntry::Header(_) => None,
-        }
-    }
-
-    // ── Selection helpers (ctx-based, for current callers) ───────────
-
-    pub fn select_next(&self, ctx: &mut WidgetContext) {
-        let repo_key = &ctx.repo_order[ctx.active_repo];
-        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-        let indices = &rui.table_view.selectable_indices;
-        if indices.is_empty() {
-            return;
-        }
-        let current_si = rui.selected_selectable_idx;
-        let next = match current_si {
-            Some(si) if si + 1 < indices.len() => si + 1,
-            Some(si) => si,
-            None => 0,
-        };
-        let table_idx = rui.table_view.selectable_indices[next];
-        rui.selected_selectable_idx = Some(next);
-        rui.table_state.select(Some(table_idx));
-    }
-
-    pub fn select_prev(&self, ctx: &mut WidgetContext) {
-        let repo_key = &ctx.repo_order[ctx.active_repo];
-        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-        let indices = &rui.table_view.selectable_indices;
-        if indices.is_empty() {
-            return;
-        }
-        let current_si = rui.selected_selectable_idx;
-        let prev = match current_si {
-            Some(si) if si > 0 => si - 1,
-            Some(si) => si,
-            None => 0,
-        };
-        let table_idx = rui.table_view.selectable_indices[prev];
-        rui.selected_selectable_idx = Some(prev);
-        rui.table_state.select(Some(table_idx));
-    }
-
-    pub fn toggle_multi_select(&self, ctx: &mut WidgetContext) {
-        let repo_key = &ctx.repo_order[ctx.active_repo];
-        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-        if let Some(si) = rui.selected_selectable_idx {
-            if let Some(&table_idx) = rui.table_view.selectable_indices.get(si) {
-                if let Some(GroupEntry::Item(item)) = rui.table_view.table_entries.get(table_idx) {
-                    let identity = item.identity.clone();
-                    if !rui.multi_selected.remove(&identity) {
-                        rui.multi_selected.insert(identity);
-                    }
-                }
-            }
         }
     }
 
@@ -367,14 +310,6 @@ impl WorkItemTable {
         }
     }
 
-    fn render_table(&mut self, model: &TuiModel, ui: &mut UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
-        let rui = active_rui(model, ui);
-        let show_providers = rui.show_providers;
-        let multi_selected = rui.multi_selected.clone();
-        let pending_actions = rui.pending_actions.clone();
-        self.render_table_owned(model, ui, theme, frame, area, show_providers, &multi_selected, &pending_actions);
-    }
-
     fn render_providers(&self, model: &TuiModel, _ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
         let repo_identity = &model.repo_order[model.active_repo];
         let rm = &model.repos[repo_identity];
@@ -400,149 +335,10 @@ impl WorkItemTable {
     }
 }
 
-impl WorkItemTable {
-    // ── Mouse helpers ──
-
-    /// Hit-test a mouse position against the table area to find which
-    /// selectable row (if any) was clicked.
-    pub(crate) fn row_at_mouse(&self, x: u16, y: u16, ctx: &WidgetContext) -> Option<usize> {
-        let ta = self.table_area;
-        if x >= ta.x && x < ta.x + ta.width && y >= ta.y && y < ta.y + ta.height {
-            let row_in_table = (y - ta.y) as usize;
-            if row_in_table < 2 {
-                return None;
-            }
-            let data_row = row_in_table - 2;
-            let repo_key = &ctx.repo_order[ctx.active_repo];
-            let rui = &ctx.repo_ui[repo_key];
-            let offset = rui.table_state.offset();
-            let actual_row = data_row + offset;
-            rui.table_view.selectable_indices.iter().position(|&idx| idx == actual_row)
-        } else {
-            None
-        }
-    }
-
-    // ── Action helpers ──
-
-    fn toggle_providers(ctx: &mut WidgetContext) -> Outcome {
-        let repo_key = &ctx.repo_order[ctx.active_repo];
-        let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-        rui.show_providers = !rui.show_providers;
-        Outcome::Consumed
-    }
-}
-
-impl InteractiveWidget for WorkItemTable {
-    fn handle_action(&mut self, action: Action, ctx: &mut WidgetContext) -> Outcome {
-        match action {
-            Action::SelectNext => {
-                self.select_next(ctx);
-                Outcome::Consumed
-            }
-            Action::SelectPrev => {
-                self.select_prev(ctx);
-                Outcome::Consumed
-            }
-            Action::ToggleMultiSelect => {
-                self.toggle_multi_select(ctx);
-                Outcome::Consumed
-            }
-            Action::ToggleProviders => Self::toggle_providers(ctx),
-            Action::ToggleHelp => Outcome::Push(Box::new(super::help::HelpWidget::new())),
-            Action::OpenBranchInput => Outcome::Push(Box::new(super::branch_input::BranchInputWidget::new(BranchInputKind::Manual))),
-            Action::OpenIssueSearch => {
-                *ctx.mode = UiMode::IssueSearch { input: tui_input::Input::default() };
-                Outcome::Push(Box::new(super::issue_search::IssueSearchWidget::new()))
-            }
-            Action::OpenCommandPalette => Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new())),
-            _ => Outcome::Ignored,
-        }
-    }
-
-    fn handle_mouse(&mut self, mouse: MouseEvent, ctx: &mut WidgetContext) -> Outcome {
-        let x = mouse.column;
-        let y = mouse.row;
-
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                // Gear icon in the table border area
-                if let Some(gear_area) = self.gear_area {
-                    if x >= gear_area.x && x < gear_area.x + gear_area.width && y >= gear_area.y && y < gear_area.y + gear_area.height {
-                        ctx.app_actions.push(AppAction::ToggleProviders);
-                        return Outcome::Consumed;
-                    }
-                }
-
-                if let Some(si) = self.row_at_mouse(x, y, ctx) {
-                    let repo_key = &ctx.repo_order[ctx.active_repo];
-                    let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-                    let table_idx = rui.table_view.selectable_indices[si];
-                    rui.selected_selectable_idx = Some(si);
-                    rui.table_state.select(Some(table_idx));
-                    return Outcome::Consumed;
-                }
-
-                Outcome::Ignored
-            }
-
-            MouseEventKind::Down(MouseButton::Right) => {
-                if let Some(si) = self.row_at_mouse(x, y, ctx) {
-                    let repo_key = &ctx.repo_order[ctx.active_repo];
-                    let rui = ctx.repo_ui.get_mut(repo_key).expect("active repo must have UI state");
-                    let table_idx = rui.table_view.selectable_indices[si];
-                    rui.selected_selectable_idx = Some(si);
-                    rui.table_state.select(Some(table_idx));
-                    ctx.app_actions.push(AppAction::OpenActionMenu);
-                    return Outcome::Consumed;
-                }
-                Outcome::Ignored
-            }
-
-            MouseEventKind::ScrollDown => {
-                self.select_next(ctx);
-                Outcome::Consumed
-            }
-
-            MouseEventKind::ScrollUp => {
-                self.select_prev(ctx);
-                Outcome::Consumed
-            }
-
-            _ => Outcome::Ignored,
-        }
-    }
-
-    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &mut RenderContext) {
-        // Store area for mouse hit-testing
-        self.table_area = area;
-        // gear_area is set inside render_table
-        self.render_table(ctx.model, ctx.ui, ctx.theme, frame, area);
-    }
-
-    fn binding_mode(&self) -> KeyBindingMode {
-        BindingModeId::Normal.into()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
 impl Default for WorkItemTable {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// ── Helper: active repo UI (immutable borrow) ───────────────────────
-
-fn active_rui<'a>(model: &TuiModel, ui: &'a UiState) -> &'a crate::app::RepoUiState {
-    ui.active_repo_ui(&model.repo_order, model.active_repo)
 }
 
 // ── Provider table helpers ──────────────────────────────────────────

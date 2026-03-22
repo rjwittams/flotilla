@@ -1,6 +1,5 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use flotilla_core::data::{group_work_items, SectionLabels};
 use flotilla_protocol::{
     CategoryLabels, ChangeRequest, ChangeRequestStatus, Checkout, CloudAgentSession, CorrelationKey, Issue, ProviderData, RepoIdentity,
     RepoLabels, SessionStatus, WorkItem,
@@ -8,7 +7,7 @@ use flotilla_protocol::{
 // Re-export shared WorkItem/RepoInfo builders — single source of truth in test_builders.
 pub use flotilla_tui::app::test_builders::{checkout_item, issue_item, pr_item, repo_info, session_item};
 use flotilla_tui::{
-    app::{InFlightCommand, ProviderStatus, RepoViewLayout, TuiModel, UiMode, UiState},
+    app::{InFlightCommand, ProviderStatus, RepoViewLayout, TuiModel, UiState},
     keymap::Keymap,
     shared::Shared,
     theme::Theme,
@@ -90,9 +89,9 @@ impl TestHarness {
         self
     }
 
-    /// Set the UI mode.
-    pub fn with_mode(mut self, mode: UiMode) -> Self {
-        self.ui.mode = mode;
+    /// Set config mode.
+    pub fn with_config(mut self) -> Self {
+        self.ui.is_config = true;
         self
     }
 
@@ -148,23 +147,15 @@ impl TestHarness {
         let providers_arc = Arc::new(providers);
         rm.providers = providers_arc.clone();
 
-        // Update the legacy UiState table view (still used by some rendering paths).
-        let section_labels = SectionLabels {
-            checkouts: rm.labels.checkouts.section.clone(),
-            change_requests: rm.labels.change_requests.section.clone(),
-            issues: rm.labels.issues.section.clone(),
-            sessions: rm.labels.cloud_agents.section.clone(),
-        };
-        let table_view = group_work_items(&items, &rm.providers, &section_labels, &rm.path);
-        let rui = self.ui.repo_ui.get_mut(&repo_identity).unwrap();
-        rui.update_table_view(table_view);
-
         // Update the RepoPage's shared data so reconciliation picks up the items.
         if let Some(page) = self.screen.repo_pages.get(&repo_identity) {
             page.repo_data().mutate(|d| {
                 d.providers = providers_arc;
                 d.work_items = items;
             });
+        }
+        if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
+            page.reconcile_if_changed();
         }
         self
     }

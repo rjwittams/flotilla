@@ -18,7 +18,6 @@ use std::{
 use flotilla_core::{
     config::{ConfigStore, RepoViewLayoutConfig},
     daemon::DaemonHandle,
-    data::{self, SectionLabels},
 };
 use flotilla_protocol::{
     Command, CommandAction, CommandValue, DaemonEvent, HostName, HostSummary, PeerConnectionState, ProviderData, ProviderError, RepoDelta,
@@ -27,7 +26,7 @@ use flotilla_protocol::{
 pub use intent::Intent;
 use tui_input::Input;
 use ui_state::PendingStatus;
-pub use ui_state::{BranchInputKind, DirEntry, RepoUiState, RepoViewLayout, TabId, UiMode, UiState};
+pub use ui_state::{BranchInputKind, DirEntry, RepoViewLayout, TabId, UiState};
 
 use crate::{
     keymap::Keymap,
@@ -109,6 +108,8 @@ pub struct TuiRepoModel {
     pub issue_fetch_pending: bool,
     /// Whether the initial issue fetch has been requested for this repo.
     pub issue_initial_requested: bool,
+    /// Whether this inactive tab has received data updates since last viewed.
+    pub has_unseen_changes: bool,
 }
 
 /// TUI-side domain model. Mirrors the shape of core's `AppModel` but without
@@ -146,6 +147,7 @@ impl TuiModel {
                 issue_search_active: false,
                 issue_fetch_pending: false,
                 issue_initial_requested: false,
+                has_unseen_changes: false,
             });
         }
         Self { repos, repo_order: order, active_repo: 0, provider_statuses: HashMap::new(), status_message: None, hosts: HashMap::new() }
@@ -326,7 +328,7 @@ impl App {
         if !self.in_flight.is_empty() {
             return true;
         }
-        if self.ui.repo_ui.values().any(|rui| rui.pending_actions.values().any(|a| matches!(a.status, PendingStatus::InFlight))) {
+        if self.screen.repo_pages.values().any(|page| page.pending_actions.values().any(|a| matches!(a.status, PendingStatus::InFlight))) {
             return true;
         }
         // Check modal stack for loading states
@@ -463,8 +465,7 @@ impl App {
             active_repo: self.model.active_repo,
             repo_order: &self.model.repo_order,
             commands: &mut self.proto_commands,
-            repo_ui: &mut self.ui.repo_ui,
-            mode: &mut self.ui.mode,
+            is_config: &mut self.ui.is_config,
             app_actions: Vec::new(),
         }
     }
@@ -510,12 +511,6 @@ impl App {
                     if let Some(page) = self.screen.repo_pages.get_mut(identity) {
                         page.show_providers = !page.show_providers;
                     }
-                    // Keep RepoUiState in sync for status bar
-                    let identity = &self.model.repo_order[self.model.active_repo];
-                    if let Some(page) = self.screen.repo_pages.get(identity) {
-                        let sp = page.show_providers;
-                        self.active_ui_mut().show_providers = sp;
-                    }
                 }
                 AppAction::ToggleMultiSelect => {
                     let repo_identity = self.model.repo_order[self.model.active_repo].clone();
@@ -528,11 +523,6 @@ impl App {
                                     let item_identity = item.identity.clone();
                                     if !page.multi_selected.remove(&item_identity) {
                                         page.multi_selected.insert(item_identity.clone());
-                                    }
-                                    // Keep RepoUiState in sync for status bar
-                                    let rui = self.ui.repo_ui.get_mut(&repo_identity).expect("active repo must have UI state");
-                                    if !rui.multi_selected.remove(&item_identity) {
-                                        rui.multi_selected.insert(item_identity);
                                     }
                                 }
                             }
@@ -553,7 +543,7 @@ impl App {
                 }
                 AppAction::SwitchToConfig => {
                     self.dismiss_modals();
-                    self.ui.mode = UiMode::Config;
+                    self.ui.is_config = true;
                 }
                 AppAction::SwitchToRepo(i) => {
                     self.dismiss_modals();
@@ -574,12 +564,12 @@ impl App {
                     self.next_tab();
                 }
                 AppAction::MoveTabLeft => {
-                    if !self.ui.mode.is_config() && self.move_tab(-1) {
+                    if !self.ui.is_config && self.move_tab(-1) {
                         self.config.save_tab_order(&self.persisted_tab_order_paths());
                     }
                 }
                 AppAction::MoveTabRight => {
-                    if !self.ui.mode.is_config() && self.move_tab(1) {
+                    if !self.ui.is_config && self.move_tab(1) {
                         self.config.save_tab_order(&self.persisted_tab_order_paths());
                     }
                 }
@@ -623,34 +613,23 @@ impl App {
                     executor::handle_result(result, self);
 
                     // Find which repo+identity has this command_id
-                    let found: Option<(RepoIdentity, WorkItemIdentity)> = self.ui.repo_ui.iter().find_map(|(repo_identity, rui)| {
-                        rui.pending_actions
-                            .iter()
-                            .find(|(_, a)| a.command_id == command_id)
-                            .map(|(id, _)| (repo_identity.clone(), id.clone()))
-                    });
+                    let found: Option<(RepoIdentity, WorkItemIdentity)> =
+                        self.screen.repo_pages.iter().find_map(|(repo_identity, page)| {
+                            page.pending_actions
+                                .iter()
+                                .find(|(_, a)| a.command_id == command_id)
+                                .map(|(id, _)| (repo_identity.clone(), id.clone()))
+                        });
 
                     if let Some((repo_identity, identity)) = found {
-                        // Dual-write: rui for status bar / needs_animation, RepoPage for row rendering.
-                        // See also: executor::dispatch() in executor.rs.
                         if let Some(ref message) = error_message {
-                            if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-                                if let Some(entry) = rui.pending_actions.get_mut(&identity) {
-                                    entry.status = PendingStatus::Failed(message.clone());
-                                }
-                            }
                             if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
                                 if let Some(entry) = page.pending_actions.get_mut(&identity) {
                                     entry.status = PendingStatus::Failed(message.clone());
                                 }
                             }
-                        } else {
-                            if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-                                rui.pending_actions.remove(&identity);
-                            }
-                            if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
-                                page.pending_actions.remove(&identity);
-                            }
+                        } else if let Some(page) = self.screen.repo_pages.get_mut(&repo_identity) {
+                            page.pending_actions.remove(&identity);
                         }
                     }
                 }
@@ -721,15 +700,6 @@ impl App {
         rm.issue_search_active = snap.issue_search_results.is_some();
         rm.issue_fetch_pending = false;
 
-        // Build table view
-        let section_labels = SectionLabels {
-            checkouts: rm.labels.checkouts.section.clone(),
-            change_requests: rm.labels.change_requests.section.clone(),
-            issues: rm.labels.issues.section.clone(),
-            sessions: rm.labels.cloud_agents.section.clone(),
-        };
-        let table_view = data::group_work_items(&snap.work_items, &rm.providers, &section_labels, &path);
-
         // Provider health -> model-level statuses (now 1:1)
         for (category, providers) in &rm.provider_health {
             for (provider_name, &healthy) in providers {
@@ -749,14 +719,10 @@ impl App {
         let i = self.model.repo_order.iter().position(|repo| repo == &repo_identity);
         if let Some(idx) = i {
             if idx != active_idx && *old_providers != *rm.providers {
-                if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-                    rui.has_unseen_changes = true;
+                if let Some(repo_model) = self.model.repos.get_mut(&repo_identity) {
+                    repo_model.has_unseen_changes = true;
                 }
             }
-        }
-
-        if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-            rui.update_table_view(table_view);
         }
 
         // Feed data into Shared<RepoData> for RepoPage rendering
@@ -837,15 +803,6 @@ impl App {
             }
         }
 
-        // Use daemon's pre-correlated work items directly (no re-correlation)
-        let section_labels = SectionLabels {
-            checkouts: rm.labels.checkouts.section.clone(),
-            change_requests: rm.labels.change_requests.section.clone(),
-            issues: rm.labels.issues.section.clone(),
-            sessions: rm.labels.cloud_agents.section.clone(),
-        };
-        let table_view = data::group_work_items(&delta.work_items, &rm.providers, &section_labels, &path);
-
         // Provider health -> model-level statuses (now 1:1)
         for (category, providers) in &rm.provider_health {
             for (provider_name, &healthy) in providers {
@@ -870,15 +827,11 @@ impl App {
             let i = self.model.repo_order.iter().position(|repo| repo == &repo_identity);
             if let Some(idx) = i {
                 if idx != active_idx {
-                    if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-                        rui.has_unseen_changes = true;
+                    if let Some(repo_model) = self.model.repos.get_mut(&repo_identity) {
+                        repo_model.has_unseen_changes = true;
                     }
                 }
             }
-        }
-
-        if let Some(rui) = self.ui.repo_ui.get_mut(&repo_identity) {
-            rui.update_table_view(table_view);
         }
 
         // Feed data into Shared<RepoData> for RepoPage rendering
@@ -939,15 +892,14 @@ impl App {
             issue_search_active: false,
             issue_fetch_pending: false,
             issue_initial_requested: false,
+            has_unseen_changes: false,
         });
-        self.model.repo_order.push(identity.clone());
-        self.ui.repo_ui.insert(identity, RepoUiState::default());
+        self.model.repo_order.push(identity);
     }
 
     fn handle_repo_removed(&mut self, repo_identity: &RepoIdentity) {
         self.model.repos.remove(repo_identity);
         self.model.repo_order.retain(|repo| repo != repo_identity);
-        self.ui.repo_ui.remove(repo_identity);
         self.repo_data.remove(repo_identity);
         self.screen.repo_pages.remove(repo_identity);
         if self.model.repo_order.is_empty() {
@@ -963,17 +915,6 @@ impl App {
         if let Some(page) = self.screen.repo_pages.get(identity) {
             self.ui.view_layout = page.layout;
         }
-    }
-
-    // ── Convenience accessors ──
-
-    pub fn active_ui(&self) -> &RepoUiState {
-        self.ui.active_repo_ui(&self.model.repo_order, self.model.active_repo)
-    }
-
-    pub fn active_ui_mut(&mut self) -> &mut RepoUiState {
-        let key = &self.model.repo_order[self.model.active_repo];
-        self.ui.repo_ui.get_mut(key).expect("active repo must have UI state")
     }
 
     pub fn selected_work_item(&self) -> Option<&WorkItem> {
@@ -1326,7 +1267,7 @@ mod tests {
         snap2.providers = different_providers;
         app.apply_snapshot(snap2);
 
-        assert!(app.ui.repo_ui[&inactive_repo].has_unseen_changes);
+        assert!(app.model.repos[&inactive_repo].has_unseen_changes);
     }
 
     // -- apply_delta --
@@ -1424,7 +1365,7 @@ mod tests {
         }]);
         app.apply_delta(change);
 
-        assert!(app.ui.repo_ui[&inactive_repo].has_unseen_changes);
+        assert!(app.model.repos[&inactive_repo].has_unseen_changes);
     }
 
     #[test]
@@ -1440,7 +1381,7 @@ mod tests {
         }]);
         app.apply_delta(change);
 
-        assert!(!app.ui.repo_ui[&inactive_repo].has_unseen_changes);
+        assert!(!app.model.repos[&inactive_repo].has_unseen_changes);
     }
 
     // -- handle_repo_added / handle_repo_removed --
@@ -1695,7 +1636,7 @@ mod tests {
         let repo_path = app.model.repos[&repo].path.clone();
         let identity = WorkItemIdentity::Session("s1".into());
 
-        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+        app.screen.repo_pages.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
             command_id: 42,
             status: PendingStatus::InFlight,
             description: "test".into(),
@@ -1710,7 +1651,7 @@ mod tests {
             result: CommandValue::Ok,
         });
 
-        assert!(!app.ui.repo_ui[&repo].pending_actions.contains_key(&identity));
+        assert!(!app.screen.repo_pages[&repo].pending_actions.contains_key(&identity));
     }
 
     #[test]
@@ -1722,7 +1663,7 @@ mod tests {
         let repo_path = app.model.repos[&repo].path.clone();
         let identity = WorkItemIdentity::Session("s1".into());
 
-        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+        app.screen.repo_pages.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
             command_id: 42,
             status: PendingStatus::InFlight,
             description: "test".into(),
@@ -1737,7 +1678,7 @@ mod tests {
             result: CommandValue::Error { message: "boom".into() },
         });
 
-        let pending = &app.ui.repo_ui[&repo].pending_actions[&identity];
+        let pending = &app.screen.repo_pages[&repo].pending_actions[&identity];
         assert!(matches!(pending.status, PendingStatus::Failed(ref msg) if msg == "boom"));
     }
 
@@ -1750,7 +1691,7 @@ mod tests {
         let repo_path = app.model.repos[&repo].path.clone();
         let identity = WorkItemIdentity::Session("s1".into());
 
-        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+        app.screen.repo_pages.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
             command_id: 42,
             status: PendingStatus::InFlight,
             description: "test".into(),
@@ -1765,7 +1706,7 @@ mod tests {
             result: CommandValue::Cancelled,
         });
 
-        assert!(!app.ui.repo_ui[&repo].pending_actions.contains_key(&identity));
+        assert!(!app.screen.repo_pages[&repo].pending_actions.contains_key(&identity));
     }
 
     #[test]
@@ -1778,7 +1719,7 @@ mod tests {
         let identity = WorkItemIdentity::Session("s1".into());
 
         // Insert pending action with command_id 99 (different from finished event)
-        app.ui.repo_ui.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
+        app.screen.repo_pages.get_mut(&repo).unwrap().pending_actions.insert(identity.clone(), PendingAction {
             command_id: 99,
             status: PendingStatus::InFlight,
             description: "test".into(),
@@ -1794,7 +1735,7 @@ mod tests {
         });
 
         // The pending action with command_id 99 should still be there
-        assert!(app.ui.repo_ui[&repo].pending_actions.contains_key(&identity));
+        assert!(app.screen.repo_pages[&repo].pending_actions.contains_key(&identity));
     }
 
     #[test]

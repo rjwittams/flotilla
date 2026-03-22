@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKin
 use flotilla_core::data::GroupEntry;
 use flotilla_protocol::{Command, CommandAction, WorkItem};
 
-use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent, UiMode};
+use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent};
 use crate::{
     binding_table::{BindingModeId, KeyBindingMode},
     keymap::Action,
@@ -12,12 +12,13 @@ use crate::{
 impl App {
     // ── Key handling ──
 
-    /// Resolve a key event to an action using the UI mode rather than the
-    /// widget-stack mode. Called for raw-key widgets (BranchInput, IssueSearch)
-    /// and when the base widget (Normal mode_id) is on top — so Config mode
-    /// gets correct keymap bindings via `BindingModeId::from(&self.ui.mode)`.
+    /// Resolve a key event using the app-level config/normal distinction.
+    ///
+    /// Called when the base layer widget (Normal mode_id) is on top, so that
+    /// config mode gets Overview bindings instead of Normal.
     fn resolve_action(&self, key: KeyEvent) -> Option<Action> {
-        let mode: KeyBindingMode = BindingModeId::from(&self.ui.mode).into();
+        let mode_id = if self.ui.is_config { BindingModeId::Overview } else { BindingModeId::Normal };
+        let mode: KeyBindingMode = mode_id.into();
         self.keymap.resolve(&mode, crokey::KeyCombination::from(key))
     }
 
@@ -28,22 +29,22 @@ impl App {
     pub(super) fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Confirm => {
-                if matches!(self.ui.mode, UiMode::Normal) {
+                if !self.ui.is_config {
                     self.action_enter();
                 }
             }
             Action::OpenActionMenu => {
-                if matches!(self.ui.mode, UiMode::Normal) {
+                if !self.ui.is_config {
                     self.open_action_menu();
                 }
             }
             Action::OpenFilePicker => {
-                if matches!(self.ui.mode, UiMode::Normal) {
+                if !self.ui.is_config {
                     self.open_file_picker_from_active_repo_parent();
                 }
             }
             Action::Dispatch(intent) => {
-                if matches!(self.ui.mode, UiMode::Normal) {
+                if !self.ui.is_config {
                     self.dispatch_if_available(intent);
                 }
             }
@@ -64,7 +65,9 @@ impl App {
 
         let action = if captures_raw {
             match key.code {
-                KeyCode::Esc | KeyCode::Enter => self.resolve_action(key),
+                // Resolve Enter/Esc through the widget's own binding mode so
+                // user overrides for e.g. IssueSearch.confirm still fire.
+                KeyCode::Esc | KeyCode::Enter => self.keymap.resolve(&KeyBindingMode::from(mode_id), crokey::KeyCombination::from(key)),
                 _ => None,
             }
         } else {
@@ -118,10 +121,6 @@ impl App {
         }
         self.process_app_actions(app_actions);
 
-        // Sync RepoPage state back into RepoUiState so legacy code
-        // (rendering via status bar, tests) continues to work.
-        self.sync_repo_page_state();
-
         // Post-dispatch: check for infinite scroll only if the selection
         // actually changed. This avoids spurious fetches from unrelated
         // key presses that happen to fire when the selection is near the bottom.
@@ -145,10 +144,6 @@ impl App {
         };
         self.screen = screen;
         self.process_app_actions(app_actions);
-
-        // Sync RepoPage state back into RepoUiState for legacy code
-        // (status bar, tests that still read from active_ui()).
-        self.sync_repo_page_state();
 
         // ── Tab drag handling ──
         // The Tabs widget owns the drag state but can't mutate model.repo_order
@@ -179,29 +174,6 @@ impl App {
         }
         let identity = &self.model.repo_order[self.model.active_repo];
         self.screen.repo_pages.get(identity).and_then(|page| page.table.selected_selectable_idx)
-    }
-
-    /// Sync the active RepoPage's state back into RepoUiState.
-    ///
-    /// RepoPage is authoritative for selection, multi-select,
-    /// show_providers, and active_search_query. This sync keeps
-    /// RepoUiState in sync for status bar fallback rendering and
-    /// tests that still read from `active_ui()`.
-    fn sync_repo_page_state(&mut self) {
-        if self.ui.mode.is_config() || self.model.repo_order.is_empty() {
-            return;
-        }
-        let identity = &self.model.repo_order[self.model.active_repo];
-        if let Some(page) = self.screen.repo_pages.get(identity) {
-            if let Some(rui) = self.ui.repo_ui.get_mut(identity) {
-                rui.selected_selectable_idx = page.table.selected_selectable_idx;
-                rui.table_state = page.table.table_state;
-                rui.table_view = page.table.grouped_items.clone();
-                rui.multi_selected.clone_from(&page.multi_selected);
-                rui.show_providers = page.show_providers;
-                rui.active_search_query.clone_from(&page.active_search_query);
-            }
-        }
     }
 
     // ── Private helpers ──
@@ -404,6 +376,38 @@ mod tests {
         HostPath::new(HostName::local(), PathBuf::from(path))
     }
 
+    /// Read the active RepoPage's selected selectable index.
+    fn active_selection(app: &App) -> Option<usize> {
+        let identity = &app.model.repo_order[app.model.active_repo];
+        app.screen.repo_pages.get(identity).and_then(|p| p.table.selected_selectable_idx)
+    }
+
+    /// Read the active RepoPage's show_providers flag.
+    fn active_show_providers(app: &App) -> bool {
+        let identity = &app.model.repo_order[app.model.active_repo];
+        app.screen.repo_pages.get(identity).is_some_and(|p| p.show_providers)
+    }
+
+    /// Read the active RepoPage's multi_selected set.
+    fn active_multi_selected(app: &App) -> &std::collections::HashSet<WorkItemIdentity> {
+        let identity = &app.model.repo_order[app.model.active_repo];
+        &app.screen.repo_pages[identity].multi_selected
+    }
+
+    /// Read the active RepoPage's active_search_query.
+    fn active_search_query(app: &App) -> Option<&str> {
+        let identity = &app.model.repo_order[app.model.active_repo];
+        app.screen.repo_pages.get(identity).and_then(|p| p.active_search_query.as_deref())
+    }
+
+    /// Set the active RepoPage's selection by selectable index.
+    fn set_active_selection(app: &mut App, si: usize) {
+        let identity = app.model.repo_order[app.model.active_repo].clone();
+        if let Some(page) = app.screen.repo_pages.get_mut(&identity) {
+            page.table.select_row_self(si);
+        }
+    }
+
     fn insert_peer_host(model: &mut crate::app::TuiModel, name: &str) {
         let host_name = HostName::new(name);
         model.hosts.insert(host_name.clone(), TuiHostState {
@@ -418,8 +422,6 @@ mod tests {
             },
         });
     }
-
-    use tui_input::Input;
 
     fn make_work_item(id: &str) -> flotilla_protocol::WorkItem {
         checkout_item(&format!("feat/{id}"), &format!("/tmp/{id}"), false)
@@ -438,13 +440,13 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char('j')));
 
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(1));
+        assert_eq!(active_selection(&app), Some(1));
     }
 
     #[test]
     fn config_select_next_moves_event_log_via_widget() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         {
             let ov = &mut app.screen.overview_page;
             ov.event_log.count = 3;
@@ -503,7 +505,7 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
 
         assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
-        assert_eq!(app.active_ui().active_search_query.as_deref(), Some("bug fix"));
+        assert_eq!(active_search_query(&app), Some("bug fix"));
         let (cmd, _) = app.proto_commands.take_next().expect("expected search command");
         match cmd {
             Command { action: CommandAction::SearchIssues { query, .. }, .. } => {
@@ -567,7 +569,7 @@ mod tests {
 
         assert_eq!(app.resolve_action(key(KeyCode::Char('q'))), Some(Action::Quit));
 
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         assert_eq!(app.resolve_action(key(KeyCode::Char('q'))), Some(Action::Dismiss));
     }
 
@@ -630,8 +632,7 @@ mod tests {
             make_work_item("e"),
             make_work_item("f"),
         ]);
-        app.active_ui_mut().selected_selectable_idx = Some(1);
-        app.active_ui_mut().table_state.select(Some(1));
+        set_active_selection(&mut app, 1);
 
         let repo = app.model.repo_order[0].clone();
         if let Some(rm) = app.model.repos.get_mut(&repo) {
@@ -641,7 +642,7 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char('c')));
 
-        assert!(app.active_ui().show_providers);
+        assert!(active_show_providers(&app));
         assert!(app.proto_commands.take_next().is_none(), "did not expect FetchMoreIssues command");
         assert!(!app.model.repos[&repo].issue_fetch_pending, "did not expect issue_fetch_pending to flip");
     }
@@ -673,27 +674,27 @@ mod tests {
     #[test]
     fn config_q_dismisses_to_normal() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         app.handle_key(key(KeyCode::Char('q')));
         assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(!app.should_quit);
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(!app.ui.is_config);
     }
 
     #[test]
     fn config_esc_dismisses_to_normal() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(!app.should_quit);
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(!app.ui.is_config);
     }
 
     #[test]
     fn config_j_navigates_event_log_down() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         {
             let ov = &mut app.screen.overview_page;
             ov.event_log.count = 5;
@@ -706,7 +707,7 @@ mod tests {
     #[test]
     fn config_k_navigates_event_log_up() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         {
             let ov = &mut app.screen.overview_page;
             ov.event_log.count = 5;
@@ -719,7 +720,7 @@ mod tests {
     #[test]
     fn config_j_when_no_selection_jumps_to_last() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         {
             let ov = &mut app.screen.overview_page;
             ov.event_log.count = 5;
@@ -732,7 +733,7 @@ mod tests {
     #[test]
     fn config_j_at_end_stays() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         {
             let ov = &mut app.screen.overview_page;
             ov.event_log.count = 3;
@@ -745,7 +746,7 @@ mod tests {
     #[test]
     fn config_k_at_zero_stays() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         {
             let ov = &mut app.screen.overview_page;
             ov.event_log.count = 5;
@@ -758,7 +759,7 @@ mod tests {
     #[test]
     fn config_bracket_switches_tabs() {
         let mut app = stub_app();
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         // ] in Config mode should switch to Normal mode + first repo
         app.handle_key(key(KeyCode::Char(']')));
         assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
@@ -766,7 +767,7 @@ mod tests {
 
         // [ from first repo (index 0) goes back to Config
         app.handle_key(key(KeyCode::Char('[')));
-        assert!(matches!(app.ui.mode, UiMode::Config));
+        assert!(app.ui.is_config);
     }
 
     #[test]
@@ -944,11 +945,11 @@ mod tests {
     #[test]
     fn normal_c_toggles_providers() {
         let mut app = stub_app();
-        assert!(!app.active_ui().show_providers);
+        assert!(!active_show_providers(&app));
         app.handle_key(key(KeyCode::Char('c')));
-        assert!(app.active_ui().show_providers);
+        assert!(active_show_providers(&app));
         app.handle_key(key(KeyCode::Char('c')));
-        assert!(!app.active_ui().show_providers);
+        assert!(!active_show_providers(&app));
     }
 
     #[test]
@@ -1048,13 +1049,13 @@ mod tests {
         // Place the gear hitbox on the active RepoPage's table
         let repo_key = app.model.repo_order[0].clone();
         app.screen.repo_pages.get_mut(&repo_key).expect("repo page").table.gear_area = Some(Rect::new(75, 2, 3, 1));
-        assert!(!app.active_ui().show_providers);
+        assert!(!active_show_providers(&app));
 
         app.handle_mouse(left_click(76, 2));
-        assert!(app.active_ui().show_providers);
+        assert!(active_show_providers(&app));
 
         app.handle_mouse(left_click(76, 2));
-        assert!(!app.active_ui().show_providers);
+        assert!(!active_show_providers(&app));
     }
 
     #[test]
@@ -1064,10 +1065,10 @@ mod tests {
         // page handles events, so the gear click should not toggle providers.
         let repo_key = app.model.repo_order[0].clone();
         app.screen.repo_pages.get_mut(&repo_key).expect("repo page").table.gear_area = Some(Rect::new(75, 2, 3, 1));
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
 
         app.handle_mouse(left_click(76, 2));
-        assert!(!app.active_ui().show_providers);
+        assert!(!active_show_providers(&app));
     }
 
     #[test]
@@ -1079,7 +1080,7 @@ mod tests {
 
         app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: 5, row: 5, modifiers: KeyModifiers::NONE });
 
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
+        assert_eq!(active_selection(&app), Some(0));
         assert_eq!(app.screen.modal_stack.len(), 1, "expected help widget to remain on stack");
     }
 
@@ -1092,7 +1093,7 @@ mod tests {
 
         app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: 5, row: 5, modifiers: KeyModifiers::NONE });
 
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
+        assert_eq!(active_selection(&app), Some(0));
         assert_eq!(app.screen.modal_stack.len(), 1, "expected action menu to remain on stack");
     }
 
@@ -1259,14 +1260,12 @@ mod tests {
     // ── IssueSearch integration (via widget stack) ──────────────────
 
     fn push_issue_search_widget(app: &mut App) {
-        app.ui.mode = UiMode::IssueSearch { input: Input::default() };
         app.screen.modal_stack.push(Box::new(crate::widgets::issue_search::IssueSearchWidget::new()));
     }
 
     fn push_issue_search_widget_with_text(app: &mut App, text: &str) {
         // We can't set text directly on the widget from outside, so we simulate
         // by typing each character through the widget stack.
-        app.ui.mode = UiMode::IssueSearch { input: Input::default() };
         app.screen.modal_stack.push(Box::new(crate::widgets::issue_search::IssueSearchWidget::new()));
         for ch in text.chars() {
             app.handle_key(key(KeyCode::Char(ch)));
@@ -1305,6 +1304,25 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
         assert!(app.proto_commands.take_next().is_none());
+    }
+
+    #[test]
+    fn issue_search_raw_key_resolves_through_widget_binding_mode() {
+        // Override the Shared Esc binding to SelectNext (a no-op for modals).
+        // If raw-key resolution incorrectly uses Normal/Shared instead of
+        // IssueSearch, Esc resolves to SelectNext and the modal stays open.
+        let mut app = stub_app();
+        let mut keys = flotilla_core::config::KeysConfig::default();
+        keys.shared.insert("esc".into(), "select_next".into());
+        app.keymap = crate::keymap::Keymap::from_config(&keys);
+
+        push_issue_search_widget(&mut app);
+        assert_eq!(app.screen.modal_stack.len(), 1);
+
+        // IssueSearch has its own Esc → Dismiss binding in the binding table.
+        // This must fire even though Shared.esc was overridden.
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.screen.modal_stack.len(), 0, "IssueSearch should dismiss via its own binding mode, not Shared");
     }
 
     // ── handle_delete_confirm_key (via widget stack) ────────────────
@@ -1608,11 +1626,11 @@ mod tests {
     fn normal_j_selects_next() {
         let mut app = stub_app();
         setup_table(&mut app, vec![make_work_item("a"), make_work_item("b"), make_work_item("c")]);
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
+        assert_eq!(active_selection(&app), Some(0));
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(1));
+        assert_eq!(active_selection(&app), Some(1));
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(2));
+        assert_eq!(active_selection(&app), Some(2));
     }
 
     #[test]
@@ -1621,9 +1639,9 @@ mod tests {
         setup_table(&mut app, vec![make_work_item("a"), make_work_item("b")]);
         // Move to second item first
         app.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(1));
+        assert_eq!(active_selection(&app), Some(1));
         app.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
+        assert_eq!(active_selection(&app), Some(0));
     }
 
     // ── action_enter_multi_select ────────────────────────────────────
@@ -1722,11 +1740,11 @@ mod tests {
     fn space_toggles_multi_select() {
         let mut app = stub_app();
         setup_table(&mut app, vec![make_work_item("a")]);
-        assert!(app.active_ui().multi_selected.is_empty());
+        assert!(active_multi_selected(&app).is_empty());
         app.handle_key(key(KeyCode::Char(' ')));
-        assert!(!app.active_ui().multi_selected.is_empty());
+        assert!(!active_multi_selected(&app).is_empty());
         app.handle_key(key(KeyCode::Char(' ')));
-        assert!(app.active_ui().multi_selected.is_empty());
+        assert!(active_multi_selected(&app).is_empty());
     }
 
     #[test]
@@ -1870,7 +1888,7 @@ mod tests {
         }
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
-        assert_eq!(app.active_ui().active_search_query.as_deref(), Some("auth"));
+        assert_eq!(active_search_query(&app), Some("auth"));
     }
 
     #[test]
@@ -1882,7 +1900,7 @@ mod tests {
         }
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
-        assert_eq!(app.active_ui().active_search_query, None);
+        assert_eq!(active_search_query(&app), None);
     }
 
     #[test]

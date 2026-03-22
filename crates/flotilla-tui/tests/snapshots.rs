@@ -3,7 +3,7 @@ mod support;
 use std::path::PathBuf;
 
 use flotilla_protocol::{HostName, HostPath, ProviderData, RepoIdentity, SessionStatus, WorkItemIdentity};
-use flotilla_tui::app::{BranchInputKind, InFlightCommand, Intent, ProviderStatus, RepoViewLayout, UiMode};
+use flotilla_tui::app::{BranchInputKind, InFlightCommand, Intent, ProviderStatus, RepoViewLayout};
 use ratatui::style::Color;
 use support::*;
 use tui_input::Input;
@@ -132,7 +132,7 @@ fn action_menu() {
 #[test]
 fn config_screen() {
     let mut harness = TestHarness::single_repo("my-project")
-        .with_mode(UiMode::Config)
+        .with_config()
         .with_provider_names("my-project", vec![
             ("change_request", "GitHub"),
             ("issue_tracker", "GitHub"),
@@ -360,9 +360,7 @@ fn branch_input_generating_popup() {
 fn issue_search_mode_status_bar() {
     let mut widget = flotilla_tui::widgets::issue_search::IssueSearchWidget::new();
     widget.prefill("auth timeout");
-    let mut harness = TestHarness::single_repo("my-project")
-        .with_mode(UiMode::IssueSearch { input: Input::from("auth timeout") })
-        .with_widget(Box::new(widget));
+    let mut harness = TestHarness::single_repo("my-project").with_widget(Box::new(widget));
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
 }
@@ -480,7 +478,6 @@ fn providers_overlay() {
         .with_provider_status("my-project", "cloud_agent", "Claude", ProviderStatus::Ok)
         .with_provider_status("my-project", "change_request", "GitHub", ProviderStatus::Error);
     let repo = harness.model.repo_order[0].clone();
-    harness.ui.repo_ui.get_mut(&repo).unwrap().show_providers = true;
     harness.screen.repo_pages.get_mut(&repo).expect("repo page exists").show_providers = true;
     let output = harness.render_to_string();
     insta::assert_snapshot!(output);
@@ -489,7 +486,7 @@ fn providers_overlay() {
 #[test]
 fn config_screen_cross_repo_worst_wins() {
     let mut harness = TestHarness::multi_repo(&["alpha", "beta"])
-        .with_mode(UiMode::Config)
+        .with_config()
         .with_provider_names("alpha", vec![("change_request", "GitHub")])
         .with_provider_names("beta", vec![("change_request", "GitHub")])
         .with_provider_status("alpha", "change_request", "GitHub", ProviderStatus::Ok)

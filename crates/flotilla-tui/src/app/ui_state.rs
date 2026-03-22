@@ -1,9 +1,7 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
-use flotilla_core::data::{GroupEntry, GroupedWorkItems};
 use flotilla_protocol::{HostName, RepoIdentity, WorkItemIdentity};
-use ratatui::{layout::Rect, widgets::TableState};
-use tui_input::Input;
+use ratatui::layout::Rect;
 
 use crate::status_bar::StatusBarTarget;
 
@@ -22,22 +20,6 @@ pub enum BranchInputKind {
     Manual,
     /// AI is generating a branch name from issue context.
     Generating,
-}
-
-#[derive(Default)]
-pub enum UiMode {
-    #[default]
-    Normal,
-    Config,
-    IssueSearch {
-        input: Input,
-    },
-}
-
-impl UiMode {
-    pub fn is_config(&self) -> bool {
-        matches!(self, UiMode::Config)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -67,69 +49,6 @@ pub struct PendingActionContext {
     pub identity: WorkItemIdentity,
     pub description: String,
     pub repo_identity: RepoIdentity,
-}
-
-/// Per-repo UI state (selection, table widget state, visual flags).
-#[derive(Default)]
-pub struct RepoUiState {
-    pub table_view: GroupedWorkItems,
-    pub table_state: TableState,
-    pub selected_selectable_idx: Option<usize>,
-    pub has_unseen_changes: bool,
-    pub multi_selected: HashSet<WorkItemIdentity>,
-    pub pending_actions: HashMap<WorkItemIdentity, PendingAction>,
-    pub show_providers: bool,
-    pub active_search_query: Option<String>,
-}
-
-impl RepoUiState {
-    /// Replace the table view and restore selection by work item identity.
-    pub fn update_table_view(&mut self, table_view: GroupedWorkItems) {
-        let prev_identity =
-            self.selected_selectable_idx.and_then(|si| self.table_view.selectable_indices.get(si).copied()).and_then(|ti| {
-                match self.table_view.table_entries.get(ti) {
-                    Some(GroupEntry::Item(item)) => Some(item.identity.clone()),
-                    _ => None,
-                }
-            });
-
-        self.table_view = table_view;
-
-        if self.table_view.selectable_indices.is_empty() {
-            self.selected_selectable_idx = None;
-            self.table_state.select(None);
-        } else if let Some(ref identity) = prev_identity {
-            let found = self.table_view.selectable_indices.iter().enumerate().find(|(_, &ti)| {
-                matches!(
-                    self.table_view.table_entries.get(ti),
-                    Some(GroupEntry::Item(item)) if item.identity == *identity
-                )
-            });
-            if let Some((si, &ti)) = found {
-                self.selected_selectable_idx = Some(si);
-                self.table_state.select(Some(ti));
-            } else {
-                self.selected_selectable_idx = Some(0);
-                self.table_state.select(Some(self.table_view.selectable_indices[0]));
-            }
-        } else {
-            self.selected_selectable_idx = Some(0);
-            self.table_state.select(Some(self.table_view.selectable_indices[0]));
-        }
-
-        // Clean up stale multi-select identities
-        let current_identities: HashSet<WorkItemIdentity> = self
-            .table_view
-            .table_entries
-            .iter()
-            .filter_map(|e| match e {
-                GroupEntry::Item(item) => Some(item.identity.clone()),
-                _ => None,
-            })
-            .collect();
-        self.multi_selected.retain(|id| current_identities.contains(id));
-        self.pending_actions.retain(|id, _| current_identities.contains(id));
-    }
 }
 
 /// Identifies a clickable tab in the tab bar.
@@ -186,8 +105,7 @@ pub struct DragState {
 }
 
 pub struct UiState {
-    pub mode: UiMode,
-    pub repo_ui: HashMap<RepoIdentity, RepoUiState>,
+    pub is_config: bool,
     pub target_host: Option<HostName>,
     pub view_layout: RepoViewLayout,
     pub status_bar: StatusBarUiState,
@@ -197,11 +115,9 @@ pub struct UiState {
 }
 
 impl UiState {
-    pub fn new(repo_ids: &[RepoIdentity]) -> Self {
-        let repo_ui = repo_ids.iter().map(|repo_id| (repo_id.clone(), RepoUiState::default())).collect();
+    pub fn new(_repo_ids: &[RepoIdentity]) -> Self {
         Self {
-            mode: UiMode::default(),
-            repo_ui,
+            is_config: false,
             target_host: None,
             view_layout: RepoViewLayout::default(),
             status_bar: StatusBarUiState::default(),
@@ -209,10 +125,6 @@ impl UiState {
             show_debug: false,
             help_scroll: 0,
         }
-    }
-
-    pub fn active_repo_ui(&self, repo_order: &[RepoIdentity], active_repo: usize) -> &RepoUiState {
-        &self.repo_ui[&repo_order[active_repo]]
     }
 
     pub fn cycle_layout(&mut self) {
@@ -244,53 +156,14 @@ mod tests {
 
     use super::*;
 
-    fn repo_id(path: &str) -> RepoIdentity {
-        RepoIdentity { authority: "local".into(), path: path.into() }
-    }
-
-    // ── UiMode tests ──────────────────────────────────────────────────
-
-    #[test]
-    fn is_config_returns_true_only_for_config_variant() {
-        let cases: Vec<(UiMode, bool)> =
-            vec![(UiMode::Normal, false), (UiMode::Config, true), (UiMode::IssueSearch { input: Input::default() }, false)];
-        for (mode, expected) in &cases {
-            assert_eq!(mode.is_config(), *expected, "failed for mode variant");
-        }
-    }
-
-    #[test]
-    fn ui_mode_default_is_normal() {
-        assert!(matches!(UiMode::default(), UiMode::Normal));
-    }
-
     // ── UiState::new tests ────────────────────────────────────────────
 
     #[test]
     fn new_with_empty_paths() {
         let state = UiState::new(&[]);
-        assert!(state.repo_ui.is_empty());
-        assert!(matches!(state.mode, UiMode::Normal));
+        assert!(!state.is_config);
         assert!(!state.show_debug);
         assert_eq!(state.view_layout, RepoViewLayout::Auto);
-    }
-
-    #[test]
-    fn new_with_single_path_creates_one_repo() {
-        let paths = vec![repo_id("/repo/a")];
-        let state = UiState::new(&paths);
-        assert_eq!(state.repo_ui.len(), 1);
-        assert!(state.repo_ui.contains_key(&repo_id("/repo/a")));
-    }
-
-    #[test]
-    fn new_with_multiple_paths_creates_correct_count() {
-        let paths = vec![repo_id("/repo/a"), repo_id("/repo/b"), repo_id("/repo/c")];
-        let state = UiState::new(&paths);
-        assert_eq!(state.repo_ui.len(), 3);
-        for p in &paths {
-            assert!(state.repo_ui.contains_key(p));
-        }
     }
 
     #[test]
@@ -355,94 +228,5 @@ mod tests {
         state.cycle_target_host(&[]);
 
         assert_eq!(state.target_host, None);
-    }
-
-    // ── active_repo_ui tests ──────────────────────────────────────────
-
-    #[test]
-    fn active_repo_ui_returns_repos_for_valid_indices() {
-        let paths = vec![repo_id("/repo/a"), repo_id("/repo/b")];
-        let state = UiState::new(&paths);
-        for idx in 0..paths.len() {
-            let repo_ui = state.active_repo_ui(&paths, idx);
-            assert_eq!(repo_ui.selected_selectable_idx, None);
-            assert!(!repo_ui.has_unseen_changes);
-        }
-    }
-
-    #[test]
-    #[should_panic]
-    fn active_repo_ui_panics_on_out_of_bounds_index() {
-        let paths = vec![repo_id("/repo/a")];
-        let state = UiState::new(&paths);
-        let _ = state.active_repo_ui(&paths, 5);
-    }
-
-    // ── RepoUiState default tests ─────────────────────────────────────
-
-    #[test]
-    fn repo_ui_state_default() {
-        let state = RepoUiState::default();
-        assert_eq!(state.selected_selectable_idx, None);
-        assert!(!state.has_unseen_changes);
-        assert!(state.multi_selected.is_empty());
-        assert!(!state.show_providers);
-    }
-
-    // ── PendingAction tests ──────────────────────────────────────────
-
-    #[test]
-    fn pending_actions_default_is_empty() {
-        let state = RepoUiState::default();
-        assert!(state.pending_actions.is_empty());
-    }
-
-    #[test]
-    fn pending_actions_cleaned_on_table_view_update() {
-        use flotilla_protocol::{HostName, HostPath};
-
-        let mut state = RepoUiState::default();
-
-        let identity_a = WorkItemIdentity::Checkout(HostPath { host: HostName::new("local"), path: "/tmp/a".into() });
-        let identity_b = WorkItemIdentity::Checkout(HostPath { host: HostName::new("local"), path: "/tmp/b".into() });
-
-        state.pending_actions.insert(identity_a.clone(), PendingAction {
-            command_id: 1,
-            status: PendingStatus::InFlight,
-            description: "test".into(),
-        });
-        state.pending_actions.insert(identity_b.clone(), PendingAction {
-            command_id: 2,
-            status: PendingStatus::InFlight,
-            description: "test".into(),
-        });
-
-        // Build a table view that only contains identity_a
-        let mut table_view = GroupedWorkItems::default();
-        let item_a = flotilla_protocol::WorkItem {
-            kind: flotilla_protocol::WorkItemKind::Checkout,
-            identity: identity_a.clone(),
-            host: HostName::new("local"),
-            branch: None,
-            description: String::new(),
-            checkout: None,
-            change_request_key: None,
-            session_key: None,
-            issue_keys: Vec::new(),
-            workspace_refs: Vec::new(),
-            is_main_checkout: false,
-            debug_group: Vec::new(),
-            source: None,
-            terminal_keys: Vec::new(),
-            attachable_set_id: None,
-            agent_keys: vec![],
-        };
-        table_view.table_entries.push(GroupEntry::Item(Box::new(item_a)));
-        table_view.selectable_indices.push(0);
-
-        state.update_table_view(table_view);
-
-        assert!(state.pending_actions.contains_key(&identity_a));
-        assert!(!state.pending_actions.contains_key(&identity_b));
     }
 }

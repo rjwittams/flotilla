@@ -34,52 +34,43 @@ impl App {
 
     #[cfg(test)]
     pub(super) fn select_next(&mut self) {
-        let indices = &self.active_ui().table_view.selectable_indices;
-        if indices.is_empty() {
+        if self.model.repo_order.is_empty() {
             return;
         }
-        let current_si = self.active_ui().selected_selectable_idx;
-        let next = match current_si {
-            Some(si) if si + 1 < indices.len() => si + 1,
-            Some(si) => si,
-            None => 0,
-        };
-        let table_idx = self.active_ui().table_view.selectable_indices[next];
-        self.active_ui_mut().selected_selectable_idx = Some(next);
-        self.active_ui_mut().table_state.select(Some(table_idx));
-
-        // Infinite scroll: fetch more issues when near the bottom
-        let total = self.active_ui().table_view.selectable_indices.len();
-        if next + 5 >= total && self.model.active().issue_has_more && !self.model.active().issue_fetch_pending {
-            let repo = self.model.active_repo_root().clone();
-            let issue_count = self.model.active().providers.issues.len();
-            let desired = issue_count + 50;
-            let repo_identity = self.model.active_repo_identity().clone();
-            if let Some(rm) = self.model.repos.get_mut(&repo_identity) {
-                rm.issue_fetch_pending = true;
+        let identity = self.model.repo_order[self.model.active_repo].clone();
+        if let Some(page) = self.screen.repo_pages.get_mut(&identity) {
+            let total = page.table.grouped_items.selectable_indices.len();
+            if total == 0 {
+                return;
             }
-            self.proto_commands.push(self.command(flotilla_protocol::CommandAction::FetchMoreIssues {
-                repo: flotilla_protocol::RepoSelector::Path(repo),
-                desired_count: desired,
-            }));
+            page.table.select_next_self();
+            // Infinite scroll: fetch more issues when near the bottom
+            if let Some(si) = page.table.selected_selectable_idx {
+                if si + 5 >= total && self.model.repos[&identity].issue_has_more && !self.model.repos[&identity].issue_fetch_pending {
+                    let repo_path = self.model.repos[&identity].path.clone();
+                    let issue_count = self.model.repos[&identity].providers.issues.len();
+                    let desired = issue_count + 50;
+                    if let Some(rm) = self.model.repos.get_mut(&identity) {
+                        rm.issue_fetch_pending = true;
+                    }
+                    self.proto_commands.push(self.command(flotilla_protocol::CommandAction::FetchMoreIssues {
+                        repo: flotilla_protocol::RepoSelector::Path(repo_path),
+                        desired_count: desired,
+                    }));
+                }
+            }
         }
     }
 
     #[cfg(test)]
     pub(super) fn select_prev(&mut self) {
-        let indices = &self.active_ui().table_view.selectable_indices;
-        if indices.is_empty() {
+        if self.model.repo_order.is_empty() {
             return;
         }
-        let current_si = self.active_ui().selected_selectable_idx;
-        let prev = match current_si {
-            Some(si) if si > 0 => si - 1,
-            Some(si) => si,
-            None => 0,
-        };
-        let table_idx = self.active_ui().table_view.selectable_indices[prev];
-        self.active_ui_mut().selected_selectable_idx = Some(prev);
-        self.active_ui_mut().table_state.select(Some(table_idx));
+        let identity = self.model.repo_order[self.model.active_repo].clone();
+        if let Some(page) = self.screen.repo_pages.get_mut(&identity) {
+            page.table.select_prev_self();
+        }
     }
 
     #[cfg(test)]
@@ -91,9 +82,14 @@ impl App {
                 return None;
             }
             let data_row = row_in_table - 2;
-            let offset = self.active_ui().table_state.offset();
-            let actual_row = data_row + offset;
-            self.active_ui().table_view.selectable_indices.iter().position(|&idx| idx == actual_row)
+            let identity = &self.model.repo_order[self.model.active_repo];
+            if let Some(page) = self.screen.repo_pages.get(identity) {
+                let offset = page.table.table_state.offset();
+                let actual_row = data_row + offset;
+                page.table.grouped_items.selectable_indices.iter().position(|&idx| idx == actual_row)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -107,18 +103,24 @@ mod tests {
 
     use crate::app::{
         test_support::{issue_item, issue_table_entries, set_active_table_view, stub_app_with_repos},
-        UiMode,
+        App,
     };
+
+    /// Read the selected selectable index from the active RepoPage.
+    fn active_page_selection(app: &App) -> Option<usize> {
+        let identity = &app.model.repo_order[app.model.active_repo];
+        app.screen.repo_pages.get(identity).and_then(|p| p.table.selected_selectable_idx)
+    }
 
     // ── switch_tab tests ─────────────────────────────────────────────
 
     #[test]
     fn switch_tab_sets_active_repo_and_mode() {
         let mut app = stub_app_with_repos(3);
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         app.switch_tab(2);
         assert_eq!(app.model.active_repo, 2);
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(!app.ui.is_config);
     }
 
     #[test]
@@ -126,9 +128,9 @@ mod tests {
         let mut app = stub_app_with_repos(2);
         // Mark repo-1 as having unseen changes
         let key = app.model.repo_order[1].clone();
-        app.ui.repo_ui.get_mut(&key).unwrap().has_unseen_changes = true;
+        app.model.repos.get_mut(&key).unwrap().has_unseen_changes = true;
         app.switch_tab(1);
-        assert!(!app.ui.repo_ui[&key].has_unseen_changes);
+        assert!(!app.model.repos[&key].has_unseen_changes);
     }
 
     #[test]
@@ -142,10 +144,10 @@ mod tests {
     #[test]
     fn switch_tab_from_config_mode() {
         let mut app = stub_app_with_repos(2);
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         app.switch_tab(1);
         assert_eq!(app.model.active_repo, 1);
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(!app.ui.is_config);
     }
 
     // ── next_tab tests ───────────────────────────────────────────────
@@ -163,16 +165,16 @@ mod tests {
         let mut app = stub_app_with_repos(2);
         app.switch_tab(1); // go to last repo
         app.next_tab();
-        assert!(app.ui.mode.is_config());
+        assert!(app.ui.is_config);
     }
 
     #[test]
     fn next_tab_from_config_goes_to_first() {
         let mut app = stub_app_with_repos(3);
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         app.next_tab();
         assert_eq!(app.model.active_repo, 0);
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(!app.ui.is_config);
     }
 
     #[test]
@@ -197,16 +199,16 @@ mod tests {
         let mut app = stub_app_with_repos(2);
         // active_repo is 0
         app.prev_tab();
-        assert!(app.ui.mode.is_config());
+        assert!(app.ui.is_config);
     }
 
     #[test]
     fn prev_tab_from_config_goes_to_last() {
         let mut app = stub_app_with_repos(3);
-        app.ui.mode = UiMode::Config;
+        app.ui.is_config = true;
         app.prev_tab();
         assert_eq!(app.model.active_repo, 2);
-        assert!(matches!(app.ui.mode, UiMode::Normal));
+        assert!(!app.ui.is_config);
     }
 
     #[test]
@@ -268,9 +270,9 @@ mod tests {
     fn select_next_from_none_selects_first() {
         let mut app = stub_app_with_repos(1);
         set_active_table_view(&mut app, issue_table_entries(5));
-        assert_eq!(app.active_ui().selected_selectable_idx, None);
+        assert_eq!(active_page_selection(&app), None);
         app.select_next();
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
+        assert_eq!(active_page_selection(&app), Some(0));
     }
 
     #[test]
@@ -279,7 +281,7 @@ mod tests {
         set_active_table_view(&mut app, issue_table_entries(5));
         app.select_next(); // None -> 0
         app.select_next(); // 0 -> 1
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(1));
+        assert_eq!(active_page_selection(&app), Some(1));
     }
 
     #[test]
@@ -291,7 +293,7 @@ mod tests {
         app.select_next(); // 0 -> 1
         app.select_next(); // 1 -> 2
         app.select_next(); // 2 -> 2 (stays)
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(2));
+        assert_eq!(active_page_selection(&app), Some(2));
     }
 
     #[test]
@@ -299,7 +301,7 @@ mod tests {
         let mut app = stub_app_with_repos(1);
         set_active_table_view(&mut app, issue_table_entries(0));
         app.select_next();
-        assert_eq!(app.active_ui().selected_selectable_idx, None);
+        assert_eq!(active_page_selection(&app), None);
     }
 
     #[test]
@@ -344,9 +346,9 @@ mod tests {
     fn select_prev_from_none_selects_first() {
         let mut app = stub_app_with_repos(1);
         set_active_table_view(&mut app, issue_table_entries(5));
-        assert_eq!(app.active_ui().selected_selectable_idx, None);
+        assert_eq!(active_page_selection(&app), None);
         app.select_prev();
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
+        assert_eq!(active_page_selection(&app), Some(0));
     }
 
     #[test]
@@ -358,7 +360,7 @@ mod tests {
         app.select_next(); // 0 -> 1
         app.select_next(); // 1 -> 2
         app.select_prev(); // 2 -> 1
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(1));
+        assert_eq!(active_page_selection(&app), Some(1));
     }
 
     #[test]
@@ -367,7 +369,7 @@ mod tests {
         set_active_table_view(&mut app, issue_table_entries(5));
         app.select_next(); // None -> 0
         app.select_prev(); // 0 -> 0 (stays)
-        assert_eq!(app.active_ui().selected_selectable_idx, Some(0));
+        assert_eq!(active_page_selection(&app), Some(0));
     }
 
     #[test]
@@ -375,7 +377,7 @@ mod tests {
         let mut app = stub_app_with_repos(1);
         set_active_table_view(&mut app, issue_table_entries(0));
         app.select_prev();
-        assert_eq!(app.active_ui().selected_selectable_idx, None);
+        assert_eq!(active_page_selection(&app), None);
     }
 
     // ── row_at_mouse tests ───────────────────────────────────────────
