@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use flotilla_protocol::{ManagedTerminal, ManagedTerminalId, TerminalStatus};
 use serde::Deserialize;
 
-use super::{TerminalEnvVars, TerminalPool};
+use super::{SessionPool, TerminalEnvVars, TerminalPool, TerminalSession};
 use crate::{
     attachable::{
         terminal_session_binding_ref, AttachableContent, AttachableId, AttachableStoreApi, BindingObjectKind, SharedAttachableStore,
@@ -257,6 +257,64 @@ impl TerminalPool for CleatTerminalPool {
     }
 }
 
+#[async_trait]
+impl SessionPool for CleatTerminalPool {
+    async fn list_sessions(&self) -> Result<Vec<TerminalSession>, String> {
+        let output = run!(self.runner, &self.binary, &["list", "--json"], Path::new("/"))?;
+        let sessions = Self::parse_list_output(&output)?;
+        Ok(sessions
+            .into_iter()
+            .map(|session| {
+                let status = match session.status {
+                    SessionStatus::Attached => TerminalStatus::Running,
+                    SessionStatus::Detached => TerminalStatus::Disconnected,
+                };
+                TerminalSession { session_name: session.id, status, command: session.cmd, working_directory: session.cwd }
+            })
+            .collect())
+    }
+
+    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path) -> Result<(), String> {
+        run!(
+            self.runner,
+            &self.binary,
+            &["create", "--json", session_name, "--cwd", &cwd.display().to_string(), "--cmd", command],
+            Path::new("/")
+        )?;
+        Ok(())
+    }
+
+    async fn attach_command(&self, session_name: &str, command: &str, cwd: &Path, env_vars: &TerminalEnvVars) -> Result<String, String> {
+        fn sq(s: &str) -> String {
+            format!("'{}'", s.replace('\'', "'\\''"))
+        }
+
+        let mut parts = vec![sq(&self.binary), "attach".into(), sq(session_name), "--cwd".into(), sq(&cwd.display().to_string())];
+        if !command.is_empty() || !env_vars.is_empty() {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+            let env_prefix = if env_vars.is_empty() {
+                String::new()
+            } else {
+                let pairs: Vec<String> = env_vars.iter().map(|(k, v)| format!("{k}={}", sq(v))).collect();
+                format!("env {} ", pairs.join(" "))
+            };
+            let wrapped = if command.is_empty() {
+                format!("{env_prefix}{shell}")
+            } else {
+                format!("{env_prefix}{shell} -lc '{}'", command.replace('\'', "'\\''"))
+            };
+            parts.push("--cmd".into());
+            parts.push(sq(&wrapped));
+        }
+        Ok(parts.join(" "))
+    }
+
+    async fn kill_session(&self, session_name: &str) -> Result<(), String> {
+        run!(self.runner, &self.binary, &["kill", session_name], Path::new("/"))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{path::Path, sync::Arc};
@@ -301,7 +359,7 @@ mod tests {
         let pool = CleatTerminalPool::new(Arc::new(MockRunner::new(vec![])), "cleat", shared_in_memory_attachable_store());
         let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
 
-        let command = pool.attach_command(&id, "bash", Path::new("/repo"), &vec![]).await.expect("attach command");
+        let command = TerminalPool::attach_command(&pool, &id, "bash", Path::new("/repo"), &vec![]).await.expect("attach command");
 
         assert!(command.contains("'cleat' attach"));
         assert!(command.contains("'flotilla/feat/shell/0'"));
@@ -375,5 +433,66 @@ mod tests {
 
         let store = store.lock().expect("store lock");
         assert!(CleatTerminalPool::find_persisted_session_id(&*store, &id).as_deref() == Some("session-123"));
+    }
+
+    // --- SessionPool tests ---
+
+    #[tokio::test]
+    async fn session_pool_list_sessions_parses_json() {
+        let json = r#"[
+            {"id":"sess-1","cwd":"/repo","cmd":"bash","status":"Attached"},
+            {"id":"sess-2","cwd":"/other","cmd":null,"status":"Detached"}
+        ]"#;
+        let pool = CleatTerminalPool::new(Arc::new(MockRunner::new(vec![Ok(json.into())])), "cleat", shared_in_memory_attachable_store());
+
+        let sessions = SessionPool::list_sessions(&pool).await.expect("list sessions");
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_name, "sess-1");
+        assert_eq!(sessions[0].status, TerminalStatus::Running);
+        assert_eq!(sessions[0].command.as_deref(), Some("bash"));
+        assert_eq!(sessions[0].working_directory.as_deref(), Some(Path::new("/repo")));
+        assert_eq!(sessions[1].session_name, "sess-2");
+        assert_eq!(sessions[1].status, TerminalStatus::Disconnected);
+        assert!(sessions[1].command.is_none());
+        assert_eq!(sessions[1].working_directory.as_deref(), Some(Path::new("/other")));
+    }
+
+    #[tokio::test]
+    async fn session_pool_ensure_creates_session() {
+        let json = r#"{"id":"new-sess","cwd":"/repo","cmd":"bash","status":"Detached"}"#;
+        let runner = Arc::new(MockRunner::new(vec![Ok(json.into())]));
+        let pool = CleatTerminalPool::new(Arc::clone(&runner) as Arc<dyn CommandRunner>, "cleat", shared_in_memory_attachable_store());
+
+        SessionPool::ensure_session(&pool, "my-session", "bash", Path::new("/repo")).await.expect("ensure session");
+
+        let calls = runner.calls.lock().expect("calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "cleat");
+        assert_eq!(calls[0].1, vec!["create", "--json", "my-session", "--cwd", "/repo", "--cmd", "bash"]);
+    }
+
+    #[tokio::test]
+    async fn session_pool_attach_wraps_command() {
+        let pool = CleatTerminalPool::new(Arc::new(MockRunner::new(vec![])), "cleat", shared_in_memory_attachable_store());
+
+        let cmd = SessionPool::attach_command(&pool, "my-session", "bash", Path::new("/repo"), &vec![]).await.expect("attach command");
+
+        assert!(cmd.contains("'cleat' attach 'my-session'"));
+        assert!(cmd.contains("--cwd '/repo'"));
+        assert!(cmd.contains("--cmd"));
+    }
+
+    #[tokio::test]
+    async fn session_pool_kill_calls_cli() {
+        let runner = Arc::new(MockRunner::new(vec![Ok(String::new())]));
+        let pool = CleatTerminalPool::new(Arc::clone(&runner) as Arc<dyn CommandRunner>, "cleat", shared_in_memory_attachable_store());
+
+        SessionPool::kill_session(&pool, "my-session").await.expect("kill session");
+
+        let calls = runner.calls.lock().expect("calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "cleat");
+        assert_eq!(calls[0].1, vec!["kill", "my-session"]);
     }
 }

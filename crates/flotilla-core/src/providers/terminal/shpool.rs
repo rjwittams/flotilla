@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use flotilla_protocol::{HostName, HostPath, ManagedTerminal, ManagedTerminalId, TerminalStatus};
 
-use super::TerminalPool;
+use super::{SessionPool, TerminalEnvVars, TerminalPool, TerminalSession};
 use crate::{
     attachable::{
         terminal_session_binding_ref, AttachableContent, AttachableId, AttachableStoreApi, BindingObjectKind, SharedAttachableStore,
@@ -592,6 +592,81 @@ impl ShpoolTerminalPool {
 }
 
 #[async_trait]
+impl SessionPool for ShpoolTerminalPool {
+    async fn list_sessions(&self) -> Result<Vec<TerminalSession>, String> {
+        let socket_path_str = self.socket_path.display().to_string();
+        let config_path_str = self.config_path.display().to_string();
+        let result = run!(self.runner, "shpool", &["--socket", &socket_path_str, "-c", &config_path_str, "list", "--json"], Path::new("/"));
+
+        match result {
+            Ok(json) => {
+                let parsed = Self::parse_list_json(&json)?;
+                Ok(parsed
+                    .into_iter()
+                    .map(|terminal| {
+                        let session_name = terminal_session_binding_ref(&terminal.id);
+                        TerminalSession {
+                            session_name,
+                            status: terminal.status,
+                            command: None,           // shpool doesn't report command
+                            working_directory: None, // shpool doesn't report cwd
+                        }
+                    })
+                    .collect())
+            }
+            Err(e) => {
+                tracing::debug!(err = %e, "shpool list failed (daemon may not be running)");
+                Ok(vec![])
+            }
+        }
+    }
+
+    async fn ensure_session(&self, _session_name: &str, _command: &str, _cwd: &Path) -> Result<(), String> {
+        // No-op: shpool creates sessions on first `attach`.
+        Ok(())
+    }
+
+    async fn attach_command(&self, session_name: &str, command: &str, cwd: &Path, env_vars: &TerminalEnvVars) -> Result<String, String> {
+        let socket_path_str = self.socket_path.display().to_string();
+        let config_path_str = self.config_path.display().to_string();
+        let cwd_str = cwd.display().to_string();
+        fn sq(s: &str) -> String {
+            format!("'{}'", s.replace('\'', "'\\''"))
+        }
+        let env_prefix = if env_vars.is_empty() {
+            String::new()
+        } else {
+            let pairs: Vec<String> = env_vars.iter().map(|(k, v)| format!("{k}={}", sq(v))).collect();
+            format!("env {} ", pairs.join(" "))
+        };
+        let cmd_part = if command.is_empty() && env_vars.is_empty() {
+            String::new()
+        } else {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+            let escaped_cmd = command.replace('\'', "'\\''");
+            let inner =
+                if command.is_empty() { format!("{env_prefix}{shell}") } else { format!("{env_prefix}{shell} -lic '{escaped_cmd}'") };
+            format!(" --cmd {}", sq(&inner))
+        };
+        Ok(format!(
+            "shpool --socket {} -c {} attach{} --dir {} {}",
+            sq(&socket_path_str),
+            sq(&config_path_str),
+            cmd_part,
+            sq(&cwd_str),
+            sq(session_name),
+        ))
+    }
+
+    async fn kill_session(&self, session_name: &str) -> Result<(), String> {
+        let socket_path_str = self.socket_path.display().to_string();
+        let config_path_str = self.config_path.display().to_string();
+        run!(self.runner, "shpool", &["--socket", &socket_path_str, "-c", &config_path_str, "kill", session_name], Path::new("/"))
+            .map(|_| ())
+    }
+}
+
+#[async_trait]
 impl TerminalPool for ShpoolTerminalPool {
     async fn list_terminals(&self) -> Result<Vec<ManagedTerminal>, String> {
         let socket_path_str = self.socket_path.display().to_string();
@@ -911,7 +986,7 @@ mod tests {
     async fn attach_command_includes_cmd_dir_and_config() {
         let (pool, _store, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
         let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
-        let cmd = pool.attach_command(&id, "bash", Path::new("/home/dev"), &vec![]).await.unwrap();
+        let cmd = TerminalPool::attach_command(&pool, &id, "bash", Path::new("/home/dev"), &vec![]).await.unwrap();
         assert!(cmd.contains("shpool"));
         assert!(cmd.contains("attach"));
         assert!(cmd.contains("--cmd"));
@@ -928,7 +1003,7 @@ mod tests {
     async fn attach_command_empty_cmd_omits_cmd_flag() {
         let (pool, _store, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
         let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
-        let cmd = pool.attach_command(&id, "", Path::new("/home/dev"), &vec![]).await.unwrap();
+        let cmd = TerminalPool::attach_command(&pool, &id, "", Path::new("/home/dev"), &vec![]).await.unwrap();
         assert!(cmd.contains("shpool"));
         assert!(cmd.contains("attach"));
         assert!(!cmd.contains("--cmd"));
@@ -944,7 +1019,7 @@ mod tests {
             ("FLOTILLA_ATTACHABLE_ID".to_string(), "att-uuid-123".to_string()),
             ("FLOTILLA_DAEMON_SOCKET".to_string(), "/tmp/flotilla.sock".to_string()),
         ];
-        let cmd = pool.attach_command(&id, "claude", Path::new("/home/dev"), &env).await.unwrap();
+        let cmd = TerminalPool::attach_command(&pool, &id, "claude", Path::new("/home/dev"), &env).await.unwrap();
         assert!(cmd.contains("--cmd"), "should have --cmd: {cmd}");
         assert!(cmd.contains("FLOTILLA_ATTACHABLE_ID"), "should contain attachable id env: {cmd}");
         assert!(cmd.contains("att-uuid-123"), "should contain attachable id value: {cmd}");
@@ -957,7 +1032,7 @@ mod tests {
         let (pool, _store, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
         let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
         let env = vec![("FLOTILLA_ATTACHABLE_ID".to_string(), "att-1".to_string())];
-        let cmd = pool.attach_command(&id, "", Path::new("/home/dev"), &env).await.unwrap();
+        let cmd = TerminalPool::attach_command(&pool, &id, "", Path::new("/home/dev"), &env).await.unwrap();
         assert!(cmd.contains("--cmd"), "env vars with empty command should still produce --cmd: {cmd}");
         assert!(cmd.contains("FLOTILLA_ATTACHABLE_ID"), "should contain env var: {cmd}");
     }
@@ -991,8 +1066,8 @@ mod tests {
         let agent_id = ManagedTerminalId { checkout: "my-feature".into(), role: "agent".into(), index: 0 };
         let cwd = Path::new("/home/dev/project");
 
-        pool.attach_command(&shell_id, "bash", cwd, &vec![]).await.expect("seed shell binding");
-        pool.attach_command(&agent_id, "claude", cwd, &vec![]).await.expect("seed agent binding");
+        TerminalPool::attach_command(&pool, &shell_id, "bash", cwd, &vec![]).await.expect("seed shell binding");
+        TerminalPool::attach_command(&pool, &agent_id, "claude", cwd, &vec![]).await.expect("seed agent binding");
 
         let terminals = pool.list_terminals().await.expect("list terminals");
         assert_eq!(terminals.len(), 2);
@@ -1043,7 +1118,7 @@ mod tests {
 
         // Only create a binding for my-feature/shell/0
         let shell_id = ManagedTerminalId { checkout: "my-feature".into(), role: "shell".into(), index: 0 };
-        pool.attach_command(&shell_id, "bash", Path::new("/repo"), &vec![]).await.expect("seed binding");
+        TerminalPool::attach_command(&pool, &shell_id, "bash", Path::new("/repo"), &vec![]).await.expect("seed binding");
 
         let terminals = pool.list_terminals().await.expect("list terminals");
 
@@ -1102,8 +1177,8 @@ mod tests {
         // Create bindings for both sessions
         let shell_id = ManagedTerminalId { checkout: "my-feature".into(), role: "shell".into(), index: 0 };
         let agent_id = ManagedTerminalId { checkout: "my-feature".into(), role: "agent".into(), index: 0 };
-        pool.attach_command(&shell_id, "bash", Path::new("/repo"), &vec![]).await.expect("seed shell");
-        pool.attach_command(&agent_id, "claude", Path::new("/repo"), &vec![]).await.expect("seed agent");
+        TerminalPool::attach_command(&pool, &shell_id, "bash", Path::new("/repo"), &vec![]).await.expect("seed shell");
+        TerminalPool::attach_command(&pool, &agent_id, "claude", Path::new("/repo"), &vec![]).await.expect("seed agent");
 
         let terminals = pool.list_terminals().await.expect("list terminals");
 
@@ -1120,7 +1195,8 @@ mod tests {
         let (pool, store, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
         let id = ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 };
 
-        let command = pool.attach_command(&id, "bash", Path::new("/home/dev/project"), &vec![]).await.expect("attach command");
+        let command =
+            TerminalPool::attach_command(&pool, &id, "bash", Path::new("/home/dev/project"), &vec![]).await.expect("attach command");
 
         assert!(command.contains(" attach"));
         assert!(command.contains("flotilla/feat/shell/0"));
@@ -1370,5 +1446,56 @@ mod tests {
         let config_path = dir.path().join("config.toml");
         assert!(config_path.exists(), "config should be written");
         // display_name removed — verified via ProviderDescriptor now
+    }
+
+    // --- SessionPool tests ---
+
+    #[tokio::test]
+    async fn session_pool_list_sessions_parses_json() {
+        let json = r#"{
+            "sessions": [
+                {"name": "flotilla/feat/shell/0", "started_at_unix_ms": 1709900000000, "status": "Attached"},
+                {"name": "flotilla/feat/agent/0", "started_at_unix_ms": 1709900001000, "status": "Disconnected"},
+                {"name": "user-manual", "started_at_unix_ms": 1709900002000, "status": "Attached"}
+            ]
+        }"#;
+        let (pool, _store, _dir) = test_pool(Arc::new(MockRunner::new(vec![Ok(json.into())])));
+
+        let sessions = SessionPool::list_sessions(&pool).await.expect("list sessions");
+
+        assert_eq!(sessions.len(), 2); // user-manual filtered out
+        assert_eq!(sessions[0].session_name, "flotilla/feat/shell/0");
+        assert_eq!(sessions[0].status, TerminalStatus::Running);
+        assert!(sessions[0].command.is_none());
+        assert!(sessions[0].working_directory.is_none());
+        assert_eq!(sessions[1].session_name, "flotilla/feat/agent/0");
+        assert_eq!(sessions[1].status, TerminalStatus::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn session_pool_attach_builds_command() {
+        let (pool, _store, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
+
+        let cmd =
+            SessionPool::attach_command(&pool, "flotilla/feat/shell/0", "bash", Path::new("/home/dev"), &vec![]).await.expect("attach");
+
+        assert!(cmd.contains("shpool"), "should reference shpool binary: {cmd}");
+        assert!(cmd.contains("attach"), "should include attach subcommand: {cmd}");
+        assert!(cmd.contains("--cmd"), "should include --cmd for non-empty command: {cmd}");
+        assert!(cmd.contains("-lic"), "should use login interactive shell: {cmd}");
+        assert!(cmd.contains("bash"), "should contain original command: {cmd}");
+        assert!(cmd.contains("--dir"), "should include --dir: {cmd}");
+        assert!(cmd.contains("/home/dev"), "should include cwd: {cmd}");
+        assert!(cmd.contains("'flotilla/feat/shell/0'"), "session name should be last: {cmd}");
+    }
+
+    #[tokio::test]
+    async fn session_pool_kill_calls_cli() {
+        let runner = Arc::new(MockRunner::new(vec![Ok(String::new())]));
+        let (pool, _store, _dir) = test_pool(runner.clone());
+
+        SessionPool::kill_session(&pool, "flotilla/feat/shell/0").await.expect("kill session");
+
+        assert_eq!(runner.remaining(), 0, "kill command should have consumed the response");
     }
 }
