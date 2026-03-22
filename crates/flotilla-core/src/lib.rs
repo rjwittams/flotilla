@@ -6,7 +6,6 @@ pub mod daemon;
 pub mod data;
 pub mod delta;
 pub mod executor;
-mod host_queries;
 pub(crate) mod host_registry;
 pub mod host_summary;
 pub mod in_process;

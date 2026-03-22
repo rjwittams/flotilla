@@ -56,10 +56,6 @@ impl HostRegistry {
         }
     }
 
-    pub(crate) fn host_name(&self) -> &HostName {
-        &self.host_name
-    }
-
     pub(crate) fn local_host_summary(&self) -> &HostSummary {
         &self.local_host_summary
     }
@@ -171,7 +167,7 @@ impl HostRegistry {
     ///
     /// Takes `remote_counts` as a parameter (the caller owns the repo data)
     /// and emits events via the `emit` closure.
-    async fn sync_host_membership(&self, remote_counts: &HashMap<HostName, HostCounts>, emit: &impl Fn(DaemonEvent)) {
+    pub(crate) async fn sync_host_membership(&self, remote_counts: &HashMap<HostName, HostCounts>, emit: &impl Fn(DaemonEvent)) {
         let configured = self.configured_peer_names.read().await.clone();
         let mut hosts = self.hosts.write().await;
 
