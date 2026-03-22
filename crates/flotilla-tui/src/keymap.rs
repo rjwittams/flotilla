@@ -265,6 +265,8 @@ impl Keymap {
             (&config.action_menu, BindingModeId::ActionMenu),
             (&config.delete_confirm, BindingModeId::DeleteConfirm),
             (&config.close_confirm, BindingModeId::CloseConfirm),
+            (&config.command_palette, BindingModeId::CommandPalette),
+            (&config.file_picker, BindingModeId::FilePicker),
         ];
 
         // Apply shared overrides
@@ -768,6 +770,19 @@ mod tests {
             keymap.resolve(&KeyBindingMode::from(BindingModeId::Normal), kc(KeyCode::Char('q'), KeyModifiers::NONE)),
             Some(Action::Quit)
         );
+    }
+
+    #[test]
+    fn from_config_overrides_command_palette_binding() {
+        let mut keys = KeysConfig::default();
+        keys.command_palette.insert("ctrl-p".into(), "select_prev".into());
+        keys.command_palette.insert("ctrl-n".into(), "select_next".into());
+        let keymap = Keymap::from_config(&keys);
+        let mode = KeyBindingMode::from(BindingModeId::CommandPalette);
+        assert_eq!(keymap.resolve(&mode, kc(KeyCode::Char('p'), KeyModifiers::CONTROL)), Some(Action::SelectPrev));
+        assert_eq!(keymap.resolve(&mode, kc(KeyCode::Char('n'), KeyModifiers::CONTROL)), Some(Action::SelectNext));
+        // Default bindings still work
+        assert_eq!(keymap.resolve(&mode, crokey::key!(up)), Some(Action::SelectPrev));
     }
 
     // ── help_sections tests ──
