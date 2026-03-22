@@ -172,15 +172,15 @@ impl TerminalPool for CleatTerminalPool {
         };
         let observed_sessions: std::collections::HashSet<String> = sessions.iter().map(|session| session.id.clone()).collect();
         let mut terminals: Vec<ManagedTerminal> =
-            sessions.into_iter().filter_map(|session| Self::reconcile_listed_session(store.as_mut(), session)).collect();
-        terminals.extend(Self::disconnected_known_terminals(store.as_mut(), &observed_sessions));
+            sessions.into_iter().filter_map(|session| Self::reconcile_listed_session(&mut *store, session)).collect();
+        terminals.extend(Self::disconnected_known_terminals(&mut *store, &observed_sessions));
         let _ = store.save();
         Ok(terminals)
     }
 
     async fn ensure_running(&self, id: &ManagedTerminalId, command: &str, cwd: &Path) -> Result<(), String> {
         if let Ok(store) = self.attachable_store.lock() {
-            if Self::find_persisted_session_id(store.as_ref(), id).is_some() {
+            if Self::find_persisted_session_id(&*store, id).is_some() {
                 return Ok(());
             }
         }
@@ -195,7 +195,7 @@ impl TerminalPool for CleatTerminalPool {
         let Ok(mut store) = self.attachable_store.lock() else {
             return Ok(());
         };
-        if Self::persist_attachable(store.as_mut(), id, &session.id, command, cwd, TerminalStatus::Disconnected) {
+        if Self::persist_attachable(&mut *store, id, &session.id, command, cwd, TerminalStatus::Disconnected) {
             let _ = store.save();
         }
         Ok(())
@@ -216,7 +216,7 @@ impl TerminalPool for CleatTerminalPool {
             .attachable_store
             .lock()
             .ok()
-            .and_then(|store| Self::find_persisted_session_id(store.as_ref(), id))
+            .and_then(|store| Self::find_persisted_session_id(&*store, id))
             .unwrap_or_else(|| terminal_session_binding_ref(id));
         let mut parts = vec![sq(&self.binary), "attach".into(), sq(&session_id), "--cwd".into(), sq(&cwd.display().to_string())];
         if !command.is_empty() || !env_vars.is_empty() {
@@ -243,7 +243,7 @@ impl TerminalPool for CleatTerminalPool {
             .attachable_store
             .lock()
             .ok()
-            .and_then(|store| Self::find_persisted_session_id(store.as_ref(), id))
+            .and_then(|store| Self::find_persisted_session_id(&*store, id))
             .unwrap_or_else(|| terminal_session_binding_ref(id));
         run!(self.runner, &self.binary, &["kill", &session_id], Path::new("/"))?;
 
@@ -315,7 +315,7 @@ mod tests {
         {
             let mut store_guard = store.lock().expect("store");
             CleatTerminalPool::persist_attachable(
-                store_guard.as_mut(),
+                &mut *store_guard,
                 &ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 },
                 "session-123",
                 "bash",
@@ -341,7 +341,7 @@ mod tests {
         {
             let mut store_guard = store.lock().expect("store");
             CleatTerminalPool::persist_attachable(
-                store_guard.as_mut(),
+                &mut *store_guard,
                 &ManagedTerminalId { checkout: "feat".into(), role: "shell".into(), index: 0 },
                 "session-123",
                 "bash",
@@ -360,7 +360,7 @@ mod tests {
         drop(calls);
 
         let store = store.lock().expect("store");
-        assert!(CleatTerminalPool::find_persisted_session_id(store.as_ref(), &id).is_none());
+        assert!(CleatTerminalPool::find_persisted_session_id(&*store, &id).is_none());
     }
 
     #[tokio::test]
@@ -374,6 +374,6 @@ mod tests {
         pool.ensure_running(&id, "bash", Path::new("/repo")).await.expect("ensure running");
 
         let store = store.lock().expect("store lock");
-        assert!(CleatTerminalPool::find_persisted_session_id(store.as_ref(), &id).as_deref() == Some("session-123"));
+        assert!(CleatTerminalPool::find_persisted_session_id(&*store, &id).as_deref() == Some("session-123"));
     }
 }

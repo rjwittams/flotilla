@@ -620,7 +620,7 @@ impl TerminalPool for ShpoolTerminalPool {
                         let has_binding =
                             store.lookup_binding("terminal_pool", "shpool", BindingObjectKind::Attachable, &session_name).is_some();
                         if has_binding {
-                            any_changed |= Self::reconcile_known_attachable(store.as_mut(), terminal, &session_name);
+                            any_changed |= Self::reconcile_known_attachable(&mut *store, terminal, &session_name);
                             bound.push(terminal.clone());
                         } else {
                             tracing::info!(session = %session_name, "reaping orphan shpool session with no binding");
@@ -630,7 +630,7 @@ impl TerminalPool for ShpoolTerminalPool {
 
                     // Emit Disconnected terminals for bindings whose sessions are not in the live list.
                     let (disconnected_terminals, disconnected_changed) =
-                        Self::disconnected_terminals_from_bindings(store.as_mut(), &observed_sessions);
+                        Self::disconnected_terminals_from_bindings(&mut *store, &observed_sessions);
                     bound.extend(disconnected_terminals);
                     any_changed |= disconnected_changed;
 
@@ -667,7 +667,7 @@ impl TerminalPool for ShpoolTerminalPool {
                     return Ok(vec![]);
                 };
                 let empty = HashSet::new();
-                let (disconnected, _) = Self::disconnected_terminals_from_bindings(store.as_mut(), &empty);
+                let (disconnected, _) = Self::disconnected_terminals_from_bindings(&mut *store, &empty);
                 Ok(disconnected)
             }
         }
@@ -730,7 +730,7 @@ impl TerminalPool for ShpoolTerminalPool {
                 tracing::warn!("attachable store lock poisoned while persisting expected shpool attachable");
                 return;
             };
-            if Self::persist_expected_attachable(store.as_mut(), id, command, cwd) {
+            if Self::persist_expected_attachable(&mut *store, id, command, cwd) {
                 if let Err(err) = store.save() {
                     tracing::warn!(err = %err, "failed to persist attachable registry after shpool attach command");
                 }

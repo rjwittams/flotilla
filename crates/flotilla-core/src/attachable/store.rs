@@ -85,13 +85,13 @@ pub trait AttachableStoreApi: Send + Sync {
     fn save(&self) -> Result<(), String>;
 }
 
-pub type SharedAttachableStore = Arc<Mutex<Box<dyn AttachableStoreApi>>>;
+pub type SharedAttachableStore = Arc<Mutex<dyn AttachableStoreApi>>;
 
 pub fn shared_attachable_store<S>(store: S) -> SharedAttachableStore
 where
     S: AttachableStoreApi + 'static,
 {
-    Arc::new(Mutex::new(Box::new(store)))
+    Arc::new(Mutex::new(store))
 }
 
 pub fn shared_file_backed_attachable_store(base: impl AsRef<Path>) -> SharedAttachableStore {
