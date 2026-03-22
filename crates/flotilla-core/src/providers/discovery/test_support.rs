@@ -356,6 +356,10 @@ pub struct FakeVcsState {
     pub remote_branches: Vec<String>,
     pub checkouts: Vec<(PathBuf, Checkout)>,
     pub commit_log: Vec<CommitInfo>,
+    /// Per-branch ahead/behind overrides. If absent for a branch, returns `Err`.
+    pub ahead_behind: std::collections::HashMap<String, AheadBehind>,
+    /// Per-checkout-path working tree overrides. If absent for a path, returns `Err`.
+    pub working_tree: std::collections::HashMap<PathBuf, WorkingTreeStatus>,
 }
 
 impl FakeVcsState {
@@ -374,11 +378,21 @@ pub struct FakeVcsStateBuilder {
     remote_branches: Vec<String>,
     checkouts: Vec<(PathBuf, Checkout)>,
     commit_log: Vec<CommitInfo>,
+    ahead_behind: std::collections::HashMap<String, AheadBehind>,
+    working_tree: std::collections::HashMap<PathBuf, WorkingTreeStatus>,
 }
 
 impl FakeVcsStateBuilder {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into(), branches: Vec::new(), remote_branches: Vec::new(), checkouts: Vec::new(), commit_log: Vec::new() }
+        Self {
+            root: root.into(),
+            branches: Vec::new(),
+            remote_branches: Vec::new(),
+            checkouts: Vec::new(),
+            commit_log: Vec::new(),
+            ahead_behind: std::collections::HashMap::new(),
+            working_tree: std::collections::HashMap::new(),
+        }
     }
 
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
@@ -421,6 +435,8 @@ impl FakeVcsStateBuilder {
             remote_branches: self.remote_branches,
             checkouts: self.checkouts,
             commit_log: self.commit_log,
+            ahead_behind: self.ahead_behind,
+            working_tree: self.working_tree,
         }))
     }
 }
@@ -432,6 +448,7 @@ impl FakeVcsStateBuilder {
 pub struct CheckoutBuilder {
     parent: FakeVcsStateBuilder,
     branch: String,
+    path: Option<PathBuf>,
     is_main: bool,
     correlation_keys: Vec<CorrelationKey>,
     association_keys: Vec<AssociationKey>,
@@ -440,7 +457,14 @@ pub struct CheckoutBuilder {
 impl CheckoutBuilder {
     fn new(parent: FakeVcsStateBuilder, branch: String) -> Self {
         let correlation_keys = vec![CorrelationKey::Branch(branch.clone())];
-        Self { parent, branch, is_main: false, correlation_keys, association_keys: Vec::new() }
+        Self { parent, branch, path: None, is_main: false, correlation_keys, association_keys: Vec::new() }
+    }
+
+    /// Override the checkout path. Without this, the path defaults to
+    /// `root.join(branch.replace('/', "-"))`.
+    pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.path = Some(path.into());
+        self
     }
 
     pub fn is_main(mut self, yes: bool) -> Self {
@@ -459,7 +483,7 @@ impl CheckoutBuilder {
     }
 
     pub fn build(mut self) -> FakeVcsStateBuilder {
-        let path = self.parent.root.join(&self.branch);
+        let path = self.path.unwrap_or_else(|| self.parent.root.join(self.branch.replace('/', "-")));
         let checkout = Checkout {
             branch: self.branch,
             is_main: self.is_main,
@@ -513,12 +537,18 @@ impl Vcs for FakeVcs {
         Ok(self.state.read().expect("FakeVcs state poisoned").commit_log.iter().take(limit).cloned().collect())
     }
 
-    async fn ahead_behind(&self, _repo_root: &Path, _branch: &str, _reference: &str) -> Result<AheadBehind, String> {
-        Ok(AheadBehind { ahead: 0, behind: 0 })
+    async fn ahead_behind(&self, _repo_root: &Path, branch: &str, _reference: &str) -> Result<AheadBehind, String> {
+        let state = self.state.read().expect("FakeVcs state poisoned");
+        state.ahead_behind.get(branch).cloned().ok_or_else(|| format!("FakeVcs: ahead_behind not configured for branch {branch:?}"))
     }
 
-    async fn working_tree_status(&self, _repo_root: &Path, _checkout_path: &Path) -> Result<WorkingTreeStatus, String> {
-        Ok(WorkingTreeStatus { staged: 0, modified: 0, untracked: 0 })
+    async fn working_tree_status(&self, _repo_root: &Path, checkout_path: &Path) -> Result<WorkingTreeStatus, String> {
+        let state = self.state.read().expect("FakeVcs state poisoned");
+        state
+            .working_tree
+            .get(checkout_path)
+            .cloned()
+            .ok_or_else(|| format!("FakeVcs: working_tree_status not configured for {}", checkout_path.display()))
     }
 }
 
