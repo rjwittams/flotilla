@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AttachableSet, AttachableSetId, ChangeRequest, Checkout, CloudAgentSession, HostPath, Issue, ProviderError, WorkItem, WorkItemIdentity,
-    Workspace,
+    AttachableId, AttachableSet, AttachableSetId, ChangeRequest, Checkout, CloudAgentSession, HostPath, Issue, ManagedTerminal,
+    ProviderError, WorkItem, WorkItemIdentity, Workspace,
 };
 
 /// Operation on a keyed collection entry.
@@ -60,6 +60,10 @@ pub enum Change {
     Branch {
         key: String,
         op: EntryOp<Branch>,
+    },
+    ManagedTerminal {
+        key: AttachableId,
+        op: EntryOp<ManagedTerminal>,
     },
     WorkItem {
         identity: WorkItemIdentity,
@@ -144,6 +148,21 @@ mod tests {
     #[test]
     fn change_branch_added_roundtrip() {
         let change = Change::Branch { key: "feat-new".into(), op: EntryOp::Added(Branch { status: BranchStatus::Remote }) };
+        assert_json_roundtrip(&change);
+    }
+
+    #[test]
+    fn change_managed_terminal_added_roundtrip() {
+        let change = Change::ManagedTerminal {
+            key: crate::AttachableId::new("att-1"),
+            op: EntryOp::Added(ManagedTerminal {
+                set_id: crate::AttachableSetId::new("set-1"),
+                role: "editor".into(),
+                command: "vim".into(),
+                working_directory: PathBuf::from("/repo"),
+                status: crate::TerminalStatus::Running,
+            }),
+        };
         assert_json_roundtrip(&change);
     }
 }

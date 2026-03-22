@@ -348,6 +348,7 @@ fn group_to_work_item(providers: &ProviderData, group: &CorrelatedGroup, group_i
     let mut agent_key: Option<String> = None;
     let mut agent_keys: Vec<String> = Vec::new();
     let mut workspace_refs: Vec<String> = Vec::new();
+    let mut terminal_ids: Vec<flotilla_protocol::AttachableId> = Vec::new();
     let mut host: Option<flotilla_protocol::HostName> = None;
 
     for item in &group.items {
@@ -388,6 +389,16 @@ fn group_to_work_item(providers: &ProviderData, group: &CorrelatedGroup, group_i
                     if attachable_set_id.is_none() {
                         attachable_set_id = providers.workspaces.get(ws_ref).and_then(|ws| ws.attachable_set_id.clone());
                     }
+                }
+            }
+            (CorItemKind::ManagedTerminal, ProviderItemKey::ManagedTerminal(key)) => {
+                if let Some(terminal) = providers.managed_terminals.get(key) {
+                    terminal_ids.push(key.clone());
+                    if attachable_set_id.is_none() {
+                        attachable_set_id = Some(terminal.set_id.clone());
+                    }
+                } else {
+                    tracing::debug!(key = %key, "managed_terminals lookup miss in group_to_work_item");
                 }
             }
             _ => {}
@@ -462,7 +473,7 @@ fn group_to_work_item(providers: &ProviderData, group: &CorrelatedGroup, group_i
         correlation_group_idx: group_idx,
         host,
         source,
-        terminal_ids: Vec::new(),
+        terminal_ids,
         agent_keys,
     }))
 }
@@ -528,6 +539,16 @@ pub fn correlate(providers: &ProviderData) -> (Vec<CorrelationResult>, Vec<Corre
             title: ws.name.clone(),
             correlation_keys: ws.attachable_set_id.as_ref().map(|id| vec![CorrelationKey::AttachableSet(id.clone())]).unwrap_or_default(),
             source_key: ProviderItemKey::Workspace(ws_ref.clone()),
+        });
+    }
+
+    for (id, terminal) in &providers.managed_terminals {
+        items.push(CorrelatedItem {
+            provider_name: "terminal".to_string(),
+            kind: CorItemKind::ManagedTerminal,
+            title: format!("{} ({})", id, terminal.role),
+            correlation_keys: vec![CorrelationKey::AttachableSet(terminal.set_id.clone())],
+            source_key: ProviderItemKey::ManagedTerminal(id.clone()),
         });
     }
 

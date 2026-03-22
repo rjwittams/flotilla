@@ -14,6 +14,7 @@ pub enum ItemKind {
     ChangeRequest,
     CloudSession,
     Workspace,
+    ManagedTerminal,
     Agent,
 }
 
@@ -25,6 +26,7 @@ pub enum ProviderItemKey {
     ChangeRequest(String),
     Session(String),
     Workspace(String),
+    ManagedTerminal(flotilla_protocol::AttachableId),
     Agent(String),
 }
 

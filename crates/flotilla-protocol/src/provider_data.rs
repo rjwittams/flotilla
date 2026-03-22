@@ -304,6 +304,15 @@ pub enum TerminalStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedTerminal {
+    pub set_id: AttachableSetId,
+    pub role: String,
+    pub command: String,
+    pub working_directory: PathBuf,
+    pub status: TerminalStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
     pub name: String,
     pub directories: Vec<PathBuf>,
@@ -322,6 +331,8 @@ pub struct ProviderData {
     pub sessions: IndexMap<String, CloudAgentSession>,
     pub branches: IndexMap<String, crate::delta::Branch>,
     pub workspaces: IndexMap<String, Workspace>,
+    #[serde(default)]
+    pub managed_terminals: IndexMap<AttachableId, ManagedTerminal>,
     pub attachable_sets: IndexMap<AttachableSetId, AttachableSet>,
     #[serde(default)]
     pub agents: IndexMap<String, Agent>,
@@ -495,8 +506,17 @@ mod tests {
     }
 
     #[test]
-    fn terminal_status_roundtrip() {
+    fn managed_terminal_roundtrip() {
         use crate::test_helpers::assert_roundtrip;
+
+        let terminal = ManagedTerminal {
+            set_id: AttachableSetId::new("set-1"),
+            role: "shell".into(),
+            command: "$SHELL".into(),
+            working_directory: PathBuf::from("/Users/dev/project"),
+            status: TerminalStatus::Running,
+        };
+        assert_roundtrip(&terminal);
 
         assert_roundtrip(&TerminalStatus::Running);
         assert_roundtrip(&TerminalStatus::Disconnected);
@@ -513,6 +533,7 @@ mod tests {
         assert!(pd.sessions.is_empty());
         assert!(pd.branches.is_empty());
         assert!(pd.workspaces.is_empty());
+        assert!(pd.managed_terminals.is_empty());
         assert!(pd.attachable_sets.is_empty());
     }
 

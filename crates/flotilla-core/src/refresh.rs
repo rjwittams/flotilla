@@ -278,6 +278,24 @@ fn project_attachable_data(pd: &mut ProviderData, registry: &ProviderRegistry, a
         .filter(|(_, set)| set.checkout.as_ref().is_some_and(|co| checkout_paths.contains(co)))
         .map(|(id, set)| (id.clone(), set.clone()))
         .collect();
+
+    // Build managed_terminals from the attachable store for projected sets
+    for (attachable_id, attachable) in &store.registry().attachables {
+        if !pd.attachable_sets.contains_key(&attachable.set_id) {
+            continue;
+        }
+        match &attachable.content {
+            crate::attachable::AttachableContent::Terminal(t) => {
+                pd.managed_terminals.insert(attachable_id.clone(), flotilla_protocol::ManagedTerminal {
+                    set_id: attachable.set_id.clone(),
+                    role: t.purpose.role.clone(),
+                    command: t.command.clone(),
+                    working_directory: t.working_directory.clone(),
+                    status: t.status.clone(),
+                });
+            }
+        }
+    }
 }
 
 fn project_agent_data(pd: &mut ProviderData, agent_state_store: &crate::agents::SharedAgentStateStore) {
