@@ -30,6 +30,7 @@ pub enum Action {
     ToggleHelp,
     ToggleMultiSelect,
     ToggleProviders,
+    ToggleArchived,
     ToggleDebug,
     ToggleStatusBarKeys,
     CycleHost,
@@ -93,6 +94,7 @@ impl Action {
             "toggle_help" => Action::ToggleHelp,
             "toggle_multi_select" => Action::ToggleMultiSelect,
             "toggle_providers" => Action::ToggleProviders,
+            "toggle_archived" => Action::ToggleArchived,
             "toggle_debug" => Action::ToggleDebug,
             "toggle_status_bar_keys" => Action::ToggleStatusBarKeys,
             "cycle_host" => Action::CycleHost,
@@ -138,6 +140,7 @@ impl Action {
             Action::ToggleHelp => "toggle_help",
             Action::ToggleMultiSelect => "toggle_multi_select",
             Action::ToggleProviders => "toggle_providers",
+            Action::ToggleArchived => "toggle_archived",
             Action::ToggleDebug => "toggle_debug",
             Action::ToggleStatusBarKeys => "toggle_status_bar_keys",
             Action::CycleHost => "cycle_host",
@@ -180,6 +183,7 @@ impl Action {
             Action::ToggleHelp => "Toggle help screen",
             Action::ToggleMultiSelect => "Toggle multi-select",
             Action::ToggleProviders => "Toggle provider config",
+            Action::ToggleArchived => "Toggle archived sessions",
             Action::ToggleDebug => "Toggle debug panel",
             Action::ToggleStatusBarKeys => "Toggle status bar key hints",
             Action::CycleHost => "Cycle host filter",
@@ -348,6 +352,7 @@ impl Keymap {
             ("Repos", &[Action::PrevTab, Action::NextTab, Action::MoveTabLeft, Action::MoveTabRight]),
             ("General", &[
                 Action::ToggleProviders,
+                Action::ToggleArchived,
                 Action::ToggleDebug,
                 Action::CycleTheme,
                 Action::CycleHost,
@@ -403,6 +408,7 @@ mod tests {
             Action::ToggleHelp,
             Action::ToggleMultiSelect,
             Action::ToggleProviders,
+            Action::ToggleArchived,
             Action::ToggleDebug,
             Action::ToggleStatusBarKeys,
             Action::CycleHost,
@@ -470,6 +476,7 @@ mod tests {
             Action::ToggleHelp,
             Action::ToggleMultiSelect,
             Action::ToggleProviders,
+            Action::ToggleArchived,
             Action::ToggleDebug,
             Action::ToggleStatusBarKeys,
             Action::CycleHost,
@@ -496,6 +503,12 @@ mod tests {
             let desc = action.description();
             assert!(!desc.is_empty(), "empty description for {:?}", action);
         }
+    }
+
+    #[test]
+    fn toggle_archived_round_trips() {
+        assert_eq!(Action::from_config_str("toggle_archived"), Some(Action::ToggleArchived));
+        assert_eq!(Action::ToggleArchived.as_config_str(), "toggle_archived");
     }
 
     // ── Keymap tests ──
