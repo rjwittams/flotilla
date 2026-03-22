@@ -126,6 +126,7 @@ pub static BINDINGS: &[Binding] = &[
     b(BindingModeId::Normal, "/", Action::OpenCommandPalette),
     b(BindingModeId::Normal, "a", Action::OpenFilePicker),
     b(BindingModeId::Normal, "c", Action::ToggleProviders),
+    b(BindingModeId::Normal, "u", Action::ToggleArchived),
     b(BindingModeId::Normal, "S-D", Action::ToggleDebug),
     b(BindingModeId::Normal, "d", Action::Dispatch(Intent::RemoveCheckout)),
     b(BindingModeId::Normal, "p", Action::Dispatch(Intent::OpenChangeRequest)),

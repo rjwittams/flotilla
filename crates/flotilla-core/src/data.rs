@@ -260,6 +260,57 @@ pub struct GroupedWorkItems {
     pub selectable_indices: Vec<usize>,
 }
 
+impl GroupedWorkItems {
+    /// Return a new `GroupedWorkItems` with archived/expired session-only items removed.
+    /// Agent items are never filtered. Items with non-Session kinds are kept.
+    pub fn filter_archived_sessions(&self, providers: &ProviderData) -> GroupedWorkItems {
+        use flotilla_protocol::SessionStatus;
+
+        let mut entries = Vec::new();
+        let mut selectable = Vec::new();
+
+        for entry in &self.table_entries {
+            match entry {
+                GroupEntry::Item(item) => {
+                    if item.kind == WorkItemKind::Session {
+                        let is_archived = item
+                            .session_key
+                            .as_deref()
+                            .and_then(|k| providers.sessions.get(k))
+                            .is_some_and(|s| matches!(s.status, SessionStatus::Archived | SessionStatus::Expired));
+                        if is_archived {
+                            continue;
+                        }
+                    }
+                    selectable.push(entries.len());
+                    entries.push(entry.clone());
+                }
+                GroupEntry::Header(_) => {
+                    entries.push(entry.clone());
+                }
+            }
+        }
+
+        // Remove orphaned headers (header followed by another header or end-of-list)
+        let mut cleaned = Vec::new();
+        let mut cleaned_selectable = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            if let GroupEntry::Header(_) = entry {
+                let next_is_item = entries.get(i + 1).is_some_and(|e| matches!(e, GroupEntry::Item(_)));
+                if !next_is_item {
+                    continue;
+                }
+            }
+            if selectable.contains(&i) {
+                cleaned_selectable.push(cleaned.len());
+            }
+            cleaned.push(entry.clone());
+        }
+
+        GroupedWorkItems { table_entries: cleaned, selectable_indices: cleaned_selectable }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct DataStore {
     pub providers: Arc<ProviderData>,
@@ -2025,6 +2076,146 @@ mod tests {
         let g = GroupedWorkItems::default();
         assert!(g.table_entries.is_empty());
         assert!(g.selectable_indices.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // GroupedWorkItems::filter_archived_sessions tests
+    // -----------------------------------------------------------------------
+
+    fn test_session_work_item(id: &str) -> flotilla_protocol::WorkItem {
+        flotilla_protocol::WorkItem {
+            kind: WorkItemKind::Session,
+            identity: WorkItemIdentity::Session(id.into()),
+            host: flotilla_protocol::HostName::local(),
+            branch: None,
+            description: format!("session {id}"),
+            checkout: None,
+            change_request_key: None,
+            session_key: Some(id.into()),
+            issue_keys: Vec::new(),
+            workspace_refs: Vec::new(),
+            is_main_checkout: false,
+            debug_group: Vec::new(),
+            source: None,
+            terminal_keys: Vec::new(),
+            attachable_set_id: None,
+            agent_keys: Vec::new(),
+        }
+    }
+
+    fn test_cloud_agent_session(status: flotilla_protocol::SessionStatus) -> flotilla_protocol::CloudAgentSession {
+        flotilla_protocol::CloudAgentSession {
+            title: String::new(),
+            status,
+            model: None,
+            updated_at: None,
+            correlation_keys: Vec::new(),
+            provider_name: String::new(),
+            provider_display_name: String::new(),
+            item_noun: String::new(),
+        }
+    }
+
+    #[test]
+    fn filter_archived_sessions_removes_archived_and_expired() {
+        use flotilla_protocol::SessionStatus;
+
+        let active = test_session_work_item("s1");
+        let archived = test_session_work_item("s2");
+
+        let checkout = flotilla_protocol::WorkItem {
+            kind: WorkItemKind::Checkout,
+            identity: WorkItemIdentity::Checkout(flotilla_protocol::HostPath::new(
+                flotilla_protocol::HostName::local(),
+                std::path::PathBuf::from("/tmp/co"),
+            )),
+            host: flotilla_protocol::HostName::local(),
+            branch: Some("main".into()),
+            description: "checkout".into(),
+            checkout: None,
+            change_request_key: None,
+            session_key: None,
+            issue_keys: Vec::new(),
+            workspace_refs: Vec::new(),
+            is_main_checkout: false,
+            debug_group: Vec::new(),
+            source: None,
+            terminal_keys: Vec::new(),
+            attachable_set_id: None,
+            agent_keys: Vec::new(),
+        };
+
+        let mut grouped = GroupedWorkItems::default();
+        grouped.table_entries.push(GroupEntry::Header(SectionHeader("Sessions".into())));
+        grouped.selectable_indices.push(1);
+        grouped.table_entries.push(GroupEntry::Item(Box::new(active)));
+        grouped.selectable_indices.push(2);
+        grouped.table_entries.push(GroupEntry::Item(Box::new(archived)));
+        grouped.table_entries.push(GroupEntry::Header(SectionHeader("Checkouts".into())));
+        grouped.selectable_indices.push(4);
+        grouped.table_entries.push(GroupEntry::Item(Box::new(checkout)));
+
+        let mut providers = ProviderData::default();
+        providers.sessions.insert("s1".into(), test_cloud_agent_session(SessionStatus::Running));
+        providers.sessions.insert("s2".into(), test_cloud_agent_session(SessionStatus::Archived));
+
+        let filtered = grouped.filter_archived_sessions(&providers);
+
+        assert_eq!(filtered.selectable_indices.len(), 2);
+        let header_count = filtered.table_entries.iter().filter(|e| matches!(e, GroupEntry::Header(_))).count();
+        assert_eq!(header_count, 2);
+    }
+
+    #[test]
+    fn filter_archived_sessions_removes_orphaned_headers() {
+        use flotilla_protocol::SessionStatus;
+
+        let archived = test_session_work_item("s1");
+
+        let mut grouped = GroupedWorkItems::default();
+        grouped.table_entries.push(GroupEntry::Header(SectionHeader("Sessions".into())));
+        grouped.selectable_indices.push(1);
+        grouped.table_entries.push(GroupEntry::Item(Box::new(archived)));
+
+        let mut providers = ProviderData::default();
+        providers.sessions.insert("s1".into(), test_cloud_agent_session(SessionStatus::Archived));
+
+        let filtered = grouped.filter_archived_sessions(&providers);
+        assert!(filtered.table_entries.is_empty());
+        assert!(filtered.selectable_indices.is_empty());
+    }
+
+    #[test]
+    fn filter_archived_sessions_keeps_agent_items() {
+        let agent = flotilla_protocol::WorkItem {
+            kind: WorkItemKind::Agent,
+            identity: WorkItemIdentity::Agent("a1".into()),
+            host: flotilla_protocol::HostName::local(),
+            branch: None,
+            description: "agent".into(),
+            checkout: None,
+            change_request_key: None,
+            session_key: None,
+            issue_keys: Vec::new(),
+            workspace_refs: Vec::new(),
+            is_main_checkout: false,
+            debug_group: Vec::new(),
+            source: None,
+            terminal_keys: Vec::new(),
+            attachable_set_id: None,
+            agent_keys: vec!["a1".into()],
+        };
+
+        let mut grouped = GroupedWorkItems::default();
+        grouped.table_entries.push(GroupEntry::Header(SectionHeader("Agents".into())));
+        grouped.selectable_indices.push(1);
+        grouped.table_entries.push(GroupEntry::Item(Box::new(agent)));
+
+        let providers = ProviderData::default();
+        let filtered = grouped.filter_archived_sessions(&providers);
+
+        assert_eq!(filtered.selectable_indices.len(), 1);
+        assert_eq!(filtered.table_entries.len(), 2);
     }
 
     // -----------------------------------------------------------------------

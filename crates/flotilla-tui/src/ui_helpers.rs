@@ -94,7 +94,9 @@ pub fn work_item_icon(
         WorkItemKind::Session => match session_status {
             Some(SessionStatus::Running) => ("▶", theme.session),
             Some(SessionStatus::Idle) => ("◆", theme.session),
-            _ => ("○", theme.session),
+            Some(SessionStatus::Archived) => ("○", theme.session),
+            Some(SessionStatus::Expired) => ("⊘", theme.session),
+            None => ("○", theme.session),
         },
         WorkItemKind::ChangeRequest => ("⊙", theme.change_request),
         WorkItemKind::RemoteBranch => ("⊶", theme.remote_branch),
@@ -108,7 +110,8 @@ pub fn session_status_display(status: &SessionStatus) -> &'static str {
     match status {
         SessionStatus::Running => "▶",
         SessionStatus::Idle => "◆",
-        SessionStatus::Archived | SessionStatus::Expired => "○",
+        SessionStatus::Archived => "○",
+        SessionStatus::Expired => "⊘",
     }
 }
 
@@ -391,7 +394,16 @@ mod tests {
         assert_eq!(session_status_display(&SessionStatus::Running), "▶");
         assert_eq!(session_status_display(&SessionStatus::Idle), "◆");
         assert_eq!(session_status_display(&SessionStatus::Archived), "○");
-        assert_eq!(session_status_display(&SessionStatus::Expired), "○");
+        assert_eq!(session_status_display(&SessionStatus::Expired), "⊘");
+    }
+
+    #[test]
+    fn expired_icon_differs_from_archived() {
+        assert_ne!(
+            session_status_display(&SessionStatus::Expired),
+            session_status_display(&SessionStatus::Archived),
+            "expired and archived should have distinct icons"
+        );
     }
 
     #[test]
