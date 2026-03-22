@@ -116,6 +116,7 @@ pub struct RepoPage {
     pub pending_actions: HashMap<WorkItemIdentity, PendingAction>,
     pub layout: RepoViewLayout,
     pub show_providers: bool,
+    pub show_archived: bool,
     pub active_search_query: Option<String>,
     last_seen_generation: u64,
     double_click: DoubleClickState,
@@ -132,6 +133,7 @@ impl RepoPage {
             pending_actions: HashMap::new(),
             layout,
             show_providers: false,
+            show_archived: false,
             active_search_query: None,
             last_seen_generation: 0,
             double_click: DoubleClickState::default(),
@@ -159,6 +161,7 @@ impl RepoPage {
                 sessions: data.labels.cloud_agents.section.clone(),
             };
             let grouped = flotilla_core::data::group_work_items(&data.work_items, &data.providers, &section_labels, &data.path);
+            let grouped = if self.show_archived { grouped } else { grouped.filter_archived_sessions(&data.providers) };
             self.table.update_items(grouped);
 
             // Prune stale multi_selected and pending_actions
@@ -255,6 +258,8 @@ impl RepoPage {
             ctx.app_actions.push(AppAction::ClearSearchQuery { repo: repo_identity });
         } else if self.show_providers {
             self.show_providers = false;
+        } else if self.show_archived {
+            self.show_archived = false;
         } else if !self.multi_selected.is_empty() {
             self.multi_selected.clear();
         } else {
@@ -304,6 +309,10 @@ impl InteractiveWidget for RepoPage {
             }
             Action::ToggleProviders => {
                 self.show_providers = !self.show_providers;
+                Outcome::Consumed
+            }
+            Action::ToggleArchived => {
+                self.show_archived = !self.show_archived;
                 Outcome::Consumed
             }
             Action::CycleLayout => {
@@ -426,6 +435,8 @@ impl InteractiveWidget for RepoPage {
             Some(StatusContent::Label("PROVIDERS".into()))
         } else if let Some(query) = &self.active_search_query {
             Some(StatusContent::Label(format!("SEARCH \"{query}\"")))
+        } else if self.show_archived {
+            Some(StatusContent::Label("ARCHIVED".into()))
         } else if !self.multi_selected.is_empty() {
             Some(StatusContent::Label(format!("{} SELECTED", self.multi_selected.len())))
         } else {
@@ -751,6 +762,50 @@ mod tests {
             page.handle_action(Action::ToggleProviders, &mut ctx);
         }
         assert!(!page.show_providers);
+    }
+
+    // ── toggle_archived ──
+
+    #[test]
+    fn toggle_archived_flips_show_archived() {
+        let mut harness = TestWidgetHarness::new();
+        let data = test_repo_data(vec![]);
+        let mut page = RepoPage::new(test_repo_identity(), data, RepoViewLayout::Auto);
+
+        assert!(!page.show_archived);
+        {
+            let mut ctx = harness.ctx();
+            page.handle_action(Action::ToggleArchived, &mut ctx);
+        }
+        assert!(page.show_archived);
+        {
+            let mut ctx = harness.ctx();
+            page.handle_action(Action::ToggleArchived, &mut ctx);
+        }
+        assert!(!page.show_archived);
+    }
+
+    #[test]
+    fn dismiss_clears_show_archived_before_multi_select() {
+        let mut harness = TestWidgetHarness::new();
+        let data = test_repo_data(vec![issue_item("1")]);
+        let mut page = RepoPage::new(test_repo_identity(), data, RepoViewLayout::Auto);
+
+        page.show_archived = true;
+        page.multi_selected.insert(WorkItemIdentity::Issue("1".into()));
+
+        {
+            let mut ctx = harness.ctx();
+            page.handle_action(Action::Dismiss, &mut ctx);
+        }
+        assert!(!page.show_archived, "archived cleared first");
+        assert!(!page.multi_selected.is_empty(), "multi-select not yet cleared");
+
+        {
+            let mut ctx = harness.ctx();
+            page.handle_action(Action::Dismiss, &mut ctx);
+        }
+        assert!(page.multi_selected.is_empty(), "now multi-select cleared");
     }
 
     // ── quit ──
