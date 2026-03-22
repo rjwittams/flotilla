@@ -213,30 +213,14 @@ impl RepoState {
     /// Return delta entries that replay state from `client_seq` to current.
     ///
     /// Returns `None` if `client_seq` is not in the delta log (caller should
-    /// fall back to a full snapshot). Returns `Some(empty slice)` if the
+    /// fall back to a full snapshot). Returns `Some(empty vec)` if the
     /// client is already up to date.
-    pub(crate) fn deltas_since(&self, client_seq: u64) -> Option<&[DeltaEntry]> {
+    pub(crate) fn deltas_since(&self, client_seq: u64) -> Option<Vec<&DeltaEntry>> {
         if client_seq == self.seq {
-            return Some(&[]);
+            return Some(vec![]);
         }
         let start = self.delta_log.iter().position(|entry| entry.prev_seq == client_seq)?;
-        // VecDeque::make_contiguous guarantees a single slice, but we only
-        // have &self so we use the two-slice form and return the combined
-        // range. In practice the log is always contiguous after push_back.
-        let (front, back) = self.delta_log.as_slices();
-        if start < front.len() {
-            // All remaining entries are in front (common case when log hasn't wrapped)
-            if back.is_empty() {
-                Some(&front[start..])
-            } else {
-                // Spans both slices — fall back to None so caller sends full snapshot.
-                // This is rare (only when start is near the boundary) and correctness
-                // is more important than optimizing this edge case.
-                None
-            }
-        } else {
-            Some(&back[start - front.len()..])
-        }
+        Some(self.delta_log.iter().skip(start).collect())
     }
 
     /// Build a [`SnapshotBuildContext`] from the current state.

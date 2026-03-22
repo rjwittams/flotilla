@@ -35,6 +35,9 @@ pub(crate) struct HostRegistry {
     hosts: RwLock<HashMap<HostName, HostState>>,
     configured_peer_names: RwLock<HashSet<HostName>>,
     topology_routes: RwLock<Vec<TopologyRoute>>,
+    /// Static snapshot of the local host's summary, computed once at startup.
+    /// Not updated at runtime — provider health changes are reflected in
+    /// per-repo snapshots, not in the host-level summary.
     local_host_summary: HostSummary,
 }
 
@@ -316,6 +319,8 @@ impl HostRegistry {
                     summary.host_name = snap.host_name.clone();
                     match hosts.get_mut(&snap.host_name) {
                         Some(state) if state.seq == snap.seq => {
+                            // Same seq: idempotent re-apply of connection status only.
+                            // Summary is unchanged — same seq means same snapshot content.
                             state.connection_status = snap.connection_status.clone();
                             state.removed = false;
                         }
