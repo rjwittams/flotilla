@@ -19,8 +19,8 @@ use flotilla_core::{
         coding_agent::CloudAgentService,
         discovery::{
             test_support::{
-                fake_discovery, fake_discovery_with_provider_set, fake_discovery_with_providers, git_process_discovery,
-                init_git_repo_with_remote, FakeCheckoutManager, FakeDiscoveryProviders, FakeIssueTracker, FakeTerminalPool,
+                fake_discovery, fake_discovery_with_provider_set, fake_discovery_with_providers, fake_vcs_discovery, git_process_discovery,
+                init_git_repo_with_remote, FakeCheckoutManager, FakeDiscoveryProviders, FakeIssueTracker, FakeTerminalPool, FakeVcsState,
                 FakeWorkspaceManager,
             },
             DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostPlatform, ProviderCategory, ProviderDescriptor,
@@ -297,6 +297,23 @@ async fn daemon_for_git_repo() -> (tempfile::TempDir, PathBuf, Arc<InProcessDaem
     (temp, repo, daemon, identity)
 }
 
+async fn daemon_for_fake_repo() -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>, RepoIdentity) {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let state =
+        FakeVcsState::builder(repo.clone()).branch("main", true).remote_branch("main").checkout("main").is_main(true).build().build();
+
+    let mut discovery = fake_vcs_discovery(state);
+    discovery.repo_detectors.push(Box::new(FixedRemoteHostDetector { owner: "owner", repo: "repo" }));
+
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, discovery, HostName::local()).await;
+    let identity = daemon.tracked_repo_identity_for_path(&repo).await.expect("identity");
+    (temp, repo, daemon, identity)
+}
+
 async fn daemon_for_duplicate_git_repos() -> (tempfile::TempDir, PathBuf, PathBuf, Arc<InProcessDaemon>) {
     let temp = tempfile::tempdir().expect("create tempdir");
     let repo_a = temp.path().join("repo-a");
@@ -312,7 +329,7 @@ async fn daemon_for_duplicate_git_repos() -> (tempfile::TempDir, PathBuf, PathBu
 
 #[tokio::test]
 async fn list_hosts_includes_local_and_configured_disconnected_peers() {
-    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, _repo, daemon, _identity) = daemon_for_fake_repo().await;
 
     daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
 
@@ -329,7 +346,7 @@ async fn list_hosts_includes_local_and_configured_disconnected_peers() {
 
 #[tokio::test]
 async fn get_host_providers_returns_local_summary_and_errors_for_unknown_remote_summary() {
-    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, _repo, daemon, _identity) = daemon_for_fake_repo().await;
 
     daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
 
@@ -344,7 +361,7 @@ async fn get_host_providers_returns_local_summary_and_errors_for_unknown_remote_
 
 #[tokio::test]
 async fn list_hosts_counts_remote_repo_overlay_and_get_topology_returns_mirrored_routes() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
 
     daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
     daemon.set_peer_host_summaries(HashMap::from([(HostName::new("remote"), sample_remote_host_summary("remote"))])).await;
@@ -385,7 +402,7 @@ async fn list_hosts_counts_remote_repo_overlay_and_get_topology_returns_mirrored
 
 #[tokio::test]
 async fn get_topology_includes_configured_but_disconnected_peers() {
-    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, _repo, daemon, _identity) = daemon_for_fake_repo().await;
 
     // Configure two peers but only set routes for one
     daemon.set_configured_peer_names(vec![HostName::new("connected"), HostName::new("unreachable")]).await;
@@ -449,7 +466,7 @@ async fn daemon_broadcasts_snapshots() {
 
 #[tokio::test]
 async fn execute_broadcasts_lifecycle_events() {
-    let (_temp, repo, daemon, identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
 
     // Execute a command that goes through the spawned task path.
@@ -506,7 +523,7 @@ async fn execute_broadcasts_lifecycle_events() {
 
 #[tokio::test]
 async fn fetch_checkout_status_accepts_identity_context_repo() {
-    let (_temp, _repo, daemon, identity) = daemon_for_git_repo().await;
+    let (_temp, _repo, daemon, identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
 
     let command = Command {
@@ -842,7 +859,7 @@ async fn publish_peer_summary_normalizes_host_name() {
 
 #[tokio::test]
 async fn set_peer_providers_emits_host_snapshot_for_overlay_only_host() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
 
     let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
@@ -877,7 +894,7 @@ async fn set_peer_providers_emits_host_snapshot_for_overlay_only_host() {
 
 #[tokio::test]
 async fn replay_since_includes_overlay_only_hosts() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
 
     let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
@@ -907,7 +924,7 @@ async fn replay_since_includes_overlay_only_hosts() {
 
 #[tokio::test]
 async fn list_hosts_and_replay_drop_stale_non_configured_hosts() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
 
     let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
@@ -963,7 +980,7 @@ async fn list_hosts_and_replay_drop_stale_non_configured_hosts() {
 
 #[tokio::test]
 async fn clearing_summary_for_visible_host_emits_host_snapshot() {
-    let (_temp, _repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, _repo, daemon, _identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
     let peer_host = HostName::new("configured-peer");
 
@@ -1011,7 +1028,7 @@ async fn clearing_summary_for_visible_host_emits_host_snapshot() {
 /// client that was connected from the start.
 #[tokio::test]
 async fn replay_since_includes_peer_checkouts_with_correct_host() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
 
     // Initial refresh
@@ -1066,7 +1083,7 @@ async fn replay_since_includes_peer_checkouts_with_correct_host() {
 /// not just local provider data.
 #[tokio::test]
 async fn replay_since_unknown_seq_includes_peer_checkouts_with_correct_host() {
-    let (_temp, repo, daemon, identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
 
     // Initial refresh so daemon has state
@@ -1121,7 +1138,7 @@ async fn replay_since_unknown_seq_includes_peer_checkouts_with_correct_host() {
 /// should reflect the peer-merged view.
 #[tokio::test]
 async fn replay_since_delta_replay_includes_peer_data() {
-    let (_temp, repo, daemon, identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
 
     // First refresh — establishes seq in delta log
@@ -1354,7 +1371,7 @@ async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
 
 #[tokio::test]
 async fn get_local_providers_excludes_peer_overlay_data() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
 
     daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh local repo");
 
@@ -1391,7 +1408,7 @@ async fn get_local_providers_excludes_peer_overlay_data() {
 /// the real peer checkouts again — duplicating them.
 #[tokio::test]
 async fn get_state_does_not_reattribute_peer_checkouts_after_poll() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
 
     // Initial refresh — populates last_snapshot with local-only data
@@ -1439,7 +1456,7 @@ async fn get_state_does_not_reattribute_peer_checkouts_after_poll() {
 /// should not duplicate peer checkouts via the normalize-then-merge path.
 #[tokio::test]
 async fn set_peer_providers_after_poll_does_not_duplicate_checkouts() {
-    let (_temp, repo, daemon, _identity) = daemon_for_git_repo().await;
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
 
     // Initial refresh
