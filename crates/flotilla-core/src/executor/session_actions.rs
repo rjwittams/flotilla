@@ -29,8 +29,6 @@ pub(super) struct TeleportSessionActionService<'a> {
 
 pub(super) struct TeleportFlow<'a> {
     service: TeleportSessionActionService<'a>,
-    session_id: &'a str,
-    branch: Option<&'a str>,
     checkout_key: Option<&'a PathBuf>,
 }
 
@@ -99,10 +97,6 @@ impl<'a> ReadOnlySessionActionService<'a> {
             }
         }
     }
-
-    pub(super) async fn resolve_attach_command(&self, session_id: &str) -> Result<String, String> {
-        resolve_attach_command(session_id, self.registry, self.providers_data).await
-    }
 }
 
 impl<'a> TeleportSessionActionService<'a> {
@@ -123,10 +117,6 @@ impl<'a> TeleportSessionActionService<'a> {
             daemon_socket_path,
             local_host,
         }
-    }
-
-    pub(super) async fn resolve_attach_command(&self, session_id: &str) -> Result<String, String> {
-        self.read_only.resolve_attach_command(session_id).await
     }
 
     pub(super) async fn resolve_teleport_checkout_path(
@@ -190,8 +180,8 @@ impl<'a> TeleportFlow<'a> {
         attachable_store: &'a SharedAttachableStore,
         daemon_socket_path: Option<&'a Path>,
         local_host: &'a HostName,
-        session_id: &'a str,
-        branch: Option<&'a str>,
+        _session_id: &'a str,
+        _branch: Option<&'a str>,
         checkout_key: Option<&'a PathBuf>,
     ) -> Self {
         Self {
@@ -204,29 +194,12 @@ impl<'a> TeleportFlow<'a> {
                 daemon_socket_path,
                 local_host,
             ),
-            session_id,
-            branch,
             checkout_key,
         }
     }
 
     pub(super) async fn initial_checkout_path(&self) -> Result<Option<PathBuf>, String> {
         self.service.resolve_teleport_checkout_path(self.checkout_key, None).await
-    }
-
-    pub(super) async fn resolve_attach_step(&self) -> Result<String, String> {
-        self.service.resolve_attach_command(self.session_id).await
-    }
-
-    pub(super) async fn create_workspace_step(&self, checkout_path: &Path, teleport_cmd: &str) -> Result<(), String> {
-        self.service.create_workspace_for_teleport(checkout_path, self.branch, teleport_cmd).await
-    }
-
-    pub(super) async fn execute(&self) -> Result<(), String> {
-        let teleport_cmd = self.resolve_attach_step().await?;
-        let checkout_path = self.service.resolve_teleport_checkout_path(self.checkout_key, self.branch).await?;
-        let checkout_path = checkout_path.ok_or_else(|| "Could not determine checkout path for teleport".to_string())?;
-        self.create_workspace_step(&checkout_path, &teleport_cmd).await
     }
 }
 

@@ -28,8 +28,7 @@ use crate::{
     config::ConfigStore,
     convert::snapshot_to_proto,
     daemon::DaemonHandle,
-    delta,
-    executor::{self, ExecutionPlan},
+    delta, executor,
     issue_cache::IssueCache,
     model::{provider_names_from_registry, repo_name, RepoModel},
     providers::discovery::{discover_providers, DiscoveryResult, DiscoveryRuntime, EnvironmentBag, UnmetRequirement},
@@ -2221,10 +2220,8 @@ impl DaemonHandle for InProcessDaemon {
             description,
         });
 
-        // Spawn the entire build_plan + execution so execute() returns the
-        // command_id immediately. This keeps the TUI event loop responsive —
-        // build_plan runs execute() inline for Immediate commands, which may
-        // do network I/O (e.g. GenerateBranchName, ArchiveSession).
+        // Spawn the entire build_plan + execution so the command_id is
+        // returned immediately. This keeps the TUI event loop responsive.
         let active_ref = Arc::clone(&self.active_command);
         let local_host = self.host_name.clone();
         let attachable_store = self.discovery.shared_attachable_store(&self.config);
@@ -2254,7 +2251,7 @@ impl DaemonHandle for InProcessDaemon {
             .await;
 
             match plan {
-                ExecutionPlan::Immediate(result) => {
+                Err(result) => {
                     refresh_trigger.notify_one();
                     let _ = event_tx.send(DaemonEvent::CommandFinished {
                         command_id: id,
@@ -2264,7 +2261,7 @@ impl DaemonHandle for InProcessDaemon {
                         result,
                     });
                 }
-                ExecutionPlan::Steps(step_plan) => {
+                Ok(step_plan) => {
                     // Reject if another step command is already running.
                     // Single-slot design: one step command at a time (global).
                     // Hold the lock across check-and-set to avoid TOCTOU races.
