@@ -9,6 +9,9 @@ pub mod provider_data;
 pub mod query;
 pub mod snapshot;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 pub use host::{HostName, HostPath, RepoIdentity};
 pub use host_summary::{DiscoveryFact, HostEnvironment, HostProviderStatus, HostSnapshot, HostSummary, SystemInfo, ToolInventory};
 pub use peer::{CommandPeerEvent, GoodbyeReason, PeerDataKind, PeerDataMessage, PeerWireMessage, RoutedPeerMessage, VectorClock};

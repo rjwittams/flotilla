@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 default = []
 replay = []
-test-support = []
+test-support = ["flotilla-protocol/test-support"]
 
 [dependencies]
 flotilla-protocol = { path = "../flotilla-protocol" }
