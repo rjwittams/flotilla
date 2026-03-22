@@ -481,9 +481,68 @@ impl StepResolver for ExecutorStepResolver {
                     None => Ok(StepOutcome::Skipped),
                 }
             }
-            StepAction::CreateWorkspaceFromPreparedTerminal { .. } => todo!("batch 2: task 3"),
-            StepAction::SelectWorkspace { .. } => todo!("batch 2: task 3"),
-            StepAction::PrepareTerminalForCheckout { .. } => todo!("batch 2: task 3"),
+            StepAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, attachable_set_id, commands } => {
+                let workspace_orchestrator = WorkspaceOrchestrator::new(
+                    &self.repo.root,
+                    self.registry.as_ref(),
+                    &self.config_base,
+                    &self.attachable_store,
+                    self.daemon_socket_path.as_deref(),
+                    &self.local_host,
+                );
+                workspace_orchestrator
+                    .create_workspace_from_prepared_terminal(&target_host, &branch, &checkout_path, attachable_set_id.as_ref(), &commands)
+                    .await?;
+                Ok(StepOutcome::Completed)
+            }
+            StepAction::SelectWorkspace { ws_ref } => {
+                info!(%ws_ref, "switching to workspace");
+                let workspace_orchestrator = WorkspaceOrchestrator::new(
+                    &self.repo.root,
+                    self.registry.as_ref(),
+                    &self.config_base,
+                    &self.attachable_store,
+                    self.daemon_socket_path.as_deref(),
+                    &self.local_host,
+                );
+                workspace_orchestrator.select_workspace(&ws_ref).await?;
+                Ok(StepOutcome::Completed)
+            }
+            StepAction::PrepareTerminalForCheckout { checkout_path, commands: requested_commands } => {
+                let host_key = HostPath::new(self.local_host.clone(), checkout_path.clone());
+                if let Some(co) = self.providers_data.checkouts.get(&host_key).cloned() {
+                    let workspace_orchestrator = WorkspaceOrchestrator::new(
+                        &self.repo.root,
+                        self.registry.as_ref(),
+                        &self.config_base,
+                        &self.attachable_store,
+                        self.daemon_socket_path.as_deref(),
+                        &self.local_host,
+                    );
+                    let attachable_set_id = workspace_orchestrator.ensure_attachable_set_for_checkout(&self.local_host, &checkout_path);
+                    let terminal_preparation = TerminalPreparationService::new(
+                        self.registry.as_ref(),
+                        &self.config_base,
+                        &self.attachable_store,
+                        self.daemon_socket_path.as_deref(),
+                    );
+                    let commands = terminal_preparation
+                        .prepare_terminal_commands(&co.branch, &checkout_path, &requested_commands, || {
+                            workspace_config(&self.repo.root, &co.branch, &checkout_path, "claude", &self.config_base)
+                        })
+                        .await?;
+                    Ok(StepOutcome::CompletedWith(CommandValue::TerminalPrepared {
+                        repo_identity: self.repo.identity.clone(),
+                        target_host: self.local_host.clone(),
+                        branch: co.branch,
+                        checkout_path,
+                        attachable_set_id,
+                        commands,
+                    }))
+                } else {
+                    Err(format!("checkout not found: {}", checkout_path.display()))
+                }
+            }
             StepAction::CheckoutImmediate { .. } => todo!("batch 2: task 4"),
             StepAction::FetchCheckoutStatus { .. } => todo!("batch 2: task 4"),
             StepAction::OpenChangeRequest { .. } => todo!("batch 2: task 2"),
