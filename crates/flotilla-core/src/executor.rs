@@ -216,24 +216,77 @@ pub async fn build_plan(
             }
         }
 
-        CommandAction::ArchiveSession { session_id } => build_archive_session_plan(session_id, registry, providers_data).await,
+        CommandAction::ArchiveSession { session_id } => build_archive_session_plan(session_id),
 
-        CommandAction::GenerateBranchName { issue_keys } => build_generate_branch_name_plan(issue_keys, registry, providers_data).await,
+        CommandAction::GenerateBranchName { issue_keys } => build_generate_branch_name_plan(issue_keys),
 
-        action => {
-            let result = execute(
-                action,
-                &repo,
-                &registry,
-                &providers_data,
-                &*runner,
-                &config_base,
-                &attachable_store,
-                daemon_socket_path.as_deref(),
-                &local_host,
-            )
-            .await;
-            ExecutionPlan::Immediate(result)
+        CommandAction::CreateWorkspaceForCheckout { checkout_path, label } => ExecutionPlan::Steps(StepPlan::new(vec![Step {
+            description: format!("Create workspace for {label}"),
+            host: StepHost::Local,
+            action: StepAction::CreateWorkspaceForCheckout { label, checkout_path: Some(checkout_path) },
+        }])),
+
+        CommandAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, attachable_set_id, commands } => {
+            ExecutionPlan::Steps(StepPlan::new(vec![Step {
+                description: format!("Create workspace from prepared terminal for {branch}"),
+                host: StepHost::Local,
+                action: StepAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, attachable_set_id, commands },
+            }]))
+        }
+
+        CommandAction::SelectWorkspace { ws_ref } => ExecutionPlan::Steps(StepPlan::new(vec![Step {
+            description: format!("Select workspace {ws_ref}"),
+            host: StepHost::Local,
+            action: StepAction::SelectWorkspace { ws_ref },
+        }])),
+
+        CommandAction::PrepareTerminalForCheckout { checkout_path, commands } => ExecutionPlan::Steps(StepPlan::new(vec![Step {
+            description: "Prepare terminal for checkout".to_string(),
+            host: StepHost::Local,
+            action: StepAction::PrepareTerminalForCheckout { checkout_path, commands },
+        }])),
+
+        CommandAction::FetchCheckoutStatus { branch, checkout_path, change_request_id } => {
+            ExecutionPlan::Steps(StepPlan::new(vec![Step {
+                description: format!("Fetch checkout status for {branch}"),
+                host: StepHost::Local,
+                action: StepAction::FetchCheckoutStatus { branch, checkout_path, change_request_id },
+            }]))
+        }
+
+        CommandAction::OpenChangeRequest { id } => ExecutionPlan::Steps(StepPlan::new(vec![Step {
+            description: format!("Open change request {id}"),
+            host: StepHost::Local,
+            action: StepAction::OpenChangeRequest { id },
+        }])),
+
+        CommandAction::CloseChangeRequest { id } => ExecutionPlan::Steps(StepPlan::new(vec![Step {
+            description: format!("Close change request {id}"),
+            host: StepHost::Local,
+            action: StepAction::CloseChangeRequest { id },
+        }])),
+
+        CommandAction::OpenIssue { id } => ExecutionPlan::Steps(StepPlan::new(vec![Step {
+            description: format!("Open issue {id}"),
+            host: StepHost::Local,
+            action: StepAction::OpenIssue { id },
+        }])),
+
+        CommandAction::LinkIssuesToChangeRequest { change_request_id, issue_ids } => ExecutionPlan::Steps(StepPlan::new(vec![Step {
+            description: format!("Link issues to change request {change_request_id}"),
+            host: StepHost::Local,
+            action: StepAction::LinkIssuesToChangeRequest { change_request_id, issue_ids },
+        }])),
+
+        // Daemon-level commands should not reach build_plan.
+        CommandAction::TrackRepoPath { .. }
+        | CommandAction::UntrackRepo { .. }
+        | CommandAction::Refresh { .. }
+        | CommandAction::SetIssueViewport { .. }
+        | CommandAction::FetchMoreIssues { .. }
+        | CommandAction::SearchIssues { .. }
+        | CommandAction::ClearIssueSearch { .. } => {
+            ExecutionPlan::Immediate(CommandValue::Error { message: "bug: daemon-level command reached per-repo executor".to_string() })
         }
     }
 }
@@ -649,17 +702,7 @@ impl StepResolver for ExecutorStepResolver {
     }
 }
 
-async fn build_archive_session_plan(
-    session_id: String,
-    registry: Arc<ProviderRegistry>,
-    providers_data: Arc<ProviderData>,
-) -> ExecutionPlan {
-    let session_actions = ReadOnlySessionActionService::new(registry.as_ref(), providers_data.as_ref());
-
-    if !session_actions.should_run_archive_as_step(&session_id) {
-        return ExecutionPlan::Immediate(session_actions.archive_session_result(&session_id).await);
-    }
-
+fn build_archive_session_plan(session_id: String) -> ExecutionPlan {
     ExecutionPlan::Steps(StepPlan::new(vec![Step {
         description: format!("Archive session {session_id}"),
         host: StepHost::Local,
@@ -667,17 +710,7 @@ async fn build_archive_session_plan(
     }]))
 }
 
-async fn build_generate_branch_name_plan(
-    issue_keys: Vec<String>,
-    registry: Arc<ProviderRegistry>,
-    providers_data: Arc<ProviderData>,
-) -> ExecutionPlan {
-    let session_actions = ReadOnlySessionActionService::new(registry.as_ref(), providers_data.as_ref());
-
-    if !session_actions.should_run_generate_branch_name_as_step() {
-        return ExecutionPlan::Immediate(session_actions.generate_branch_name_result(&issue_keys).await);
-    }
-
+fn build_generate_branch_name_plan(issue_keys: Vec<String>) -> ExecutionPlan {
     ExecutionPlan::Steps(StepPlan::new(vec![Step {
         description: "Generate branch name".to_string(),
         host: StepHost::Local,

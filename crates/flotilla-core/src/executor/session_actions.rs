@@ -39,15 +39,6 @@ impl<'a> ReadOnlySessionActionService<'a> {
         Self { registry, providers_data }
     }
 
-    pub(super) fn should_run_archive_as_step(&self, session_id: &str) -> bool {
-        self.providers_data
-            .sessions
-            .get(session_id)
-            .and_then(|session| session_provider_key(session, session_id))
-            .and_then(|provider_key| self.registry.cloud_agents.get(provider_key))
-            .is_some()
-    }
-
     pub(super) async fn archive_session_result(&self, session_id: &str) -> CommandValue {
         if let Some(session) = self.providers_data.sessions.get(session_id) {
             info!(%session_id, "archiving session");
@@ -66,10 +57,6 @@ impl<'a> ReadOnlySessionActionService<'a> {
         } else {
             CommandValue::Error { message: format!("session not found: {session_id}") }
         }
-    }
-
-    pub(super) fn should_run_generate_branch_name_as_step(&self) -> bool {
-        !self.registry.ai_utilities.is_empty()
     }
 
     pub(super) async fn generate_branch_name_result(&self, issue_keys: &[String]) -> CommandValue {
