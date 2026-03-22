@@ -1306,6 +1306,25 @@ mod tests {
         assert!(app.proto_commands.take_next().is_none());
     }
 
+    #[test]
+    fn issue_search_raw_key_resolves_through_widget_binding_mode() {
+        // Override the Shared Esc binding to SelectNext (a no-op for modals).
+        // If raw-key resolution incorrectly uses Normal/Shared instead of
+        // IssueSearch, Esc resolves to SelectNext and the modal stays open.
+        let mut app = stub_app();
+        let mut keys = flotilla_core::config::KeysConfig::default();
+        keys.shared.insert("esc".into(), "select_next".into());
+        app.keymap = crate::keymap::Keymap::from_config(&keys);
+
+        push_issue_search_widget(&mut app);
+        assert_eq!(app.screen.modal_stack.len(), 1);
+
+        // IssueSearch has its own Esc → Dismiss binding in the binding table.
+        // This must fire even though Shared.esc was overridden.
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.screen.modal_stack.len(), 0, "IssueSearch should dismiss via its own binding mode, not Shared");
+    }
+
     // ── handle_delete_confirm_key (via widget stack) ────────────────
 
     fn push_delete_confirm_widget(app: &mut App, branch: &str) {
