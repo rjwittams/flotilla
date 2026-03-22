@@ -89,7 +89,9 @@ pub(crate) async fn get_host_status(
     &self, host: &str, local_counts: HostCounts, remote_counts: &HashMap<HostName, HostCounts>,
 ) -> Result<HostStatusResponse, String>
 
-pub(crate) async fn get_host_providers(&self, host: &str) -> Result<HostProvidersResponse, String>
+pub(crate) async fn get_host_providers(
+    &self, host: &str, remote_counts: &HashMap<HostName, HostCounts>,
+) -> Result<HostProvidersResponse, String>
 
 pub(crate) async fn get_topology(&self) -> TopologyResponse
 
