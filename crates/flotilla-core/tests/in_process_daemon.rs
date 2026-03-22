@@ -286,18 +286,6 @@ fn init_git_repo_with_local_bare_remote(path: &Path, remote_path: &Path) -> Repo
     init_git_repo_with_remote(path, remote_path.to_str().expect("remote path utf8"))
 }
 
-#[allow(dead_code)] // TODO(task-9): remove once all git-backed helpers are cleaned up
-async fn daemon_for_git_repo() -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>, RepoIdentity) {
-    let temp = tempfile::tempdir().expect("create tempdir");
-    let repo = temp.path().join("repo");
-    let remote = temp.path().join("origin.git");
-    init_git_repo_with_local_bare_remote(&repo, &remote);
-    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config, local_bare_remote_discovery(), HostName::local()).await;
-    let identity = daemon.tracked_repo_identity_for_path(&repo).await.expect("repo identity should be detected");
-    (temp, repo, daemon, identity)
-}
-
 async fn daemon_for_fake_repo() -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>, RepoIdentity) {
     let temp = tempfile::tempdir().expect("create tempdir");
     let repo = temp.path().join("repo");
@@ -313,20 +301,6 @@ async fn daemon_for_fake_repo() -> (tempfile::TempDir, PathBuf, Arc<InProcessDae
     let daemon = InProcessDaemon::new(vec![repo.clone()], config, discovery, HostName::local()).await;
     let identity = daemon.tracked_repo_identity_for_path(&repo).await.expect("identity");
     (temp, repo, daemon, identity)
-}
-
-#[allow(dead_code)] // TODO(task-9): remove once all git-backed helpers are cleaned up
-async fn daemon_for_duplicate_git_repos() -> (tempfile::TempDir, PathBuf, PathBuf, Arc<InProcessDaemon>) {
-    let temp = tempfile::tempdir().expect("create tempdir");
-    let repo_a = temp.path().join("repo-a");
-    let repo_b = temp.path().join("repo-b");
-    let remote = temp.path().join("origin.git");
-    init_bare_git_remote(&remote);
-    init_git_repo_with_remote(&repo_a, remote.to_str().expect("remote path utf8"));
-    init_git_repo_with_remote(&repo_b, remote.to_str().expect("remote path utf8"));
-    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo_a.clone(), repo_b.clone()], config, local_bare_remote_discovery(), HostName::local()).await;
-    (temp, repo_a, repo_b, daemon)
 }
 
 async fn daemon_for_duplicate_fake_repos() -> (tempfile::TempDir, PathBuf, PathBuf, Arc<InProcessDaemon>) {
