@@ -33,11 +33,11 @@ Add a `test-support` feature to `flotilla-protocol/Cargo.toml` and create `src/t
 
 ```rust
 pub fn hp(path: &str) -> HostPath {
-    HostPath::new(HostName::local(), PathBuf::from(path))
+    HostPath::new(HostName::new("test-host"), PathBuf::from(path))
 }
 ```
 
-Replaces 10 identical copies across `flotilla-protocol` (lib.rs, delta.rs, snapshot.rs, provider_data.rs), `flotilla-core` (data.rs, delta.rs, convert.rs, correlation.rs, executor/tests.rs), and `flotilla-tui` (key_handlers.rs).
+Replaces 10 copies across `flotilla-protocol` (lib.rs, delta.rs, snapshot.rs, provider_data.rs), `flotilla-core` (data.rs, delta.rs, convert.rs, correlation.rs, executor/tests.rs), and `flotilla-tui` (key_handlers.rs). Eight of the ten use `HostName::new("test-host")`; two use `HostName::local()`. The shared version uses the deterministic `"test-host"` to keep tests reproducible. The two `HostName::local()` call sites (`executor/tests.rs` and `key_handlers.rs`) should be checked — if they need the real hostname, they keep a local wrapper.
 
 #### `TestCheckout` — fluent builder
 
@@ -52,6 +52,8 @@ impl TestCheckout {
     pub fn build(self) -> Checkout;
 }
 ```
+
+Default behavior: no correlation keys. `at()` adds `CorrelationKey::CheckoutPath`; `with_branch_key()` adds `CorrelationKey::Branch`. Callers opt in to the keys they need.
 
 Replaces 6 `make_checkout()` variants:
 
@@ -110,7 +112,7 @@ Replaces 4 copies across `core/data.rs`, `core/executor/tests.rs`, `core/tests/i
 
 ### Dependency updates
 
-Each consuming crate adds to its `Cargo.toml`:
+Each consuming crate adds `flotilla-protocol` with the `test-support` feature to `[dev-dependencies]`. Crates that already list `flotilla-protocol` in `[dependencies]` (without the feature) add a second entry in `[dev-dependencies]` to enable the feature for tests only — this is the standard Cargo idiom:
 
 ```toml
 [dev-dependencies]
@@ -136,7 +138,7 @@ Two identical `MockTransport` implementations exist in `peer/manager.rs` and `te
 
 `BlockingPeerSender` in `server/tests.rs` extends the capture pattern with `Notify`-based synchronization.
 
-Move all three to `peer/test_support.rs` (which already exists with `TestPeer` and `TestNetwork`), gated by `#[cfg(any(test, feature = "test-support"))]`. Delete the 5 duplicate copies.
+Move all three to `peer/test_support.rs` (which already exists with `TestPeer` and `TestNetwork`), gated by `#[cfg(any(test, feature = "test-support"))]`. Delete the 5 duplicate copies. Use the name `MockPeerSender` (2:1 majority). The consolidated `MockTransport` should include both `new()` (from manager.rs) and `with_sender()` constructors.
 
 ### `wait_for_command_result()` → daemon test support
 
@@ -194,9 +196,9 @@ Each source file replaces its inline `#[cfg(test)] mod tests { ... }` with:
 mod tests;
 ```
 
-The source file itself does not move or become a `mod.rs`. The directory contains only the test file.
+The source file itself does not move or become a `mod.rs`. The directory must be created (e.g. `mkdir crates/flotilla-core/src/data/`) and contains only the test file. The extracted test file begins with `use super::*` (or explicit imports) since the module's parent is the declaring module.
 
-For `peer/manager.rs`, the `MockPeerSender` and `MockTransport` that currently live in its test module are deleted (they moved to `peer/test_support.rs` in Phase 2), reducing the extracted file further.
+Phase 3 depends on Phase 2 for `peer/manager.rs`: the `MockPeerSender` and `MockTransport` that currently live in its test module are deleted (they moved to `peer/test_support.rs` in Phase 2), reducing the extracted file further.
 
 ### Modules kept inline
 
@@ -228,7 +230,7 @@ fn kind_returns_correct_variant() {
 }
 ```
 
-This pattern applies to accessor groups: `kind`, `branch`, `description`, `checkout`, `change_request_key`, `session_key`, `issue_keys`, `workspace_refs`, `correlation_group_idx`, `as_correlated_mut`, and `identity`. Estimated reduction: ~44 tests → ~10, eliminating ~300 lines of boilerplate.
+This pattern applies to accessor groups: `kind`, `branch`, `description`, `checkout`, `change_request_key`, `session_key`, `issue_keys`, `workspace_refs`, `correlation_group_idx`, `as_correlated_mut`, and `identity`. Some tests construct items with custom setup (e.g. `branch_from_change_request_correlated` builds a `CorrelatedWorkItem` directly rather than using a factory), so the exact reduction should be validated during implementation. Estimated reduction: ~34-44 tests → ~10, eliminating ~200-300 lines of boilerplate.
 
 The correlation tests (25 tests) stay as individual tests — each exercises a distinct scenario with different assertions.
 
