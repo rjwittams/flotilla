@@ -802,19 +802,16 @@ mod tests {
 
         // Create provider data with one archived session.
         let mut providers = ProviderData::default();
-        providers.sessions.insert(
-            "s1".into(),
-            CloudAgentSession {
-                title: String::new(),
-                status: SessionStatus::Archived,
-                model: None,
-                updated_at: None,
-                correlation_keys: Vec::new(),
-                provider_name: String::new(),
-                provider_display_name: String::new(),
-                item_noun: String::new(),
-            },
-        );
+        providers.sessions.insert("s1".into(), CloudAgentSession {
+            title: String::new(),
+            status: SessionStatus::Archived,
+            model: None,
+            updated_at: None,
+            correlation_keys: Vec::new(),
+            provider_name: String::new(),
+            provider_display_name: String::new(),
+            item_noun: String::new(),
+        });
 
         let data = Shared::new(RepoData {
             path: PathBuf::from("/tmp/test-repo"),
@@ -822,10 +819,7 @@ mod tests {
             labels: RepoLabels::default(),
             provider_names: HashMap::new(),
             provider_health: HashMap::new(),
-            work_items: vec![
-                crate::app::test_support::session_item("s1"),
-                issue_item("i1"),
-            ],
+            work_items: vec![crate::app::test_support::session_item("s1"), issue_item("i1")],
             issue_has_more: false,
             issue_total: None,
             issue_search_active: false,
@@ -854,11 +848,7 @@ mod tests {
         }
 
         // After toggling off, the archived session should be hidden again.
-        assert_eq!(
-            page.table.grouped_items.selectable_indices.len(),
-            count_before,
-            "toggle off should re-hide archived session row"
-        );
+        assert_eq!(page.table.grouped_items.selectable_indices.len(), count_before, "toggle off should re-hide archived session row");
     }
 
     #[test]
@@ -866,19 +856,16 @@ mod tests {
         use flotilla_protocol::{CloudAgentSession, SessionStatus};
 
         let mut providers = ProviderData::default();
-        providers.sessions.insert(
-            "s1".into(),
-            CloudAgentSession {
-                title: String::new(),
-                status: SessionStatus::Archived,
-                model: None,
-                updated_at: None,
-                correlation_keys: Vec::new(),
-                provider_name: String::new(),
-                provider_display_name: String::new(),
-                item_noun: String::new(),
-            },
-        );
+        providers.sessions.insert("s1".into(), CloudAgentSession {
+            title: String::new(),
+            status: SessionStatus::Archived,
+            model: None,
+            updated_at: None,
+            correlation_keys: Vec::new(),
+            provider_name: String::new(),
+            provider_display_name: String::new(),
+            item_noun: String::new(),
+        });
 
         let data = Shared::new(RepoData {
             path: PathBuf::from("/tmp/test-repo"),
@@ -886,10 +873,7 @@ mod tests {
             labels: RepoLabels::default(),
             provider_names: HashMap::new(),
             provider_health: HashMap::new(),
-            work_items: vec![
-                crate::app::test_support::session_item("s1"),
-                issue_item("i1"),
-            ],
+            work_items: vec![crate::app::test_support::session_item("s1"), issue_item("i1")],
             issue_has_more: false,
             issue_total: None,
             issue_search_active: false,
@@ -916,11 +900,7 @@ mod tests {
             page.handle_action(Action::Dismiss, &mut ctx);
         }
         assert!(!page.show_archived);
-        assert_eq!(
-            page.table.grouped_items.selectable_indices.len(),
-            hidden_count,
-            "dismiss should re-hide archived session rows"
-        );
+        assert_eq!(page.table.grouped_items.selectable_indices.len(), hidden_count, "dismiss should re-hide archived session rows");
     }
 
     #[test]
