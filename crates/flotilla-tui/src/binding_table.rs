@@ -164,18 +164,18 @@ pub static BINDINGS: &[Binding] = &[
     hk(BindingModeId::IssueSearch, "esc", "ESC", Action::Dismiss, "Cancel"),
     // ── CommandPalette ──
     // No shared fallback: typing keys must reach handle_raw_key for text input.
-    // Tab is handled by handle_raw_key for "fill" behavior (not bound here).
     b(BindingModeId::CommandPalette, "up", Action::SelectPrev),
     b(BindingModeId::CommandPalette, "down", Action::SelectNext),
     hk(BindingModeId::CommandPalette, "enter", "ENT", Action::Confirm, "Run"),
     hk(BindingModeId::CommandPalette, "esc", "ESC", Action::Dismiss, "Close"),
+    hk(BindingModeId::CommandPalette, "tab", "TAB", Action::FillSelected, "Fill"),
     // ── FilePicker ──
     // No shared fallback: typing keys must reach handle_raw_key for text input.
-    // Tab is handled by handle_raw_key for directory completion (not bound here).
     b(BindingModeId::FilePicker, "up", Action::SelectPrev),
     b(BindingModeId::FilePicker, "down", Action::SelectNext),
     hk(BindingModeId::FilePicker, "enter", "ENT", Action::Confirm, "Select"),
     hk(BindingModeId::FilePicker, "esc", "ESC", Action::Dismiss, "Cancel"),
+    hk(BindingModeId::FilePicker, "tab", "TAB", Action::FillSelected, "Complete"),
     // ── SearchActive ──
     h(BindingModeId::SearchActive, "esc", Action::Dismiss, "Clear"),
 ];

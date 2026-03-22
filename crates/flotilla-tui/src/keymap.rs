@@ -41,6 +41,7 @@ pub enum Action {
     OpenIssueSearch,
     OpenFilePicker,
     OpenCommandPalette,
+    FillSelected,
     Dispatch(Intent),
 }
 
@@ -105,6 +106,7 @@ impl Action {
             "open_issue_search" => Action::OpenIssueSearch,
             "open_file_picker" => Action::OpenFilePicker,
             "open_command_palette" => Action::OpenCommandPalette,
+            "fill_selected" => Action::FillSelected,
             // Intent-wrapping actions
             "switch_to_workspace" => Action::Dispatch(Intent::SwitchToWorkspace),
             "create_workspace" => Action::Dispatch(Intent::CreateWorkspace),
@@ -151,6 +153,7 @@ impl Action {
             Action::OpenIssueSearch => "open_issue_search",
             Action::OpenFilePicker => "open_file_picker",
             Action::OpenCommandPalette => "open_command_palette",
+            Action::FillSelected => "fill_selected",
             Action::Dispatch(intent) => match intent {
                 Intent::SwitchToWorkspace => "switch_to_workspace",
                 Intent::CreateWorkspace => "create_workspace",
@@ -194,6 +197,7 @@ impl Action {
             Action::OpenIssueSearch => "Search issues",
             Action::OpenFilePicker => "Open file picker",
             Action::OpenCommandPalette => "Open command palette",
+            Action::FillSelected => "Fill selected item",
             Action::Dispatch(intent) => match intent {
                 Intent::SwitchToWorkspace => "Switch to workspace",
                 Intent::CreateWorkspace => "Create workspace",
@@ -426,6 +430,7 @@ mod tests {
             Action::OpenIssueSearch,
             Action::OpenFilePicker,
             Action::OpenCommandPalette,
+            Action::FillSelected,
         ];
         for action in actions {
             let s = action.as_config_str();
@@ -494,6 +499,7 @@ mod tests {
             Action::OpenIssueSearch,
             Action::OpenFilePicker,
             Action::OpenCommandPalette,
+            Action::FillSelected,
             Action::Dispatch(Intent::SwitchToWorkspace),
             Action::Dispatch(Intent::CreateWorkspace),
             Action::Dispatch(Intent::RemoveCheckout),
@@ -682,8 +688,8 @@ mod tests {
         assert_eq!(km.resolve(&mode, crokey::key!(j)), None);
         assert_eq!(km.resolve(&mode, crokey::key!(k)), None);
         assert_eq!(km.resolve(&mode, kc(KeyCode::Char('?'), KeyModifiers::NONE)), None);
-        // Tab does NOT resolve (handled by handle_raw_key for "fill" behavior)
-        assert_eq!(km.resolve(&mode, crokey::key!(tab)), None);
+        // Tab resolves to FillSelected
+        assert_eq!(km.resolve(&mode, crokey::key!(tab)), Some(Action::FillSelected));
     }
 
     #[test]
@@ -699,8 +705,8 @@ mod tests {
         assert_eq!(km.resolve(&mode, crokey::key!(j)), None);
         assert_eq!(km.resolve(&mode, crokey::key!(k)), None);
         assert_eq!(km.resolve(&mode, kc(KeyCode::Char('?'), KeyModifiers::NONE)), None);
-        // Tab does NOT resolve (handled by handle_raw_key for completion)
-        assert_eq!(km.resolve(&mode, crokey::key!(tab)), None);
+        // Tab resolves to FillSelected
+        assert_eq!(km.resolve(&mode, crokey::key!(tab)), Some(Action::FillSelected));
     }
 
     // ── from_config tests ──
