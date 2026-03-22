@@ -184,7 +184,6 @@ impl super::CloudAgentService for CursorCodingAgent {
         let provider_name = &self.provider_name;
         Ok(agents
             .into_iter()
-            .filter(|a| a.session_status() != SessionStatus::Expired)
             .filter(|a| a.repo_slug().is_some_and(|r| r == *slug))
             .map(|a| {
                 let mut correlation_keys = vec![CorrelationKey::SessionRef(provider_name.clone(), a.id.clone())];

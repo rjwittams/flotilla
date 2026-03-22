@@ -226,7 +226,7 @@ impl ClaudeCodingAgent {
 
         let parsed: SessionsResponse = serde_json::from_str(body).map_err(|e| format!("session parse error: {e}"))?;
 
-        let mut sessions: Vec<WebSession> = parsed.data.into_iter().filter(|s| s.session_status != "archived").collect();
+        let mut sessions: Vec<WebSession> = parsed.data.into_iter().collect();
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(sessions)
     }
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_sessions_inner_filters_archived_sorts_and_sends_auth_header() {
+    async fn fetch_sessions_inner_includes_archived_and_sorts() {
         let _test_lock = TEST_LOCK.lock().await;
         reset_auth_state();
 
@@ -423,9 +423,10 @@ mod tests {
         let sessions = agent.fetch_sessions_inner("https://api.test").await.expect("fetch sessions");
         session.finish();
 
-        assert_eq!(sessions.len(), 2, "archived sessions should be filtered");
-        assert_eq!(sessions[0].id, "new", "sessions should be sorted desc");
-        assert_eq!(sessions[1].id, "old");
+        assert_eq!(sessions.len(), 3, "all sessions including archived should be returned");
+        assert_eq!(sessions[0].id, "skip", "archived session with newest timestamp first");
+        assert_eq!(sessions[1].id, "new");
+        assert_eq!(sessions[2].id, "old");
     }
 
     #[tokio::test]
