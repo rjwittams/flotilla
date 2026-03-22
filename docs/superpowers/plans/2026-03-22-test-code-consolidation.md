@@ -369,13 +369,13 @@ git commit -m "chore: wire test-support feature through to flotilla-protocol"
 - Modify: `crates/flotilla-protocol/src/lib.rs:249` (inline test `hp()`)
 - Modify: `crates/flotilla-protocol/src/delta.rs:101` (inline test `hp()`)
 - Modify: `crates/flotilla-protocol/src/snapshot.rs:152` (inline test `hp()`)
-- Modify: `crates/flotilla-protocol/src/provider_data.rs:362` (inline test `hp()`)
-- Modify: `crates/flotilla-core/src/data.rs:898` (inline test `hp()`)
+- Modify: `crates/flotilla-protocol/src/provider_data.rs:346` (inline test `hp()`)
+- Modify: `crates/flotilla-core/src/data.rs:894` (inline test `hp()`)
 - Modify: `crates/flotilla-core/src/delta.rs:141` (inline test `hp()`)
 - Modify: `crates/flotilla-core/src/convert.rs:299` (inline test `hp()`)
 - Modify: `crates/flotilla-core/src/providers/correlation.rs:201` (inline test `hp()`)
-- Modify: `crates/flotilla-core/src/executor/tests.rs:44` (inline test `hp()`)
-- Modify: `crates/flotilla-tui/src/app/key_handlers.rs:357` (inline test `hp()`)
+- Modify: `crates/flotilla-core/src/executor/tests.rs:42` (inline test `hp()`)
+- Modify: `crates/flotilla-tui/src/app/key_handlers.rs:356` (inline test `hp()`)
 
 - [ ] **Step 1: Replace hp() in protocol crate's own test modules**
 
@@ -415,37 +415,37 @@ git commit -am "refactor: replace 10 local hp() copies with shared flotilla_prot
 ## Task 4: Replace `make_checkout()` across 6 call sites with `TestCheckout`
 
 **Files:**
-- Modify: `crates/flotilla-core/src/data.rs:967-978`
-- Modify: `crates/flotilla-core/src/refresh.rs:647-658`
-- Modify: `crates/flotilla-core/src/executor/tests.rs:276-287`
-- Modify: `crates/flotilla-daemon/src/peer/merge.rs:15-25`
+- Modify: `crates/flotilla-core/src/data.rs:963-974`
+- Modify: `crates/flotilla-core/src/refresh.rs:630-641`
+- Modify: `crates/flotilla-core/src/executor/tests.rs:274-285`
+- Modify: `crates/flotilla-daemon/src/peer/merge.rs:11-21`
 - Modify: `crates/flotilla-daemon/tests/multi_host.rs:102-112`
 - Modify: `crates/flotilla-tui/tests/support/mod.rs:221-234`
 
 - [ ] **Step 1: Replace make_checkout() in core/data.rs**
 
-Delete the `make_checkout` function (lines 967-978). Add `use flotilla_protocol::test_support::TestCheckout;` to imports. Update all call sites in the test module:
+Delete the `make_checkout` function (lines 963-974). Add `use flotilla_protocol::test_support::TestCheckout;` to imports. Update all call sites in the test module:
 - `make_checkout(branch, path, is_main)` becomes `TestCheckout::new(branch).at(path).is_main(is_main).with_branch_key().build()`
 
 The existing version adds both `Branch` and `CheckoutPath` correlation keys.
 
 - [ ] **Step 2: Replace make_checkout() in core/refresh.rs**
 
-Delete the `make_checkout` function (lines 647-658). Add `use flotilla_protocol::test_support::TestCheckout;` to imports. Update call sites:
+Delete the `make_checkout` function (lines 630-641). Add `use flotilla_protocol::test_support::TestCheckout;` to imports. Update call sites:
 - `make_checkout(branch)` becomes `TestCheckout::new(branch).with_branch_key().build()`
 
 The existing version adds a `Branch` correlation key.
 
 - [ ] **Step 3: Replace make_checkout() in core/executor/tests.rs**
 
-Delete the `make_checkout` function (lines 276-287). Add `use flotilla_protocol::test_support::TestCheckout;` to imports. Update call sites:
+Delete the `make_checkout` function (lines 274-285). Add `use flotilla_protocol::test_support::TestCheckout;` to imports. Update call sites:
 - `make_checkout(branch, _path)` becomes `TestCheckout::new(branch).build()`
 
 The existing version adds no correlation keys.
 
 - [ ] **Step 4: Replace make_checkout() in daemon/peer/merge.rs**
 
-Delete the `make_checkout` function (lines 15-25). Add `use flotilla_protocol::test_support::TestCheckout;` to imports. Update call sites:
+Delete the `make_checkout` function (lines 11-21). Add `use flotilla_protocol::test_support::TestCheckout;` to imports. Update call sites:
 - `make_checkout(branch)` becomes `TestCheckout::new(branch).build()`
 
 - [ ] **Step 5: Replace make_checkout() in daemon/tests/multi_host.rs**
@@ -483,10 +483,10 @@ git commit -am "refactor: replace 6 make_checkout() copies with TestCheckout bui
 ## Task 5: Replace `make_change_request()`, `make_session()`, `make_issue()` with builders
 
 **Files:**
-- Modify: `crates/flotilla-core/src/data.rs` — `make_change_request` (line 980), `make_session` (line 993), `make_issue` (line 1011)
-- Modify: `crates/flotilla-core/src/refresh.rs` — `make_change_request` (line 660), `make_session` (line 673)
-- Modify: `crates/flotilla-core/src/executor/tests.rs` — `make_issue` (line 302), `make_session_for` (line 289)
-- Modify: `crates/flotilla-core/tests/in_process_daemon.rs` — `make_issue` (line 2318)
+- Modify: `crates/flotilla-core/src/data.rs` — `make_change_request` (line 976), `make_session` (line 989), `make_issue` (line 1007)
+- Modify: `crates/flotilla-core/src/refresh.rs` — `make_change_request` (line 643), `make_session` (line 656)
+- Modify: `crates/flotilla-core/src/executor/tests.rs` — `make_issue` (line 300), `make_session_for` (line 287)
+- Modify: `crates/flotilla-core/tests/in_process_daemon.rs` — `make_issue` (line 2309)
 - Modify: `crates/flotilla-tui/tests/support/mod.rs` — `make_change_request` (line 236), `make_issue` (line 250), `make_session` (line 261)
 
 - [ ] **Step 1: Replace make_change_request() in core/data.rs**
@@ -634,7 +634,6 @@ impl PeerSender for MockPeerSender {
 ```
 
 The `sent` field is `pub` so callers can construct via struct literal (`MockPeerSender { sent: Arc::clone(&existing) }`) — this matches the 40+ existing call sites in manager.rs and server/tests.rs that pass a pre-existing `Arc`. The `new()` constructor is a convenience for sites that don't need to share a buffer.
-```
 
 - [ ] **Step 3: Add BlockingPeerSender to test_support.rs**
 
@@ -784,12 +783,12 @@ git commit -am "refactor: consolidate MockPeerSender, MockTransport, BlockingPee
 ## Task 7: Consolidate `CommandRunner` mock in `flotilla-core`
 
 **Files:**
-- Modify: `crates/flotilla-core/src/providers/mod.rs:354-395`
-- Modify: `crates/flotilla-core/src/providers/terminal/cleat.rs:272-297`
+- Modify: `crates/flotilla-core/src/providers/mod.rs:355-395`
+- Modify: `crates/flotilla-core/src/providers/terminal/cleat.rs:106-131`
 
 - [ ] **Step 1: Add call tracking to the existing MockRunner in providers/mod.rs**
 
-In `crates/flotilla-core/src/providers/mod.rs` (lines 354-395), the `testing` module contains `MockRunner`. Add a `calls` field:
+In `crates/flotilla-core/src/providers/mod.rs` (lines 355-395), the `testing` module contains `MockRunner`. Add a `calls` field:
 
 ```rust
 pub struct MockRunner {
@@ -828,7 +827,7 @@ Keep the existing `run_output()` implementation from `providers/mod.rs` (which m
 
 - [ ] **Step 2: Replace cleat.rs MockRunner with import**
 
-In `crates/flotilla-core/src/providers/terminal/cleat.rs`, delete the local `MockRunner` struct and impl (lines 272-297). Replace with:
+In `crates/flotilla-core/src/providers/terminal/cleat.rs`, delete the local `MockRunner` struct and impl (lines 106-131). Replace with:
 
 ```rust
 use crate::providers::testing::MockRunner;
@@ -852,7 +851,7 @@ git commit -am "refactor: consolidate CommandRunner mocks into providers::testin
 ## Task 8: Extract `data.rs` test module to `data/tests.rs`
 
 **Files:**
-- Modify: `crates/flotilla-core/src/data.rs:891-2413`
+- Modify: `crates/flotilla-core/src/data.rs:887-2371`
 - Create: `crates/flotilla-core/src/data/tests.rs`
 
 - [ ] **Step 1: Create the directory**
@@ -861,7 +860,7 @@ Run: `mkdir -p crates/flotilla-core/src/data`
 
 - [ ] **Step 2: Move the test module body**
 
-Cut the *contents* of `mod tests { ... }` — everything between the opening `{` (line 892) and the closing `}` (last line of file). Write these contents to `crates/flotilla-core/src/data/tests.rs`. The extracted file should start with the `use` imports that were inside the module (e.g. `use super::*;`) and contain all test functions and helpers. Do not include the `mod tests {` or closing `}` lines — those are replaced by the `#[path]` declaration.
+Cut the *contents* of `mod tests { ... }` — everything between the opening `{` (line 888) and the closing `}` (last line of file). Write these contents to `crates/flotilla-core/src/data/tests.rs`. The extracted file should start with the `use` imports that were inside the module (e.g. `use super::*;`) and contain all test functions and helpers. Do not include the `mod tests {` or closing `}` lines — those are replaced by the `#[path]` declaration.
 
 - [ ] **Step 3: Replace inline module with path declaration**
 
@@ -890,7 +889,7 @@ git commit -m "refactor: extract data.rs test module to data/tests.rs"
 ## Task 9: Extract `key_handlers.rs`, `intent.rs`, `manager.rs` test modules
 
 **Files:**
-- Modify: `crates/flotilla-tui/src/app/key_handlers.rs:335-1948`
+- Modify: `crates/flotilla-tui/src/app/key_handlers.rs:334-1944`
 - Create: `crates/flotilla-tui/src/app/key_handlers/tests.rs`
 - Modify: `crates/flotilla-tui/src/app/intent.rs:230-1314`
 - Create: `crates/flotilla-tui/src/app/intent/tests.rs`
@@ -907,7 +906,7 @@ mkdir -p crates/flotilla-daemon/src/peer/manager
 
 - [ ] **Step 2: Extract key_handlers.rs tests**
 
-Move the test module body from `key_handlers.rs` (line 336 onward) to `key_handlers/tests.rs`. Replace inline module with:
+Move the test module body from `key_handlers.rs` (line 335 onward) to `key_handlers/tests.rs`. Replace inline module with:
 
 ```rust
 #[cfg(test)]
