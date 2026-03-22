@@ -204,15 +204,17 @@ async fn refresh_providers(
         }
     };
 
+    let terminal_manager = registry.terminal_pools.preferred_with_desc().map(|(desc, tp)| {
+        let tm = crate::terminal_manager::TerminalManager::new(Arc::clone(tp), attachable_store.clone());
+        (desc.display_name.clone(), tm)
+    });
     let tp_fut = async {
-        if let Some((desc, tp)) = registry.terminal_pools.preferred_with_desc() {
-            let name = desc.display_name.clone();
-            match tp.list_sessions().await {
-                Ok(sessions) => (sessions, vec![]),
-                Err(e) => (vec![], vec![(name, e)]),
-            }
-        } else {
-            (vec![], vec![])
+        match &terminal_manager {
+            Some((name, tm)) => match tm.refresh().await {
+                Ok(_) => vec![],
+                Err(e) => vec![(name.clone(), e)],
+            },
+            None => vec![],
         }
     };
 
@@ -223,7 +225,7 @@ async fn refresh_providers(
         (branches, branch_errors),
         (merged, merged_errors),
         (workspaces, ws_errors),
-        (terminal_sessions, tp_errors),
+        tp_errors,
     ) = tokio::join!(checkouts_fut, cr_fut, sessions_fut, branches_fut, merged_fut, ws_fut, tp_fut);
 
     fn collect_errors(errors: &mut Vec<RefreshError>, category: &'static str, provider_errors: Vec<(String, String)>) {
@@ -246,7 +248,6 @@ async fn refresh_providers(
     collect_errors(&mut errors, "workspaces", ws_errors);
 
     collect_errors(&mut errors, "terminals", tp_errors);
-    reconcile_terminal_statuses(&terminal_sessions, attachable_store);
 
     project_attachable_data(pd, registry, attachable_store);
     project_agent_data(pd, agent_state_store);
@@ -267,36 +268,6 @@ async fn refresh_providers(
     errors
 }
 
-/// Update terminal statuses in the attachable store from live session data.
-/// Must run before `project_attachable_data` so it reads fresh statuses.
-fn reconcile_terminal_statuses(sessions: &[crate::providers::terminal::TerminalSession], attachable_store: &SharedAttachableStore) {
-    let live: std::collections::HashMap<&str, &crate::providers::terminal::TerminalSession> =
-        sessions.iter().map(|s| (s.session_name.as_str(), s)).collect();
-
-    let Ok(mut store) = attachable_store.lock() else {
-        return;
-    };
-
-    let ids: Vec<flotilla_protocol::AttachableId> = store
-        .registry()
-        .attachables
-        .iter()
-        .filter(|(_, a)| matches!(&a.content, crate::attachable::AttachableContent::Terminal(_)))
-        .map(|(id, _)| id.clone())
-        .collect();
-
-    let mut changed = false;
-    for id in ids {
-        let status = match live.get(id.to_string().as_str()) {
-            Some(s) => s.status.clone(),
-            None => flotilla_protocol::TerminalStatus::Disconnected,
-        };
-        changed |= store.update_terminal_status(&id, status);
-    }
-    if changed {
-        let _ = store.save();
-    }
-}
 
 fn project_attachable_data(pd: &mut ProviderData, registry: &ProviderRegistry, attachable_store: &SharedAttachableStore) {
     let workspace_provider = registry.workspace_managers.preferred_with_desc().map(|(desc, _)| desc.implementation.clone());
