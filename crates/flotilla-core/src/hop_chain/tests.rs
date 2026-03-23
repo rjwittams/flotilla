@@ -343,14 +343,15 @@ fn wrap_non_command_on_stack_returns_error() {
 }
 
 #[test]
-fn wrap_updates_current_host() {
+fn wrap_does_not_update_current_host() {
     let resolver = test_resolver_no_multiplex();
     let mut context = minimal_context();
     assert_eq!(context.current_host.as_str(), "test-host");
     context.actions.push(ResolvedAction::Command(vec![Arg::Literal("ls".into())]));
 
     resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
-    assert_eq!(context.current_host.as_str(), "feta");
+    // current_host is updated by HopResolver, not by per-hop resolvers
+    assert_eq!(context.current_host.as_str(), "test-host");
 }
 
 // ── resolve_enter tests ─────────────────────────────────────────────
@@ -464,13 +465,14 @@ fn enter_with_working_directory_and_empty_command() {
 }
 
 #[test]
-fn enter_updates_current_host() {
+fn enter_does_not_update_current_host() {
     let resolver = test_resolver_no_multiplex();
     let mut context = minimal_context();
     context.actions.push(ResolvedAction::Command(vec![Arg::Literal("ls".into())]));
 
     resolver.resolve_enter(&HostName::new("feta"), &mut context).expect("resolve_enter should succeed");
-    assert_eq!(context.current_host.as_str(), "feta");
+    // current_host is updated by HopResolver, not by per-hop resolvers
+    assert_eq!(context.current_host.as_str(), "test-host");
 }
 
 // ── Regression: flatten output matches old wrap_remote_attach_commands ──

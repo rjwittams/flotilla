@@ -126,7 +126,6 @@ impl RemoteHopResolver for SshRemoteHopResolver {
         context.actions.push(ResolvedAction::Command(ssh_args));
         // Working directory has been consumed (baked into the cd prefix)
         context.working_directory = None;
-        context.current_host = host.clone();
         Ok(())
     }
 
@@ -170,7 +169,6 @@ impl RemoteHopResolver for SshRemoteHopResolver {
 
         // Working directory consumed
         context.working_directory = None;
-        context.current_host = host.clone();
         Ok(())
     }
 }
