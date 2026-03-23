@@ -91,6 +91,7 @@ struct EnvironmentHandle {
     id: EnvironmentId,
     image: ImageId,
     status: EnvironmentStatus,
+    env_snapshot: EnvironmentBag,
 }
 
 impl EnvironmentHandle {
@@ -100,6 +101,8 @@ impl EnvironmentHandle {
 ```
 
 The handle provides a `CommandRunner` that composes with the host runner (decorator pattern). This runner wraps commands via `docker exec` (or equivalent). The same runner feeds back into standard provider discovery — the `FactoryRegistry` probes inside the environment using the environment's runner, producing a per-environment provider tree identical in shape to a host-level one.
+
+The `env_snapshot` captures the interior environment's variables via login shell invocation (`docker exec <container> sh -lc env`). This reflects the real environment a process sees inside — including image defaults, profile scripts, and injected vars. The snapshot feeds into `Factory::probe()` as the `EnvironmentBag` parameter, so interior discovery sees the container's env, not the host's. Captured at create time; re-captured on restart (mounts and profiles may change).
 
 **Phase 1 implementation:** `DockerEnvironment`.
 
@@ -230,6 +233,8 @@ Commands from an environment socket are tagged with that environment context. Th
 
 Environments participate in correlation via a new `CorrelationKey::EnvironmentRef(EnvironmentId)` — an environment contains checkouts, terminal sessions, and agent instances that should group into the same work item.
 
+Items inside an environment carry `environment_id` as a **first-class field**, not just a correlation key. This is important: today's correlation is hardcoded with checkout as the primary grouping axis, which is already straining. Environments make it undeniable that different views (by work stream, by environment, by agent, by branch) need different primary axes. Storing `environment_id` richly on every item means configurable correlation views can be built later without restructuring the data model. For phase 1, `EnvironmentRef` participates in the existing union-find alongside branch-based keys — same branch + same environment = same work item.
+
 ### Token Injection
 
 Phase 1: env vars at container launch. `CreateOpts` carries token key-value pairs:
@@ -266,4 +271,5 @@ Audit every provider factory for direct host assumptions. Ensure all discovery a
 - **Image caching:** per-host image cache, cross-host image distribution
 - **DirectHost-as-Environment unification:** should bare-host execution eventually become a degenerate environment for a uniform model?
 - **Agent awareness:** should agents inside environments know they're sandboxed? How does this affect their workflow?
+- **Configurable correlation views:** the current single hardcoded grouping axis (checkout-centric) won't scale. Environments, agents, work streams, and branches are all valid primary axes. How should users switch between views? How does the correlation engine support multiple simultaneous grouping strategies?
 - **Proxmox/LXC path:** how does the model extend to managing VMs/containers on a hypervisor from a flotilla daemon in one LXC?
