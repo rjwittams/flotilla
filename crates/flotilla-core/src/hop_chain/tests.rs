@@ -14,7 +14,8 @@ use super::{
 };
 use crate::{
     attachable::{
-        shared_in_memory_attachable_store, AttachableContent, AttachableId, SharedAttachableStore, TerminalAttachable, TerminalPurpose,
+        shared_in_memory_attachable_store, Attachable, AttachableContent, AttachableId, AttachableSet, AttachableStoreApi,
+        InMemoryAttachableStore, SharedAttachableStore, TerminalAttachable, TerminalPurpose,
     },
     config::{HostsConfig, RemoteHostConfig, SshConfig},
     providers::terminal::{TerminalEnvVars, TerminalPool, TerminalSession},
@@ -1167,4 +1168,109 @@ fn hop_resolver_remote_attach_terminal_with_always_send_keys() {
     let remote_calls = remote.recorded_calls();
     assert_eq!(remote_calls.len(), 1);
     assert!(matches!(&remote_calls[0], MockRemoteCall::Enter(h) if h.as_str() == "feta"));
+}
+
+// ── HopPlanBuilder tests ─────────────────────────────────────────────
+
+use super::builder::HopPlanBuilder;
+
+/// Helper: create an in-memory store with a terminal attachable in a set with the given host affinity.
+fn builder_store_with_host(attachable_id: &AttachableId, host_affinity: Option<HostName>) -> InMemoryAttachableStore {
+    let mut store = InMemoryAttachableStore::new();
+    let set_id = store.allocate_set_id();
+    store.insert_set(AttachableSet {
+        id: set_id.clone(),
+        host_affinity,
+        checkout: None,
+        template_identity: None,
+        members: vec![attachable_id.clone()],
+    });
+    store.insert_attachable(Attachable {
+        id: attachable_id.clone(),
+        set_id,
+        content: AttachableContent::Terminal(TerminalAttachable {
+            purpose: TerminalPurpose { checkout: "feat".to_string(), role: "shell".to_string(), index: 0 },
+            command: "bash".to_string(),
+            working_directory: PathBuf::from("/repo/wt-feat"),
+            status: TerminalStatus::Disconnected,
+        }),
+    });
+    store
+}
+
+#[test]
+fn build_for_attachable_local_host_produces_attach_only() {
+    let att_id = AttachableId::new("local-term");
+    let local_host = HostName::new("my-host");
+    let store = builder_store_with_host(&att_id, Some(local_host.clone()));
+    let builder = HopPlanBuilder::new(&local_host);
+
+    let plan = builder.build_for_attachable(&att_id, &store).expect("should succeed");
+
+    assert_eq!(plan.0.len(), 1);
+    assert_eq!(plan.0[0], Hop::AttachTerminal { attachable_id: att_id });
+}
+
+#[test]
+fn build_for_attachable_remote_host_prepends_remote_hop() {
+    let att_id = AttachableId::new("remote-term");
+    let local_host = HostName::new("my-host");
+    let remote_host = HostName::new("feta");
+    let store = builder_store_with_host(&att_id, Some(remote_host.clone()));
+    let builder = HopPlanBuilder::new(&local_host);
+
+    let plan = builder.build_for_attachable(&att_id, &store).expect("should succeed");
+
+    assert_eq!(plan.0.len(), 2);
+    assert_eq!(plan.0[0], Hop::RemoteToHost { host: remote_host });
+    assert_eq!(plan.0[1], Hop::AttachTerminal { attachable_id: att_id });
+}
+
+#[test]
+fn build_for_attachable_no_host_affinity_produces_attach_only() {
+    let att_id = AttachableId::new("no-host-term");
+    let local_host = HostName::new("my-host");
+    let store = builder_store_with_host(&att_id, None);
+    let builder = HopPlanBuilder::new(&local_host);
+
+    let plan = builder.build_for_attachable(&att_id, &store).expect("should succeed");
+
+    assert_eq!(plan.0.len(), 1);
+    assert_eq!(plan.0[0], Hop::AttachTerminal { attachable_id: att_id });
+}
+
+#[test]
+fn build_for_attachable_unknown_id_returns_error() {
+    let local_host = HostName::new("my-host");
+    let store = InMemoryAttachableStore::new();
+    let builder = HopPlanBuilder::new(&local_host);
+
+    let err = builder.build_for_attachable(&AttachableId::new("nonexistent"), &store).expect_err("should fail for unknown attachable");
+    assert!(err.contains("attachable not found"), "error should mention not found: {err}");
+}
+
+#[test]
+fn build_for_prepared_command_remote_target() {
+    let local_host = HostName::new("my-host");
+    let target = HostName::new("feta");
+    let builder = HopPlanBuilder::new(&local_host);
+    let command = vec![Arg::Literal("cargo".into()), Arg::Literal("build".into())];
+
+    let plan = builder.build_for_prepared_command(&target, &command);
+
+    assert_eq!(plan.0.len(), 2);
+    assert_eq!(plan.0[0], Hop::RemoteToHost { host: target });
+    assert_eq!(plan.0[1], Hop::RunCommand { command: vec![Arg::Literal("cargo".into()), Arg::Literal("build".into())] });
+}
+
+#[test]
+fn build_for_prepared_command_local_target() {
+    let local_host = HostName::new("my-host");
+    let builder = HopPlanBuilder::new(&local_host);
+    let command = vec![Arg::Literal("cargo".into()), Arg::Literal("build".into())];
+
+    let plan = builder.build_for_prepared_command(&local_host, &command);
+
+    assert_eq!(plan.0.len(), 1);
+    assert_eq!(plan.0[0], Hop::RunCommand { command: vec![Arg::Literal("cargo".into()), Arg::Literal("build".into())] });
 }
