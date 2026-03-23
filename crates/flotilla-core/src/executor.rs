@@ -529,7 +529,7 @@ impl StepResolver for ExecutorStepResolver {
                         tm.as_ref(),
                     );
                     let attachable_set_id = workspace_orchestrator.ensure_attachable_set_for_checkout(&self.local_host, &checkout_path);
-                    let prepared = if let Some(ref tm) = tm {
+                    let commands = if let Some(ref tm) = tm {
                         let terminal_preparation = TerminalPreparationService::new(tm, self.daemon_socket_path.as_deref());
                         terminal_preparation
                             .prepare_terminal_commands(&co.branch, &checkout_path, &requested_commands, || {
@@ -537,18 +537,18 @@ impl StepResolver for ExecutorStepResolver {
                             })
                             .await?
                     } else if !requested_commands.is_empty() {
-                        requested_commands.to_vec()
+                        requested_commands
+                            .iter()
+                            .map(|cmd| ResolvedPaneCommand { role: cmd.role.clone(), args: vec![Arg::Literal(cmd.command.clone())] })
+                            .collect()
                     } else {
                         terminals::render_fallback_commands(|| {
                             workspace_config(&self.repo.root, &co.branch, &checkout_path, "claude", &self.config_base)
                         })
-                    };
-                    // Temporary bridge: wrap PreparedTerminalCommand strings as Arg::Literal.
-                    // Task 5 will change the producer to use attach_args() properly.
-                    let commands = prepared
                         .into_iter()
                         .map(|cmd| ResolvedPaneCommand { role: cmd.role, args: vec![Arg::Literal(cmd.command)] })
-                        .collect();
+                        .collect()
+                    };
                     Ok(StepOutcome::CompletedWith(CommandValue::TerminalPrepared {
                         repo_identity: self.repo.identity.clone(),
                         target_host: self.local_host.clone(),

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use flotilla_protocol::{HostName, HostPath, PreparedTerminalCommand};
+use flotilla_protocol::{arg::Arg, HostName, HostPath, PreparedTerminalCommand, ResolvedPaneCommand};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -83,7 +83,7 @@ impl<'a> TerminalPreparationService<'a> {
         checkout_path: &Path,
         requested_commands: &[PreparedTerminalCommand],
         workspace_config: impl FnOnce() -> WorkspaceConfig,
-    ) -> Result<Vec<PreparedTerminalCommand>, String> {
+    ) -> Result<Vec<ResolvedPaneCommand>, String> {
         if !requested_commands.is_empty() {
             let host = HostName::local();
             let hp = HostPath::new(host.clone(), checkout_path.to_path_buf());
@@ -110,18 +110,23 @@ impl<'a> TerminalPreparationService<'a> {
                     Ok(id) => id,
                     Err(err) => {
                         warn!(role = %cmd.role, err = %err, "failed to allocate terminal");
-                        resolved.push(cmd.clone());
+                        // Fallback: wrap original command as Arg::Literal
+                        resolved.push(ResolvedPaneCommand { role: cmd.role.clone(), args: vec![Arg::Literal(cmd.command.clone())] });
                         continue;
                     }
                 };
                 if let Err(err) = self.terminal_manager.ensure_running(&attachable_id).await {
                     warn!(attachable_id = %attachable_id, err = %err, "failed to ensure terminal");
                 }
-                match self.terminal_manager.attach_command(&attachable_id, socket_str.as_deref()).await {
-                    Ok(attach_cmd) => resolved.push(PreparedTerminalCommand { role: cmd.role.clone(), command: attach_cmd }),
+                match self.terminal_manager.attach_args(&attachable_id, socket_str.as_deref()) {
+                    Ok(args) => {
+                        debug!(attachable_id = %attachable_id, command = ?cmd.command, ?args, "terminal resolved");
+                        resolved.push(ResolvedPaneCommand { role: cmd.role.clone(), args });
+                    }
                     Err(err) => {
-                        warn!(attachable_id = %attachable_id, err = %err, "failed to get attach command, using original");
-                        resolved.push(cmd.clone());
+                        warn!(attachable_id = %attachable_id, err = %err, "failed to get attach args, using original");
+                        // Fallback: wrap original command as Arg::Literal
+                        resolved.push(ResolvedPaneCommand { role: cmd.role.clone(), args: vec![Arg::Literal(cmd.command.clone())] });
                     }
                 }
             }
@@ -133,7 +138,7 @@ impl<'a> TerminalPreparationService<'a> {
 
         let commands = if let Some(resolved) = config.resolved_commands { resolved } else { render_template_commands(&config) };
 
-        Ok(commands.into_iter().map(|(role, command)| PreparedTerminalCommand { role, command }).collect())
+        Ok(commands.into_iter().map(|(role, command)| ResolvedPaneCommand { role, args: vec![Arg::Literal(command)] }).collect())
     }
 }
 

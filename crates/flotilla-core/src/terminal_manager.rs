@@ -131,6 +131,29 @@ impl TerminalManager {
         self.pool.attach_command(&session_name, &command, &cwd, &env_vars).await
     }
 
+    /// Returns a structured `Arg` tree for attaching to a terminal session.
+    /// Like `attach_command()` but returns `Vec<Arg>` instead of a flat string.
+    pub fn attach_args(
+        &self,
+        attachable_id: &AttachableId,
+        daemon_socket_path: Option<&str>,
+    ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
+        let (command, cwd) = {
+            let store = self.store.lock().map_err(|e| format!("failed to lock store: {e}"))?;
+            let attachable =
+                store.registry().attachables.get(attachable_id).ok_or_else(|| format!("attachable not found: {attachable_id}"))?;
+            match &attachable.content {
+                AttachableContent::Terminal(t) => (t.command.clone(), t.working_directory.clone()),
+            }
+        };
+        let mut env_vars: TerminalEnvVars = vec![("FLOTILLA_ATTACHABLE_ID".to_string(), attachable_id.to_string())];
+        if let Some(socket) = daemon_socket_path {
+            env_vars.push(("FLOTILLA_DAEMON_SOCKET".to_string(), socket.to_string()));
+        }
+        let session_name = attachable_id.to_string();
+        self.pool.attach_args(&session_name, &command, &cwd, &env_vars)
+    }
+
     /// Kills a terminal session in the pool.
     pub async fn kill_terminal(&self, attachable_id: &AttachableId) -> Result<(), String> {
         let session_name = attachable_id.to_string();

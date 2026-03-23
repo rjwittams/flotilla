@@ -2323,8 +2323,9 @@ async fn prepare_terminal_commands_wraps_requested_commands_via_terminal_manager
     assert_eq!(result.len(), 2);
     assert_eq!(result[0].role, "main");
     assert_eq!(result[1].role, "main");
-    // Attach commands use the attachable ID as session name
-    assert!(result[0].command.starts_with("attach:"), "expected attach: prefix, got: {}", result[0].command);
+    // Args should contain structured Arg from attach_args(), not Literal-wrapped strings
+    let flat = flotilla_protocol::arg::flatten(&result[0].args, 0);
+    assert!(flat.starts_with("attach:"), "expected attach: prefix, got: {flat}");
 }
 
 #[tokio::test]
