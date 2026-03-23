@@ -1,0 +1,28 @@
+---
+source: crates/flotilla-core/src/hop_chain/tests.rs
+expression: resolved
+---
+ResolvedPlan(
+    [
+        Command(
+            [
+                Literal(
+                    "ssh",
+                ),
+                Quoted(
+                    "feta",
+                ),
+                NestedCommand(
+                    [
+                        Literal(
+                            "mock-attach",
+                        ),
+                        Quoted(
+                            "remote-shell-0",
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ],
+)

@@ -1,0 +1,5 @@
+---
+source: crates/flotilla-core/src/hop_chain/tests.rs
+expression: flat
+---
+ssh 'feta' 'mock-attach '\''remote-shell-0'\'''

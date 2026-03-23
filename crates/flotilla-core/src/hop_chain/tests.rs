@@ -1274,3 +1274,237 @@ fn build_for_prepared_command_local_target() {
     assert_eq!(plan.0.len(), 1);
     assert_eq!(plan.0[0], Hop::RunCommand { command: vec![Arg::Literal("cargo".into()), Arg::Literal("build".into())] });
 }
+
+// ── Snapshot tests ───────────────────────────────────────────────────
+
+/// Scenario 1: Local terminal attach (no remote hop).
+/// Plan: [AttachTerminal(id)] resolved with mock terminal resolver.
+#[test]
+fn snapshot_local_terminal_attach() {
+    let (resolver, _remote, _terminal) = mock_hop_resolver(Arc::new(AlwaysWrap));
+    let mut context = minimal_context();
+    let att_id = AttachableId::new("local-shell-0");
+
+    let plan = HopPlan(vec![Hop::AttachTerminal { attachable_id: att_id }]);
+    let resolved = resolver.resolve(&plan, &mut context).expect("resolve should succeed");
+
+    insta::assert_debug_snapshot!(resolved);
+}
+
+/// Scenario 2: Remote terminal attach via SSH with AlwaysWrap.
+/// Plan: [RemoteToHost(feta), AttachTerminal(id)] → single wrapped Command action.
+#[test]
+fn snapshot_remote_terminal_attach_always_wrap() {
+    let (resolver, _remote, _terminal) = mock_hop_resolver(Arc::new(AlwaysWrap));
+    let mut context = minimal_context();
+    let att_id = AttachableId::new("remote-shell-0");
+
+    let plan = HopPlan(vec![Hop::RemoteToHost { host: HostName::new("feta") }, Hop::AttachTerminal { attachable_id: att_id }]);
+    let resolved = resolver.resolve(&plan, &mut context).expect("resolve should succeed");
+
+    insta::assert_debug_snapshot!(resolved);
+
+    // Also snapshot the flattened output
+    let flat = match &resolved.0[0] {
+        ResolvedAction::Command(args) => flatten(args, 0),
+        other => panic!("expected Command, got {other:?}"),
+    };
+    insta::assert_snapshot!("remote_terminal_attach_always_wrap_flat", flat);
+}
+
+/// Scenario 3: Remote terminal attach via SSH with AlwaysSendKeys.
+/// Plan: [RemoteToHost(feta), AttachTerminal(id)] → 2 actions (Command + SendKeys).
+#[test]
+fn snapshot_remote_terminal_attach_always_send_keys() {
+    let (resolver, _remote, _terminal) = mock_hop_resolver(Arc::new(AlwaysSendKeys));
+    let mut context = minimal_context();
+    let att_id = AttachableId::new("remote-shell-0");
+
+    let plan = HopPlan(vec![Hop::RemoteToHost { host: HostName::new("feta") }, Hop::AttachTerminal { attachable_id: att_id }]);
+    let resolved = resolver.resolve(&plan, &mut context).expect("resolve should succeed");
+
+    insta::assert_debug_snapshot!(resolved);
+}
+
+/// Scenario 4: Collapse case — target host == local host.
+/// Plan: [RemoteToHost(test-host), RunCommand(ls)] → just RunCommand (RemoteToHost collapsed).
+#[test]
+fn snapshot_collapse_remote_to_local() {
+    let (resolver, _remote, _terminal) = mock_hop_resolver(Arc::new(AlwaysWrap));
+    let mut context = minimal_context(); // current_host = "test-host"
+
+    let plan = HopPlan(vec![Hop::RemoteToHost { host: HostName::new("test-host") }, Hop::RunCommand {
+        command: vec![Arg::Literal("ls".into()), Arg::Literal("-la".into())],
+    }]);
+    let resolved = resolver.resolve(&plan, &mut context).expect("resolve should succeed");
+
+    insta::assert_debug_snapshot!(resolved);
+}
+
+/// Scenario 5: Display impl for a multi-level Arg tree.
+#[test]
+fn snapshot_arg_display_multi_level() {
+    let arg = Arg::NestedCommand(vec![
+        Arg::Literal("$SHELL".into()),
+        Arg::Literal("-l".into()),
+        Arg::Literal("-c".into()),
+        Arg::NestedCommand(vec![
+            Arg::Literal("cd".into()),
+            Arg::Quoted("/home/alice/dev/my-repo".into()),
+            Arg::Literal("&&".into()),
+            Arg::Literal("cleat".into()),
+            Arg::Literal("attach".into()),
+            Arg::Literal("sess-1".into()),
+        ]),
+    ]);
+    let display_output = format!("{arg}");
+    insta::assert_snapshot!(display_output);
+}
+
+/// End-to-end regression: mimics the real workspace creation flow.
+///
+/// 1. Build cleat-style attach args (ResolvedPaneCommand output)
+/// 2. Build hop plan via `build_for_prepared_command`
+/// 3. Resolve with SSH hop resolver (no multiplex) and AlwaysWrap
+/// 4. Flatten to shell string
+/// 5. Snapshot the final command string
+#[test]
+fn snapshot_e2e_workspace_creation_flow() {
+    // Step 1: Build cleat-style attach args matching what CleatTerminalPool produces
+    let cleat_args = vec![
+        Arg::Quoted("cleat".into()),
+        Arg::Literal("attach".into()),
+        Arg::Quoted("feat__shell__0".into()),
+        Arg::Literal("--cwd".into()),
+        Arg::Quoted("/home/alice/dev/my-repo/wt-feat".into()),
+        Arg::Literal("--cmd".into()),
+        Arg::NestedCommand(vec![
+            Arg::Literal("env".into()),
+            Arg::Literal("FLOTILLA_ATTACHABLE_ID='feat__shell__0'".into()),
+            Arg::Literal("FLOTILLA_DAEMON_SOCKET='/tmp/flotilla.sock'".into()),
+            Arg::Literal("$SHELL".into()),
+            Arg::Literal("-lc".into()),
+            Arg::Quoted("bash".into()),
+        ]),
+    ];
+
+    // Step 2: Build hop plan for a remote target
+    let local_host = HostName::new("my-laptop");
+    let target_host = HostName::new("feta");
+    let builder = HopPlanBuilder::new(&local_host);
+    let plan = builder.build_for_prepared_command(&target_host, &cleat_args);
+
+    // Step 3: Resolve with the real SSH resolver (no multiplex) and AlwaysWrap
+    let ssh_resolver = test_resolver_no_multiplex();
+    let terminal_resolver = Arc::new(super::terminal::NoopTerminalHopResolver);
+    let hop_resolver = HopResolver { remote: Arc::new(ssh_resolver), terminal: terminal_resolver, strategy: Arc::new(AlwaysWrap) };
+    let mut context = ResolutionContext {
+        current_host: local_host,
+        current_environment: None,
+        working_directory: Some(PathBuf::from("/home/alice/dev/my-repo/wt-feat")),
+        actions: Vec::new(),
+        nesting_depth: 0,
+    };
+    let resolved = hop_resolver.resolve(&plan, &mut context).expect("resolve should succeed");
+
+    // Snapshot the resolved plan structure
+    insta::assert_debug_snapshot!("e2e_workspace_resolved_plan", &resolved);
+
+    // Step 4: Flatten each action to shell strings and snapshot
+    let flattened: Vec<String> = resolved
+        .0
+        .iter()
+        .map(|action| match action {
+            ResolvedAction::Command(args) => format!("Command: {}", flatten(args, 0)),
+            ResolvedAction::SendKeys { steps } => format!("SendKeys: {steps:?}"),
+        })
+        .collect();
+    insta::assert_debug_snapshot!("e2e_workspace_flattened_commands", &flattened);
+}
+
+/// End-to-end: local workspace creation (no remote hop).
+/// The plan has only RunCommand — no SSH wrapping needed.
+#[test]
+fn snapshot_e2e_local_workspace_creation() {
+    let cleat_args = vec![
+        Arg::Quoted("cleat".into()),
+        Arg::Literal("attach".into()),
+        Arg::Quoted("main__shell__0".into()),
+        Arg::Literal("--cwd".into()),
+        Arg::Quoted("/home/alice/dev/my-repo".into()),
+    ];
+
+    let local_host = HostName::new("my-laptop");
+    let builder = HopPlanBuilder::new(&local_host);
+    let plan = builder.build_for_prepared_command(&local_host, &cleat_args);
+
+    let hop_resolver = HopResolver {
+        remote: Arc::new(super::remote::NoopRemoteHopResolver),
+        terminal: Arc::new(super::terminal::NoopTerminalHopResolver),
+        strategy: Arc::new(AlwaysWrap),
+    };
+    let mut context = ResolutionContext {
+        current_host: local_host,
+        current_environment: None,
+        working_directory: None,
+        actions: Vec::new(),
+        nesting_depth: 0,
+    };
+    let resolved = hop_resolver.resolve(&plan, &mut context).expect("resolve should succeed");
+
+    // Snapshot resolved plan
+    insta::assert_debug_snapshot!("e2e_local_workspace_resolved_plan", &resolved);
+
+    // Flatten and snapshot
+    let flat = match &resolved.0[0] {
+        ResolvedAction::Command(args) => flatten(args, 0),
+        other => panic!("expected Command, got {other:?}"),
+    };
+    insta::assert_snapshot!("e2e_local_workspace_flattened", flat);
+}
+
+/// End-to-end: remote workspace creation with AlwaysSendKeys strategy.
+#[test]
+fn snapshot_e2e_remote_workspace_send_keys() {
+    let cleat_args = vec![
+        Arg::Quoted("cleat".into()),
+        Arg::Literal("attach".into()),
+        Arg::Quoted("feat__shell__0".into()),
+        Arg::Literal("--cwd".into()),
+        Arg::Quoted("/home/alice/dev/my-repo/wt-feat".into()),
+    ];
+
+    let local_host = HostName::new("my-laptop");
+    let target_host = HostName::new("feta");
+    let builder = HopPlanBuilder::new(&local_host);
+    let plan = builder.build_for_prepared_command(&target_host, &cleat_args);
+
+    let ssh_resolver = test_resolver_no_multiplex();
+    let hop_resolver = HopResolver {
+        remote: Arc::new(ssh_resolver),
+        terminal: Arc::new(super::terminal::NoopTerminalHopResolver),
+        strategy: Arc::new(AlwaysSendKeys),
+    };
+    let mut context = ResolutionContext {
+        current_host: local_host,
+        current_environment: None,
+        working_directory: Some(PathBuf::from("/home/alice/dev/my-repo/wt-feat")),
+        actions: Vec::new(),
+        nesting_depth: 0,
+    };
+    let resolved = hop_resolver.resolve(&plan, &mut context).expect("resolve should succeed");
+
+    // Snapshot the resolved plan: should have 2 actions (SSH Command + SendKeys)
+    insta::assert_debug_snapshot!("e2e_remote_send_keys_resolved_plan", &resolved);
+
+    // Flatten and snapshot each action
+    let flattened: Vec<String> = resolved
+        .0
+        .iter()
+        .map(|action| match action {
+            ResolvedAction::Command(args) => format!("Command: {}", flatten(args, 0)),
+            ResolvedAction::SendKeys { steps } => format!("SendKeys: {steps:?}"),
+        })
+        .collect();
+    insta::assert_debug_snapshot!("e2e_remote_send_keys_flattened", &flattened);
+}

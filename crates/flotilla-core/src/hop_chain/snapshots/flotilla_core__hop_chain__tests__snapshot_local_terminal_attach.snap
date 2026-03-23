@@ -1,0 +1,18 @@
+---
+source: crates/flotilla-core/src/hop_chain/tests.rs
+expression: resolved
+---
+ResolvedPlan(
+    [
+        Command(
+            [
+                Literal(
+                    "mock-attach",
+                ),
+                Quoted(
+                    "local-shell-0",
+                ),
+            ],
+        ),
+    ],
+)
