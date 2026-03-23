@@ -24,6 +24,9 @@ enum Hop {
     RunCommand { command: Vec<Arg> },
 }
 
+/// Hops are ordered outermost-first: the first hop is the outermost transport layer,
+/// the last hop is the innermost action (e.g. AttachTerminal). Resolution walks
+/// inside-out (last hop first), building up the command from the inside.
 struct HopPlan(Vec<Hop>);
 ```
 
@@ -38,6 +41,8 @@ enum Arg {
 ```
 
 `Arg` is a shell-oriented tree: it models the command that will eventually be rendered for a POSIX shell consumer. `Bare` can therefore include shell syntax tokens that are intentionally emitted verbatim at the current depth (`&&`, `$SHELL`, `exec`). This keeps Phase A aligned with the actual consumers while still centralizing quoting in one place.
+
+**Safety invariant:** `Bare` is raw shell injection at the current depth. Only resolvers (trusted code) construct `Arg` values — never from user input or untrusted external data. This invariant must be maintained by all code that creates `Arg` trees.
 
 `NestedCommand` means "render this entire subtree into a single shell-quoted argument." It exists because some transports (SSH, `docker exec ... bash -lc`, future environment wrappers) need to pass the inner command as a single string argument to another shell layer. The per-hop resolver decides which wrapper shape to use:
 
@@ -78,7 +83,7 @@ Resolution walks the hop plan inside-out. A mutable `ResolutionContext` accumula
 struct ResolutionContext {
     current_host: HostName,
     current_environment: Option<EnvironmentId>,
-    working_directory: Option<PathBuf>,  // remote cwd, used by SSH wrapper for cd prefix
+    working_directory: Option<PathBuf>,  // set by HopPlanBuilder, read by resolvers (e.g. SSH cd prefix)
     actions: Vec<ResolvedAction>,
     nesting_depth: usize,
 }
@@ -175,7 +180,7 @@ impl HopResolver {
 }
 ```
 
-Walks hops inside-out (last hop first), dispatches each to the appropriate per-hop resolver, returns the accumulated `ResolvedPlan`. `RunCommand` is the leaf primitive: it pushes a `ResolvedAction::Command(command.clone())` directly. For example, given `[RemoteToHost(feta), RunCommand(cmd)]`, resolves `RunCommand` first (pushes a `Command`), then `RemoteToHost` pops and wraps it.
+Walks hops inside-out (last hop first), dispatches each to the appropriate per-hop resolver. After all hops are resolved, builds `ResolvedPlan` from `context.actions`. `RunCommand` is the leaf primitive: it pushes a `ResolvedAction::Command(command.clone())` directly. For example, given `[RemoteToHost(feta), RunCommand(cmd)]`, resolves `RunCommand` first (pushes a `Command`), then `RemoteToHost` pops and wraps it.
 
 ### Flatten
 
@@ -232,6 +237,10 @@ struct PreparedTerminalCommand {
 
 `PrepareTerminalForCheckout` on the target host produces these structured commands after allocating terminals and calling `attach_args()`. `CreateWorkspaceFromPreparedTerminal` carries them to the presentation host, which wraps them through the hop chain and flattens once at the edge when building workspace pane config.
 
+`Arg` needs serde support since it crosses the host boundary. Use adjacently tagged representation (`{"type": "Quoted", "value": "..."}`) for debuggability — the serialized form should be readable in logs and protocol traces.
+
+**Coordinated deployment:** changing `PreparedTerminalCommand.command` from `String` to `Vec<Arg>` means both the producing host (step 5) and consuming host (step 9) must be at the same version. In a multi-host mesh, deploy steps 4-5 and 9 together across all hosts. Acceptable in the current "no backwards compatibility" phase.
+
 ### Consumers
 
 **Workspace pane consumer (Phase A):** the step system resolves one `HopPlan` per prepared pane command, then flattens `Command` actions to a single string for the workspace pane config. The remote `PrepareTerminalForCheckout` step produces structured shell args from `TerminalPool::attach_args()`. The local `CreateWorkspaceFromPreparedTerminal` step builds `[RemoteToHost(target_host), RunCommand(command)]`, resolves it, and flattens once. This replaces the current flow through flattened `PreparedTerminalCommand.command` strings plus `wrap_remote_attach_commands()`.
@@ -270,11 +279,11 @@ The tree structure makes each layer independently testable:
 - **`flatten()` unit tests** — depth-0/1/2 quoting, mixed Bare/Quoted/Nested, edge cases (quotes in values, spaces, special chars)
 - **Per-hop resolver tests** — given config, produce expected `Vec<Arg>` tree. Pure functions, no I/O.
 - **Protocol / step-data tests** — `PreparedTerminalCommand` serde round-trip with nested args, and step resolver tests proving structured pane commands survive the remote-to-local handoff without flattening.
-- **`HopResolver` tests** — given plan and context, produce expected `ResolvedPlan`. Test collapse, wrapping, sendkeys boundaries, pop-wrap-push mechanics. Run the same plans through `AlwaysWrap` and `AlwaysSendKeys` strategies to verify both paths produce valid output.
+- **`HopResolver` tests** — given plan and context, produce expected `ResolvedPlan`. Test collapse, wrapping, sendkeys boundaries, pop-wrap-push mechanics. Run the same plans through `AlwaysWrap` and `AlwaysSendKeys` strategies to verify both paths produce valid output. Include a collapse test: local-only attach where `RemoteToHost(local_host)` is a no-op.
 - **`HopPlanBuilder` tests** — given attachables and hosts, produce expected `HopPlan` for `build_for_attachable()`, and verify `build_for_prepared_command()` produces the expected remote wrapper shape.
 - **End-to-end flatten tests** — given a structured prepared command with known host affinity, final flattened string matches expected output (regression against old `wrap_remote_attach_commands()` behavior).
 - **Snapshot tests** — pretty-printed `Arg` trees for common scenarios (local attach, remote attach, future 3-hop).
-- **Debug rendering tests** — verify the tree pretty-prints readably for tracing output.
+- **Debug rendering tests** — verify the tree pretty-prints readably for tracing output. Format: indented by nesting depth, `Bare` values unadorned, `Quoted` values in quotes, `NestedCommand` children indented one level. Useful for `debug!()` traces when diagnosing attach failures.
 
 ## Open Questions
 
