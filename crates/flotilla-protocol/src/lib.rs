@@ -36,7 +36,7 @@ pub(crate) mod test_helpers {
 
 pub use commands::{
     CheckoutSelector, CheckoutStatus, CheckoutTarget, Command, CommandAction, CommandValue, PreparedTerminalCommand, RepoSelector,
-    StepStatus,
+    ResolvedPaneCommand, StepStatus,
 };
 pub use delta::{Branch, BranchStatus, Change, DeltaEntry, EntryOp};
 pub use provider_data::{

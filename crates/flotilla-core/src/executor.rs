@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
 };
 
-use flotilla_protocol::{CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath};
+use flotilla_protocol::{arg::Arg, CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath, ResolvedPaneCommand};
 use tracing::{debug, error, info};
 
 use self::{
@@ -147,10 +147,18 @@ pub async fn build_plan(
         }])),
 
         CommandAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, attachable_set_id, commands } => {
+            let resolved_commands =
+                commands.into_iter().map(|cmd| ResolvedPaneCommand { role: cmd.role, args: vec![Arg::Literal(cmd.command)] }).collect();
             Ok(StepPlan::new(vec![Step {
                 description: format!("Create workspace from prepared terminal for {branch}"),
                 host: StepHost::Local,
-                action: StepAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, attachable_set_id, commands },
+                action: StepAction::CreateWorkspaceFromPreparedTerminal {
+                    target_host,
+                    branch,
+                    checkout_path,
+                    attachable_set_id,
+                    commands: resolved_commands,
+                },
             }]))
         }
 
@@ -462,6 +470,15 @@ impl StepResolver for ExecutorStepResolver {
                 }
             }
             StepAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, attachable_set_id, commands } => {
+                // Temporary bridge: flatten ResolvedPaneCommand args back to strings
+                // for the existing workspace orchestrator. Task 11 will wire in the hop chain.
+                let flat_commands: Vec<flotilla_protocol::PreparedTerminalCommand> = commands
+                    .into_iter()
+                    .map(|cmd| flotilla_protocol::PreparedTerminalCommand {
+                        role: cmd.role,
+                        command: flotilla_protocol::arg::flatten(&cmd.args, 0),
+                    })
+                    .collect();
                 let tm = self.terminal_manager();
                 let workspace_orchestrator = WorkspaceOrchestrator::new(
                     &self.repo.root,
@@ -473,7 +490,13 @@ impl StepResolver for ExecutorStepResolver {
                     tm.as_ref(),
                 );
                 workspace_orchestrator
-                    .create_workspace_from_prepared_terminal(&target_host, &branch, &checkout_path, attachable_set_id.as_ref(), &commands)
+                    .create_workspace_from_prepared_terminal(
+                        &target_host,
+                        &branch,
+                        &checkout_path,
+                        attachable_set_id.as_ref(),
+                        &flat_commands,
+                    )
                     .await?;
                 Ok(StepOutcome::Completed)
             }
@@ -506,7 +529,7 @@ impl StepResolver for ExecutorStepResolver {
                         tm.as_ref(),
                     );
                     let attachable_set_id = workspace_orchestrator.ensure_attachable_set_for_checkout(&self.local_host, &checkout_path);
-                    let commands = if let Some(ref tm) = tm {
+                    let prepared = if let Some(ref tm) = tm {
                         let terminal_preparation = TerminalPreparationService::new(tm, self.daemon_socket_path.as_deref());
                         terminal_preparation
                             .prepare_terminal_commands(&co.branch, &checkout_path, &requested_commands, || {
@@ -520,6 +543,12 @@ impl StepResolver for ExecutorStepResolver {
                             workspace_config(&self.repo.root, &co.branch, &checkout_path, "claude", &self.config_base)
                         })
                     };
+                    // Temporary bridge: wrap PreparedTerminalCommand strings as Arg::Literal.
+                    // Task 5 will change the producer to use attach_args() properly.
+                    let commands = prepared
+                        .into_iter()
+                        .map(|cmd| ResolvedPaneCommand { role: cmd.role, args: vec![Arg::Literal(cmd.command)] })
+                        .collect();
                     Ok(StepOutcome::CompletedWith(CommandValue::TerminalPrepared {
                         repo_identity: self.repo.identity.clone(),
                         target_host: self.local_host.clone(),

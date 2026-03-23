@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AttachableSetId, RepoIdentity};
+use crate::{arg::Arg, AttachableSetId, RepoIdentity};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepoSelector {
@@ -27,6 +27,14 @@ pub enum CheckoutTarget {
 pub struct PreparedTerminalCommand {
     pub role: String,
     pub command: String,
+}
+
+/// Structured resolved attach command for a workspace pane.
+/// Produced on the target host, consumed on the presentation host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPaneCommand {
+    pub role: String,
+    pub args: Vec<Arg>,
 }
 
 /// Routed command envelope shared by all frontends.
@@ -192,7 +200,7 @@ pub enum CommandValue {
         checkout_path: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attachable_set_id: Option<AttachableSetId>,
-        commands: Vec<PreparedTerminalCommand>,
+        commands: Vec<ResolvedPaneCommand>,
     },
     BranchNameGenerated {
         name: String,
@@ -392,7 +400,7 @@ mod tests {
                 branch: "feat-x".into(),
                 checkout_path: PathBuf::from("/remote/repo/feat-x"),
                 attachable_set_id: Some(AttachableSetId::new("set-1")),
-                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }],
+                commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash".into())] }],
             },
             CommandValue::BranchNameGenerated { name: "feat/cool-thing".into(), issue_ids: vec![("gh".into(), "1".into())] },
             CommandValue::CheckoutStatus(CheckoutStatus {

@@ -35,8 +35,8 @@ fn desc(name: &str) -> ProviderDescriptor {
 }
 use async_trait::async_trait;
 use flotilla_protocol::{
-    CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath, PreparedTerminalCommand, RepoSelector,
-    TerminalStatus,
+    arg::Arg, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath, PreparedTerminalCommand,
+    RepoSelector, ResolvedPaneCommand, TerminalStatus,
 };
 
 fn hp(path: &str) -> HostPath {
@@ -552,7 +552,7 @@ async fn prepare_terminal_for_checkout_returns_terminal_commands() {
             assert_eq!(branch, "feat");
             assert_eq!(checkout_path, path);
             assert!(attachable_set_id.is_some(), "prepare should allocate an attachable set");
-            assert_eq!(commands, vec![PreparedTerminalCommand { role: "main".into(), command: "claude".into() }]);
+            assert_eq!(commands, vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("claude".into())] }]);
         }
         other => panic!("expected TerminalPrepared, got {other:?}"),
     }
