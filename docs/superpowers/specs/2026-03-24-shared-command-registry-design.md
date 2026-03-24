@@ -20,11 +20,18 @@ A single command vocabulary shared across CLI, TUI command palette, TUI intents,
 - **verb**: the action to perform on the noun.
 - **verb-specific args**: additional arguments, format varies per verb.
 
+**Creation commands** are a special case: the subject doesn't exist yet, so the noun has no subject. Parameters describe what to create, and the command may return a generated ID.
+
+```
+checkout create --branch my-feature          # creation — no subject
+workspace create --checkout /path/to/co      # creation — no subject
+checkout my-feature remove                   # action on existing subject
+```
+
 ### Examples
 
 ```
 workspace feat-ws select
-checkout my-feature create
 checkout my-feature remove
 cr #42 close
 cr #42 link-issues #1,#5
@@ -32,14 +39,13 @@ issue #1,#5,#7 suggest-branch
 agent claude-1 teleport
 agent claude-1 archive
 repo flotilla-org/cleat add
-host feta checkout my-feature create        # explicit host target
-terminal $uuid ensure                       # internal/step-level command
+host feta checkout create --branch my-feat   # explicit host target
 ```
 
 When subjects are inferred:
 ```
-checkout create                             # subject from TUI selection
-cr close                                    # subject from TUI selection
+checkout create                              # subject from TUI selection
+cr close                                     # subject from TUI selection
 ```
 
 ## Command Registry
@@ -52,8 +58,8 @@ The registry is a flat table of command definitions. Each entry specifies:
 | verb | Action name |
 | description | Human-readable, for help/palette/logging |
 | aliases | Alternative names (e.g., `pr` for `cr`) |
-| subject_type | What the subject is — branch name, CR id, session id, etc. |
-| subject_cardinality | Single, optional, set |
+| subject_type | What the subject is — branch name, CR id, agent id, etc. |
+| subject_cardinality | None (creation), single, optional, set |
 | additional_args | Verb-specific argument specs |
 | availability | What context is needed (e.g., "requires a checkout", "requires a CR") |
 | completion_sources | Per-argument completion source references |
@@ -64,7 +70,7 @@ The registry is a flat table of command definitions. Each entry specifies:
 
 **User commands** appear in CLI help, palette, shell completions. These are the primary vocabulary.
 
-**Internal commands** are the same data structure but not surfaced in help by default. They're the atomic building blocks that user commands decompose into. A user *can* invoke them (for debugging, manual stepping), but they're not the normal entry point. The `terminal ensure`, `environment create`, `attachable-set ensure` commands that are currently `StepAction` variants live here.
+**Internal commands** are the same data structure but not surfaced in help by default. They're the atomic building blocks that user commands decompose into. A user *can* invoke them (for debugging, manual stepping), but they're not the normal entry point.
 
 ### Noun Vocabulary
 
@@ -82,95 +88,172 @@ The registry is a flat table of command definitions. Each entry specifies:
 | `environment` | environment id | EnvironmentProvider (per #474) |
 | `attachable-set` | set id | AttachableStore |
 
-### Current Intents → Commands
+## Command Catalog
 
-| TUI Intent | Command | Notes |
-|------------|---------|-------|
-| SwitchToWorkspace | `workspace <ref> select` | |
-| CreateWorkspace | `workspace <checkout> create` | Local/remote distinction is execution, not command |
-| RemoveCheckout | `checkout <branch> remove` | Currently fires FetchCheckoutStatus first (UI concern) |
-| CreateCheckout | `checkout <branch> create` | `--fresh` flag for new branch vs existing |
-| GenerateBranchName | `issue <ids> suggest-branch` | Set subject; AI utility call |
-| OpenChangeRequest | `cr <id> open` | Opens in browser |
-| CloseChangeRequest | `cr <id> close` | |
-| OpenIssue | `issue <id> open` | Opens in browser |
-| LinkIssuesToChangeRequest | `cr <id> link-issues <issue-ids>` | |
-| TeleportSession | `agent <id> teleport` | Renamed from session per #397 |
-| ArchiveSession | `agent <id> archive` | Renamed from session per #397 |
+### User Commands
 
-### Current StepActions → Commands
+#### workspace
 
-| StepAction | Command | Level |
-|------------|---------|-------|
-| CreateCheckout | `checkout <branch> create` | user |
-| LinkIssuesToBranch | `branch <branch> link-issues <issue-ids>` | internal |
-| RemoveCheckout | `checkout <branch> remove` | user |
-| CreateWorkspaceForCheckout | `workspace <checkout> create` | user |
-| CreateWorkspaceFromPreparedTerminal | `workspace <checkout> create-from-terminal` | internal |
-| SelectWorkspace | `workspace <ref> select` | user |
-| PrepareTerminalForCheckout | `terminal <checkout> prepare` | internal |
-| FetchCheckoutStatus | `checkout <branch> status` | internal |
-| ResolveAttachCommand | `agent <id> resolve-attach` | internal |
-| EnsureCheckoutForTeleport | `checkout <branch> ensure-for-teleport` | internal |
-| CreateTeleportWorkspace | `agent <id> create-teleport-workspace` | internal |
-| ArchiveSession | `agent <id> archive` | user |
-| GenerateBranchName | `issue <ids> suggest-branch` | user |
-| OpenChangeRequest | `cr <id> open` | user |
-| CloseChangeRequest | `cr <id> close` | user |
-| OpenIssue | `issue <id> open` | user |
-| LinkIssuesToChangeRequest | `cr <id> link-issues <issue-ids>` | internal |
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `select` | workspace ref | — | — | Switch to existing workspace |
+| `create` | (none — creation) | `--checkout <path>` | workspace ref | High-level: decomposes into terminal prepare + workspace create. Local/remote distinction is execution concern, not command concern. See composition patterns below. |
 
-### Current palette/global commands
+#### checkout
 
-| Palette entry | Command | Notes |
-|---------------|---------|-------|
-| refresh | `repo refresh` | Or `refresh` as a bare verb |
-| search | `issue search <query>` | |
-| add repo | `repo <path> add` | |
-| quit, help, theme, layout, etc. | App-level actions | Not commands — pure UI state toggles, stay outside registry |
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `create` | (none — creation) | `--branch <name>`, `--fresh` | checkout path | `--fresh` = new branch vs tracking existing. High-level: decomposes into create + link-issues + workspace create. |
+| `remove` | branch name | — | — | |
+| `status` | branch name | `--checkout-path`, `--cr-id` | checkout status | Query, not mutation. Used by TUI for delete confirmation dialog. |
 
-## Composition Model
+#### cr (alias: pr)
 
-A user command can decompose into a sequence of lower-level commands with named bindings. This replaces today's `build_plan()` match arms and the positional `prior` value threading.
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `open` | CR id | — | — | Opens in browser |
+| `close` | CR id | — | — | |
+| `link-issues` | CR id | issue ids (positional) | — | Appends "Fixes #N" to PR body |
 
-### Plan Syntax
+#### issue
 
-A plan is an ordered sequence of steps. Each step is a command invocation with bindings for inputs and outputs.
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `open` | issue id | — | — | Opens in browser |
+| `suggest-branch` | issue id(s) (set) | — | branch name | AI utility call. Subject is a set. |
+| `search` | (none) | query (positional) | — | |
+
+#### agent (currently "session", per #397)
+
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `teleport` | agent id | `--branch`, `--checkout` | — | High-level: decomposes into resolve-attach + ensure-checkout + create-workspace. |
+| `archive` | agent id | — | — | |
+
+#### repo
+
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `add` | repo path | — | — | Track a repository |
+| `remove` | repo identity | — | — | Untrack |
+| `refresh` | repo identity (optional) | — | — | None = refresh all |
+
+### Internal Commands
+
+These are the atomic building blocks. Currently `StepAction` variants, they become registry entries at `internal` level.
+
+#### checkout (internal verbs)
+
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `ensure-for-teleport` | branch name | `--checkout-key`, `--initial-path` | checkout path | Fast-path if initial-path known. Used in teleport composition. |
+
+#### branch (internal)
+
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `link-issues` | branch name | issue ids | — | Writes issue associations to git config |
+
+#### terminal (internal)
+
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `prepare` | checkout path | template commands | attachable-set id | Allocates attachable set, ensures terminals running, resolves attach args. Currently produces fat `TerminalPrepared` struct — should produce attachable-set handle instead. |
+
+#### attachable-set (internal)
+
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `ensure` | checkout path | — | set id | Allocate or reuse set for checkout |
+
+#### agent (internal verbs)
+
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `resolve-attach` | agent id | — | attach command string | Intermediate result for teleport |
+| `create-teleport-workspace` | agent id | `--branch` | — | Consumes resolved attach command + checkout path |
+
+#### workspace (internal verbs)
+
+| Verb | Subject | Additional args | Produces | Notes |
+|------|---------|-----------------|----------|-------|
+| `create-from-prepared` | (none — creation) | `--checkout <path>`, `--attachable-set <id>` | — | Creates workspace from pre-prepared terminal state. See composition patterns. |
+
+### Daemon-level Commands
+
+Commands that don't require repo context. Handled directly by the daemon.
+
+| Command | Subject | Args | Notes |
+|---------|---------|------|-------|
+| `repo add` | path | — | Detect and track |
+| `repo remove` | identity | — | Untrack |
+| `repo refresh` | identity (optional) | — | All repos if omitted |
+| `issue search` | (none) | query | Per-repo, inline |
+| `issue viewport` | (none) | count | UI-driven, inline. Not a user command — system-level. |
+
+## Composition Patterns
+
+High-level user commands decompose into sequences of lower-level commands. The binding model connects outputs from earlier steps to inputs of later steps.
+
+### Pattern: checkout create
+
+The user says "start working on this branch". This decomposes into:
 
 ```
-checkout $branch create
+checkout create --branch $branch [--fresh]
   → $checkout_path
 
-branch $branch link-issues $issue_ids
+branch $branch link-issues $issue_ids          [conditional: if $issue_ids present]
 
+workspace create --checkout $checkout_path
+```
+
+Currently `build_create_checkout_plan` in `executor.rs`.
+
+### Pattern: workspace create
+
+The user says "create a workspace for this checkout". This decomposes into terminal preparation and workspace creation. Whether the checkout is local or remote is a routing concern, not a different command.
+
+```
 terminal $checkout_path prepare
-  → $attachable_set_id, $commands
+  → $attachable_set_id
 
-workspace $checkout_path create-from-terminal $attachable_set_id $commands
+workspace create-from-prepared --checkout $checkout_path --attachable-set $attachable_set_id
 ```
 
-`$name` references are resolved from a binding table. Outputs (after `→`) are stored in the binding table for subsequent steps.
+**Note on TerminalPrepared:** Today `terminal prepare` produces a fat `TerminalPrepared` struct (repo identity, target host, branch, checkout path, attachable set id, resolved pane commands). This should produce just the attachable-set handle. The workspace creation step queries the store for what it needs using that handle. The system may cache the snapshot alongside the handle as an optimization.
 
-### Plan Definitions
+**Note on dual-target:** Today there's a split between `CreateWorkspaceForCheckout` (local) and `PrepareTerminalForCheckout → CreateWorkspaceFromPreparedTerminal` (remote, via TUI round-trip). In the registry model this is a single `workspace create` that the executor routes correctly — the TUI round-trip becomes executor-internal.
 
-Plans are defined declaratively in the registry. A user command specifies its expansion:
+### Pattern: agent teleport
+
+The user says "connect to this remote agent". This decomposes into:
 
 ```
-"checkout create" expands to:
-  1. checkout $branch create → $checkout_path
-  2. branch $branch link-issues $issue_ids    [if $issue_ids present]
-  3. workspace $checkout_path create
+agent $agent_id resolve-attach
+  → $attach_command
+
+checkout $branch ensure-for-teleport --checkout-key $checkout_key
+  → $checkout_path
+
+agent $agent_id create-teleport-workspace --branch $branch
 ```
 
-Conditional steps (step 2 above) execute only if their bindings are present. This replaces the current `StepOutcome::Skipped` pattern.
+Currently `build_teleport_session_plan` in `executor.rs`. Step 3 currently reaches into `prior` to find results from steps 1 and 2 — the binding model replaces this with named references.
 
-### Resource References
+### Pattern: checkout remove (with confirmation)
 
-Commands produce resources identified by handle (ID). The binding carries the handle, not a snapshot. Consuming commands query the authoritative state from the store using the handle. The system may carry cached snapshots alongside handles as an optimization — this is transparent to commands.
+The TUI intent `RemoveCheckout` actually fires `FetchCheckoutStatus` first to populate a confirmation dialog. The actual removal only happens after user confirmation. This is a UI flow, not a composition:
 
-### Target Routing
+- `checkout <branch> status` — query, populates dialog
+- User confirms
+- `checkout <branch> remove` — mutation
 
-Each step has an implicit or explicit target (host/environment). The plan executor routes each step to its target. This replaces `StepHost::Local | Remote(HostName)` and eventually `StepHost::Environment(EnvironmentId)` from #474.
+The registry models these as two separate commands. The TUI orchestrates the confirm-then-act flow.
+
+### Observations on Composition
+
+Some "commands" in the current code are really pre-composed conveniences (`checkout create` = create + link-issues + workspace). Over time, composition on the fly from primitives may replace these. For now, keeping them as named user commands that expand into plans is the right approach — they represent user intent ("start working on this branch"), not just a sequence of steps.
 
 ## Stepper / Plan Executor
 
@@ -203,10 +286,10 @@ The new stepper is a generic engine that replaces the current `StepAction`-speci
 The CLI is generated from the registry. Each noun becomes a subcommand group, verbs become subcommands within.
 
 ```
-flotilla workspace <ws-ref> select
-flotilla checkout <branch> create [--fresh]
-flotilla cr <id> close
-flotilla repo <path> add
+flotilla workspace feat-ws select
+flotilla checkout create --branch my-feature --fresh
+flotilla cr #42 close
+flotilla repo flotilla-org/cleat add
 flotilla refresh
 ```
 
@@ -264,7 +347,7 @@ New crate: `flotilla-commands`
 | Command definitions (noun, verb, args, description) | Yes |
 | Argument types and subject specs | Yes |
 | Completion source trait + static sources | Yes |
-| Plan composition definitions | Yes |
+| Plan composition definitions | Yes (phase 3) |
 | Registry (flat table of all commands) | Yes |
 | CLI parser generation from registry | Yes |
 | Shell completion generation | Yes |
@@ -297,6 +380,8 @@ Define the command registry with all current user-visible commands. Generate CLI
 - Shell completion via `flotilla complete`
 - All current CLI functionality preserved
 
+**Scope note:** Phase 1 maps registry commands down to existing `CommandAction` / `build_plan` / stepper. The registry is a new front door to the same back end. The existing execution machinery is unchanged.
+
 ### Phase 2: Palette Integration
 
 Command palette consumes registry for Phase 2 (#401). TUI intents become thin lookups into the registry. UI actions echo resolved commands.
@@ -315,6 +400,7 @@ Plans expressed as command sequences with named bindings. New generic stepper re
 - New stepper with binding resolution
 - `build_plan()` → declarative plans
 - Plan inspection/logging in TUI
+- `TerminalPrepared` fat struct → attachable-set handle
 
 ### Phase 4: Step Dissolution
 
@@ -330,3 +416,4 @@ Step-level commands promoted to first-class registry entries at `internal` level
 - Exact verb-specific argument syntax (positional vs flags) — to be determined per command during implementation.
 - Whether `host` and `environment` are pure target prefixes or also nouns with their own verbs (e.g., `host feta status`). Likely both.
 - Interaction model for command echo — timing, duration, palette vs status bar.
+- How composition-on-the-fly evolves — whether pre-composed user commands eventually dissolve into CLI-composable primitives (like shell pipelines) or stay as named conveniences.
