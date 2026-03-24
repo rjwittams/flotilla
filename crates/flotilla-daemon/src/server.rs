@@ -157,7 +157,7 @@ impl DaemonServer {
     /// `config` — daemon configuration store, used for hostname and peer config.
     /// `discovery` — discovery runtime used to initialize tracked repos.
     /// `socket_path` — path to the Unix domain socket.
-    /// `idle_timeout` — how long to wait after the last client disconnects before shutting down.
+    /// `idle_timeout` — how long to wait after the last active connection disconnects before shutting down.
     pub async fn new(
         repo_paths: Vec<PathBuf>,
         config: Arc<ConfigStore>,
@@ -243,7 +243,7 @@ impl DaemonServer {
             let idle_notify = Arc::clone(&client_notify);
             tokio::spawn(async move {
                 loop {
-                    // Wait until zero clients
+                    // Wait until zero active connections.
                     loop {
                         if idle_client_count.load(Ordering::SeqCst) == 0 {
                             break;
@@ -251,7 +251,7 @@ impl DaemonServer {
                         idle_notify.notified().await;
                     }
 
-                    info!(timeout_secs = idle_timeout.as_secs(), "no clients connected, waiting before shutdown");
+                    info!(timeout_secs = idle_timeout.as_secs(), "no active connections, waiting before shutdown");
 
                     // Race: timeout vs client count change
                     tokio::select! {
@@ -409,7 +409,7 @@ async fn handle_client(
                 .await;
         }
         Message::Hello { protocol_version, host_name, session_id } => {
-            PeerConnection::new(daemon, shutdown_rx, peer_data_tx, peer_manager, peer_connected_tx)
+            PeerConnection::new(daemon, shutdown_rx, peer_data_tx, peer_manager, peer_connected_tx, client_count, client_notify)
                 .run(lines, writer, protocol_version, host_name, session_id)
                 .await;
         }

@@ -1111,7 +1111,7 @@ async fn handle_client_forwards_peer_data_and_registers_peer() {
         let pm = peer_manager.lock().await;
         assert_eq!(pm.current_generation(&HostName::new("remote-host")), Some(1));
     }
-    assert_eq!(client_count.load(Ordering::SeqCst), 0);
+    assert_eq!(client_count.load(Ordering::SeqCst), 1, "active peer connection should suppress idle shutdown");
 
     drop(writer);
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
@@ -1130,6 +1130,7 @@ async fn handle_client_forwards_peer_data_and_registers_peer() {
     .expect("timeout waiting for peer disconnect");
     assert_eq!(disconnected_event.0, HostName::new("remote-host"));
     assert_eq!(disconnected_event.1, PeerConnectionState::Disconnected);
+    assert_eq!(client_count.load(Ordering::SeqCst), 0, "peer disconnect should release idle-shutdown accounting");
 
     let pm = peer_manager.lock().await;
     assert!(pm.current_generation(&HostName::new("remote-host")).is_none(), "peer should be disconnected after socket close");
