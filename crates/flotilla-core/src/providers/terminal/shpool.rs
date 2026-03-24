@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use flotilla_protocol::{arg::Arg, TerminalStatus};
 
 use super::{TerminalEnvVars, TerminalPool, TerminalSession};
-use crate::providers::{run, CommandRunner};
+use crate::providers::{run, run_output, CommandRunner};
 
 pub struct ShpoolTerminalPool {
     runner: Arc<dyn CommandRunner>,
@@ -500,17 +500,26 @@ impl TerminalPool for ShpoolTerminalPool {
         let cwd_str = cwd.display().to_string();
 
         // Create the session by attaching. Without a TTY, shpool creates the
-        // session and the attach process exits on its own.
-        run!(
+        // session and the attach process exits on its own with a non-zero
+        // status. We use run_output! to tolerate non-zero exit and only
+        // fail if the process couldn't be spawned at all.
+        let output = run_output!(
             self.runner,
             "shpool",
             &["--socket", &socket_str, "-c", &config_str, "attach", "--cmd", &cmd_str, "--dir", &cwd_str, session_name],
             Path::new("/")
         )?;
+        if !output.success {
+            tracing::debug!(
+                %session_name,
+                stderr = %output.stderr,
+                "shpool attach exited non-zero (expected without TTY)",
+            );
+        }
 
         // Detach for robustness — ensures session is disconnected even if
         // the attach process didn't exit cleanly.
-        run!(self.runner, "shpool", &["--socket", &socket_str, "-c", &config_str, "detach", session_name], Path::new("/"))?;
+        let _ = run_output!(self.runner, "shpool", &["--socket", &socket_str, "-c", &config_str, "detach", session_name], Path::new("/"));
 
         Ok(())
     }
