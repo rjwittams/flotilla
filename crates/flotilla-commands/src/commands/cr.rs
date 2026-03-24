@@ -6,7 +6,7 @@ use flotilla_protocol::{Command, CommandAction};
 use crate::Resolved;
 
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
-#[command(about = "Code review", visible_alias = "pr")]
+#[command(about = "Code review")]
 pub struct CrNoun {
     /// Change request ID
     pub subject: String,
