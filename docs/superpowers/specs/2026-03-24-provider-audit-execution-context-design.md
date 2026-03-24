@@ -81,9 +81,46 @@ Shpool's `start_daemon()` uses `tokio::process::Command::new()` because `Command
 
 ## Design
 
-### 1. Path policy module (#367)
+### Key distinction: config context vs execution context
 
-Centralize path resolution. All flotilla-managed paths resolve through a single module that checks env vars before falling back to `dirs::`:
+Two completely different categories of "path" exist in the system, and the current code conflates them:
+
+**Config/state context (daemon-side):** User preferences, terminal state, agent state, socket locations. These live on the daemon host. They're *about* things that may run in containers, but they don't exist *inside* containers. Access is through abstract store interfaces — nobody sees file paths.
+
+**Execution context (environment-side):** Where is git? Where is HOME? Where is cleat? These are discovered by running commands *inside* the execution environment via the injected `CommandRunner` and `EnvironmentBag`. They come from the environment, not from config.
+
+When discovery runs inside a container:
+- ConfigStore stays on the daemon host, serves preferences to whoever asks (which backend to use, checkout strategy, etc.)
+- The runner + env vars point inside the container
+- `Factory::probe()` already receives *both*: `config` (daemon-side prefs) and `runner` + `env` (environment-side execution)
+
+The fix is not "make ConfigStore work inside the container." It is: make ConfigStore opaque so nobody computes paths from its internals, and ensure execution-context paths come from the runner/env.
+
+### 1. Opaque ConfigStore
+
+Nobody calls `config.base_path()` and does path arithmetic on the result. The store provides data through methods; its storage layout is an internal detail.
+
+Currently, code outside ConfigStore calls `flotilla_config_dir()` to compute paths for shpool sockets, tmux state files, etc. These paths are not config — they are runtime state. They should go through a state storage abstraction, not through path arithmetic on a config directory.
+
+```rust
+// Before (leaks paths):
+let socket_path = flotilla_config_dir().join("shpool/shpool.socket");
+let state_path = dirs::config_dir().join("flotilla/tmux").join(session).join("state.toml");
+
+// After (opaque):
+// Config: ask for config data, get data back
+let checkout_config = config.resolve_checkout_config(repo_root);
+
+// State: ask the state store, it manages its own paths
+let socket_path = state_store.shpool_socket_path();
+let state = state_store.load_workspace_state("tmux", session);
+```
+
+ConfigStore's constructor still needs a base path internally (for its own file I/O), but this is resolved by the daemon at startup via the path policy module and never exposed to consumers.
+
+### 2. Path policy module (#367, internal to stores)
+
+Centralize the daemon's own file layout. All daemon-managed paths resolve through a single module:
 
 ```rust
 pub struct PathPolicy {
@@ -92,24 +129,15 @@ pub struct PathPolicy {
     state_dir: PathBuf,   // XDG_STATE_HOME/flotilla or FLOTILLA_ROOT/state
     cache_dir: PathBuf,   // XDG_CACHE_HOME/flotilla or FLOTILLA_ROOT/cache
 }
-
-impl PathPolicy {
-    pub fn from_env(env: &dyn EnvVars) -> Self;           // host discovery (reads process env)
-    pub fn from_env_vars(vars: &HashMap<String, String>) -> Self; // container discovery (Phase C: raw vars from EnvironmentHandle::env_vars())
-}
 ```
 
-Resolution order per category:
-1. `FLOTILLA_ROOT` → `<root>/<category>`
-2. Category-specific XDG env var
-3. `dirs::` fallback
-4. Hardcoded default only if all else fails
+Resolution order: `FLOTILLA_ROOT` → XDG env var → `dirs::` fallback.
 
-This replaces every `flotilla_config_dir()` call and every `dirs::config_dir()` / `dirs::home_dir()` call for flotilla-managed paths. Binary lookups (like claude's `~/.claude/local/claude`) resolve `HOME` from env vars rather than `dirs::home_dir()`.
+This is an **internal implementation detail** of the stores and the daemon, not exposed to providers. Providers never see daemon-side paths — they see config values and execution results.
 
-### 2. Push probe-time resolution
+### 3. Push probe-time resolution (execution context)
 
-For each provider that re-reads at runtime:
+For each provider that re-reads execution-context values at runtime:
 
 **Codex:** Resolve `codex_home` path during probe (from `EnvironmentBag` which already has `$CODEX_HOME` and home dir assertions). Read auth file during probe. Pass resolved auth data to constructor.
 
@@ -117,41 +145,19 @@ For each provider that re-reads at runtime:
 
 **Zellij:** Always use `session_name_override` path — factory already supports this. Remove the `std::env::var` fallback.
 
-**Cmux:** Resolve binary path from `EnvironmentBag` during probe (like cleat does), pass to constructor. Remove hardcoded `/Applications/` path.
+**Cmux:** The binary is a macOS app bundle at `/Applications/cmux.app/.../cmux` — it's not on PATH by design. The factory probe should detect the binary location using platform-aware logic (check known locations using the runner, not hardcoded path constants in the provider struct). Pass resolved binary path to constructor, like cleat does.
 
-### 3. Injectable ConfigStore base path
+### 4. Execution-context binary and path discovery
 
-`ConfigStore::new()` takes an explicit `base: PathBuf` instead of computing it from `dirs::home_dir()`. The caller (typically `InProcessDaemon` or `DiscoveryRuntime`) resolves the path via the path policy module.
-
-```rust
-impl ConfigStore {
-    pub fn new(base: PathBuf) -> Self { ... }
-    // Remove: pub fn new() that calls dirs::home_dir()
-}
-```
-
-### 4. State persistence via path policy
-
-Tmux and Zellij `state_path()` methods use the path policy's `state_dir` instead of `dirs::config_dir()`. This also addresses #367's concern about mixing config and state.
-
-```rust
-// Before:
-fn state_path(session: &str) -> Result<PathBuf, String> {
-    let config_dir = dirs::config_dir().ok_or(...)?;
-    Ok(config_dir.join("flotilla/tmux").join(session).join("state.toml"))
-}
-
-// After: accept state_dir as parameter or from stored PathPolicy
-fn state_path(state_dir: &Path, session: &str) -> PathBuf {
-    state_dir.join("tmux").join(session).join("state.toml")
-}
-```
+Binary lookups for tools like Claude (`~/.claude/local/claude`) and Cmux resolve `HOME` from the injected `EnvVars` trait, not from `dirs::home_dir()`. The detectors already receive `runner` and `env` — they should use them consistently. Platform-specific known paths are checked via the runner (`runner.exists(path, &["--version"])`) with `HOME` from env vars.
 
 ## What this does NOT address (tracked for Phase C)
 
 ### Store data model changes
 
-The stores (AttachableStore, AgentStateStore) will need environment awareness when environments exist. Terminals, agents, and attachable sets that live inside an environment need `environment_id: Option<EnvironmentId>` — where `None` means the daemon's ambient environment. This is a Phase C data model change, not a Phase B concern. Phase B ensures the stores' *initialization* is injectable (base path comes from path policy, not hardcoded); Phase C adds the environment dimension to the *data* they store.
+The stores (AttachableStore, AgentStateStore) will need environment awareness when environments exist. Terminals, agents, and attachable sets that live inside an environment need `environment_id: Option<EnvironmentId>` — where `None` means the daemon's ambient environment. This is a Phase C data model change. Phase B makes the stores opaque and properly separated (config vs state vs data); Phase C adds the environment dimension to the *data* they store.
+
+Note: these stores remain daemon-side even with environments. The daemon stores data *about* things running in containers — the stores themselves don't move into containers. The `EnvironmentHandle` provides a runner for executing commands inside the container; the stores track what the daemon knows about those commands' results.
 
 ### HostName semantics
 
@@ -169,9 +175,9 @@ The data model implication: every attachable, agent session, and checkout exists
 
 These are Phase C design decisions. Phase B's job is to not paint into a corner — which the path policy and probe-time resolution changes achieve by making the infrastructure environment-agnostic without requiring environment awareness.
 
-### Full ConfigStore abstraction
+### Full ConfigStore trait abstraction
 
-Making ConfigStore a trait (like AttachableStore) would allow environment-specific config projections, read-only views, and in-memory test implementations. This is valuable but not needed for Phase B. The injectable base path is sufficient.
+Phase B makes ConfigStore opaque (no path leakage) but keeps it as a concrete struct. Making it a trait (like AttachableStore) would enable in-memory test implementations, environment-specific config projections, and read-only views. Valuable but deferred — the opacity change is sufficient for now.
 
 ### Daemon process lifecycle
 
@@ -179,22 +185,26 @@ Making ConfigStore a trait (like AttachableStore) would allow environment-specif
 
 ## Implementation Plan
 
-### Step 1: Path policy module
+### Step 1: Make ConfigStore opaque
 
-New module (probably `crates/flotilla-core/src/path_policy.rs`) implementing `PathPolicy::from_env()`. Replaces all `flotilla_config_dir()` calls. Classify existing files into config/data/state/cache per #367.
+Remove `flotilla_config_dir()` as a public function. Remove `config.base_path()` or any path-exposing API. Code that currently computes paths from ConfigStore's base directory (shpool socket, tmux/zellij state) moves to appropriate store abstractions. ConfigStore serves data, not paths.
 
-### Step 2: Thread PathPolicy through initialization
+### Step 2: Path policy module (internal)
 
-`DiscoveryRuntime`, `InProcessDaemon`, `ConfigStore`, `AttachableStore`, `AgentStateStore` all receive paths from a `PathPolicy` instance rather than computing them.
+New module (`crates/flotilla-core/src/path_policy.rs`) implementing `PathPolicy::from_env()`. Used internally by stores and the daemon to locate their own files. Classify existing files into config/data/state/cache per #367. Not exposed to providers.
 
-### Step 3: Fix probe-time re-reads
+### Step 3: Separate state storage from config
 
-Codex auth, Cursor API key, Zellij session name, Cmux binary path — resolve at probe, pass to constructor.
+Shpool socket paths, tmux/zellij workspace state, and similar runtime state move out of ConfigStore's directory into proper state storage (via PathPolicy's `state_dir`). Access through store methods, not path computation.
 
-### Step 4: Fix detector host assumptions
+### Step 4: Fix probe-time re-reads
 
-Claude and Codex detectors use `HOME` from env vars (via `EnvVars` trait) instead of `dirs::home_dir()`.
+Codex auth, Cursor API key, Zellij session name, Cmux binary path — resolve at probe, pass to constructor. The pattern: detect during probe using `EnvironmentBag` and `CommandRunner`, store in the provider struct, never re-read.
 
-### Step 5: Verification
+### Step 5: Fix detector host assumptions
 
-Run existing test suite. Add test that constructs a `PathPolicy` from explicit env vars and verifies all paths resolve to the expected locations. Verify that `Factory::probe()` for git and cleat works with a mock runner and custom env vars (simulating container-interior discovery).
+Claude and Codex detectors use `HOME` from env vars (via `EnvVars` trait) instead of `dirs::home_dir()`. Platform-aware binary lookup uses the runner to check known locations.
+
+### Step 6: Verification
+
+Run existing test suite + CI gates (fmt, clippy, test). Add test that constructs a `PathPolicy` from explicit env vars and verifies all paths resolve correctly. Verify that `Factory::probe()` for git and cleat works with a mock runner and custom env vars (simulating container-interior discovery).
