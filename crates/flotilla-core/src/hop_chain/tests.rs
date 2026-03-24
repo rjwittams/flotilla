@@ -18,6 +18,7 @@ use crate::{
         InMemoryAttachableStore, SharedAttachableStore, TerminalAttachable, TerminalPurpose,
     },
     config::{HostsConfig, RemoteHostConfig, SshConfig},
+    path_context::ExecutionEnvironmentPath,
     providers::terminal::{TerminalEnvVars, TerminalPool, TerminalSession},
 };
 
@@ -619,7 +620,7 @@ struct FakeTerminalPool {
 struct FakePoolCall {
     session_name: String,
     command: String,
-    cwd: PathBuf,
+    cwd: ExecutionEnvironmentPath,
     env_vars: TerminalEnvVars,
 }
 
@@ -639,7 +640,7 @@ impl TerminalPool for FakeTerminalPool {
         Ok(Vec::new())
     }
 
-    async fn ensure_session(&self, _session_name: &str, _command: &str, _cwd: &Path) -> Result<(), String> {
+    async fn ensure_session(&self, _session_name: &str, _command: &str, _cwd: &ExecutionEnvironmentPath) -> Result<(), String> {
         Ok(())
     }
 
@@ -647,13 +648,13 @@ impl TerminalPool for FakeTerminalPool {
         &self,
         session_name: &str,
         command: &str,
-        cwd: &Path,
+        cwd: &ExecutionEnvironmentPath,
         env_vars: &TerminalEnvVars,
     ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
         self.calls.lock().expect("lock").push(FakePoolCall {
             session_name: session_name.to_string(),
             command: command.to_string(),
-            cwd: cwd.to_path_buf(),
+            cwd: cwd.clone(),
             env_vars: env_vars.clone(),
         });
         Ok(vec![Arg::Quoted("cleat".into()), Arg::Literal("attach".into()), Arg::Literal(session_name.to_string())])
@@ -723,7 +724,7 @@ fn terminal_resolve_pushes_command_onto_context() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].session_name, att_id.to_string());
     assert_eq!(calls[0].command, "bash");
-    assert_eq!(calls[0].cwd, PathBuf::from("/repo/wt-feat"));
+    assert_eq!(calls[0].cwd, ExecutionEnvironmentPath::new("/repo/wt-feat"));
 }
 
 #[test]

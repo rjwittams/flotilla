@@ -642,7 +642,7 @@ async fn create_workspace_from_prepared_terminal_wraps_remote_commands_in_ssh() 
     assert_ok(result);
     let created = workspace_manager.created_configs.lock().await;
     assert_eq!(created.len(), 1);
-    assert_eq!(created[0].working_directory, repo_root);
+    assert_eq!(created[0].working_directory, ExecutionEnvironmentPath::new(&repo_root));
     let resolved = created[0].resolved_commands.as_ref().expect("resolved commands");
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].0, "main");
@@ -825,8 +825,8 @@ async fn create_workspace_from_prepared_terminal_uses_local_fallback_for_remote_
     assert_ok(result);
     let created = workspace_manager.created_configs.lock().await;
     assert_eq!(created.len(), 1);
-    assert!(!created[0].working_directory.to_string_lossy().starts_with("<remote>/"));
-    assert!(created[0].working_directory.exists(), "fallback working directory should exist");
+    assert!(!created[0].working_directory.as_path().to_string_lossy().starts_with("<remote>/"));
+    assert!(created[0].working_directory.as_path().exists(), "fallback working directory should exist");
     let resolved = created[0].resolved_commands.as_ref().expect("resolved commands");
     assert!(resolved[0].1.contains("${SHELL:-/bin/sh} -l -c"), "expected login shell wrapper, got: {}", resolved[0].1);
 }
@@ -1068,14 +1068,14 @@ impl TerminalPool for MockTerminalPool {
     async fn list_sessions(&self) -> Result<Vec<crate::providers::terminal::TerminalSession>, String> {
         Ok(vec![])
     }
-    async fn ensure_session(&self, _session_name: &str, _cmd: &str, _cwd: &Path) -> Result<(), String> {
+    async fn ensure_session(&self, _session_name: &str, _cmd: &str, _cwd: &ExecutionEnvironmentPath) -> Result<(), String> {
         Ok(())
     }
     fn attach_args(
         &self,
         session_name: &str,
         _cmd: &str,
-        _cwd: &Path,
+        _cwd: &ExecutionEnvironmentPath,
         _env_vars: &crate::providers::terminal::TerminalEnvVars,
     ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
         Ok(vec![flotilla_protocol::arg::Arg::Literal(format!("attach:{session_name}"))])
@@ -1642,7 +1642,7 @@ fn workspace_config_builds_correct_struct() {
     let config = workspace_config(Path::new("/nonexistent-repo"), "my-branch", Path::new("/repo/wt"), "claude", &config_base());
 
     assert_eq!(config.name, "my-branch");
-    assert_eq!(config.working_directory, PathBuf::from("/repo/wt"));
+    assert_eq!(config.working_directory, ExecutionEnvironmentPath::new("/repo/wt"));
     assert_eq!(config.template_vars.get("main_command"), Some(&"claude".to_string()));
     assert!(config.template_yaml.is_none(), "no template file should exist at test paths");
 }
@@ -2236,7 +2236,7 @@ async fn resolve_workspace_commands_no_template_uses_default() {
     let tm = crate::terminal_manager::TerminalManager::new(mock_pool, store, HostName::local());
     let mut config = WorkspaceConfig {
         name: "test-branch".to_string(),
-        working_directory: PathBuf::from("/repo/wt"),
+        working_directory: ExecutionEnvironmentPath::new("/repo/wt"),
         template_vars: [("main_command".to_string(), "claude".to_string())].into_iter().collect(),
         template_yaml: None,
         resolved_commands: None,
@@ -2265,7 +2265,7 @@ content:
 "#;
     let mut config = WorkspaceConfig {
         name: "test-branch".to_string(),
-        working_directory: PathBuf::from("/repo/wt"),
+        working_directory: ExecutionEnvironmentPath::new("/repo/wt"),
         template_vars: std::collections::HashMap::new(),
         template_yaml: Some(yaml.to_string()),
         resolved_commands: None,
@@ -2311,7 +2311,7 @@ async fn resolve_workspace_commands_invalid_template_uses_default() {
     let tm = crate::terminal_manager::TerminalManager::new(mock_pool, store, HostName::local());
     let mut config = WorkspaceConfig {
         name: "test-branch".to_string(),
-        working_directory: PathBuf::from("/repo/wt"),
+        working_directory: ExecutionEnvironmentPath::new("/repo/wt"),
         template_vars: [("main_command".to_string(), "claude".to_string())].into_iter().collect(),
         template_yaml: Some("content: [".to_string()),
         resolved_commands: None,

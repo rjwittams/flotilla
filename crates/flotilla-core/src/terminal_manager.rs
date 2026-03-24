@@ -118,7 +118,7 @@ impl TerminalManager {
             }
         };
         let session_name = attachable_id.to_string();
-        self.pool.ensure_session(&session_name, &command, cwd.as_path()).await
+        self.pool.ensure_session(&session_name, &command, &cwd).await
     }
 
     /// Returns the command string needed to attach to a terminal session.
@@ -186,7 +186,7 @@ impl TerminalManager {
             env_vars.push(("FLOTILLA_DAEMON_SOCKET".to_string(), socket.to_string()));
         }
         let session_name = attachable_id.to_string();
-        self.pool.attach_args(&session_name, &command, cwd.as_path(), &env_vars)
+        self.pool.attach_args(&session_name, &command, &cwd, &env_vars)
     }
 
     /// Kills a terminal session in the pool.

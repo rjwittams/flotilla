@@ -5,7 +5,10 @@ use flotilla_protocol::arg::Arg;
 use serde::Deserialize;
 
 use super::{TerminalEnvVars, TerminalPool, TerminalSession};
-use crate::providers::{run, CommandRunner};
+use crate::{
+    path_context::ExecutionEnvironmentPath,
+    providers::{run, CommandRunner},
+};
 
 #[derive(Debug, Deserialize)]
 struct SessionInfo {
@@ -49,28 +52,39 @@ impl TerminalPool for CleatTerminalPool {
                     SessionStatus::Attached => flotilla_protocol::TerminalStatus::Running,
                     SessionStatus::Detached => flotilla_protocol::TerminalStatus::Disconnected,
                 };
-                TerminalSession { session_name: session.id, status, command: session.cmd, working_directory: session.cwd }
+                TerminalSession {
+                    session_name: session.id,
+                    status,
+                    command: session.cmd,
+                    working_directory: session.cwd.map(ExecutionEnvironmentPath::from),
+                }
             })
             .collect())
     }
 
-    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path) -> Result<(), String> {
+    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &ExecutionEnvironmentPath) -> Result<(), String> {
         run!(
             self.runner,
             &self.binary,
-            &["create", "--json", session_name, "--cwd", &cwd.display().to_string(), "--cmd", command],
+            &["create", "--json", session_name, "--cwd", &cwd.as_path().display().to_string(), "--cmd", command],
             Path::new("/")
         )?;
         Ok(())
     }
 
-    fn attach_args(&self, session_name: &str, command: &str, cwd: &Path, env_vars: &TerminalEnvVars) -> Result<Vec<Arg>, String> {
+    fn attach_args(
+        &self,
+        session_name: &str,
+        command: &str,
+        cwd: &ExecutionEnvironmentPath,
+        env_vars: &TerminalEnvVars,
+    ) -> Result<Vec<Arg>, String> {
         let mut args = vec![
             Arg::Quoted(self.binary.clone()),
             Arg::Literal("attach".into()),
             Arg::Quoted(session_name.into()),
             Arg::Literal("--cwd".into()),
-            Arg::Quoted(cwd.display().to_string()),
+            Arg::Quoted(cwd.as_path().display().to_string()),
         ];
         if !command.is_empty() || !env_vars.is_empty() {
             let mut cmd_inner: Vec<Arg> = Vec::new();
@@ -104,7 +118,10 @@ mod tests {
     use std::{path::Path, sync::Arc};
 
     use super::*;
-    use crate::providers::{testing::MockRunner, CommandRunner};
+    use crate::{
+        path_context::ExecutionEnvironmentPath,
+        providers::{testing::MockRunner, CommandRunner},
+    };
 
     #[tokio::test]
     async fn list_sessions_parses_json() {
@@ -120,11 +137,11 @@ mod tests {
         assert_eq!(sessions[0].session_name, "sess-1");
         assert_eq!(sessions[0].status, flotilla_protocol::TerminalStatus::Running);
         assert_eq!(sessions[0].command.as_deref(), Some("bash"));
-        assert_eq!(sessions[0].working_directory.as_deref(), Some(Path::new("/repo")));
+        assert_eq!(sessions[0].working_directory.as_ref().map(|p| p.as_path()), Some(Path::new("/repo")));
         assert_eq!(sessions[1].session_name, "sess-2");
         assert_eq!(sessions[1].status, flotilla_protocol::TerminalStatus::Disconnected);
         assert!(sessions[1].command.is_none());
-        assert_eq!(sessions[1].working_directory.as_deref(), Some(Path::new("/other")));
+        assert_eq!(sessions[1].working_directory.as_ref().map(|p| p.as_path()), Some(Path::new("/other")));
     }
 
     #[tokio::test]
@@ -133,7 +150,7 @@ mod tests {
         let runner = Arc::new(MockRunner::new(vec![Ok(json.into())]));
         let pool = CleatTerminalPool::new(Arc::clone(&runner) as Arc<dyn CommandRunner>, "cleat");
 
-        pool.ensure_session("my-session", "bash", Path::new("/repo")).await.expect("ensure session");
+        pool.ensure_session("my-session", "bash", &ExecutionEnvironmentPath::new("/repo")).await.expect("ensure session");
 
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
@@ -145,7 +162,8 @@ mod tests {
     async fn attach_wraps_command() {
         let pool = CleatTerminalPool::new(Arc::new(MockRunner::new(vec![])), "cleat");
 
-        let cmd = pool.attach_command("my-session", "bash", Path::new("/repo"), &vec![]).await.expect("attach command");
+        let cmd =
+            pool.attach_command("my-session", "bash", &ExecutionEnvironmentPath::new("/repo"), &vec![]).await.expect("attach command");
 
         assert!(cmd.contains("'cleat' attach 'my-session'"));
         assert!(cmd.contains("--cwd '/repo'"));
@@ -170,7 +188,7 @@ mod tests {
     #[test]
     fn attach_args_with_command_no_env() {
         let pool = CleatTerminalPool::new(Arc::new(MockRunner::new(vec![])), "cleat");
-        let args = pool.attach_args("my-session", "bash", Path::new("/repo"), &vec![]).expect("attach_args");
+        let args = pool.attach_args("my-session", "bash", &ExecutionEnvironmentPath::new("/repo"), &vec![]).expect("attach_args");
 
         assert_eq!(args, vec![
             Arg::Quoted("cleat".into()),
@@ -186,7 +204,7 @@ mod tests {
     #[test]
     fn attach_args_flatten_with_command_no_env() {
         let pool = CleatTerminalPool::new(Arc::new(MockRunner::new(vec![])), "cleat");
-        let args = pool.attach_args("my-session", "bash", Path::new("/repo"), &vec![]).expect("attach_args");
+        let args = pool.attach_args("my-session", "bash", &ExecutionEnvironmentPath::new("/repo"), &vec![]).expect("attach_args");
         let flat = flotilla_protocol::arg::flatten(&args, 0);
 
         assert_eq!(flat, "'cleat' attach 'my-session' --cwd '/repo' --cmd '${SHELL:-/bin/sh} -lc '\\''bash'\\'''");
@@ -195,7 +213,7 @@ mod tests {
     #[test]
     fn attach_args_empty_command_no_env() {
         let pool = CleatTerminalPool::new(Arc::new(MockRunner::new(vec![])), "cleat");
-        let args = pool.attach_args("sess-1", "", Path::new("/home/dev"), &vec![]).expect("attach_args");
+        let args = pool.attach_args("sess-1", "", &ExecutionEnvironmentPath::new("/home/dev"), &vec![]).expect("attach_args");
 
         // No --cmd when both command and env_vars are empty
         assert_eq!(args, vec![
@@ -211,7 +229,7 @@ mod tests {
     fn attach_args_with_env_vars() {
         let pool = CleatTerminalPool::new(Arc::new(MockRunner::new(vec![])), "cleat");
         let env = vec![("FOO".to_string(), "bar".to_string()), ("BAZ".to_string(), "qu'x".to_string())];
-        let args = pool.attach_args("sess", "cmd", Path::new("/wd"), &env).expect("attach_args");
+        let args = pool.attach_args("sess", "cmd", &ExecutionEnvironmentPath::new("/wd"), &env).expect("attach_args");
 
         assert_eq!(args, vec![
             Arg::Quoted("cleat".into()),
@@ -235,7 +253,7 @@ mod tests {
     fn attach_args_with_env_vars_empty_command() {
         let pool = CleatTerminalPool::new(Arc::new(MockRunner::new(vec![])), "cleat");
         let env = vec![("KEY".to_string(), "val".to_string())];
-        let args = pool.attach_args("sess", "", Path::new("/wd"), &env).expect("attach_args");
+        let args = pool.attach_args("sess", "", &ExecutionEnvironmentPath::new("/wd"), &env).expect("attach_args");
 
         // Empty command with env vars: spawns $SHELL with env prefix, no -lc
         assert_eq!(args, vec![
@@ -257,7 +275,7 @@ mod tests {
     fn attach_args_flatten_roundtrip_env_vars() {
         let pool = CleatTerminalPool::new(Arc::new(MockRunner::new(vec![])), "cleat");
         let env = vec![("FOO".to_string(), "bar".to_string())];
-        let args = pool.attach_args("sess", "bash", Path::new("/wd"), &env).expect("attach_args");
+        let args = pool.attach_args("sess", "bash", &ExecutionEnvironmentPath::new("/wd"), &env).expect("attach_args");
         let flat = flotilla_protocol::arg::flatten(&args, 0);
 
         // --cmd value is a NestedCommand, so the inner string is shell-quoted.

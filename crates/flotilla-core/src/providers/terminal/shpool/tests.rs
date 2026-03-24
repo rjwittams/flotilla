@@ -1,12 +1,15 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::providers::testing::MockRunner;
+use crate::{
+    path_context::{DaemonHostPath, ExecutionEnvironmentPath},
+    providers::testing::MockRunner,
+};
 
 /// Create a ShpoolTerminalPool in a temp dir so config writes succeed.
 fn test_pool(runner: Arc<MockRunner>) -> (ShpoolTerminalPool, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir for shpool test");
-    let socket_path = dir.path().join("shpool.socket");
+    let socket_path = DaemonHostPath::new(dir.path().join("shpool.socket"));
     let pool = ShpoolTerminalPool::new(runner, socket_path);
     (pool, dir)
 }
@@ -135,7 +138,8 @@ async fn list_sessions_parses_json() {
 async fn attach_builds_command() {
     let (pool, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
 
-    let cmd = TerminalPool::attach_command(&pool, "flotilla/feat/shell/0", "bash", Path::new("/home/dev"), &vec![]).await.expect("attach");
+    let cwd = ExecutionEnvironmentPath::new("/home/dev");
+    let cmd = TerminalPool::attach_command(&pool, "flotilla/feat/shell/0", "bash", &cwd, &vec![]).await.expect("attach");
 
     assert!(cmd.contains("shpool"), "should reference shpool binary: {cmd}");
     assert!(cmd.contains("attach"), "should include attach subcommand: {cmd}");
@@ -162,9 +166,10 @@ async fn kill_calls_cli() {
 #[test]
 fn attach_args_with_command_no_env() {
     let (pool, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
-    let socket = pool.socket_path.display().to_string();
-    let config = pool.config_path.display().to_string();
-    let args = pool.attach_args("flotilla/feat/shell/0", "bash", Path::new("/home/dev"), &vec![]).expect("attach_args");
+    let socket = pool.socket_path.as_path().display().to_string();
+    let config = pool.config_path.as_path().display().to_string();
+    let args =
+        pool.attach_args("flotilla/feat/shell/0", "bash", &ExecutionEnvironmentPath::new("/home/dev"), &vec![]).expect("attach_args");
 
     assert_eq!(args, vec![
         Arg::Quoted("shpool".into()),
@@ -184,7 +189,8 @@ fn attach_args_with_command_no_env() {
 #[test]
 fn attach_args_flatten_with_command_no_env() {
     let (pool, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
-    let args = pool.attach_args("flotilla/feat/shell/0", "bash", Path::new("/home/dev"), &vec![]).expect("attach_args");
+    let args =
+        pool.attach_args("flotilla/feat/shell/0", "bash", &ExecutionEnvironmentPath::new("/home/dev"), &vec![]).expect("attach_args");
     let flat = flotilla_protocol::arg::flatten(&args, 0);
 
     assert!(flat.starts_with("'shpool' --socket "), "should start with shpool: {flat}");
@@ -200,7 +206,7 @@ fn attach_args_flatten_with_command_no_env() {
 #[test]
 fn attach_args_empty_command_no_env() {
     let (pool, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
-    let args = pool.attach_args("sess", "", Path::new("/wd"), &vec![]).expect("attach_args");
+    let args = pool.attach_args("sess", "", &ExecutionEnvironmentPath::new("/wd"), &vec![]).expect("attach_args");
 
     // No --cmd when both command and env_vars are empty
     assert!(!args.iter().any(|a| matches!(a, Arg::Literal(s) if s == "--cmd")), "no --cmd for empty command+env");
@@ -215,7 +221,7 @@ fn attach_args_empty_command_no_env() {
 fn attach_args_with_env_vars() {
     let (pool, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
     let env = vec![("FOO".to_string(), "bar".to_string())];
-    let args = pool.attach_args("sess", "cmd", Path::new("/wd"), &env).expect("attach_args");
+    let args = pool.attach_args("sess", "cmd", &ExecutionEnvironmentPath::new("/wd"), &env).expect("attach_args");
 
     // Verify the inner command structure via the NestedCommand
     let nested = args.iter().find(|a| matches!(a, Arg::NestedCommand(_)));
@@ -232,7 +238,7 @@ fn attach_args_with_env_vars() {
 fn attach_args_with_env_vars_empty_command() {
     let (pool, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
     let env = vec![("KEY".to_string(), "val".to_string())];
-    let args = pool.attach_args("sess", "", Path::new("/wd"), &env).expect("attach_args");
+    let args = pool.attach_args("sess", "", &ExecutionEnvironmentPath::new("/wd"), &env).expect("attach_args");
 
     // Should have --cmd with env prefix and $SHELL but no -lic
     let nested = args.iter().find(|a| matches!(a, Arg::NestedCommand(_)));

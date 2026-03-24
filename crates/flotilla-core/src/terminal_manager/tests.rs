@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::{path::PathBuf, sync::Mutex};
 
 use async_trait::async_trait;
 use flotilla_protocol::{HostName, HostPath, TerminalStatus};
@@ -21,8 +18,8 @@ fn ee(path: &str) -> ExecutionEnvironmentPath {
 #[allow(dead_code)] // Fields used for test assertions via Debug matching
 enum PoolCall {
     ListSessions,
-    EnsureSession { session_name: String, command: String, cwd: PathBuf },
-    AttachCommand { session_name: String, command: String, cwd: PathBuf, env_vars: TerminalEnvVars },
+    EnsureSession { session_name: String, command: String, cwd: ExecutionEnvironmentPath },
+    AttachCommand { session_name: String, command: String, cwd: ExecutionEnvironmentPath, env_vars: TerminalEnvVars },
     KillSession { session_name: String },
 }
 
@@ -48,11 +45,11 @@ impl TerminalPool for MockTerminalPool {
         Ok(self.list_response.lock().expect("lock list_response").clone())
     }
 
-    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path) -> Result<(), String> {
+    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &ExecutionEnvironmentPath) -> Result<(), String> {
         self.calls.lock().expect("lock calls").push(PoolCall::EnsureSession {
             session_name: session_name.to_string(),
             command: command.to_string(),
-            cwd: cwd.to_path_buf(),
+            cwd: cwd.clone(),
         });
         Ok(())
     }
@@ -61,13 +58,13 @@ impl TerminalPool for MockTerminalPool {
         &self,
         session_name: &str,
         command: &str,
-        cwd: &Path,
+        cwd: &ExecutionEnvironmentPath,
         env_vars: &TerminalEnvVars,
     ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
         self.calls.lock().expect("lock calls").push(PoolCall::AttachCommand {
             session_name: session_name.to_string(),
             command: command.to_string(),
-            cwd: cwd.to_path_buf(),
+            cwd: cwd.clone(),
             env_vars: env_vars.clone(),
         });
         Ok(vec![flotilla_protocol::arg::Arg::Literal(format!("attach {session_name}"))])
@@ -160,11 +157,11 @@ async fn ensure_running_uses_attachable_id_as_session_name() {
             self.calls.lock().expect("lock").push(PoolCall::ListSessions);
             Ok(Vec::new())
         }
-        async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path) -> Result<(), String> {
+        async fn ensure_session(&self, session_name: &str, command: &str, cwd: &ExecutionEnvironmentPath) -> Result<(), String> {
             self.calls.lock().expect("lock").push(PoolCall::EnsureSession {
                 session_name: session_name.to_string(),
                 command: command.to_string(),
-                cwd: cwd.to_path_buf(),
+                cwd: cwd.clone(),
             });
             Ok(())
         }
@@ -172,13 +169,13 @@ async fn ensure_running_uses_attachable_id_as_session_name() {
             &self,
             session_name: &str,
             command: &str,
-            cwd: &Path,
+            cwd: &ExecutionEnvironmentPath,
             env_vars: &TerminalEnvVars,
         ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
             self.calls.lock().expect("lock").push(PoolCall::AttachCommand {
                 session_name: session_name.to_string(),
                 command: command.to_string(),
-                cwd: cwd.to_path_buf(),
+                cwd: cwd.clone(),
                 env_vars: env_vars.clone(),
             });
             Ok(vec![flotilla_protocol::arg::Arg::Literal(format!("attach {session_name}"))])
@@ -203,7 +200,7 @@ async fn ensure_running_uses_attachable_id_as_session_name() {
         PoolCall::EnsureSession { session_name, command, cwd } => {
             assert_eq!(session_name, &att_id.to_string());
             assert_eq!(command, "bash");
-            assert_eq!(cwd, &PathBuf::from("/repo/wt-feat"));
+            assert_eq!(cwd, &ExecutionEnvironmentPath::new("/repo/wt-feat"));
         }
         other => panic!("expected EnsureSession, got {other:?}"),
     }
@@ -224,20 +221,20 @@ async fn attach_command_includes_env_vars() {
         async fn list_sessions(&self) -> Result<Vec<TerminalSession>, String> {
             Ok(Vec::new())
         }
-        async fn ensure_session(&self, _: &str, _: &str, _: &Path) -> Result<(), String> {
+        async fn ensure_session(&self, _: &str, _: &str, _: &ExecutionEnvironmentPath) -> Result<(), String> {
             Ok(())
         }
         fn attach_args(
             &self,
             session_name: &str,
             command: &str,
-            cwd: &Path,
+            cwd: &ExecutionEnvironmentPath,
             env_vars: &TerminalEnvVars,
         ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
             self.calls.lock().expect("lock").push(PoolCall::AttachCommand {
                 session_name: session_name.to_string(),
                 command: command.to_string(),
-                cwd: cwd.to_path_buf(),
+                cwd: cwd.clone(),
                 env_vars: env_vars.clone(),
             });
             Ok(vec![flotilla_protocol::arg::Arg::Literal(format!("attach {session_name}"))])
@@ -326,10 +323,16 @@ async fn kill_terminal_delegates_to_pool() {
         async fn list_sessions(&self) -> Result<Vec<TerminalSession>, String> {
             Ok(Vec::new())
         }
-        async fn ensure_session(&self, _: &str, _: &str, _: &Path) -> Result<(), String> {
+        async fn ensure_session(&self, _: &str, _: &str, _: &ExecutionEnvironmentPath) -> Result<(), String> {
             Ok(())
         }
-        fn attach_args(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
+        fn attach_args(
+            &self,
+            _: &str,
+            _: &str,
+            _: &ExecutionEnvironmentPath,
+            _: &TerminalEnvVars,
+        ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
             Ok(vec![])
         }
         async fn kill_session(&self, session_name: &str) -> Result<(), String> {
@@ -368,7 +371,7 @@ async fn refresh_updates_statuses() {
         session_name: att_id.to_string(),
         status: TerminalStatus::Running,
         command: Some("bash".to_string()),
-        working_directory: Some(PathBuf::from("/repo/wt-feat")),
+        working_directory: Some(ExecutionEnvironmentPath::new("/repo/wt-feat")),
     }]);
     let mgr = TerminalManager::new(Arc::new(pool), store.clone(), test_host());
 
@@ -413,10 +416,16 @@ async fn cascade_delete_removes_sets_and_kills_sessions() {
         async fn list_sessions(&self) -> Result<Vec<TerminalSession>, String> {
             Ok(Vec::new())
         }
-        async fn ensure_session(&self, _: &str, _: &str, _: &Path) -> Result<(), String> {
+        async fn ensure_session(&self, _: &str, _: &str, _: &ExecutionEnvironmentPath) -> Result<(), String> {
             Ok(())
         }
-        fn attach_args(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
+        fn attach_args(
+            &self,
+            _: &str,
+            _: &str,
+            _: &ExecutionEnvironmentPath,
+            _: &TerminalEnvVars,
+        ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
             Ok(vec![])
         }
         async fn kill_session(&self, session_name: &str) -> Result<(), String> {

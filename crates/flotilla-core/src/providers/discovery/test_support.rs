@@ -676,7 +676,7 @@ impl WorkspaceManager for FakeWorkspaceManager {
         let ws_ref = format!("workspace:{}", store.len() + 1);
         let workspace = Workspace {
             name: config.name.clone(),
-            directories: vec![config.working_directory.clone()],
+            directories: vec![config.working_directory.clone().into_path_buf()],
             correlation_keys: vec![],
             attachable_set_id: None,
         };
@@ -717,7 +717,7 @@ impl TerminalPool for FakeTerminalPool {
         Ok(self.sessions.lock().await.clone())
     }
 
-    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path) -> Result<(), String> {
+    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &ExecutionEnvironmentPath) -> Result<(), String> {
         let mut sessions = self.sessions.lock().await;
         if sessions.iter().any(|s| s.session_name == session_name) {
             return Ok(());
@@ -726,7 +726,7 @@ impl TerminalPool for FakeTerminalPool {
             session_name: session_name.to_string(),
             status: TerminalStatus::Running,
             command: Some(command.to_string()),
-            working_directory: Some(cwd.to_path_buf()),
+            working_directory: Some(cwd.clone()),
         });
         Ok(())
     }
@@ -735,7 +735,7 @@ impl TerminalPool for FakeTerminalPool {
         &self,
         session_name: &str,
         _command: &str,
-        _cwd: &Path,
+        _cwd: &ExecutionEnvironmentPath,
         _env_vars: &super::super::terminal::TerminalEnvVars,
     ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
         Ok(vec![flotilla_protocol::arg::Arg::Literal(format!("attach {session_name}"))])

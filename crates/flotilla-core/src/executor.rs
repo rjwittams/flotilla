@@ -25,6 +25,7 @@ use self::{
 use crate::{
     attachable::SharedAttachableStore,
     data,
+    path_context::ExecutionEnvironmentPath,
     provider_data::ProviderData,
     providers::{registry::ProviderRegistry, run, types::WorkspaceConfig, CommandRunner},
     step::{Step, StepAction, StepHost, StepOutcome, StepPlan, StepResolver},
@@ -646,7 +647,7 @@ pub(crate) fn workspace_config(
     template_vars.insert("main_command".to_string(), main_command.to_string());
     WorkspaceConfig {
         name: name.to_string(),
-        working_directory: working_dir.to_path_buf(),
+        working_directory: ExecutionEnvironmentPath::new(working_dir),
         template_vars,
         template_yaml,
         resolved_commands: None,
