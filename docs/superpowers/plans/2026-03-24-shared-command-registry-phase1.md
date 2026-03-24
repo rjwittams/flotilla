@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Create a `flotilla-commands` crate with a shared command registry that defines flotilla's noun-verb command vocabulary. Generate the CLI from the registry, replacing hand-written clap. Add shell completions. All existing CLI functionality preserved.
+**Goal:** Create a `flotilla-commands` crate with clap-derive noun-verb structs that replace hand-written CLI parsing in `main.rs`, add static shell completions, and expose new CLI commands for TUI-only actions.
 
-**Architecture:** The registry is a flat table of `CommandDef` structs, each describing a noun+verb command with argument specs. A `CliBuilder` generates clap `Command` from the registry. Each `CommandDef` has a `resolve` function that maps parsed args to a `flotilla_protocol::Command` for daemon execution. Infrastructure subcommands (daemon, watch, hook/hooks) stay outside the registry as they're not domain commands. Shell completions use a hidden `complete` subcommand that walks the registry.
+**Architecture:** Per-noun clap derive structs parse into typed values, resolve to a `Resolved` enum (daemon commands or queries), and dispatch through a single `dispatch()` function. Host routing uses a two-stage parse via a `Refinable` trait. `--json` is a global flag. A custom completion engine walks the clap `Command` tree.
 
-**Tech Stack:** Rust, clap (programmatic API, not derive), flotilla-protocol types
+**Tech Stack:** Rust, clap 4 (derive + builder for introspection), flotilla-protocol types
 
-**Spec:** `docs/superpowers/specs/2026-03-24-shared-command-registry-design.md`
+**Spec:** `docs/superpowers/specs/2026-03-24-shared-command-registry-phase1-design.md`
 
 ---
 
@@ -19,32 +19,30 @@
 | `Cargo.toml` (workspace root) | Modify | Add `flotilla-commands` to workspace members + root dependencies |
 | `crates/flotilla-commands/Cargo.toml` | Create | Crate manifest |
 | `crates/flotilla-commands/src/lib.rs` | Create | Crate root — re-exports |
-| `crates/flotilla-commands/src/registry.rs` | Create | `CommandDef`, `NounDef`, `Registry` — the core data structures |
-| `crates/flotilla-commands/src/commands/mod.rs` | Create | Module root for command definitions |
-| `crates/flotilla-commands/src/commands/repo.rs` | Create | repo add, remove, refresh |
-| `crates/flotilla-commands/src/commands/checkout.rs` | Create | checkout create, remove |
-| `crates/flotilla-commands/src/commands/workspace.rs` | Create | workspace select, create |
-| `crates/flotilla-commands/src/commands/cr.rs` | Create | cr open, close, link-issues |
-| `crates/flotilla-commands/src/commands/issue.rs` | Create | issue open, suggest-branch, search |
-| `crates/flotilla-commands/src/commands/agent.rs` | Create | agent teleport, archive |
-| `crates/flotilla-commands/src/commands/host.rs` | Create | host as target prefix + list, status, providers |
-| `crates/flotilla-commands/src/cli.rs` | Create | `CliBuilder` — generates clap `Command` tree from registry |
-| `crates/flotilla-commands/src/complete.rs` | Create | Shell completion engine |
-| `src/main.rs` | Modify | Replace clap derive with registry-generated CLI |
+| `crates/flotilla-commands/src/resolved.rs` | Create | `Resolved` enum, `Refinable` trait |
+| `crates/flotilla-commands/src/noun.rs` | Create | `NounCommand` enum, resolve dispatch |
+| `crates/flotilla-commands/src/commands/mod.rs` | Create | Module root for noun definitions |
+| `crates/flotilla-commands/src/commands/repo.rs` | Create | `RepoNoun`, `RepoVerb`, resolve, Display |
+| `crates/flotilla-commands/src/commands/checkout.rs` | Create | `CheckoutNoun`, `CheckoutVerb`, resolve, Display |
+| `crates/flotilla-commands/src/commands/cr.rs` | Create | `CrNoun`, `CrVerb`, resolve, Display |
+| `crates/flotilla-commands/src/commands/issue.rs` | Create | `IssueNoun`, `IssueVerb`, resolve, Display |
+| `crates/flotilla-commands/src/commands/agent.rs` | Create | `AgentNoun`, `AgentVerb`, resolve, Display |
+| `crates/flotilla-commands/src/commands/workspace.rs` | Create | `WorkspaceNoun`, `WorkspaceVerb`, resolve, Display |
+| `crates/flotilla-commands/src/commands/host.rs` | Create | `HostNounPartial`, `HostNoun`, `HostVerb`, refine, resolve, Display |
+| `crates/flotilla-commands/src/complete.rs` | Create | Completion engine (tree walker) |
+| `src/main.rs` | Modify | Replace old domain subcommands with noun types, global `--json`, new dispatch |
 
 ---
 
-### Task 1: Create the flotilla-commands crate with core registry types
+### Task 1: Create the flotilla-commands crate with Resolved and Refinable
 
 **Files:**
 - Create: `crates/flotilla-commands/Cargo.toml`
 - Create: `crates/flotilla-commands/src/lib.rs`
-- Create: `crates/flotilla-commands/src/registry.rs`
-- Modify: `Cargo.toml` (workspace root)
+- Create: `crates/flotilla-commands/src/resolved.rs`
+- Modify: `Cargo.toml` (workspace root, lines 2-7 for members, lines 33-44 for dependencies)
 
-Define the core types that all command definitions use:
-
-- [ ] **Step 1: Create the crate skeleton**
+- [ ] **Step 1: Create the crate manifest**
 
 `crates/flotilla-commands/Cargo.toml`:
 ```toml
@@ -56,383 +54,947 @@ license.workspace = true
 
 [dependencies]
 flotilla-protocol = { path = "../flotilla-protocol" }
-clap = { version = "4", features = ["string"] }
+clap = { version = "4", features = ["derive", "string"] }
 ```
 
-Add to workspace `Cargo.toml` members and root package dependencies.
+- [ ] **Step 2: Add to workspace and root dependencies**
 
-- [ ] **Step 2: Define the core registry types**
+In `Cargo.toml` (workspace root), add `"crates/flotilla-commands"` to the `members` list (after line 6). In the `[dependencies]` section (around line 33), add:
+```toml
+flotilla-commands = { path = "crates/flotilla-commands" }
+```
 
-In `registry.rs`, define:
+- [ ] **Step 3: Create resolved.rs with Resolved enum and Refinable trait**
 
+`crates/flotilla-commands/src/resolved.rs`:
 ```rust
-/// A noun in the command vocabulary (workspace, checkout, cr, etc.)
-pub struct NounDef {
-    pub name: &'static str,
-    pub aliases: &'static [&'static str],       // e.g. "pr" for "cr"
-    pub description: &'static str,
-}
+use flotilla_protocol::{Command, HostName};
 
-/// A single command: noun + verb + argument spec + resolver.
-pub struct CommandDef {
-    pub noun: &'static str,
-    pub verb: &'static str,
-    pub description: &'static str,
-    pub level: CommandLevel,
-    pub subject: SubjectSpec,
-    pub args: &'static [ArgSpec],
-    pub resolve: ResolveFn,                      // parsed args → Command
-}
-
-pub enum CommandLevel { User, Internal }
-
-/// What kind of subject this command takes.
-pub enum SubjectSpec {
-    None,                                         // creation command
-    Single { name: &'static str, required: bool },
-    Set { name: &'static str },                   // comma-separated set
-}
-
-pub struct ArgSpec {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub kind: ArgKind,
-}
-
-pub enum ArgKind {
-    Flag,                                         // --fresh
-    Named { value_name: &'static str },           // --branch <name>
-    Positional { value_name: &'static str },      // trailing args
-}
-
-/// Resolution context provided to the resolve function.
-pub struct ResolveContext {
-    pub subject: Option<String>,
-    pub subjects: Vec<String>,                    // for set subjects
-    pub args: std::collections::HashMap<String, String>,
-    pub host: Option<String>,                     // target prefix
-    pub json: bool,
-}
-
-/// The resolve function signature.
-pub type ResolveFn = fn(&ResolveContext) -> Result<Resolved, String>;
-
-/// What a resolved command produces.
+/// Output of noun resolution — what main.rs dispatches on.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
-    /// Send this command to the daemon.
-    DaemonCommand(flotilla_protocol::Command),
-    /// A query that needs special handling (status, topology, etc.)
-    Query(QueryKind),
-}
-
-pub enum QueryKind {
-    RepoQuery { slug: String, detail: Option<String> },
+    /// A command to send to the daemon for execution.
+    Command(Command),
+    /// Query: show repo details.
+    RepoDetail { slug: String },
+    /// Query: show repo providers.
+    RepoProviders { slug: String },
+    /// Query: show repo work items.
+    RepoWork { slug: String },
+    /// Query: list all known hosts.
     HostList,
-    HostQuery { host: String, detail: String },
+    /// Query: show host status.
+    HostStatus { host: String },
+    /// Query: show host providers.
+    HostProviders { host: String },
 }
 
-/// The registry — a flat list of all commands.
-pub struct Registry {
-    pub nouns: Vec<NounDef>,
-    pub commands: Vec<CommandDef>,
+impl Resolved {
+    /// Set the target host on a resolved command or query.
+    /// For Command variants, sets Command.host.
+    /// For query variants that carry a host field, this is a no-op
+    /// (the host is already populated by the noun's resolve).
+    pub fn set_host(&mut self, host: String) {
+        match self {
+            Resolved::Command(cmd) => {
+                cmd.host = Some(HostName::new(&host));
+            }
+            // Query variants with host are already populated
+            Resolved::HostStatus { .. } | Resolved::HostProviders { .. } | Resolved::HostList => {}
+            // Repo queries routed through a host become commands instead
+            // (handled in HostNoun::resolve, not here)
+            Resolved::RepoDetail { .. } | Resolved::RepoProviders { .. } | Resolved::RepoWork { .. } => {}
+        }
+    }
 }
 
-impl Registry {
-    pub fn commands_for_noun(&self, noun: &str) -> impl Iterator<Item = &CommandDef>;
-    pub fn find(&self, noun: &str, verb: &str) -> Option<&CommandDef>;
-    pub fn user_commands(&self) -> impl Iterator<Item = &CommandDef>;
+/// Two-stage parsing: clap parse produces a partial type, refine produces the full type.
+/// Only needed for nouns where clap cannot express the full structure in one pass (e.g. host routing).
+pub trait Refinable {
+    type Refined;
+    fn refine(self) -> Result<Self::Refined, String>;
 }
 ```
 
-- [ ] **Step 3: Write tests for Registry lookup**
+- [ ] **Step 4: Create lib.rs**
 
-Test `commands_for_noun`, `find`, `user_commands` filtering. Use a small test registry with 2-3 stub commands.
+`crates/flotilla-commands/src/lib.rs`:
+```rust
+pub mod commands;
+pub mod resolved;
 
-- [ ] **Step 4: Run tests, commit**
+pub use resolved::{Refinable, Resolved};
+```
 
-Run: `cargo test -p flotilla-commands`
-Commit: `feat: create flotilla-commands crate with core registry types`
+Note: `noun` module and `complete` module added in later tasks.
+
+- [ ] **Step 5: Verify it compiles**
+
+Run: `cargo check -p flotilla-commands`
+
+- [ ] **Step 6: Commit**
+
+Commit: `feat: create flotilla-commands crate with Resolved and Refinable`
 
 ---
 
-### Task 2: Define the domain command modules
+### Task 2: Implement repo noun with tests
 
 **Files:**
 - Create: `crates/flotilla-commands/src/commands/mod.rs`
 - Create: `crates/flotilla-commands/src/commands/repo.rs`
-- Create: `crates/flotilla-commands/src/commands/checkout.rs`
-- Create: `crates/flotilla-commands/src/commands/workspace.rs`
-- Create: `crates/flotilla-commands/src/commands/cr.rs`
-- Create: `crates/flotilla-commands/src/commands/issue.rs`
-- Create: `crates/flotilla-commands/src/commands/agent.rs`
-- Create: `crates/flotilla-commands/src/commands/host.rs`
 
-Each module exports a function that returns the `NounDef` and a `Vec<CommandDef>` for that noun. The `resolve` function on each `CommandDef` maps parsed args to `flotilla_protocol::Command` or a `QueryKind`.
+This is the most complex noun — it has subject-before-verb parsing, both commands and queries, and covers most of the current `parse_repo_command` logic (lines 428-487 of `src/main.rs`).
 
-- [ ] **Step 1: Implement repo commands**
+- [ ] **Step 1: Create commands/mod.rs**
 
-`repo add`, `repo remove`, `repo refresh`, `repo <slug> (query)`, `repo <slug> providers`, `repo <slug> work`, `repo <slug> checkout <branch>`, `repo <slug> checkout --fresh <branch>`, `repo <slug> prepare-terminal <path>`.
+`crates/flotilla-commands/src/commands/mod.rs`:
+```rust
+pub mod repo;
+```
 
-Mirror the current `parse_repo_command` logic. The resolve function produces `CommandAction::TrackRepoPath`, `UntrackRepo`, `Refresh`, `Checkout`, `PrepareTerminalForCheckout`, or `QueryKind::RepoQuery`.
+- [ ] **Step 2: Write failing tests for repo resolve**
 
-Test each resolve function independently: given a `ResolveContext`, assert the correct `Command`/`QueryKind` is produced.
-
-- [ ] **Step 2: Implement checkout commands**
-
-`checkout <path-or-branch> remove`.
-
-Mirror the current `Checkout { checkout, command: CheckoutSubCommand::Remove }` mapping. Resolve produces `CommandAction::RemoveCheckout`.
-
-- [ ] **Step 3: Implement host commands**
-
-`host list`, `host <name> status`, `host <name> providers`, `host <name> refresh [repo]`, `host <name> repo ...`, `host <name> checkout <branch> remove`.
-
-Host is both a target prefix and a noun. Mirror `parse_host_command` / `parse_host_control_command`. The host name sets `Command.host`.
-
-- [ ] **Step 4: Implement workspace, cr, issue, agent commands**
-
-These are new CLI commands that don't exist yet in the current CLI (they're TUI-only intents today). Define them with resolve functions that produce the right `CommandAction`:
-
-- `workspace <ref> select` → `CommandAction::SelectWorkspace`
-- `cr <id> open` → `CommandAction::OpenChangeRequest`
-- `cr <id> close` → `CommandAction::CloseChangeRequest`
-- `cr <id> link-issues <issue-ids>` → `CommandAction::LinkIssuesToChangeRequest`
-- `issue <id> open` → `CommandAction::OpenIssue`
-- `issue <ids> suggest-branch` → `CommandAction::GenerateBranchName`
-- `agent <id> teleport` → `CommandAction::TeleportSession`
-- `agent <id> archive` → `CommandAction::ArchiveSession`
-
-These require `context_repo` to be set. For Phase 1, the resolve function can leave it as `None` (the daemon will need a way to infer it, or we accept that these CLI commands need a `--repo` flag initially).
-
-- [ ] **Step 5: Build the full registry**
-
-In `commands/mod.rs`, create `pub fn build_registry() -> Registry` that assembles all noun/command definitions.
-
-- [ ] **Step 6: Tests for each resolve function**
-
-Each command module should have tests verifying that `resolve(&context)` produces the expected `Command` variant. This is the key correctness guarantee — the registry produces the same `Command` values as the current hand-written CLI parsing.
-
-- [ ] **Step 7: Run tests, commit**
-
-Run: `cargo test -p flotilla-commands`
-Commit: `feat: define domain command modules with resolve functions`
-
----
-
-### Task 3: Build the CLI generator
-
-**Files:**
-- Create: `crates/flotilla-commands/src/cli.rs`
-
-Generate a clap `Command` tree from the registry. Each noun becomes a subcommand group, each verb becomes a subcommand within it.
-
-- [ ] **Step 1: Implement CliBuilder**
+Add to `crates/flotilla-commands/src/commands/repo.rs` a `#[cfg(test)] mod tests` block with tests covering the existing `parse_repo_command` behavior. Key test cases:
 
 ```rust
-pub struct CliBuilder<'a> {
-    registry: &'a Registry,
-}
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
 
-impl<'a> CliBuilder<'a> {
-    pub fn new(registry: &'a Registry) -> Self;
+    use clap::Parser;
+    use flotilla_protocol::{CheckoutTarget, Command, CommandAction, RepoSelector};
 
-    /// Build a clap Command tree for all user-level registry commands.
-    /// Returns a Vec of top-level noun subcommands to add to the main CLI.
-    pub fn build_noun_subcommands(&self) -> Vec<clap::Command>;
+    use super::RepoNoun;
+    use crate::Resolved;
 
-    /// Parse matched args from a clap ArgMatches into a ResolveContext,
-    /// then call the CommandDef's resolve function.
-    pub fn resolve_matches(&self, noun: &str, matches: &clap::ArgMatches) -> Result<Resolved, String>;
+    fn parse(args: &[&str]) -> RepoNoun {
+        RepoNoun::try_parse_from(args).expect("should parse")
+    }
+
+    #[test]
+    fn repo_add() {
+        let resolved = parse(&["repo", "add", "/tmp/test"]).resolve().unwrap();
+        assert_eq!(
+            resolved,
+            Resolved::Command(Command {
+                host: None,
+                context_repo: None,
+                action: CommandAction::TrackRepoPath { path: PathBuf::from("/tmp/test") },
+            })
+        );
+    }
+
+    #[test]
+    fn repo_remove() {
+        let resolved = parse(&["repo", "remove", "owner/repo"]).resolve().unwrap();
+        assert_eq!(
+            resolved,
+            Resolved::Command(Command {
+                host: None,
+                context_repo: None,
+                action: CommandAction::UntrackRepo { repo: RepoSelector::Query("owner/repo".into()) },
+            })
+        );
+    }
+
+    #[test]
+    fn repo_refresh_all() {
+        let resolved = parse(&["repo", "refresh"]).resolve().unwrap();
+        assert_eq!(
+            resolved,
+            Resolved::Command(Command {
+                host: None,
+                context_repo: None,
+                action: CommandAction::Refresh { repo: None },
+            })
+        );
+    }
+
+    #[test]
+    fn repo_refresh_specific() {
+        let resolved = parse(&["repo", "refresh", "owner/repo"]).resolve().unwrap();
+        assert_eq!(
+            resolved,
+            Resolved::Command(Command {
+                host: None,
+                context_repo: None,
+                action: CommandAction::Refresh { repo: Some(RepoSelector::Query("owner/repo".into())) },
+            })
+        );
+    }
+
+    #[test]
+    fn repo_query_detail() {
+        let resolved = parse(&["repo", "myslug"]).resolve().unwrap();
+        assert_eq!(resolved, Resolved::RepoDetail { slug: "myslug".into() });
+    }
+
+    #[test]
+    fn repo_query_providers() {
+        let resolved = parse(&["repo", "myslug", "providers"]).resolve().unwrap();
+        assert_eq!(resolved, Resolved::RepoProviders { slug: "myslug".into() });
+    }
+
+    #[test]
+    fn repo_query_work() {
+        let resolved = parse(&["repo", "myslug", "work"]).resolve().unwrap();
+        assert_eq!(resolved, Resolved::RepoWork { slug: "myslug".into() });
+    }
+
+    #[test]
+    fn repo_checkout_existing_branch() {
+        let resolved = parse(&["repo", "myslug", "checkout", "feat-x"]).resolve().unwrap();
+        assert_eq!(
+            resolved,
+            Resolved::Command(Command {
+                host: None,
+                context_repo: None,
+                action: CommandAction::Checkout {
+                    repo: RepoSelector::Query("myslug".into()),
+                    target: CheckoutTarget::Branch("feat-x".into()),
+                    issue_ids: vec![],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn repo_checkout_fresh_branch() {
+        let resolved = parse(&["repo", "myslug", "checkout", "--fresh", "feat-x"]).resolve().unwrap();
+        assert_eq!(
+            resolved,
+            Resolved::Command(Command {
+                host: None,
+                context_repo: None,
+                action: CommandAction::Checkout {
+                    repo: RepoSelector::Query("myslug".into()),
+                    target: CheckoutTarget::FreshBranch("feat-x".into()),
+                    issue_ids: vec![],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn repo_prepare_terminal() {
+        let resolved = parse(&["repo", "myslug", "prepare-terminal", "/tmp/path"]).resolve().unwrap();
+        assert_eq!(
+            resolved,
+            Resolved::Command(Command {
+                host: None,
+                context_repo: Some(RepoSelector::Query("myslug".into())),
+                action: CommandAction::PrepareTerminalForCheckout {
+                    checkout_path: PathBuf::from("/tmp/path"),
+                    commands: vec![],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn repo_subject_form_refresh() {
+        // `repo myslug refresh` — subject used as repo
+        let resolved = parse(&["repo", "myslug", "refresh"]).resolve().unwrap();
+        assert!(matches!(
+            resolved,
+            Resolved::Command(Command { action: CommandAction::Refresh { repo: Some(_) }, .. })
+        ));
+    }
 }
 ```
 
-The builder iterates the registry's nouns and commands, creating clap `Command` and `Arg` entries from `SubjectSpec` and `ArgSpec`.
+- [ ] **Step 3: Run tests to verify they fail**
 
-Key mapping:
-- `SubjectSpec::Single { required: true }` → positional arg
-- `SubjectSpec::Single { required: false }` → optional positional
-- `SubjectSpec::Set` → positional with `num_args(1..)`
-- `ArgKind::Flag` → `Arg::new().long().action(SetTrue)`
-- `ArgKind::Named` → `Arg::new().long().value_name()`
-- `ArgKind::Positional` → `Arg::new().value_name()`
+Run: `cargo test -p flotilla-commands`
+Expected: compilation errors (RepoNoun not defined yet)
 
-Handle the noun-subject-verb ordering: the subject comes before the verb. In clap terms, the subject is a positional arg on the noun subcommand, and verbs are sub-subcommands. But this creates a parsing ambiguity (is the next token a subject or a verb?). Two approaches:
+- [ ] **Step 4: Implement RepoNoun, RepoVerb, resolve, and Display**
 
-**Option A:** Verbs as sub-subcommands with subject as a preceding positional. Clap can handle this if all verbs are known strings — the subject is any token that isn't a verb.
+`crates/flotilla-commands/src/commands/repo.rs` — the struct definitions, resolve function, and Display impl. The resolve function mirrors `parse_repo_command` (lines 428-487 of `src/main.rs`), mapping subject + verb to `Resolved` variants.
 
-**Option B:** Custom parsing similar to current `parse_repo_command` — match verb tokens manually from the arg list. This is what the existing CLI already does for `repo`.
+Key implementation details:
+- `subcommand_precedence_over_arg = true` and `subcommand_negates_reqs = true` on `RepoNoun`
+- `subject: Option<String>` and `verb: Option<RepoVerb>`
+- When both `subject` and `verb` are `None`, return error
+- When `subject` is `Some` and `verb` is `None`, return `Resolved::RepoDetail`
+- For `RepoVerb::Refresh { repo }`, merge with `subject` — prefer explicit verb arg, fall back to subject
+- For `RepoVerb::Checkout`, get repo from `subject` (required — error if missing)
+- For `RepoVerb::PrepareTerminal`, set `context_repo` from `subject`
+- All noun structs and verb enums derive `Debug, Clone, PartialEq, Eq` (in addition to `Parser`/`Subcommand`) for testing
+- `Display` outputs `repo [subject] [verb] [args]`
 
-Recommend **Option B** for Phase 1 — use clap for top-level noun routing but do verb+subject parsing manually within each noun handler. This avoids fighting clap's subcommand model and matches the existing pattern. The registry's `CommandDef` entries drive the manual parsing.
+- [ ] **Step 5: Run tests to verify they pass**
 
-- [ ] **Step 2: Test CLI generation**
+Run: `cargo test -p flotilla-commands`
 
-Test that `build_noun_subcommands()` produces the expected clap structure. Test that `resolve_matches()` correctly extracts subjects and args and calls the right resolve function.
+- [ ] **Step 6: Run formatting and clippy**
 
-- [ ] **Step 3: Run tests, commit**
+Run: `cargo +nightly-2026-03-12 fmt -- crates/flotilla-commands/src/**/*.rs`
+Run: `cargo clippy -p flotilla-commands --all-targets --locked -- -D warnings`
 
-Commit: `feat: CLI generator from command registry`
+- [ ] **Step 7: Commit**
+
+Commit: `feat: implement repo noun with resolve and Display`
 
 ---
 
-### Task 4: Wire registry CLI into the binary
+### Task 3: Implement simple nouns (checkout, cr, issue, agent, workspace)
 
 **Files:**
-- Modify: `src/main.rs`
-- Modify: `Cargo.toml` (root package)
+- Create: `crates/flotilla-commands/src/commands/checkout.rs`
+- Create: `crates/flotilla-commands/src/commands/cr.rs`
+- Create: `crates/flotilla-commands/src/commands/issue.rs`
+- Create: `crates/flotilla-commands/src/commands/agent.rs`
+- Create: `crates/flotilla-commands/src/commands/workspace.rs`
+- Modify: `crates/flotilla-commands/src/commands/mod.rs`
 
-Replace the current clap derive CLI for domain commands with registry-generated commands. Keep infrastructure commands (daemon, watch, hook, hooks, status, topology) as-is.
+These are simpler nouns — most verbs map directly to a single `CommandAction` variant.
 
-- [ ] **Step 1: Add flotilla-commands dependency to root Cargo.toml**
+- [ ] **Step 1: Write failing tests for all five nouns**
 
-- [ ] **Step 2: Restructure main.rs**
+Each noun gets a test file or `#[cfg(test)] mod tests` with resolve tests. Key cases:
 
-The current structure is a single clap `#[derive(Parser)]` enum. Change to:
+**checkout:**
+- `checkout create --branch feat-x` → `Checkout { repo: RepoSelector::Query("".into()), target: Branch("feat-x") }` (empty repo sentinel — dispatch injects from `--repo`/env)
+- `checkout create --branch feat-x --fresh` → `Checkout { repo: RepoSelector::Query("".into()), target: FreshBranch("feat-x") }`
+- `checkout my-feature remove` → `RemoveCheckout { checkout: CheckoutSelector::Query("my-feature") }`
+- `checkout my-feature status` → `FetchCheckoutStatus { branch: "my-feature" }`
+- `checkout my-feature status --checkout-path /tmp/wt --cr-id 42` → `FetchCheckoutStatus` with all fields
 
-1. Keep the top-level `Cli` struct with global args (`--repo-root`, `--config-dir`, `--socket`, `--embedded`, `--theme`)
-2. Keep infrastructure subcommands (daemon, watch, status, topology, hook, hooks) as clap derive
-3. Add registry-generated noun subcommands via `CliBuilder::build_noun_subcommands()`
-4. Route matched noun subcommands through `CliBuilder::resolve_matches()` → `run_control_command()` or query handlers
+**cr:**
+- `cr 42 open` → `OpenChangeRequest { id: "42" }`
+- `cr 42 close` → `CloseChangeRequest { id: "42" }`
+- `cr 42 link-issues 1 5 7` → `LinkIssuesToChangeRequest { change_request_id: "42", issue_ids: ["1", "5", "7"] }`
+- `pr 42 open` → same as `cr 42 open` (alias)
 
-The main dispatch becomes:
+**issue:**
+- `issue 1 open` → `OpenIssue { id: "1" }`
+- `issue 1,5,7 suggest-branch` → `GenerateBranchName { issue_keys: ["1", "5", "7"] }`
+- `issue search my query` → `SearchIssues { repo: RepoSelector::Query("".into()), query: "my query" }` (repo sentinel — dispatch injects from `--repo`/env). Note: `issue search` maps to `CommandAction::SearchIssues` which is a user-facing command. The deferred "issue viewport" commands are `SetIssueViewport`, `FetchMoreIssues`, `ClearIssueSearch` — UI-internal, not `SearchIssues`.
+
+**agent:**
+- `agent claude-1 teleport` → `TeleportSession { session_id: "claude-1", branch: None, checkout_key: None }`
+- `agent claude-1 teleport --branch feat` → `TeleportSession { session_id: "claude-1", branch: Some("feat"), checkout_key: None }`
+- `agent claude-1 archive` → `ArchiveSession { session_id: "claude-1" }`
+
+**workspace:**
+- `workspace feat-ws select` → `SelectWorkspace { ws_ref: "feat-ws" }`
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cargo test -p flotilla-commands`
+Expected: compilation errors
+
+- [ ] **Step 3: Implement all five nouns**
+
+Each noun follows the pattern from the spec. Implementation details:
+
+- **checkout:** Uses `subcommand_precedence_over_arg` / `subcommand_negates_reqs`. `create` has no subject. `remove`/`status` require subject. For `create`, `checkout create` resolves with `context_repo: None` (dispatch injects it).
+- **cr:** `visible_alias = "pr"`. Subject and verb both required. `context_repo: None` (dispatch injects it).
+- **issue:** Subject is `Option<String>`. Comma-separated subjects split in resolve. `context_repo: None` for all variants.
+- **agent:** Subject and verb required. `context_repo: None`.
+- **workspace:** Subject and verb required. `context_repo: None`.
+
+Add all modules to `commands/mod.rs`:
 ```rust
-match &cli.command {
-    Some(SubCommand::Daemon { .. }) => ...,      // unchanged
-    Some(SubCommand::Watch { .. }) => ...,       // unchanged
-    Some(SubCommand::Status { .. }) => ...,      // unchanged
-    Some(SubCommand::Topology { .. }) => ...,    // unchanged
-    Some(SubCommand::Hook { .. }) => ...,        // unchanged
-    Some(SubCommand::Hooks { .. }) => ...,       // unchanged
-    Some(SubCommand::Registry { noun, matches }) => {
-        // Resolve through registry
-        match cli_builder.resolve_matches(noun, matches)? {
-            Resolved::DaemonCommand(cmd) => run_control_command(&cli, cmd, format).await,
-            Resolved::Query(q) => run_registry_query(&cli, q, format).await,
+pub mod agent;
+pub mod checkout;
+pub mod cr;
+pub mod issue;
+pub mod repo;
+pub mod workspace;
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cargo test -p flotilla-commands`
+
+- [ ] **Step 5: Run formatting and clippy**
+
+Run: `cargo +nightly-2026-03-12 fmt -- crates/flotilla-commands/src/**/*.rs`
+Run: `cargo clippy -p flotilla-commands --all-targets --locked -- -D warnings`
+
+- [ ] **Step 6: Commit**
+
+Commit: `feat: implement checkout, cr, issue, agent, workspace nouns`
+
+---
+
+### Task 4: Implement host noun with two-stage parsing
+
+**Files:**
+- Create: `crates/flotilla-commands/src/commands/host.rs`
+- Create: `crates/flotilla-commands/src/noun.rs`
+- Modify: `crates/flotilla-commands/src/commands/mod.rs`
+- Modify: `crates/flotilla-commands/src/lib.rs`
+
+Host is the most complex noun — it has its own verbs AND routes other noun commands via two-stage parsing.
+
+- [ ] **Step 1: Create NounCommand enum**
+
+`crates/flotilla-commands/src/noun.rs`:
+```rust
+use clap::Subcommand;
+
+use crate::commands::{agent::AgentNoun, checkout::CheckoutNoun, cr::CrNoun, issue::IssueNoun, repo::RepoNoun, workspace::WorkspaceNoun};
+use crate::Resolved;
+
+/// All domain noun commands. Used by host routing to parse inner commands,
+/// and as the top-level dispatch type.
+#[derive(Debug, Subcommand)]
+pub enum NounCommand {
+    Repo(RepoNoun),
+    Checkout(CheckoutNoun),
+    Cr(CrNoun), // alias "pr" is on CrNoun itself, not here
+    Issue(IssueNoun),
+    Agent(AgentNoun),
+    Workspace(WorkspaceNoun),
+    // Host is NOT included — host doesn't nest inside host
+}
+
+impl NounCommand {
+    pub fn resolve(self) -> Result<Resolved, String> {
+        match self {
+            NounCommand::Repo(noun) => noun.resolve(),
+            NounCommand::Checkout(noun) => noun.resolve(),
+            NounCommand::Cr(noun) => noun.resolve(),
+            NounCommand::Issue(noun) => noun.resolve(),
+            NounCommand::Agent(noun) => noun.resolve(),
+            NounCommand::Workspace(noun) => noun.resolve(),
         }
     }
+}
+```
+
+Update `lib.rs` to add:
+```rust
+pub mod noun;
+pub use noun::NounCommand;
+```
+
+- [ ] **Step 2: Write failing tests for host noun**
+
+Tests in `crates/flotilla-commands/src/commands/host.rs`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use flotilla_protocol::{Command, CommandAction, RepoSelector};
+
+    use super::HostNounPartial;
+    use crate::{Refinable, Resolved};
+
+    fn parse(args: &[&str]) -> HostNounPartial {
+        HostNounPartial::try_parse_from(args).expect("should parse")
+    }
+
+    #[test]
+    fn host_list() {
+        let resolved = parse(&["host", "list"]).refine().unwrap().resolve().unwrap();
+        assert_eq!(resolved, Resolved::HostList);
+    }
+
+    #[test]
+    fn host_status() {
+        let resolved = parse(&["host", "alpha", "status"]).refine().unwrap().resolve().unwrap();
+        assert_eq!(resolved, Resolved::HostStatus { host: "alpha".into() });
+    }
+
+    #[test]
+    fn host_providers() {
+        let resolved = parse(&["host", "alpha", "providers"]).refine().unwrap().resolve().unwrap();
+        assert_eq!(resolved, Resolved::HostProviders { host: "alpha".into() });
+    }
+
+    #[test]
+    fn host_refresh_bare() {
+        let resolved = parse(&["host", "alpha", "refresh"]).refine().unwrap().resolve().unwrap();
+        assert!(matches!(
+            resolved,
+            Resolved::Command(Command {
+                action: CommandAction::Refresh { repo: None },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn host_refresh_with_repo() {
+        let resolved = parse(&["host", "alpha", "refresh", "my-repo"]).refine().unwrap().resolve().unwrap();
+        assert!(matches!(
+            resolved,
+            Resolved::Command(cmd) if cmd.host.is_some()
+                && matches!(cmd.action, CommandAction::Refresh { repo: Some(RepoSelector::Query(ref q)) } if q == "my-repo")
+        ));
+    }
+
+    #[test]
+    fn host_routes_repo_command() {
+        let resolved = parse(&["host", "feta", "repo", "myslug", "checkout", "main"])
+            .refine()
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(matches!(
+            resolved,
+            Resolved::Command(cmd) if cmd.host.as_ref().map(|h| h.as_str()) == Some("feta")
+                && matches!(cmd.action, CommandAction::Checkout { .. })
+        ));
+    }
+
+    #[test]
+    fn host_routes_checkout_remove() {
+        let resolved = parse(&["host", "alpha", "checkout", "my-feature", "remove"])
+            .refine()
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(matches!(
+            resolved,
+            Resolved::Command(cmd) if cmd.host.is_some()
+                && matches!(cmd.action, CommandAction::RemoveCheckout { .. })
+        ));
+    }
+}
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `cargo test -p flotilla-commands`
+
+- [ ] **Step 4: Implement HostNounPartial, HostNoun, refine, resolve, Display**
+
+`crates/flotilla-commands/src/commands/host.rs`:
+
+- `HostNounPartial` with `subcommand_precedence_over_arg`, `subcommand_negates_reqs`
+- `HostVerbPartial` with List, Status, Providers, Refresh, and `#[command(external_subcommand)] Route(Vec<OsString>)`
+- `HostNoun` and `HostVerb` (refined types — not clap derive, plain structs/enums)
+- `impl Refinable for HostNounPartial` — maps simple verbs through, parses `Route` tokens via `NounCommand::augment_subcommands` on a temporary clap `Command` then `try_get_matches_from`
+- `impl HostNoun { fn resolve(self) -> Result<Resolved, String> }` — delegates to inner NounCommand for Route, calls `resolved.set_host(host)`, handles own verbs directly
+- `impl Display` for HostNoun
+
+Add `pub mod host;` to `commands/mod.rs`.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `cargo test -p flotilla-commands`
+
+- [ ] **Step 6: Run formatting and clippy**
+
+Run: `cargo +nightly-2026-03-12 fmt -- crates/flotilla-commands/src/**/*.rs`
+Run: `cargo clippy -p flotilla-commands --all-targets --locked -- -D warnings`
+
+- [ ] **Step 7: Commit**
+
+Commit: `feat: implement host noun with two-stage parsing`
+
+---
+
+### Task 5: Wire registry CLI into main.rs
+
+**Files:**
+- Modify: `src/main.rs` — `Cli` struct, `SubCommand` enum, `main()` dispatch, removal of `normalize_cli_args`/`parse_*` functions/old enums/`run_repo`/`run_host`, test migration
+
+This is the integration task — replace old domain subcommands with noun types.
+
+- [ ] **Step 1: Update Cli struct**
+
+Add `#[arg(long, global = true)] json: bool` to Cli. Remove `json: bool` from Status, Watch, Topology, Refresh variants.
+
+- [ ] **Step 2: Replace domain subcommand variants**
+
+Remove from SubCommand: `Refresh`, `Repo`, `Checkout` (and `CheckoutSubCommand`), `Host`.
+Add: `Repo(flotilla_commands::commands::repo::RepoNoun)`, `Checkout(flotilla_commands::commands::checkout::CheckoutNoun)`, `Cr(flotilla_commands::commands::cr::CrNoun)`, `Issue(flotilla_commands::commands::issue::IssueNoun)`, `Agent(flotilla_commands::commands::agent::AgentNoun)`, `Workspace(flotilla_commands::commands::workspace::WorkspaceNoun)`, `Host(flotilla_commands::commands::host::HostNounPartial)`.
+
+Keep infrastructure variants unchanged: Daemon, Status, Watch, Topology, Hook, Hooks.
+
+- [ ] **Step 3: Add `--repo` flag to Cli and implement context injection**
+
+Add to the `Cli` struct:
+```rust
+/// Repo context for commands that need it (e.g. checkout create, cr close)
+#[arg(long)]
+repo: Option<String>,
+```
+
+Implement a context injection function that fills in missing `repo` fields on `CommandAction` variants that require them. This bridges the gap between the resolve function (which doesn't know the repo) and execution (which requires it):
+
+```rust
+fn inject_repo_context(cmd: &mut Command, cli: &Cli) -> Result<()> {
+    // If the command already has context_repo or the action has its own repo, skip.
+    // Otherwise, resolve from: --repo flag > FLOTILLA_REPO env var > error.
+    let repo_selector = match (&cli.repo, std::env::var("FLOTILLA_REPO").ok()) {
+        (Some(repo), _) => Some(RepoSelector::Query(repo.clone())),
+        (None, Some(repo)) => Some(RepoSelector::Query(repo)),
+        (None, None) => None,
+    };
+
+    // Patch action variants that need a repo but don't have one
+    match &mut cmd.action {
+        CommandAction::Checkout { repo, .. } if *repo == RepoSelector::Query(String::new()) => {
+            *repo = repo_selector.ok_or_else(|| eyre!("checkout create requires --repo or FLOTILLA_REPO"))?;
+        }
+        CommandAction::SearchIssues { repo, .. } if cmd.context_repo.is_none() => {
+            cmd.context_repo = repo_selector.clone();
+            *repo = repo_selector.ok_or_else(|| eyre!("issue search requires --repo or FLOTILLA_REPO"))?;
+        }
+        // Other variants that need context_repo
+        _ => {
+            if cmd.context_repo.is_none() {
+                cmd.context_repo = repo_selector;
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+Commands that need repo context but don't have it: `checkout create` (sets `CommandAction::Checkout.repo` to empty `RepoSelector::Query("")` in resolve, patched here), `cr open/close/link-issues` (sets `context_repo`), `issue open/suggest-branch/search` (sets `context_repo` and action `repo` field), `agent teleport/archive` (sets `context_repo`), `workspace select` (sets `context_repo`).
+
+- [ ] **Step 4: Add dispatch function**
+
+```rust
+async fn dispatch(mut resolved: flotilla_commands::Resolved, cli: &Cli, format: OutputFormat) -> Result<()> {
+    use flotilla_commands::Resolved;
+    // Inject repo context for commands that need it
+    if let Resolved::Command(ref mut cmd) = resolved {
+        inject_repo_context(cmd, cli)?;
+    }
+    match resolved {
+        Resolved::Command(cmd) => run_control_command(cli, cmd, format).await,
+        Resolved::RepoDetail { slug } => run_repo_detail(cli, &slug, format).await,
+        Resolved::RepoProviders { slug } => run_repo_providers(cli, &slug, format).await,
+        Resolved::RepoWork { slug } => run_repo_work(cli, &slug, format).await,
+        Resolved::HostList => run_host_list(cli, format).await,
+        Resolved::HostStatus { host } => run_host_status(cli, &host, format).await,
+        Resolved::HostProviders { host } => run_host_providers(cli, &host, format).await,
+    }
+}
+```
+
+Note: `run_repo_detail`, `run_repo_providers`, `run_repo_work`, `run_host_list`, `run_host_status`, `run_host_providers` — these exist today embedded in `run_repo` and `run_host`. Extract them as standalone functions, or inline the logic in `dispatch`.
+
+- [ ] **Step 5: Update main dispatch**
+
+Replace the match in `main()` (lines 172-206):
+```rust
+let format = OutputFormat::from_json_flag(cli.json);
+
+match cli.command {
+    Some(SubCommand::Daemon { .. }) => run_daemon(&cli, ..).await,
+    Some(SubCommand::Status) => run_status(&cli, format).await,
+    Some(SubCommand::Watch) => run_watch(&cli, format).await,
+    Some(SubCommand::Topology) => run_topology_command(&cli, format).await,
+    Some(SubCommand::Hook { .. }) => run_hook(&cli, ..).await,
+    Some(SubCommand::Hooks { .. }) => run_hooks_command(..).await,
+
+    Some(SubCommand::Repo(noun)) => dispatch(noun.resolve().map_err(|e| eyre!(e))?, &cli, format).await,
+    Some(SubCommand::Cr(noun)) => dispatch(noun.resolve().map_err(|e| eyre!(e))?, &cli, format).await,
+    Some(SubCommand::Checkout(noun)) => dispatch(noun.resolve().map_err(|e| eyre!(e))?, &cli, format).await,
+    Some(SubCommand::Issue(noun)) => dispatch(noun.resolve().map_err(|e| eyre!(e))?, &cli, format).await,
+    Some(SubCommand::Agent(noun)) => dispatch(noun.resolve().map_err(|e| eyre!(e))?, &cli, format).await,
+    Some(SubCommand::Workspace(noun)) => dispatch(noun.resolve().map_err(|e| eyre!(e))?, &cli, format).await,
+    Some(SubCommand::Host(partial)) => {
+        use flotilla_commands::Refinable;
+        dispatch(partial.refine().and_then(|n| n.resolve()).map_err(|e| eyre!(e))?, &cli, format).await
+    }
+
     None => run_tui(cli).await,
 }
 ```
 
-- [ ] **Step 3: Remove old domain subcommands**
+- [ ] **Step 6: Delete old parsing code**
 
-Remove the `Repo`, `Checkout`, `Host` clap derive variants, `parse_repo_command`, `parse_host_command`, `parse_host_control_command`, `RepoCommand`, `HostCommand` enums, and `normalize_cli_args`. The registry commands replace all of these.
+Remove these functions and types from `src/main.rs`:
+- `normalize_cli_args` function
+- `find_subcommand_index` function
+- `try_parse_cli_from` function — replace with direct `Cli::try_parse()` or `Cli::parse()`
+- `parse_repo_command` function
+- `parse_host_control_command` function
+- `parse_host_command` function
+- `RepoCommand`, `RepoQueryCommand`, `HostCommand`, `HostQueryCommand` enums
+- `run_repo` and `run_host` functions — replaced by `dispatch`
+- `CheckoutSubCommand` enum
 
-Also remove the `Refresh` subcommand — it becomes `repo refresh` in the registry.
+Remove unused imports: `OsString`, `CheckoutSelector`, `CheckoutTarget` (now used in flotilla-commands, not main.rs).
 
-- [ ] **Step 4: Verify all existing CLI commands still work**
+**Note:** The `Refresh` top-level subcommand is removed — it becomes `repo refresh`. This is intentional; the project is in a no-backward-compatibility phase. Scripts using `flotilla refresh` must change to `flotilla repo refresh`.
 
-Test manually or with a script:
-```bash
-cargo run -- repo list
-cargo run -- repo add /tmp/test-repo
-cargo run -- repo remove /tmp/test-repo
-cargo run -- refresh
-cargo run -- checkout some-branch remove
-cargo run -- host list
-cargo run -- host feta status
-# etc.
-```
+- [ ] **Step 7: Verify it compiles**
 
-Write integration tests if feasible (the existing repo command tests in `src/main.rs` can be adapted).
+Run: `cargo check --workspace --locked`
 
-- [ ] **Step 5: Run full test suite, CI checks, commit**
+- [ ] **Step 8: Migrate tests**
+
+Replace the test module (lines 815-954) with equivalent tests using the new noun types. The old tests tested `parse_repo_command` and `parse_host_command` directly and via `try_parse_cli_from` — new tests should use noun `try_parse_from` and `resolve`. Some tests are now redundant with the flotilla-commands crate tests; keep only tests that exercise the main.rs integration (e.g., `Cli::try_parse_from` produces the right SubCommand variant).
+
+Delete tests for `normalize_cli_args` (no longer needed — `--json` is global).
+
+- [ ] **Step 9: Run full test suite**
 
 Run: `cargo test --workspace --locked`
-Run: `cargo +nightly-2026-03-12 fmt --check && cargo clippy --workspace --all-targets --locked -- -D warnings`
+
+- [ ] **Step 10: Run CI checks**
+
+Run: `cargo +nightly-2026-03-12 fmt --check`
+Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
+
+- [ ] **Step 11: Commit**
+
 Commit: `feat: wire registry-generated CLI into flotilla binary`
 
 ---
 
-### Task 5: Add shell completion support
+### Task 6: Add shell completion engine
 
 **Files:**
 - Create: `crates/flotilla-commands/src/complete.rs`
-- Modify: `src/main.rs`
+- Modify: `crates/flotilla-commands/src/lib.rs`
+- Modify: `src/main.rs` (add Complete and Completions subcommands)
 
-- [ ] **Step 1: Implement completion engine**
+- [ ] **Step 1: Write failing tests for completion engine**
+
+`crates/flotilla-commands/src/complete.rs`:
 
 ```rust
-pub fn complete(registry: &Registry, line: &str, cursor_pos: usize) -> Vec<CompletionItem>;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_root() -> clap::Command {
+        // Build a minimal root command for testing.
+        // In the real binary, this is Cli::command().
+        use crate::commands::{repo::RepoNoun, checkout::CheckoutNoun, cr::CrNoun, host::HostNounPartial};
+        use clap::{Parser, CommandFactory};
+        // Build from noun commands + stub infrastructure subcommands
+        clap::Command::new("flotilla")
+            .subcommand(RepoNoun::command().name("repo"))
+            .subcommand(CheckoutNoun::command().name("checkout"))
+            .subcommand(CrNoun::command().name("cr"))
+            .subcommand(HostNounPartial::command().name("host"))
+            .subcommand(clap::Command::new("status"))
+            .subcommand(clap::Command::new("daemon"))
+    }
+
+    #[test]
+    fn empty_input_completes_to_nouns_and_infrastructure() {
+        let completions = complete(&test_root(), "", 0);
+        let values: Vec<&str> = completions.iter().map(|c| c.value.as_str()).collect();
+        assert!(values.contains(&"repo"));
+        assert!(values.contains(&"cr"));
+        assert!(values.contains(&"checkout"));
+        assert!(values.contains(&"host"));
+        assert!(values.contains(&"status"));
+        assert!(values.contains(&"daemon"));
+    }
+
+    #[test]
+    fn noun_completes_to_verbs() {
+        let completions = complete(&test_root(), "repo ", 5);
+        let values: Vec<&str> = completions.iter().map(|c| c.value.as_str()).collect();
+        assert!(values.contains(&"add"));
+        assert!(values.contains(&"remove"));
+        assert!(values.contains(&"refresh"));
+        assert!(values.contains(&"checkout"));
+    }
+
+    #[test]
+    fn noun_with_subject_completes_to_verbs() {
+        let completions = complete(&test_root(), "repo myslug ", 12);
+        let values: Vec<&str> = completions.iter().map(|c| c.value.as_str()).collect();
+        assert!(values.contains(&"checkout"));
+        assert!(values.contains(&"providers"));
+        assert!(values.contains(&"work"));
+    }
+
+    #[test]
+    fn host_with_subject_completes_to_verbs_and_nouns() {
+        let completions = complete(&test_root(), "host feta ", 10);
+        let values: Vec<&str> = completions.iter().map(|c| c.value.as_str()).collect();
+        // Host verbs
+        assert!(values.contains(&"status"));
+        assert!(values.contains(&"providers"));
+        assert!(values.contains(&"list"));
+        // Routable nouns
+        assert!(values.contains(&"repo"));
+        assert!(values.contains(&"checkout"));
+    }
+
+    #[test]
+    fn host_routed_noun_completes_to_noun_verbs() {
+        let completions = complete(&test_root(), "host feta repo myslug ", 22);
+        let values: Vec<&str> = completions.iter().map(|c| c.value.as_str()).collect();
+        assert!(values.contains(&"checkout"));
+        assert!(values.contains(&"providers"));
+    }
+
+    #[test]
+    fn partial_noun_completes() {
+        let completions = complete(&test_root(), "ch", 2);
+        let values: Vec<&str> = completions.iter().map(|c| c.value.as_str()).collect();
+        assert!(values.contains(&"checkout"));
+        assert!(!values.contains(&"repo"));
+    }
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cargo test -p flotilla-commands`
+
+- [ ] **Step 3: Implement completion engine**
+
+`crates/flotilla-commands/src/complete.rs`:
+
+```rust
+use clap::Command;
 
 pub struct CompletionItem {
     pub value: String,
     pub description: Option<String>,
 }
-```
 
-The completion engine tokenizes the line up to cursor_pos and walks the registry:
-1. Empty or first token → noun names + infrastructure subcommand names
-2. Noun matched, next token → verb names for that noun (for verbs that don't need a subject) or "expecting subject"
-3. Noun + subject, next token → verb names
-4. Noun + verb, next tokens → arg completions from `ArgSpec`
+/// Complete a command line. `root` is the full clap Command tree,
+/// passed in by the binary crate (which owns the full CLI definition).
+pub fn complete(root: &Command, line: &str, cursor_pos: usize) -> Vec<CompletionItem> {
+    let input = &line[..cursor_pos.min(line.len())];
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    // If input ends with space, we're completing the next token
+    // If not, we're completing a partial current token
+    let trailing_space = input.ends_with(' ') || input.is_empty();
+    if trailing_space {
+        walk_for_completions(&tokens, &root, 0, "")
+    } else {
+        let (prefix_tokens, partial) = tokens.split_at(tokens.len().saturating_sub(1));
+        let partial = partial.first().copied().unwrap_or("");
+        walk_for_completions(prefix_tokens, &root, 0, partial)
+    }
+}
 
-Phase 1 completions are static (nouns, verbs, flag names). Dynamic completions (subjects from providers) come in a later phase.
+fn walk_for_completions(tokens: &[&str], cmd: &Command, pos: usize, partial: &str) -> Vec<CompletionItem> {
+    if pos >= tokens.len() {
+        return filter_completions(valid_next_tokens(cmd), partial);
+    }
 
-- [ ] **Step 2: Add `complete` subcommand to main.rs**
+    let token = tokens[pos];
 
-```rust
-/// Generate shell completions (hidden, called by shell completion scripts)
-Complete {
-    /// The input line
-    line: String,
-    /// Cursor position
-    #[arg(default_value = "0")]
-    cursor_pos: usize,
+    // Try matching as subcommand
+    if let Some(sub) = cmd.find_subcommand(token) {
+        return walk_for_completions(tokens, sub, pos + 1, partial);
+    }
+
+    // Host routing: external_subcommands → try noun names
+    if cmd.is_allow_external_subcommands_set() {
+        if let Some(noun_cmd) = find_noun_command(token) {
+            return walk_for_completions(tokens, &noun_cmd, pos + 1, partial);
+        }
+    }
+
+    // Positional (subject) — consume and continue
+    walk_for_completions(tokens, cmd, pos + 1, partial)
 }
 ```
 
-Output: one completion per line, tab-separated value and description.
+The `complete()` function takes a `&Command` parameter — the binary crate passes `Cli::command()` which includes all subcommands. `find_noun_command` looks up nouns by name and returns their clap `Command` via the noun struct's `CommandFactory::command()` method.
 
-- [ ] **Step 3: Generate shell setup scripts**
+Helper functions: `valid_next_tokens` returns subcommand names + flag names. `filter_completions` filters by prefix.
 
-Add a `completions` subcommand that outputs the shell-specific boilerplate:
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cargo test -p flotilla-commands`
+
+- [ ] **Step 5: Add Complete and Completions subcommands to main.rs**
+
+Add to SubCommand enum:
+```rust
+/// Generate completions (hidden, called by shell scripts)
+#[command(hide = true)]
+Complete {
+    /// The input line to complete
+    line: String,
+    /// Cursor position within the line
+    #[arg(default_value = "0")]
+    cursor_pos: usize,
+},
+/// Output shell completion setup scripts
+Completions {
+    /// Shell type
+    #[arg(value_enum)]
+    shell: CompletionShell,
+},
 ```
-flotilla completions bash    # outputs bash completion script
-flotilla completions zsh     # outputs zsh completion script
-flotilla completions fish    # outputs fish completion script
+
+Define `CompletionShell` as a `clap::ValueEnum`:
+```rust
+#[derive(Clone, clap::ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
 ```
 
-Each script calls `flotilla complete "$line" $cursor_pos` and formats the output for the shell.
+Implement `run_complete` and `run_completions` handlers. `run_complete` builds the root command via `Cli::command()` and calls `flotilla_commands::complete::complete(&root, &line, cursor_pos)`, printing tab-separated output. `run_completions` outputs hardcoded shell scripts (one template per shell) that call `flotilla complete`.
 
-- [ ] **Step 4: Test completion engine**
+Add dispatch arms in main:
+```rust
+Some(SubCommand::Complete { line, cursor_pos }) => run_complete(&line, cursor_pos),
+Some(SubCommand::Completions { shell }) => run_completions(shell),
+```
 
-Test cases:
-- Empty line → all nouns + infrastructure commands
-- `repo` → verbs for repo (add, remove, refresh)
-- `repo add` → no more completions (expects path)
-- `cr` → verbs for cr (open, close, link-issues)
-- `check` → completes to `checkout`
+- [ ] **Step 6: Run full test suite and CI checks**
 
-- [ ] **Step 5: Run tests, commit**
+Run: `cargo test --workspace --locked`
+Run: `cargo +nightly-2026-03-12 fmt --check`
+Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
+
+- [ ] **Step 7: Commit**
 
 Commit: `feat: shell completion engine from command registry`
 
 ---
 
-### Task 6: Tests, cleanup, documentation
+### Task 7: Display round-trip tests and final cleanup
 
 **Files:**
-- Modify: `crates/flotilla-commands/src/lib.rs`
-- Various test files
+- Modify: `crates/flotilla-commands/src/commands/repo.rs` (add round-trip tests)
+- Modify: `crates/flotilla-commands/src/commands/host.rs` (add round-trip tests)
+- Modify: various files for cleanup
 
-- [ ] **Step 1: Ensure all existing main.rs tests still pass**
+- [ ] **Step 1: Add Display round-trip tests for each noun**
 
-The `normalize_cli_args` tests and any existing CLI integration tests need to be migrated or removed (the `--json` normalization may no longer be needed if the registry handles it uniformly).
+For each noun, add a test that `parse → display → parse` produces the same result:
 
-- [ ] **Step 2: Add round-trip tests**
+```rust
+#[test]
+fn display_round_trips() {
+    let cases = [
+        &["repo", "myslug", "checkout", "main"][..],
+        &["repo", "add", "/tmp/test"],
+        &["repo", "myslug", "providers"],
+        &["checkout", "my-feature", "remove"],
+        &["cr", "42", "close"],
+        &["agent", "claude-1", "teleport"],
+        &["workspace", "feat-ws", "select"],
+    ];
+    for args in &cases {
+        // Parse each through its noun, display, re-parse, compare
+    }
+}
+```
 
-For each domain command that the old CLI supported, write a test that:
-1. Constructs the same args the old CLI would receive
-2. Passes them through the registry CLI parser
-3. Asserts the same `Command` is produced
+- [ ] **Step 2: Run tests**
 
-This is the key regression safety net.
+Run: `cargo test -p flotilla-commands`
 
 - [ ] **Step 3: Run full CI suite**
 
 Run: `cargo test --workspace --locked`
-Run: `cargo +nightly-2026-03-12 fmt --check && cargo clippy --workspace --all-targets --locked -- -D warnings`
+Run: `cargo +nightly-2026-03-12 fmt --check`
+Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
-- [ ] **Step 4: Final commit**
+- [ ] **Step 4: Commit**
 
-Commit: `test: round-trip tests for registry CLI migration`
+Commit: `test: Display round-trip tests for registry nouns`
