@@ -25,9 +25,9 @@ impl HostDetector for ClaudeDetector {
             };
         }
 
-        // 2. Check known installation locations via runner (not local filesystem)
-        let known_paths: Vec<PathBuf> = env.get("HOME").into_iter().map(|h| PathBuf::from(h).join(".claude/local/claude")).collect();
-        for path in known_paths {
+        // 2. Check known installation location via runner (not local filesystem)
+        if let Some(home) = env.get("HOME") {
+            let path = PathBuf::from(home).join(".claude/local/claude");
             let path_str = path.to_str().unwrap_or("");
             if let Ok(output) = run!(runner, path_str, &["--version"], Path::new(".")) {
                 return match parse_first_dotted_version(&output) {

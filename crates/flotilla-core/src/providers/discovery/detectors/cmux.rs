@@ -33,7 +33,8 @@ impl HostDetector for CmuxDetector {
         if runner.exists("cmux", &["list-sessions", "--format=json"]).await {
             assertions.push(EnvironmentAssertion::binary("cmux", "cmux"));
         } else {
-            // 3. Fall back to the macOS app-bundle path, checked via runner
+            // 3. Fall back to the macOS app-bundle path — runs the binary to confirm
+            //    it's functional, not just present on disk
             if runner.exists(CMUX_APP_BUNDLE_BIN, &["list-sessions", "--format=json"]).await {
                 assertions.push(EnvironmentAssertion::binary("cmux", CMUX_APP_BUNDLE_BIN));
             }

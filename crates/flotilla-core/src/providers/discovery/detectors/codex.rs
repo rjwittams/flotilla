@@ -34,7 +34,10 @@ impl HostDetector for CodexAuthDetector {
         };
         let auth_path = home.join("auth.json");
         // Check existence via runner (test -f) rather than local filesystem
-        if runner.exists("test", &["-f", &auth_path.to_string_lossy()]).await {
+        let Some(path_str) = auth_path.to_str() else {
+            return vec![]; // non-UTF-8 path — can't pass to runner
+        };
+        if runner.exists("test", &["-f", path_str]).await {
             vec![EnvironmentAssertion::auth_file("codex", auth_path)]
         } else {
             vec![]
