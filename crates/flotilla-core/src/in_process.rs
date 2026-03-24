@@ -315,9 +315,10 @@ impl InProcessDaemon {
                 continue;
             }
             let attachable_store = discovery.shared_attachable_store(&config);
+            let ee_path = crate::path_context::ExecutionEnvironmentPath::new(&path);
             let DiscoveryResult { registry, repo_slug, host_repo_bag, repo_bag, unmet } = discovery::discover_providers(
                 &host_bag,
-                &path,
+                &ee_path,
                 &discovery.repo_detectors,
                 &discovery.factories,
                 &config,
@@ -517,8 +518,9 @@ impl InProcessDaemon {
         let mut repo_bag = EnvironmentBag::new();
         let runner = &*self.discovery.runner;
         let env = &*self.discovery.env;
+        let ee_path = crate::path_context::ExecutionEnvironmentPath::new(repo_path);
         for detector in &self.discovery.repo_detectors {
-            repo_bag = repo_bag.extend(detector.detect(repo_path, runner, env).await);
+            repo_bag = repo_bag.extend(detector.detect(&ee_path, runner, env).await);
         }
         let combined = self.host_bag.merge(&repo_bag);
         repo_identity_from_bag_or_path(repo_path, &combined)
@@ -1358,9 +1360,10 @@ impl InProcessDaemon {
         }
 
         // Create the model outside the lock (spawns provider detection and refresh)
+        let ee_path = crate::path_context::ExecutionEnvironmentPath::new(&path);
         let DiscoveryResult { registry, repo_slug, host_repo_bag, repo_bag, unmet } = discover_providers(
             &self.host_bag,
-            &path,
+            &ee_path,
             &self.discovery.repo_detectors,
             &self.discovery.factories,
             &self.config,

@@ -11,6 +11,7 @@ use flotilla_core::{
     config::ConfigStore,
     daemon::DaemonHandle,
     in_process::InProcessDaemon,
+    path_context::ExecutionEnvironmentPath,
     providers::{
         ai_utility::AiUtility,
         change_request::ChangeRequestTracker,
@@ -43,7 +44,7 @@ struct FixedRemoteHostDetector {
 impl RepoDetector for FixedRemoteHostDetector {
     async fn detect(
         &self,
-        _repo_root: &Path,
+        _repo_root: &ExecutionEnvironmentPath,
         _runner: &dyn flotilla_core::providers::CommandRunner,
         _env: &dyn flotilla_core::providers::discovery::EnvVars,
     ) -> Vec<EnvironmentAssertion> {
@@ -112,7 +113,7 @@ impl Factory for SlowCloudAgentFactory {
         &self,
         _: &EnvironmentBag,
         _: &ConfigStore,
-        _: &Path,
+        _: &ExecutionEnvironmentPath,
         _: Arc<dyn flotilla_core::providers::CommandRunner>,
     ) -> Result<Arc<Self::Output>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.agent) as Arc<dyn CloudAgentService>)
@@ -169,7 +170,7 @@ impl Factory for SlowAiUtilityFactory {
         &self,
         _: &EnvironmentBag,
         _: &ConfigStore,
-        _: &Path,
+        _: &ExecutionEnvironmentPath,
         _: Arc<dyn flotilla_core::providers::CommandRunner>,
     ) -> Result<Arc<Self::Output>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.utility) as Arc<dyn AiUtility>)

@@ -25,6 +25,7 @@ use super::{DiscoveryRuntime, EnvironmentBag, Factory, FactoryRegistry, Provider
 use crate::{
     attachable::{shared_file_backed_attachable_store, SharedAttachableStore},
     config::ConfigStore,
+    path_context::ExecutionEnvironmentPath,
     providers::{
         change_request::ChangeRequestTracker,
         discovery::EnvVars,
@@ -797,7 +798,7 @@ impl Factory for FakeIssueTrackerFactory {
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,
-        _repo_root: &Path,
+        _repo_root: &ExecutionEnvironmentPath,
         _runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn IssueTracker>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.0))
@@ -839,11 +840,11 @@ impl Factory for FakeVcsFactory {
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,
-        repo_root: &Path,
+        repo_root: &ExecutionEnvironmentPath,
         _runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn Vcs>, Vec<UnmetRequirement>> {
         let state = self.state.read().expect("FakeVcsFactory state poisoned");
-        if repo_root == state.root {
+        if repo_root.as_path() == state.root {
             Ok(Arc::new(FakeVcs::new(Arc::clone(&self.state))))
         } else {
             Err(vec![UnmetRequirement::NoVcsCheckout])
@@ -883,11 +884,11 @@ impl Factory for FakeCheckoutManagerFactory {
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,
-        repo_root: &Path,
+        repo_root: &ExecutionEnvironmentPath,
         _runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn CheckoutManager>, Vec<UnmetRequirement>> {
         let state = self.state.read().expect("FakeCheckoutManagerFactory state poisoned");
-        if repo_root == state.root {
+        if repo_root.as_path() == state.root {
             Ok(Arc::new(FakeCheckoutManager::from_state(Arc::clone(&self.state))))
         } else {
             Err(vec![UnmetRequirement::NoVcsCheckout])
@@ -910,7 +911,7 @@ impl Factory for FakeChangeRequestFactory {
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,
-        _repo_root: &Path,
+        _repo_root: &ExecutionEnvironmentPath,
         _runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn ChangeRequestTracker>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.0))
@@ -938,7 +939,7 @@ impl Factory for FakeWorkspaceManagerFactory {
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,
-        _repo_root: &Path,
+        _repo_root: &ExecutionEnvironmentPath,
         _runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn WorkspaceManager>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.0))
@@ -966,7 +967,7 @@ impl Factory for FakeTerminalPoolFactory {
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,
-        _repo_root: &Path,
+        _repo_root: &ExecutionEnvironmentPath,
         _runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn TerminalPool>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.0))
@@ -1033,7 +1034,7 @@ impl Factory for ArcCheckoutManagerFactory {
         &self,
         _env: &EnvironmentBag,
         _config: &ConfigStore,
-        _repo_root: &Path,
+        _repo_root: &ExecutionEnvironmentPath,
         _runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn CheckoutManager>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.0))

@@ -13,7 +13,7 @@ pub mod factories;
 pub mod test_support;
 
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, OnceLock},
 };
 
@@ -364,7 +364,12 @@ pub trait HostDetector: Send + Sync {
 
 #[async_trait]
 pub trait RepoDetector: Send + Sync {
-    async fn detect(&self, repo_root: &Path, runner: &dyn CommandRunner, env: &dyn EnvVars) -> Vec<EnvironmentAssertion>;
+    async fn detect(
+        &self,
+        repo_root: &ExecutionEnvironmentPath,
+        runner: &dyn CommandRunner,
+        env: &dyn EnvVars,
+    ) -> Vec<EnvironmentAssertion>;
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +386,7 @@ pub trait Factory: Send + Sync {
         &self,
         env: &EnvironmentBag,
         config: &ConfigStore,
-        repo_root: &Path,
+        repo_root: &ExecutionEnvironmentPath,
         runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<Self::Output>, Vec<UnmetRequirement>>;
 }
@@ -465,7 +470,7 @@ pub async fn run_host_detectors(detectors: &[Box<dyn HostDetector>], runner: &dy
 
 pub async fn discover_providers(
     host_bag: &EnvironmentBag,
-    repo_root: &Path,
+    repo_root: &ExecutionEnvironmentPath,
     repo_detectors: &[Box<dyn RepoDetector>],
     factories: &FactoryRegistry,
     config: &ConfigStore,
@@ -487,7 +492,7 @@ pub async fn discover_providers(
         factories: &[Box<dyn Factory<Output = T>>],
         env: &EnvironmentBag,
         config: &ConfigStore,
-        repo_root: &Path,
+        repo_root: &ExecutionEnvironmentPath,
         runner: &Arc<dyn CommandRunner>,
         unmet: &mut Vec<(String, UnmetRequirement)>,
         mut insert: F,
@@ -600,7 +605,7 @@ pub async fn discover_providers(
     );
 
     // Checkout strategy — resolved per-repo, nested under vcs.git
-    let checkout_config = config.resolve_checkout_config(repo_root);
+    let checkout_config = config.resolve_checkout_config(repo_root.as_path());
     if checkout_config.strategy != "auto" && !registry.checkout_managers.prefer_by_implementation(&checkout_config.strategy) {
         unmet.push((ProviderCategory::CheckoutManager.slug().into(), UnmetRequirement::UnknownProviderPreference {
             category: ProviderCategory::CheckoutManager,
@@ -631,6 +636,7 @@ mod orchestrator_tests {
     use super::*;
     use crate::{
         config::ConfigStore,
+        path_context::ExecutionEnvironmentPath,
         providers::discovery::{
             detectors,
             test_support::{DiscoveryMockRunner, TestEnvVars},
@@ -664,6 +670,7 @@ mod orchestrator_tests {
 
         let runner = runner_with_git_repo(repo_root);
         let config = ConfigStore::with_base(dir.path().join("config"));
+        let repo_root = ExecutionEnvironmentPath::new(repo_root);
 
         // Build host bag with git binary assertion
         let host_bag = EnvironmentBag::new()
@@ -673,7 +680,7 @@ mod orchestrator_tests {
         let repo_dets = detectors::default_repo_detectors();
         let fact_reg = FactoryRegistry::default_all();
 
-        let result = discover_providers(&host_bag, repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
+        let result = discover_providers(&host_bag, &repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
 
         // VCS should be registered (git factory)
         assert!(!result.registry.vcs.is_empty(), "expected at least one VCS provider");
@@ -691,6 +698,7 @@ mod orchestrator_tests {
 
         let runner = runner_with_git_repo(repo_root);
         let config = ConfigStore::with_base(dir.path().join("config"));
+        let repo_root = ExecutionEnvironmentPath::new(repo_root);
 
         // Host bag with both git and wt binaries
         let host_bag = EnvironmentBag::new()
@@ -700,7 +708,7 @@ mod orchestrator_tests {
         let repo_dets = detectors::default_repo_detectors();
         let fact_reg = FactoryRegistry::default_all();
 
-        let result = discover_providers(&host_bag, repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
+        let result = discover_providers(&host_bag, &repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
 
         // All checkout managers now register (probe_all); config preferences choose the preferred one
         assert!(!result.registry.checkout_managers.is_empty(), "at least one checkout manager should be registered");
@@ -715,13 +723,14 @@ mod orchestrator_tests {
         // Runner with NO tool_exists — everything will fail
         let runner: Arc<DiscoveryMockRunner> = Arc::new(DiscoveryMockRunner::builder().build());
         let config = ConfigStore::with_base(dir.path().join("config"));
+        let repo_root = ExecutionEnvironmentPath::new(repo_root);
 
         // Empty host bag — no binaries detected
         let host_bag = EnvironmentBag::new();
         let repo_dets = detectors::default_repo_detectors();
         let fact_reg = FactoryRegistry::default_all();
 
-        let result = discover_providers(&host_bag, repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
+        let result = discover_providers(&host_bag, &repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
 
         // With no binaries and no assertions, factories should report unmet
         assert!(!result.unmet.is_empty(), "expected unmet requirements when no tools available");
@@ -735,6 +744,7 @@ mod orchestrator_tests {
 
         let runner = runner_with_git_repo(repo_root);
         let config = ConfigStore::with_base(dir.path().join("config"));
+        let repo_root = ExecutionEnvironmentPath::new(repo_root);
 
         // Host bag with git binary
         let host_bag = EnvironmentBag::new().with(EnvironmentAssertion::versioned_binary("git", "/usr/bin/git", "2.40.0"));
@@ -752,7 +762,7 @@ mod orchestrator_tests {
             terminal_pools: vec![],
         };
 
-        let result = discover_providers(&host_bag, repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
+        let result = discover_providers(&host_bag, &repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
 
         // RemoteHostDetector should have parsed the git remote URL into a
         // RemoteHost assertion, yielding a repo_slug.
@@ -762,7 +772,7 @@ mod orchestrator_tests {
     #[tokio::test]
     async fn discover_providers_empty_factories() {
         let dir = tempdir().expect("tempdir");
-        let repo_root = dir.path();
+        let repo_root = ExecutionEnvironmentPath::new(dir.path());
 
         let runner: Arc<DiscoveryMockRunner> = Arc::new(DiscoveryMockRunner::builder().build());
         let config = ConfigStore::with_base(dir.path().join("config"));
@@ -780,7 +790,7 @@ mod orchestrator_tests {
             terminal_pools: vec![],
         };
 
-        let result = discover_providers(&host_bag, repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
+        let result = discover_providers(&host_bag, &repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
 
         assert!(result.registry.vcs.is_empty());
         assert!(result.registry.checkout_managers.is_empty());
