@@ -43,7 +43,7 @@ impl TerminalPool for MockTerminalPool {
         Ok(self.list_response.lock().expect("lock list_response").clone())
     }
 
-    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path) -> Result<(), String> {
+    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path, _env_vars: &TerminalEnvVars) -> Result<(), String> {
         self.calls.lock().expect("lock calls").push(PoolCall::EnsureSession {
             session_name: session_name.to_string(),
             command: command.to_string(),
@@ -156,7 +156,7 @@ async fn ensure_running_uses_attachable_id_as_session_name() {
             self.calls.lock().expect("lock").push(PoolCall::ListSessions);
             Ok(Vec::new())
         }
-        async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path) -> Result<(), String> {
+        async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path, _env_vars: &TerminalEnvVars) -> Result<(), String> {
             self.calls.lock().expect("lock").push(PoolCall::EnsureSession {
                 session_name: session_name.to_string(),
                 command: command.to_string(),
@@ -220,7 +220,7 @@ async fn attach_command_includes_env_vars() {
         async fn list_sessions(&self) -> Result<Vec<TerminalSession>, String> {
             Ok(Vec::new())
         }
-        async fn ensure_session(&self, _: &str, _: &str, _: &Path) -> Result<(), String> {
+        async fn ensure_session(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<(), String> {
             Ok(())
         }
         fn attach_args(
@@ -322,7 +322,7 @@ async fn kill_terminal_delegates_to_pool() {
         async fn list_sessions(&self) -> Result<Vec<TerminalSession>, String> {
             Ok(Vec::new())
         }
-        async fn ensure_session(&self, _: &str, _: &str, _: &Path) -> Result<(), String> {
+        async fn ensure_session(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<(), String> {
             Ok(())
         }
         fn attach_args(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
@@ -411,7 +411,7 @@ async fn cascade_delete_removes_sets_and_kills_sessions() {
         async fn list_sessions(&self) -> Result<Vec<TerminalSession>, String> {
             Ok(Vec::new())
         }
-        async fn ensure_session(&self, _: &str, _: &str, _: &Path) -> Result<(), String> {
+        async fn ensure_session(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<(), String> {
             Ok(())
         }
         fn attach_args(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {

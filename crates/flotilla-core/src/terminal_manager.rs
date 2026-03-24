@@ -117,7 +117,7 @@ impl TerminalManager {
             }
         };
         let session_name = attachable_id.to_string();
-        self.pool.ensure_session(&session_name, &command, &cwd).await
+        self.pool.ensure_session(&session_name, &command, &cwd, &vec![]).await
     }
 
     /// Returns the command string needed to attach to a terminal session.

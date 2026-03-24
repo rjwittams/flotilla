@@ -54,7 +54,7 @@ impl TerminalPool for CleatTerminalPool {
             .collect())
     }
 
-    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path) -> Result<(), String> {
+    async fn ensure_session(&self, session_name: &str, command: &str, cwd: &Path, _env_vars: &TerminalEnvVars) -> Result<(), String> {
         run!(
             self.runner,
             &self.binary,
@@ -133,7 +133,7 @@ mod tests {
         let runner = Arc::new(MockRunner::new(vec![Ok(json.into())]));
         let pool = CleatTerminalPool::new(Arc::clone(&runner) as Arc<dyn CommandRunner>, "cleat");
 
-        pool.ensure_session("my-session", "bash", Path::new("/repo")).await.expect("ensure session");
+        pool.ensure_session("my-session", "bash", Path::new("/repo"), &vec![]).await.expect("ensure session");
 
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
