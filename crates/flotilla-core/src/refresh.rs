@@ -308,7 +308,7 @@ fn project_attachable_data(pd: &mut ProviderData, registry: &ProviderRegistry, a
                     set_id: attachable.set_id.clone(),
                     role: t.purpose.role.clone(),
                     command: t.command.clone(),
-                    working_directory: t.working_directory.clone(),
+                    working_directory: t.working_directory.clone().into_path_buf(),
                     status: t.status.clone(),
                 });
             }

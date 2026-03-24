@@ -9,8 +9,13 @@ use flotilla_protocol::{HostName, HostPath, TerminalStatus};
 use super::*;
 use crate::{
     attachable::{shared_in_memory_attachable_store, AttachableContent},
+    path_context::ExecutionEnvironmentPath,
     providers::terminal::{TerminalEnvVars, TerminalPool, TerminalSession},
 };
+
+fn ee(path: &str) -> ExecutionEnvironmentPath {
+    ExecutionEnvironmentPath::new(path)
+}
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields used for test assertions via Debug matching
@@ -102,8 +107,7 @@ async fn allocate_terminal_creates_attachable() {
     let mgr = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
-    let att_id =
-        mgr.allocate_terminal(set_id.clone(), "shell", 0, "feat", "$SHELL", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
+    let att_id = mgr.allocate_terminal(set_id.clone(), "shell", 0, "feat", "$SHELL", ee("/repo/wt-feat")).expect("allocate_terminal");
 
     let store = store.lock().expect("lock store");
     let attachable = store.registry().attachables.get(&att_id).expect("attachable should exist");
@@ -114,7 +118,7 @@ async fn allocate_terminal_creates_attachable() {
             assert_eq!(t.purpose.checkout, "feat");
             assert_eq!(t.purpose.index, 0);
             assert_eq!(t.command, "$SHELL");
-            assert_eq!(t.working_directory, PathBuf::from("/repo/wt-feat"));
+            assert_eq!(t.working_directory, ee("/repo/wt-feat"));
             assert_eq!(t.status, TerminalStatus::Disconnected);
         }
     }
@@ -127,7 +131,7 @@ async fn ensure_running_delegates_to_pool() {
     let mgr = TerminalManager::new(Arc::new(pool), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
-    let att_id = mgr.allocate_terminal(set_id, "shell", 0, "feat", "bash", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
+    let att_id = mgr.allocate_terminal(set_id, "shell", 0, "feat", "bash", ee("/repo/wt-feat")).expect("allocate_terminal");
 
     mgr.ensure_running(&att_id).await.expect("ensure_running");
 
@@ -189,7 +193,7 @@ async fn ensure_running_uses_attachable_id_as_session_name() {
     let _ = mock; // silence unused warning
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
-    let att_id = mgr.allocate_terminal(set_id, "shell", 0, "feat", "bash", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
+    let att_id = mgr.allocate_terminal(set_id, "shell", 0, "feat", "bash", ee("/repo/wt-feat")).expect("allocate_terminal");
 
     mgr.ensure_running(&att_id).await.expect("ensure_running");
 
@@ -246,7 +250,7 @@ async fn attach_command_includes_env_vars() {
     let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
-    let att_id = mgr.allocate_terminal(set_id, "agent", 1, "feat", "claude", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
+    let att_id = mgr.allocate_terminal(set_id, "agent", 1, "feat", "claude", ee("/repo/wt-feat")).expect("allocate_terminal");
 
     let result = mgr.attach_command(&att_id, Some("/tmp/flotilla.sock")).await.expect("attach_command");
     assert!(result.contains("attach"));
@@ -291,7 +295,7 @@ async fn attach_command_rejects_remote_attachable() {
             content: AttachableContent::Terminal(TerminalAttachable {
                 purpose: TerminalPurpose { checkout: "feat".to_string(), role: "shell".to_string(), index: 0 },
                 command: "bash".to_string(),
-                working_directory: PathBuf::from("/remote/wt-feat"),
+                working_directory: ee("/remote/wt-feat"),
                 status: flotilla_protocol::TerminalStatus::Disconnected,
             }),
         });
@@ -337,7 +341,7 @@ async fn kill_terminal_delegates_to_pool() {
     let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
-    let att_id = mgr.allocate_terminal(set_id, "shell", 0, "feat", "bash", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
+    let att_id = mgr.allocate_terminal(set_id, "shell", 0, "feat", "bash", ee("/repo/wt-feat")).expect("allocate_terminal");
 
     mgr.kill_terminal(&att_id).await.expect("kill_terminal");
 
@@ -357,8 +361,7 @@ async fn refresh_updates_statuses() {
     let mgr_for_setup = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone(), test_host());
 
     let set_id = mgr_for_setup.allocate_set(test_host(), test_checkout()).expect("allocate_set");
-    let att_id =
-        mgr_for_setup.allocate_terminal(set_id, "shell", 0, "feat", "bash", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
+    let att_id = mgr_for_setup.allocate_terminal(set_id, "shell", 0, "feat", "bash", ee("/repo/wt-feat")).expect("allocate_terminal");
 
     // Create a new manager with a pool that reports the session as running.
     let pool = MockTerminalPool::with_sessions(vec![TerminalSession {
@@ -383,8 +386,7 @@ async fn refresh_reports_disconnected_for_missing_sessions() {
     let mgr_for_setup = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone(), test_host());
 
     let set_id = mgr_for_setup.allocate_set(test_host(), test_checkout()).expect("allocate_set");
-    let att_id =
-        mgr_for_setup.allocate_terminal(set_id, "shell", 0, "feat", "bash", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
+    let att_id = mgr_for_setup.allocate_terminal(set_id, "shell", 0, "feat", "bash", ee("/repo/wt-feat")).expect("allocate_terminal");
 
     // Pool returns empty — no live sessions.
     let pool = MockTerminalPool::new();
@@ -426,9 +428,8 @@ async fn cascade_delete_removes_sets_and_kills_sessions() {
     let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
-    let att_id_1 =
-        mgr.allocate_terminal(set_id.clone(), "shell", 0, "feat", "bash", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
-    let att_id_2 = mgr.allocate_terminal(set_id, "agent", 0, "feat", "claude", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
+    let att_id_1 = mgr.allocate_terminal(set_id.clone(), "shell", 0, "feat", "bash", ee("/repo/wt-feat")).expect("allocate_terminal");
+    let att_id_2 = mgr.allocate_terminal(set_id, "agent", 0, "feat", "claude", ee("/repo/wt-feat")).expect("allocate_terminal");
 
     mgr.cascade_delete(&[test_checkout()]).await.expect("cascade_delete");
 

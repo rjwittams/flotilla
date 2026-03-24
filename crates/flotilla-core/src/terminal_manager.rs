@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use flotilla_protocol::{arg, AttachableId, AttachableSet, AttachableSetId, HostName, HostPath, TerminalStatus};
 use tracing::warn;
@@ -12,6 +12,7 @@ use crate::{
         terminal::PoolTerminalHopResolver,
         ResolutionContext, ResolvedAction,
     },
+    path_context::ExecutionEnvironmentPath,
     providers::terminal::{TerminalEnvVars, TerminalPool},
 };
 
@@ -24,7 +25,7 @@ pub struct TerminalInfo {
     pub checkout: String,
     pub index: u32,
     pub command: String,
-    pub working_directory: PathBuf,
+    pub working_directory: ExecutionEnvironmentPath,
     pub status: TerminalStatus,
 }
 
@@ -71,7 +72,7 @@ impl TerminalManager {
         index: u32,
         checkout: &str,
         command: &str,
-        working_directory: PathBuf,
+        working_directory: ExecutionEnvironmentPath,
     ) -> Result<AttachableId, String> {
         let mut store = self.store.lock().map_err(|e| format!("failed to lock store: {e}"))?;
         let target_purpose = TerminalPurpose { checkout: checkout.to_string(), role: role.to_string(), index };
@@ -117,7 +118,7 @@ impl TerminalManager {
             }
         };
         let session_name = attachable_id.to_string();
-        self.pool.ensure_session(&session_name, &command, &cwd).await
+        self.pool.ensure_session(&session_name, &command, cwd.as_path()).await
     }
 
     /// Returns the command string needed to attach to a terminal session.
@@ -185,7 +186,7 @@ impl TerminalManager {
             env_vars.push(("FLOTILLA_DAEMON_SOCKET".to_string(), socket.to_string()));
         }
         let session_name = attachable_id.to_string();
-        self.pool.attach_args(&session_name, &command, &cwd, &env_vars)
+        self.pool.attach_args(&session_name, &command, cwd.as_path(), &env_vars)
     }
 
     /// Kills a terminal session in the pool.

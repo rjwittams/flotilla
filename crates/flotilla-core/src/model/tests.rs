@@ -314,7 +314,7 @@ async fn repo_model_new_initializes_state_and_uses_registry_data() {
         PathBuf::from("/tmp/test-repo"),
         reg,
         Some("owner/repo".to_string()),
-        crate::attachable::shared_file_backed_attachable_store("/tmp"),
+        crate::attachable::shared_file_backed_attachable_store(&crate::path_context::DaemonHostPath::new("/tmp")),
         crate::agents::shared_in_memory_agent_state_store(),
     );
 
@@ -340,7 +340,7 @@ async fn repo_model_new_with_empty_registry_uses_default_labels() {
         PathBuf::from("/tmp/empty"),
         reg,
         None,
-        crate::attachable::shared_file_backed_attachable_store("/tmp"),
+        crate::attachable::shared_file_backed_attachable_store(&crate::path_context::DaemonHostPath::new("/tmp")),
         crate::agents::shared_in_memory_agent_state_store(),
     );
     assert_eq!(model.labels.checkouts.section, "\u{2014}");

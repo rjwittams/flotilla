@@ -4,6 +4,7 @@ use flotilla_protocol::{arg::Arg, HostName, HostPath, PreparedTerminalCommand, R
 use tracing::{debug, info, warn};
 
 use crate::{
+    path_context::ExecutionEnvironmentPath,
     providers::types::WorkspaceConfig,
     template::{self, WorkspaceTemplate},
     terminal_manager::TerminalManager,
@@ -50,7 +51,7 @@ impl<'a> TerminalPreparationService<'a> {
                     i,
                     &config.name,
                     &entry.command,
-                    config.working_directory.clone(),
+                    ExecutionEnvironmentPath::new(config.working_directory.clone()),
                 ) {
                     Ok(id) => id,
                     Err(err) => {
@@ -105,7 +106,7 @@ impl<'a> TerminalPreparationService<'a> {
                     idx,
                     branch,
                     &cmd.command,
-                    checkout_path.to_path_buf(),
+                    ExecutionEnvironmentPath::new(checkout_path),
                 ) {
                     Ok(id) => id,
                     Err(err) => {

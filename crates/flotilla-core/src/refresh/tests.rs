@@ -385,7 +385,8 @@ fn project_attachable_data_populates_sets_and_ids() {
     registry.terminal_pools.insert("shpool", desc("shpool"), Arc::new(MockTerminalPool::ok(vec![])));
 
     let store_dir = tempfile::tempdir().expect("tempdir");
-    let attachable_store = crate::attachable::shared_file_backed_attachable_store(store_dir.path());
+    let attachable_store =
+        crate::attachable::shared_file_backed_attachable_store(&crate::path_context::DaemonHostPath::new(store_dir.path()));
     let set_id = {
         let mut store = attachable_store.lock().expect("lock store");
         let set_id = store.ensure_terminal_set(
@@ -399,7 +400,7 @@ fn project_attachable_data_populates_sets_and_ids() {
             "flotilla/feat/dev/0",
             crate::attachable::TerminalPurpose { checkout: "feat".into(), role: "dev".into(), index: 0 },
             "bash",
-            PathBuf::from("/tmp/wt-feat"),
+            crate::path_context::ExecutionEnvironmentPath::new("/tmp/wt-feat"),
             flotilla_protocol::TerminalStatus::Running,
         );
         store.replace_binding(crate::attachable::ProviderBinding {

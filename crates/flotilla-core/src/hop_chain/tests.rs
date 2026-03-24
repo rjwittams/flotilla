@@ -687,7 +687,7 @@ fn store_with_terminal(attachable_id: &AttachableId, command: &str, cwd: &Path) 
             content: AttachableContent::Terminal(TerminalAttachable {
                 purpose: TerminalPurpose { checkout: "feat".to_string(), role: "shell".to_string(), index: 0 },
                 command: command.to_string(),
-                working_directory: cwd.to_path_buf(),
+                working_directory: crate::path_context::ExecutionEnvironmentPath::new(cwd),
                 status: TerminalStatus::Disconnected,
             }),
         });
@@ -1196,7 +1196,7 @@ fn builder_store_with_host(attachable_id: &AttachableId, host_affinity: Option<H
         content: AttachableContent::Terminal(TerminalAttachable {
             purpose: TerminalPurpose { checkout: "feat".to_string(), role: "shell".to_string(), index: 0 },
             command: "bash".to_string(),
-            working_directory: PathBuf::from("/repo/wt-feat"),
+            working_directory: crate::path_context::ExecutionEnvironmentPath::new("/repo/wt-feat"),
             status: TerminalStatus::Disconnected,
         }),
     });

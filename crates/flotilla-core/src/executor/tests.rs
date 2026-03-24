@@ -305,7 +305,7 @@ fn remove_checkout_action(branch: &str) -> CommandAction {
 }
 
 fn test_attachable_store(base: &Path) -> SharedAttachableStore {
-    crate::attachable::shared_file_backed_attachable_store(base)
+    crate::attachable::shared_file_backed_attachable_store(&crate::path_context::DaemonHostPath::new(base))
 }
 
 fn assert_error_contains(result: CommandValue, expected_substring: &str) {
@@ -467,7 +467,7 @@ async fn create_workspace_for_checkout_persists_workspace_binding() {
     .await;
 
     assert_ok(result);
-    let store = AttachableStore::with_base(temp.path());
+    let store = AttachableStore::with_base(&crate::path_context::DaemonHostPath::new(temp.path()));
     let object_id = store
         .lookup_binding("workspace_manager", "cmux", BindingObjectKind::AttachableSet, "mock-ref")
         .expect("workspace binding should exist");
@@ -556,7 +556,7 @@ async fn prepare_terminal_for_checkout_includes_attachable_set_id_when_present()
     match result {
         CommandValue::TerminalPrepared { attachable_set_id, .. } => {
             let set_id = attachable_set_id.expect("attachable set id");
-            let store = AttachableStore::with_base(temp.path());
+            let store = AttachableStore::with_base(&crate::path_context::DaemonHostPath::new(temp.path()));
             assert!(store.registry().sets.contains_key(&set_id), "prepare should reuse persisted set");
         }
         other => panic!("expected TerminalPrepared, got {other:?}"),
@@ -589,7 +589,7 @@ async fn prepare_terminal_for_checkout_creates_and_persists_attachable_set() {
         other => panic!("expected TerminalPrepared, got {other:?}"),
     };
 
-    let store = AttachableStore::with_base(temp.path());
+    let store = AttachableStore::with_base(&crate::path_context::DaemonHostPath::new(temp.path()));
     let set = store.registry().sets.get(&set_id).expect("set should exist");
     assert_eq!(set.checkout, Some(HostPath::new(local_host(), path)));
     assert!(temp.path().join("attachables").join("registry.json").exists(), "registry should be written");
@@ -716,7 +716,7 @@ async fn create_workspace_from_prepared_terminal_persists_remote_attachable_set_
     .await;
 
     assert_ok(result);
-    let store = AttachableStore::with_base(temp.path());
+    let store = AttachableStore::with_base(&crate::path_context::DaemonHostPath::new(temp.path()));
     let object_id = store
         .lookup_binding("workspace_manager", "cmux", BindingObjectKind::AttachableSet, "mock-ref")
         .expect("workspace binding should exist");
@@ -885,7 +885,7 @@ async fn teleport_session_persists_workspace_binding() {
     .await;
 
     assert_ok(result);
-    let store = AttachableStore::with_base(temp.path());
+    let store = AttachableStore::with_base(&crate::path_context::DaemonHostPath::new(temp.path()));
     let object_id = store
         .lookup_binding("workspace_manager", "cmux", BindingObjectKind::AttachableSet, "mock-ref")
         .expect("workspace binding should exist");
@@ -1745,7 +1745,7 @@ async fn remove_checkout_cascades_attachable_set_deletion() {
             "flotilla/feat-x/shell/0",
             crate::attachable::TerminalPurpose { checkout: "feat-x".into(), role: "shell".into(), index: 0 },
             "bash",
-            PathBuf::from("/repo/wt-feat-x"),
+            crate::path_context::ExecutionEnvironmentPath::new("/repo/wt-feat-x"),
             TerminalStatus::Running,
         );
     }

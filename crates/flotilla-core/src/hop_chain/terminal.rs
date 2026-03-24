@@ -47,7 +47,7 @@ impl TerminalHopResolver for PoolTerminalHopResolver {
         }
 
         let session_name = attachable_id.to_string();
-        let args = self.pool.attach_args(&session_name, &command, &cwd, &env_vars)?;
+        let args = self.pool.attach_args(&session_name, &command, cwd.as_path(), &env_vars)?;
         context.actions.push(ResolvedAction::Command(args));
         Ok(())
     }

@@ -2227,7 +2227,7 @@ async fn attachable_set_cascade_deletes_on_checkout_removal() {
             "flotilla/feat-lifecycle/shell/0",
             TerminalPurpose { checkout: "feat-lifecycle".into(), role: "shell".into(), index: 0 },
             "bash",
-            PathBuf::from("/tmp/repo/wt-feat-lifecycle"),
+            flotilla_core::path_context::ExecutionEnvironmentPath::new("/tmp/repo/wt-feat-lifecycle"),
             flotilla_protocol::TerminalStatus::Running,
         );
         set_id
