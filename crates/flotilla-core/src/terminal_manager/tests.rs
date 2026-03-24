@@ -52,14 +52,20 @@ impl TerminalPool for MockTerminalPool {
         Ok(())
     }
 
-    async fn attach_command(&self, session_name: &str, command: &str, cwd: &Path, env_vars: &TerminalEnvVars) -> Result<String, String> {
+    fn attach_args(
+        &self,
+        session_name: &str,
+        command: &str,
+        cwd: &Path,
+        env_vars: &TerminalEnvVars,
+    ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
         self.calls.lock().expect("lock calls").push(PoolCall::AttachCommand {
             session_name: session_name.to_string(),
             command: command.to_string(),
             cwd: cwd.to_path_buf(),
             env_vars: env_vars.clone(),
         });
-        Ok(format!("attach {session_name}"))
+        Ok(vec![flotilla_protocol::arg::Arg::Literal(format!("attach {session_name}"))])
     }
 
     async fn kill_session(&self, session_name: &str) -> Result<(), String> {
@@ -79,7 +85,7 @@ fn test_checkout() -> HostPath {
 #[tokio::test]
 async fn allocate_set_creates_store_entry() {
     let store = shared_in_memory_attachable_store();
-    let mgr = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone());
+    let mgr = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
 
@@ -93,7 +99,7 @@ async fn allocate_set_creates_store_entry() {
 #[tokio::test]
 async fn allocate_terminal_creates_attachable() {
     let store = shared_in_memory_attachable_store();
-    let mgr = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone());
+    let mgr = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
     let att_id =
@@ -118,7 +124,7 @@ async fn allocate_terminal_creates_attachable() {
 async fn ensure_running_delegates_to_pool() {
     let store = shared_in_memory_attachable_store();
     let pool = MockTerminalPool::new();
-    let mgr = TerminalManager::new(Arc::new(pool), store.clone());
+    let mgr = TerminalManager::new(Arc::new(pool), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
     let att_id = mgr.allocate_terminal(set_id, "shell", 0, "feat", "bash", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
@@ -158,20 +164,20 @@ async fn ensure_running_uses_attachable_id_as_session_name() {
             });
             Ok(())
         }
-        async fn attach_command(
+        fn attach_args(
             &self,
             session_name: &str,
             command: &str,
             cwd: &Path,
             env_vars: &TerminalEnvVars,
-        ) -> Result<String, String> {
+        ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
             self.calls.lock().expect("lock").push(PoolCall::AttachCommand {
                 session_name: session_name.to_string(),
                 command: command.to_string(),
                 cwd: cwd.to_path_buf(),
                 env_vars: env_vars.clone(),
             });
-            Ok(format!("attach {session_name}"))
+            Ok(vec![flotilla_protocol::arg::Arg::Literal(format!("attach {session_name}"))])
         }
         async fn kill_session(&self, session_name: &str) -> Result<(), String> {
             self.calls.lock().expect("lock").push(PoolCall::KillSession { session_name: session_name.to_string() });
@@ -179,7 +185,7 @@ async fn ensure_running_uses_attachable_id_as_session_name() {
         }
     }
 
-    let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone());
+    let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone(), test_host());
     let _ = mock; // silence unused warning
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
@@ -217,27 +223,27 @@ async fn attach_command_includes_env_vars() {
         async fn ensure_session(&self, _: &str, _: &str, _: &Path) -> Result<(), String> {
             Ok(())
         }
-        async fn attach_command(
+        fn attach_args(
             &self,
             session_name: &str,
             command: &str,
             cwd: &Path,
             env_vars: &TerminalEnvVars,
-        ) -> Result<String, String> {
+        ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
             self.calls.lock().expect("lock").push(PoolCall::AttachCommand {
                 session_name: session_name.to_string(),
                 command: command.to_string(),
                 cwd: cwd.to_path_buf(),
                 env_vars: env_vars.clone(),
             });
-            Ok(format!("attach {session_name}"))
+            Ok(vec![flotilla_protocol::arg::Arg::Literal(format!("attach {session_name}"))])
         }
         async fn kill_session(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
     }
 
-    let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone());
+    let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
     let att_id = mgr.allocate_terminal(set_id, "agent", 1, "feat", "claude", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
@@ -258,6 +264,50 @@ async fn attach_command_includes_env_vars() {
 }
 
 #[tokio::test]
+async fn attach_command_rejects_remote_attachable() {
+    use flotilla_protocol::AttachableSet;
+
+    use crate::attachable::{Attachable, AttachableContent, TerminalAttachable, TerminalPurpose};
+
+    let store = shared_in_memory_attachable_store();
+    let local_host = HostName::new("my-laptop");
+    let remote_host = HostName::new("remote-server");
+
+    // Insert an attachable set with a remote host affinity.
+    {
+        let mut s = store.lock().expect("lock");
+        let set_id = s.allocate_set_id();
+        let att_id = s.allocate_attachable_id();
+        s.insert_set(AttachableSet {
+            id: set_id.clone(),
+            host_affinity: Some(remote_host),
+            checkout: None,
+            template_identity: None,
+            members: vec![att_id.clone()],
+        });
+        s.insert_attachable(Attachable {
+            id: att_id,
+            set_id,
+            content: AttachableContent::Terminal(TerminalAttachable {
+                purpose: TerminalPurpose { checkout: "feat".to_string(), role: "shell".to_string(), index: 0 },
+                command: "bash".to_string(),
+                working_directory: PathBuf::from("/remote/wt-feat"),
+                status: flotilla_protocol::TerminalStatus::Disconnected,
+            }),
+        });
+    }
+
+    let att_id = {
+        let s = store.lock().expect("lock");
+        s.registry().attachables.keys().next().expect("should have one attachable").clone()
+    };
+
+    let mgr = TerminalManager::new(Arc::new(MockTerminalPool::new()), store, local_host);
+    let err = mgr.attach_command(&att_id, None).await.expect_err("should reject remote attachable");
+    assert!(err.contains("does not support remote attachables"), "error should mention remote attachables not supported: {err}");
+}
+
+#[tokio::test]
 async fn kill_terminal_delegates_to_pool() {
     let store = shared_in_memory_attachable_store();
     let calls: std::sync::Arc<Mutex<Vec<PoolCall>>> = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -275,8 +325,8 @@ async fn kill_terminal_delegates_to_pool() {
         async fn ensure_session(&self, _: &str, _: &str, _: &Path) -> Result<(), String> {
             Ok(())
         }
-        async fn attach_command(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<String, String> {
-            Ok(String::new())
+        fn attach_args(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
+            Ok(vec![])
         }
         async fn kill_session(&self, session_name: &str) -> Result<(), String> {
             self.calls.lock().expect("lock").push(PoolCall::KillSession { session_name: session_name.to_string() });
@@ -284,7 +334,7 @@ async fn kill_terminal_delegates_to_pool() {
         }
     }
 
-    let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone());
+    let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
     let att_id = mgr.allocate_terminal(set_id, "shell", 0, "feat", "bash", PathBuf::from("/repo/wt-feat")).expect("allocate_terminal");
@@ -304,7 +354,7 @@ async fn kill_terminal_delegates_to_pool() {
 #[tokio::test]
 async fn refresh_updates_statuses() {
     let store = shared_in_memory_attachable_store();
-    let mgr_for_setup = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone());
+    let mgr_for_setup = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone(), test_host());
 
     let set_id = mgr_for_setup.allocate_set(test_host(), test_checkout()).expect("allocate_set");
     let att_id =
@@ -317,7 +367,7 @@ async fn refresh_updates_statuses() {
         command: Some("bash".to_string()),
         working_directory: Some(PathBuf::from("/repo/wt-feat")),
     }]);
-    let mgr = TerminalManager::new(Arc::new(pool), store.clone());
+    let mgr = TerminalManager::new(Arc::new(pool), store.clone(), test_host());
 
     let infos = mgr.refresh().await.expect("refresh");
     assert_eq!(infos.len(), 1);
@@ -330,7 +380,7 @@ async fn refresh_updates_statuses() {
 #[tokio::test]
 async fn refresh_reports_disconnected_for_missing_sessions() {
     let store = shared_in_memory_attachable_store();
-    let mgr_for_setup = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone());
+    let mgr_for_setup = TerminalManager::new(Arc::new(MockTerminalPool::new()), store.clone(), test_host());
 
     let set_id = mgr_for_setup.allocate_set(test_host(), test_checkout()).expect("allocate_set");
     let att_id =
@@ -338,7 +388,7 @@ async fn refresh_reports_disconnected_for_missing_sessions() {
 
     // Pool returns empty — no live sessions.
     let pool = MockTerminalPool::new();
-    let mgr = TerminalManager::new(Arc::new(pool), store.clone());
+    let mgr = TerminalManager::new(Arc::new(pool), store.clone(), test_host());
 
     let infos = mgr.refresh().await.expect("refresh");
     assert_eq!(infos.len(), 1);
@@ -364,8 +414,8 @@ async fn cascade_delete_removes_sets_and_kills_sessions() {
         async fn ensure_session(&self, _: &str, _: &str, _: &Path) -> Result<(), String> {
             Ok(())
         }
-        async fn attach_command(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<String, String> {
-            Ok(String::new())
+        fn attach_args(&self, _: &str, _: &str, _: &Path, _: &TerminalEnvVars) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
+            Ok(vec![])
         }
         async fn kill_session(&self, session_name: &str) -> Result<(), String> {
             self.calls.lock().expect("lock").push(PoolCall::KillSession { session_name: session_name.to_string() });
@@ -373,7 +423,7 @@ async fn cascade_delete_removes_sets_and_kills_sessions() {
         }
     }
 
-    let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone());
+    let mgr = TerminalManager::new(Arc::new(SharedMock { calls: calls_clone }), store.clone(), test_host());
 
     let set_id = mgr.allocate_set(test_host(), test_checkout()).expect("allocate_set");
     let att_id_1 =

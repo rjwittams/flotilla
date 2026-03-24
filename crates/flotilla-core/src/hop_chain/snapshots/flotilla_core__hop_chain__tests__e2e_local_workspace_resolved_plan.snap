@@ -1,0 +1,28 @@
+---
+source: crates/flotilla-core/src/hop_chain/tests.rs
+assertion_line: 1458
+expression: "&resolved"
+---
+ResolvedPlan(
+    [
+        Command(
+            [
+                Quoted(
+                    "cleat",
+                ),
+                Literal(
+                    "attach",
+                ),
+                Quoted(
+                    "main__shell__0",
+                ),
+                Literal(
+                    "--cwd",
+                ),
+                Quoted(
+                    "/home/alice/dev/my-repo",
+                ),
+            ],
+        ),
+    ],
+)

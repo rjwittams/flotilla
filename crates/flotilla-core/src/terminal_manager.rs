@@ -1,10 +1,17 @@
 use std::{path::PathBuf, sync::Arc};
 
-use flotilla_protocol::{AttachableId, AttachableSet, AttachableSetId, HostName, HostPath, TerminalStatus};
+use flotilla_protocol::{arg, AttachableId, AttachableSet, AttachableSetId, HostName, HostPath, TerminalStatus};
 use tracing::warn;
 
 use crate::{
     attachable::{Attachable, AttachableContent, SharedAttachableStore, TerminalAttachable, TerminalPurpose},
+    hop_chain::{
+        builder::HopPlanBuilder,
+        remote::NoopRemoteHopResolver,
+        resolver::{AlwaysWrap, HopResolver},
+        terminal::PoolTerminalHopResolver,
+        ResolutionContext, ResolvedAction,
+    },
     providers::terminal::{TerminalEnvVars, TerminalPool},
 };
 
@@ -30,11 +37,12 @@ pub struct TerminalInfo {
 pub struct TerminalManager {
     pool: Arc<dyn TerminalPool>,
     store: SharedAttachableStore,
+    local_host: HostName,
 }
 
 impl TerminalManager {
-    pub fn new(pool: Arc<dyn TerminalPool>, store: SharedAttachableStore) -> Self {
-        Self { pool, store }
+    pub fn new(pool: Arc<dyn TerminalPool>, store: SharedAttachableStore, local_host: HostName) -> Self {
+        Self { pool, store, local_host }
     }
 
     /// Returns the existing `AttachableSet` for the given checkout, or creates a new one.
@@ -113,8 +121,57 @@ impl TerminalManager {
     }
 
     /// Returns the command string needed to attach to a terminal session.
-    /// Injects `FLOTILLA_ATTACHABLE_ID` and optionally `FLOTILLA_DAEMON_SOCKET` env vars.
+    ///
+    /// Uses the hop chain internally: builds a `HopPlan` via `HopPlanBuilder::build_for_attachable()`,
+    /// resolves it with `PoolTerminalHopResolver` + `AlwaysWrap`, and flattens to a string.
+    /// For local attach (same-host), the plan is just `[AttachTerminal(id)]` with no remote hop.
     pub async fn attach_command(&self, attachable_id: &AttachableId, daemon_socket_path: Option<&str>) -> Result<String, String> {
+        let plan = {
+            let store = self.store.lock().map_err(|e| format!("failed to lock store: {e}"))?;
+            let builder = HopPlanBuilder::new(&self.local_host);
+            builder.build_for_attachable(attachable_id, &*store)?
+        };
+
+        // Guard: attach_command only supports local attachables.
+        // Remote terminals should use the workspace flow which routes through
+        // the hop chain with a real SSH resolver.
+        if plan.0.iter().any(|hop| matches!(hop, crate::hop_chain::Hop::RemoteToHost { .. })) {
+            return Err(
+                "attach_command does not support remote attachables — use the workspace flow for remote terminal attach".to_string()
+            );
+        }
+
+        let terminal_resolver =
+            PoolTerminalHopResolver::new(Arc::clone(&self.pool), self.store.clone(), daemon_socket_path.map(|s| s.to_string()));
+        let hop_resolver =
+            HopResolver { remote: Arc::new(NoopRemoteHopResolver), terminal: Arc::new(terminal_resolver), strategy: Arc::new(AlwaysWrap) };
+
+        let mut context = ResolutionContext {
+            current_host: self.local_host.clone(),
+            current_environment: None,
+            working_directory: None,
+            actions: Vec::new(),
+            nesting_depth: 0,
+        };
+        let resolved = hop_resolver.resolve(&plan, &mut context)?;
+
+        resolved
+            .0
+            .into_iter()
+            .find_map(|action| match action {
+                ResolvedAction::Command(args) => Some(arg::flatten(&args, 0)),
+                _ => None,
+            })
+            .ok_or_else(|| "hop chain resolution produced no Command action for attach".to_string())
+    }
+
+    /// Returns a structured `Arg` tree for attaching to a terminal session.
+    /// Like `attach_command()` but returns `Vec<Arg>` instead of a flat string.
+    pub fn attach_args(
+        &self,
+        attachable_id: &AttachableId,
+        daemon_socket_path: Option<&str>,
+    ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
         let (command, cwd) = {
             let store = self.store.lock().map_err(|e| format!("failed to lock store: {e}"))?;
             let attachable =
@@ -128,7 +185,7 @@ impl TerminalManager {
             env_vars.push(("FLOTILLA_DAEMON_SOCKET".to_string(), socket.to_string()));
         }
         let session_name = attachable_id.to_string();
-        self.pool.attach_command(&session_name, &command, &cwd, &env_vars).await
+        self.pool.attach_args(&session_name, &command, &cwd, &env_vars)
     }
 
     /// Kills a terminal session in the pool.
