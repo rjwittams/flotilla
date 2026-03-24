@@ -515,35 +515,19 @@ impl TerminalPool for ShpoolTerminalPool {
         Ok(())
     }
 
-    fn attach_args(&self, session_name: &str, command: &str, cwd: &Path, env_vars: &TerminalEnvVars) -> Result<Vec<Arg>, String> {
-        let mut args = vec![
+    fn attach_args(&self, session_name: &str, _command: &str, cwd: &Path, _env_vars: &TerminalEnvVars) -> Result<Vec<Arg>, String> {
+        Ok(vec![
             Arg::Quoted("shpool".into()),
             Arg::Literal("--socket".into()),
             Arg::Quoted(self.socket_path.display().to_string()),
             Arg::Literal("-c".into()),
             Arg::Quoted(self.config_path.display().to_string()),
             Arg::Literal("attach".into()),
-        ];
-        if !command.is_empty() || !env_vars.is_empty() {
-            let mut cmd_inner: Vec<Arg> = Vec::new();
-            if !env_vars.is_empty() {
-                cmd_inner.push(Arg::Literal("env".into()));
-                for (k, v) in env_vars {
-                    cmd_inner.push(Arg::Literal(format!("{k}={}", flotilla_protocol::arg::shell_quote(v))));
-                }
-            }
-            cmd_inner.push(Arg::Literal("${SHELL:-/bin/sh}".into()));
-            if !command.is_empty() {
-                cmd_inner.push(Arg::Literal("-lic".into()));
-                cmd_inner.push(Arg::Quoted(command.into()));
-            }
-            args.push(Arg::Literal("--cmd".into()));
-            args.push(Arg::NestedCommand(cmd_inner));
-        }
-        args.push(Arg::Literal("--dir".into()));
-        args.push(Arg::Quoted(cwd.display().to_string()));
-        args.push(Arg::Quoted(session_name.into()));
-        Ok(args)
+            Arg::Literal("--force".into()),
+            Arg::Literal("--dir".into()),
+            Arg::Quoted(cwd.display().to_string()),
+            Arg::Quoted(session_name.into()),
+        ])
     }
 
     async fn kill_session(&self, session_name: &str) -> Result<(), String> {

@@ -139,9 +139,8 @@ async fn attach_builds_command() {
 
     assert!(cmd.contains("shpool"), "should reference shpool binary: {cmd}");
     assert!(cmd.contains("attach"), "should include attach subcommand: {cmd}");
-    assert!(cmd.contains("--cmd"), "should include --cmd for non-empty command: {cmd}");
-    assert!(cmd.contains("-lic"), "should use login interactive shell: {cmd}");
-    assert!(cmd.contains("bash"), "should contain original command: {cmd}");
+    assert!(cmd.contains("--force"), "should include --force: {cmd}");
+    assert!(!cmd.contains("--cmd"), "should NOT have --cmd: {cmd}");
     assert!(cmd.contains("--dir"), "should include --dir: {cmd}");
     assert!(cmd.contains("/home/dev"), "should include cwd: {cmd}");
     assert!(cmd.contains("'flotilla/feat/shell/0'"), "session name should be last: {cmd}");
@@ -173,8 +172,7 @@ fn attach_args_with_command_no_env() {
         Arg::Literal("-c".into()),
         Arg::Quoted(config),
         Arg::Literal("attach".into()),
-        Arg::Literal("--cmd".into()),
-        Arg::NestedCommand(vec![Arg::Literal("${SHELL:-/bin/sh}".into()), Arg::Literal("-lic".into()), Arg::Quoted("bash".into()),]),
+        Arg::Literal("--force".into()),
         Arg::Literal("--dir".into()),
         Arg::Quoted("/home/dev".into()),
         Arg::Quoted("flotilla/feat/shell/0".into()),
@@ -189,9 +187,8 @@ fn attach_args_flatten_with_command_no_env() {
 
     assert!(flat.starts_with("'shpool' --socket "), "should start with shpool: {flat}");
     assert!(flat.contains("attach"), "should include attach: {flat}");
-    assert!(flat.contains("--cmd"), "should include --cmd: {flat}");
-    assert!(flat.contains("-lic"), "should use login interactive shell: {flat}");
-    assert!(flat.contains("bash"), "should contain original command: {flat}");
+    assert!(flat.contains("--force"), "should include --force: {flat}");
+    assert!(!flat.contains("--cmd"), "should NOT have --cmd: {flat}");
     assert!(flat.contains("--dir"), "should include --dir: {flat}");
     assert!(flat.contains("'/home/dev'"), "should include cwd: {flat}");
     assert!(flat.ends_with("'flotilla/feat/shell/0'"), "session name should be last: {flat}");
@@ -202,13 +199,9 @@ fn attach_args_empty_command_no_env() {
     let (pool, _dir) = test_pool(Arc::new(MockRunner::new(vec![])));
     let args = pool.attach_args("sess", "", Path::new("/wd"), &vec![]).expect("attach_args");
 
-    // No --cmd when both command and env_vars are empty
-    assert!(!args.iter().any(|a| matches!(a, Arg::Literal(s) if s == "--cmd")), "no --cmd for empty command+env");
-    // Should end with --dir, quoted cwd, quoted session name
-    let len = args.len();
-    assert_eq!(args[len - 3], Arg::Literal("--dir".into()));
-    assert_eq!(args[len - 2], Arg::Quoted("/wd".into()));
-    assert_eq!(args[len - 1], Arg::Quoted("sess".into()));
+    // Same structure as with command — command was baked in at ensure_session time
+    assert!(args.iter().any(|a| matches!(a, Arg::Literal(s) if s == "--force")), "should have --force");
+    assert!(!args.iter().any(|a| matches!(a, Arg::Literal(s) if s == "--cmd")), "should NOT have --cmd");
 }
 
 #[test]
@@ -217,15 +210,9 @@ fn attach_args_with_env_vars() {
     let env = vec![("FOO".to_string(), "bar".to_string())];
     let args = pool.attach_args("sess", "cmd", Path::new("/wd"), &env).expect("attach_args");
 
-    // Verify the inner command structure via the NestedCommand
-    let nested = args.iter().find(|a| matches!(a, Arg::NestedCommand(_)));
-    assert!(nested.is_some(), "should have NestedCommand for --cmd");
-    if let Some(Arg::NestedCommand(inner)) = nested {
-        let inner_flat = flotilla_protocol::arg::flatten(inner, 0);
-        assert!(inner_flat.contains("FOO='bar'"), "inner should contain env assignment: {inner_flat}");
-        assert!(inner_flat.contains("${SHELL:-/bin/sh}"), "inner should reference $SHELL: {inner_flat}");
-        assert!(inner_flat.contains("-lic"), "inner should have -lic: {inner_flat}");
-    }
+    // Env vars are baked in at ensure_session time — not in attach_args
+    assert!(!args.iter().any(|a| matches!(a, Arg::NestedCommand(_))), "should have no NestedCommand");
+    assert!(!args.iter().any(|a| matches!(a, Arg::Literal(s) if s == "--cmd")), "should NOT have --cmd");
 }
 
 #[test]
@@ -234,15 +221,9 @@ fn attach_args_with_env_vars_empty_command() {
     let env = vec![("KEY".to_string(), "val".to_string())];
     let args = pool.attach_args("sess", "", Path::new("/wd"), &env).expect("attach_args");
 
-    // Should have --cmd with env prefix and $SHELL but no -lic
-    let nested = args.iter().find(|a| matches!(a, Arg::NestedCommand(_)));
-    assert!(nested.is_some(), "should have NestedCommand for --cmd");
-    if let Some(Arg::NestedCommand(inner)) = nested {
-        let inner_flat = flotilla_protocol::arg::flatten(inner, 0);
-        assert!(inner_flat.contains("env KEY='val'"), "inner should contain env: {inner_flat}");
-        assert!(inner_flat.contains("${SHELL:-/bin/sh}"), "inner should contain $SHELL: {inner_flat}");
-        assert!(!inner_flat.contains("-lic"), "inner should not have -lic for empty command: {inner_flat}");
-    }
+    // Same as above — env vars ignored in attach_args
+    assert!(!args.iter().any(|a| matches!(a, Arg::NestedCommand(_))), "should have no NestedCommand");
+    assert!(!args.iter().any(|a| matches!(a, Arg::Literal(s) if s == "--cmd")), "should NOT have --cmd");
 }
 
 // ── ensure_session tests ───────────────────────────────────────
