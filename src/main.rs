@@ -86,6 +86,29 @@ enum SubCommand {
     Workspace(flotilla_commands::commands::workspace::WorkspaceNoun),
     /// Manage and route to hosts
     Host(flotilla_commands::commands::host::HostNounPartial),
+
+    /// Generate completions (hidden, called by shell scripts)
+    #[command(hide = true)]
+    Complete {
+        /// The input line to complete
+        line: String,
+        /// Cursor position within the line
+        #[arg(default_value = "0")]
+        cursor_pos: usize,
+    },
+    /// Output shell completion setup scripts
+    Completions {
+        /// Shell type
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
 }
 
 #[derive(clap::Subcommand)]
@@ -157,6 +180,15 @@ async fn main() -> Result<()> {
         Some(SubCommand::Host(partial)) => {
             use flotilla_commands::Refinable;
             dispatch(partial.refine().and_then(|n| n.resolve()).map_err(|e| color_eyre::eyre::eyre!(e))?, &cli, format).await
+        }
+
+        Some(SubCommand::Complete { line, cursor_pos }) => {
+            run_complete(&line, cursor_pos);
+            Ok(())
+        }
+        Some(SubCommand::Completions { shell }) => {
+            run_completions(shell);
+            Ok(())
         }
 
         None => run_tui(cli).await,
@@ -492,6 +524,59 @@ async fn run_hooks_command(command: &HooksSubCommand) -> Result<()> {
             uninstall_claude_code_hooks(&path)?;
             println!("Removed flotilla hooks for claude-code from {}", path.display());
             Ok(())
+        }
+    }
+}
+
+fn run_complete(line: &str, cursor_pos: usize) {
+    use clap::CommandFactory;
+    let mut root = Cli::command();
+    root.build();
+    let completions = flotilla_commands::complete::complete(&root, line, cursor_pos);
+    for item in completions {
+        if let Some(desc) = &item.description {
+            println!("{}\t{desc}", item.value);
+        } else {
+            println!("{}", item.value);
+        }
+    }
+}
+
+fn run_completions(shell: CompletionShell) {
+    match shell {
+        CompletionShell::Bash => {
+            print!(
+                r#"_flotilla() {{
+    local completions
+    completions="$(flotilla complete "${{COMP_LINE}}" "${{COMP_POINT}}" 2>/dev/null)"
+    COMPREPLY=()
+    while IFS=$'\t' read -r val _desc; do
+        [ -n "$val" ] && COMPREPLY+=("$val")
+    done <<< "$completions"
+}}
+complete -F _flotilla flotilla
+"#
+            );
+        }
+        CompletionShell::Zsh => {
+            print!(
+                r#"#compdef flotilla
+_flotilla() {{
+    local -a completions
+    local line
+    while IFS=$'\t' read -r val desc; do
+        [ -n "$val" ] && completions+=("$val:$desc")
+    done < <(flotilla complete "${{words[2,-1]}}" "${{CURSOR}}" 2>/dev/null)
+    _describe 'flotilla' completions
+}}
+compdef _flotilla flotilla
+"#
+            );
+        }
+        CompletionShell::Fish => {
+            println!(
+                r#"complete -c flotilla -f -a '(flotilla complete (commandline -cp) (commandline -C) 2>/dev/null | string replace \t \t)'"#
+            );
         }
     }
 }

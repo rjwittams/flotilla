@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod complete;
 pub mod noun;
 pub mod resolved;
 
