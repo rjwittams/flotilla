@@ -163,7 +163,7 @@ impl super::CloudAgentService for CursorCodingAgent {
             Ok(agents) => agents,
             Err(e) if e.contains("authentication") => {
                 if !self.auth_warned.swap(true, Ordering::Relaxed) {
-                    warn!(provider = "cursor", "Cursor sessions unavailable: set CURSOR_API_KEY");
+                    warn!(provider = "cursor", "Cursor sessions unavailable: check CURSOR_API_KEY is valid");
                 }
                 return Ok(vec![]);
             }

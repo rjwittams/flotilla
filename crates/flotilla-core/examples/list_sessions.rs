@@ -32,7 +32,7 @@ async fn main() {
             "cursor",
             Arc::new(CursorCodingAgent::new(
                 "cursor".to_string(),
-                std::env::var("CURSOR_API_KEY").unwrap_or_default(),
+                std::env::var("CURSOR_API_KEY").expect("CURSOR_API_KEY must be set"),
                 Arc::new(flotilla_core::providers::ReqwestHttpClient::new()),
             )),
         ),
