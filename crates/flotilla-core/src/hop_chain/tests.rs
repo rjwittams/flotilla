@@ -31,36 +31,65 @@ fn minimal_context() -> ResolutionContext {
     }
 }
 
-// ── CombineStrategy tests ───────────────────────────────────────────
+// ── Assertion helpers ───────────────────────────────────────────────
 
-#[test]
-fn always_wrap_returns_true() {
-    let strategy = AlwaysWrap;
-    let hop = Hop::RemoteToHost { host: HostName::new("feta") };
-    let context = minimal_context();
-    assert!(strategy.should_wrap(&hop, &context));
+#[track_caller]
+fn expect_command(action: &ResolvedAction) -> &[Arg] {
+    match action {
+        ResolvedAction::Command(args) => args,
+        other => panic!("expected Command, got {other:?}"),
+    }
 }
 
-#[test]
-fn always_send_keys_returns_false() {
-    let strategy = AlwaysSendKeys;
-    let hop = Hop::RemoteToHost { host: HostName::new("feta") };
-    let context = minimal_context();
-    assert!(!strategy.should_wrap(&hop, &context));
+#[track_caller]
+fn expect_send_keys(action: &ResolvedAction) -> &[SendKeyStep] {
+    match action {
+        ResolvedAction::SendKeys { steps } => steps,
+        other => panic!("expected SendKeys, got {other:?}"),
+    }
+}
+
+#[track_caller]
+fn expect_type_step(step: &SendKeyStep) -> &str {
+    match step {
+        SendKeyStep::Type(text) => text,
+        other => panic!("expected Type step, got {other:?}"),
+    }
+}
+
+#[track_caller]
+fn expect_nested(arg: &Arg) -> &[Arg] {
+    match arg {
+        Arg::NestedCommand(args) => args,
+        other => panic!("expected NestedCommand, got {other:?}"),
+    }
+}
+
+fn flatten_actions(actions: &[ResolvedAction]) -> Vec<String> {
+    actions
+        .iter()
+        .map(|action| match action {
+            ResolvedAction::Command(args) => format!("Command: {}", flatten(args, 0)),
+            ResolvedAction::SendKeys { steps } => format!("SendKeys: {steps:?}"),
+        })
+        .collect()
+}
+
+// ── CombineStrategy tests ───────────────────────────────────────────
+
+fn all_hop_variants() -> [Hop; 3] {
+    [
+        Hop::RemoteToHost { host: HostName::new("gouda") },
+        Hop::AttachTerminal { attachable_id: crate::attachable::AttachableId::new("sess-1") },
+        Hop::RunCommand { command: vec![super::Arg::Literal("echo".into())] },
+    ]
 }
 
 #[test]
 fn always_wrap_returns_true_for_all_hop_variants() {
     let strategy = AlwaysWrap;
     let context = minimal_context();
-
-    let hops = [
-        Hop::RemoteToHost { host: HostName::new("gouda") },
-        Hop::AttachTerminal { attachable_id: crate::attachable::AttachableId::new("sess-1") },
-        Hop::RunCommand { command: vec![super::Arg::Literal("echo".into())] },
-    ];
-
-    for hop in &hops {
+    for hop in &all_hop_variants() {
         assert!(strategy.should_wrap(hop, &context), "AlwaysWrap should return true for {hop:?}");
     }
 }
@@ -69,14 +98,7 @@ fn always_wrap_returns_true_for_all_hop_variants() {
 fn always_send_keys_returns_false_for_all_hop_variants() {
     let strategy = AlwaysSendKeys;
     let context = minimal_context();
-
-    let hops = [
-        Hop::RemoteToHost { host: HostName::new("gouda") },
-        Hop::AttachTerminal { attachable_id: crate::attachable::AttachableId::new("sess-1") },
-        Hop::RunCommand { command: vec![super::Arg::Literal("echo".into())] },
-    ];
-
-    for hop in &hops {
+    for hop in &all_hop_variants() {
         assert!(!strategy.should_wrap(hop, &context), "AlwaysSendKeys should return false for {hop:?}");
     }
 }
@@ -132,11 +154,7 @@ fn wrap_with_working_directory_and_inner_command() {
     assert_eq!(context.actions.len(), 1);
     assert!(context.working_directory.is_none(), "working_directory should be consumed");
 
-    let action = &context.actions[0];
-    let args = match action {
-        ResolvedAction::Command(args) => args,
-        other => panic!("expected Command, got {other:?}"),
-    };
+    let args = expect_command(&context.actions[0]);
 
     // Verify the structure: ssh -t 'alice@feta.local' '<$SHELL -l -c ...>'
     assert_eq!(args[0], Arg::Literal("ssh".into()));
@@ -144,26 +162,18 @@ fn wrap_with_working_directory_and_inner_command() {
     assert_eq!(args[2], Arg::Quoted("alice@feta.local".into()));
 
     // The outer NestedCommand wraps $SHELL -l -c <inner>
-    match &args[3] {
-        Arg::NestedCommand(shell_args) => {
-            assert_eq!(shell_args[0], Arg::Literal("${SHELL:-/bin/sh}".into()));
-            assert_eq!(shell_args[1], Arg::Literal("-l".into()));
-            assert_eq!(shell_args[2], Arg::Literal("-c".into()));
-            // The inner NestedCommand has cd + inner command
-            match &shell_args[3] {
-                Arg::NestedCommand(inner_args) => {
-                    assert_eq!(inner_args[0], Arg::Literal("cd".into()));
-                    assert_eq!(inner_args[1], Arg::Quoted("/home/alice/dev/my-repo".into()));
-                    assert_eq!(inner_args[2], Arg::Literal("&&".into()));
-                    assert_eq!(inner_args[3], Arg::Quoted("cleat".into()));
-                    assert_eq!(inner_args[4], Arg::Literal("attach".into()));
-                    assert_eq!(inner_args[5], Arg::Literal("sess-1".into()));
-                }
-                other => panic!("expected NestedCommand for inner, got {other:?}"),
-            }
-        }
-        other => panic!("expected NestedCommand for $SHELL wrapper, got {other:?}"),
-    }
+    let shell_args = expect_nested(&args[3]);
+    assert_eq!(shell_args[0], Arg::Literal("${SHELL:-/bin/sh}".into()));
+    assert_eq!(shell_args[1], Arg::Literal("-l".into()));
+    assert_eq!(shell_args[2], Arg::Literal("-c".into()));
+    // The inner NestedCommand has cd + inner command
+    let inner_args = expect_nested(&shell_args[3]);
+    assert_eq!(inner_args[0], Arg::Literal("cd".into()));
+    assert_eq!(inner_args[1], Arg::Quoted("/home/alice/dev/my-repo".into()));
+    assert_eq!(inner_args[2], Arg::Literal("&&".into()));
+    assert_eq!(inner_args[3], Arg::Quoted("cleat".into()));
+    assert_eq!(inner_args[4], Arg::Literal("attach".into()));
+    assert_eq!(inner_args[5], Arg::Literal("sess-1".into()));
 }
 
 #[test]
@@ -176,23 +186,13 @@ fn wrap_without_working_directory() {
     resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
 
     assert_eq!(context.actions.len(), 1);
-    let args = match &context.actions[0] {
-        ResolvedAction::Command(args) => args,
-        other => panic!("expected Command, got {other:?}"),
-    };
+    let args = expect_command(&context.actions[0]);
 
     // Should NOT have cd prefix
-    match &args[3] {
-        Arg::NestedCommand(shell_args) => match &shell_args[3] {
-            Arg::NestedCommand(inner_args) => {
-                assert_eq!(inner_args[0], Arg::Literal("tmux".into()));
-                assert_eq!(inner_args[1], Arg::Literal("attach".into()));
-                assert_eq!(inner_args.len(), 2, "no cd prefix when working_directory is None");
-            }
-            other => panic!("expected NestedCommand, got {other:?}"),
-        },
-        other => panic!("expected NestedCommand, got {other:?}"),
-    }
+    let inner_args = expect_nested(&expect_nested(&args[3])[3]);
+    assert_eq!(inner_args[0], Arg::Literal("tmux".into()));
+    assert_eq!(inner_args[1], Arg::Literal("attach".into()));
+    assert_eq!(inner_args.len(), 2, "no cd prefix when working_directory is None");
 }
 
 #[test]
@@ -204,26 +204,16 @@ fn wrap_empty_command_with_working_directory_produces_login_shell() {
 
     resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
 
-    let args = match &context.actions[0] {
-        ResolvedAction::Command(args) => args,
-        other => panic!("expected Command, got {other:?}"),
-    };
+    let args = expect_command(&context.actions[0]);
 
     // Inner should be: cd <dir> && exec $SHELL -l
-    match &args[3] {
-        Arg::NestedCommand(shell_args) => match &shell_args[3] {
-            Arg::NestedCommand(inner_args) => {
-                assert_eq!(inner_args[0], Arg::Literal("cd".into()));
-                assert_eq!(inner_args[1], Arg::Quoted("/home/alice/dev/my-repo".into()));
-                assert_eq!(inner_args[2], Arg::Literal("&&".into()));
-                assert_eq!(inner_args[3], Arg::Literal("exec".into()));
-                assert_eq!(inner_args[4], Arg::Literal("${SHELL:-/bin/sh}".into()));
-                assert_eq!(inner_args[5], Arg::Literal("-l".into()));
-            }
-            other => panic!("expected NestedCommand, got {other:?}"),
-        },
-        other => panic!("expected NestedCommand, got {other:?}"),
-    }
+    let inner_args = expect_nested(&expect_nested(&args[3])[3]);
+    assert_eq!(inner_args[0], Arg::Literal("cd".into()));
+    assert_eq!(inner_args[1], Arg::Quoted("/home/alice/dev/my-repo".into()));
+    assert_eq!(inner_args[2], Arg::Literal("&&".into()));
+    assert_eq!(inner_args[3], Arg::Literal("exec".into()));
+    assert_eq!(inner_args[4], Arg::Literal("${SHELL:-/bin/sh}".into()));
+    assert_eq!(inner_args[5], Arg::Literal("-l".into()));
 }
 
 #[test]
@@ -235,10 +225,7 @@ fn wrap_with_multiplex_includes_control_args() {
     // feta inherits global ssh.multiplex=true
     resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
 
-    let args = match &context.actions[0] {
-        ResolvedAction::Command(args) => args,
-        other => panic!("expected Command, got {other:?}"),
-    };
+    let args = expect_command(&context.actions[0]);
 
     // Should have: ssh -t -o ControlMaster=auto -o ControlPath=... -o ControlPersist=60 'alice@feta.local' <nested>
     assert_eq!(args[0], Arg::Literal("ssh".into()));
@@ -267,10 +254,7 @@ fn wrap_without_multiplex_has_no_control_args() {
     // gouda has ssh_multiplex=false
     resolver.resolve_wrap(&HostName::new("gouda"), &mut context).expect("resolve_wrap should succeed");
 
-    let args = match &context.actions[0] {
-        ResolvedAction::Command(args) => args,
-        other => panic!("expected Command, got {other:?}"),
-    };
+    let args = expect_command(&context.actions[0]);
 
     // ssh -t 'gouda.example.com' <nested> — no -o flags
     assert_eq!(args[0], Arg::Literal("ssh".into()));
@@ -281,35 +265,18 @@ fn wrap_without_multiplex_has_no_control_args() {
 }
 
 #[test]
-fn wrap_user_at_host_target_format() {
+fn wrap_target_format_with_and_without_user() {
     let resolver = test_resolver_no_multiplex();
-    let mut context = minimal_context();
-    context.actions.push(ResolvedAction::Command(vec![Arg::Literal("ls".into())]));
 
     // feta has user=Some("alice"), hostname="feta.local" -> "alice@feta.local"
-    resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
-
-    let args = match &context.actions[0] {
-        ResolvedAction::Command(args) => args,
-        other => panic!("expected Command, got {other:?}"),
-    };
-    assert_eq!(args[2], Arg::Quoted("alice@feta.local".into()));
-}
-
-#[test]
-fn wrap_no_user_target_format() {
-    let resolver = test_resolver_no_multiplex();
-    let mut context = minimal_context();
-    context.actions.push(ResolvedAction::Command(vec![Arg::Literal("ls".into())]));
-
     // gouda has user=None, hostname="gouda.example.com" -> "gouda.example.com"
-    resolver.resolve_wrap(&HostName::new("gouda"), &mut context).expect("resolve_wrap should succeed");
-
-    let args = match &context.actions[0] {
-        ResolvedAction::Command(args) => args,
-        other => panic!("expected Command, got {other:?}"),
-    };
-    assert_eq!(args[2], Arg::Quoted("gouda.example.com".into()));
+    for (host, expected_target) in [("feta", "alice@feta.local"), ("gouda", "gouda.example.com")] {
+        let mut context = minimal_context();
+        context.actions.push(ResolvedAction::Command(vec![Arg::Literal("ls".into())]));
+        resolver.resolve_wrap(&HostName::new(host), &mut context).expect("resolve_wrap should succeed");
+        let args = expect_command(&context.actions[0]);
+        assert_eq!(args[2], Arg::Quoted(expected_target.into()), "target for host {host}");
+    }
 }
 
 #[test]
@@ -373,32 +340,20 @@ fn enter_produces_ssh_command_and_sendkeys() {
     assert_eq!(context.actions.len(), 2);
 
     // Bottom: SendKeys with the flattened inner command
-    match &context.actions[0] {
-        ResolvedAction::SendKeys { steps } => {
-            assert_eq!(steps.len(), 2);
-            match &steps[0] {
-                SendKeyStep::Type(text) => {
-                    assert!(text.contains("cd"), "should include cd: {text}");
-                    assert!(text.contains("/home/alice/dev/my-repo"), "should include dir: {text}");
-                    assert!(text.contains("'cleat' attach sess-1"), "should include inner cmd: {text}");
-                }
-                other => panic!("expected Type step, got {other:?}"),
-            }
-            assert_eq!(steps[1], SendKeyStep::WaitForPrompt);
-        }
-        other => panic!("expected SendKeys, got {other:?}"),
-    }
+    let steps = expect_send_keys(&context.actions[0]);
+    assert_eq!(steps.len(), 2);
+    let text = expect_type_step(&steps[0]);
+    assert!(text.contains("cd"), "should include cd: {text}");
+    assert!(text.contains("/home/alice/dev/my-repo"), "should include dir: {text}");
+    assert!(text.contains("'cleat' attach sess-1"), "should include inner cmd: {text}");
+    assert_eq!(steps[1], SendKeyStep::WaitForPrompt);
 
     // Top: SSH enter command (no inner command arg)
-    match &context.actions[1] {
-        ResolvedAction::Command(args) => {
-            assert_eq!(args[0], Arg::Literal("ssh".into()));
-            assert_eq!(args[1], Arg::Literal("-t".into()));
-            assert_eq!(args[2], Arg::Quoted("alice@feta.local".into()));
-            assert_eq!(args.len(), 3, "SSH enter command should not have a nested command arg");
-        }
-        other => panic!("expected Command, got {other:?}"),
-    }
+    let args = expect_command(&context.actions[1]);
+    assert_eq!(args[0], Arg::Literal("ssh".into()));
+    assert_eq!(args[1], Arg::Literal("-t".into()));
+    assert_eq!(args[2], Arg::Quoted("alice@feta.local".into()));
+    assert_eq!(args.len(), 3, "SSH enter command should not have a nested command arg");
 }
 
 #[test]
@@ -412,16 +367,9 @@ fn enter_without_working_directory() {
     assert_eq!(context.actions.len(), 2);
 
     // SendKeys should just have the inner command, no cd
-    match &context.actions[0] {
-        ResolvedAction::SendKeys { steps } => match &steps[0] {
-            SendKeyStep::Type(text) => {
-                assert!(!text.contains("cd"), "should not include cd: {text}");
-                assert_eq!(text, "echo 'hello'");
-            }
-            other => panic!("expected Type step, got {other:?}"),
-        },
-        other => panic!("expected SendKeys, got {other:?}"),
-    }
+    let text = expect_type_step(&expect_send_keys(&context.actions[0])[0]);
+    assert!(!text.contains("cd"), "should not include cd: {text}");
+    assert_eq!(text, "echo 'hello'");
 }
 
 #[test]
@@ -434,12 +382,7 @@ fn enter_empty_command_no_sendkeys() {
 
     // Only the SSH command, no SendKeys since there's nothing to type
     assert_eq!(context.actions.len(), 1);
-    match &context.actions[0] {
-        ResolvedAction::Command(args) => {
-            assert_eq!(args[0], Arg::Literal("ssh".into()));
-        }
-        other => panic!("expected Command, got {other:?}"),
-    }
+    assert_eq!(expect_command(&context.actions[0])[0], Arg::Literal("ssh".into()));
 }
 
 #[test]
@@ -453,15 +396,7 @@ fn enter_with_working_directory_and_empty_command() {
 
     // Should have SendKeys with just the cd, plus SSH command
     assert_eq!(context.actions.len(), 2);
-    match &context.actions[0] {
-        ResolvedAction::SendKeys { steps } => match &steps[0] {
-            SendKeyStep::Type(text) => {
-                assert_eq!(text, "cd '/remote/dir'");
-            }
-            other => panic!("expected Type step, got {other:?}"),
-        },
-        other => panic!("expected SendKeys, got {other:?}"),
-    }
+    assert_eq!(expect_type_step(&expect_send_keys(&context.actions[0])[0]), "cd '/remote/dir'");
 }
 
 #[test]
@@ -501,11 +436,7 @@ fn regression_flatten_matches_old_ssh_wrap_pattern() {
 
     resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
 
-    let args = match &context.actions[0] {
-        ResolvedAction::Command(args) => args,
-        other => panic!("expected Command, got {other:?}"),
-    };
-
+    let args = expect_command(&context.actions[0]);
     let flat = flatten(args, 0);
 
     // Verify structural properties of the flattened output
@@ -558,11 +489,7 @@ fn regression_flatten_empty_command_matches_login_shell_pattern() {
 
     resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
 
-    let args = match &context.actions[0] {
-        ResolvedAction::Command(args) => args,
-        other => panic!("expected Command, got {other:?}"),
-    };
-
+    let args = expect_command(&context.actions[0]);
     let expected_args = vec![
         Arg::Literal("ssh".into()),
         Arg::Literal("-t".into()),
@@ -597,11 +524,7 @@ fn regression_multiplex_args_in_flatten() {
 
     resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
 
-    let args = match &context.actions[0] {
-        ResolvedAction::Command(args) => args,
-        other => panic!("expected Command, got {other:?}"),
-    };
-
+    let args = expect_command(&context.actions[0]);
     let flat = flatten(args, 0);
     assert!(flat.starts_with("ssh -t -o ControlMaster=auto -o "), "should have multiplex args: {flat}");
     assert!(flat.contains("ControlPersist=60"), "should have ControlPersist: {flat}");
@@ -664,33 +587,40 @@ impl TerminalPool for FakeTerminalPool {
     }
 }
 
-/// Helper: create an in-memory store with one terminal attachable pre-inserted.
+/// Populate a store with one terminal attachable.
+fn insert_terminal(
+    store: &mut dyn AttachableStoreApi,
+    attachable_id: &AttachableId,
+    host_affinity: Option<HostName>,
+    command: &str,
+    cwd: &Path,
+) {
+    let set_id = store.allocate_set_id();
+    store.insert_set(AttachableSet {
+        id: set_id.clone(),
+        host_affinity,
+        checkout: None,
+        template_identity: None,
+        members: vec![attachable_id.clone()],
+    });
+    store.insert_attachable(Attachable {
+        id: attachable_id.clone(),
+        set_id,
+        content: AttachableContent::Terminal(TerminalAttachable {
+            purpose: TerminalPurpose { checkout: "feat".to_string(), role: "shell".to_string(), index: 0 },
+            command: command.to_string(),
+            working_directory: cwd.to_path_buf(),
+            status: TerminalStatus::Disconnected,
+        }),
+    });
+}
+
+/// Helper: create a shared store with one terminal attachable pre-inserted.
 fn store_with_terminal(attachable_id: &AttachableId, command: &str, cwd: &Path) -> SharedAttachableStore {
-    use flotilla_protocol::HostName;
-
-    use crate::attachable::{Attachable, AttachableSet};
-
     let store = shared_in_memory_attachable_store();
     {
         let mut s = store.lock().expect("lock");
-        let set_id = s.allocate_set_id();
-        s.insert_set(AttachableSet {
-            id: set_id.clone(),
-            host_affinity: Some(HostName::new("test-host")),
-            checkout: None,
-            template_identity: None,
-            members: vec![attachable_id.clone()],
-        });
-        s.insert_attachable(Attachable {
-            id: attachable_id.clone(),
-            set_id,
-            content: AttachableContent::Terminal(TerminalAttachable {
-                purpose: TerminalPurpose { checkout: "feat".to_string(), role: "shell".to_string(), index: 0 },
-                command: command.to_string(),
-                working_directory: cwd.to_path_buf(),
-                status: TerminalStatus::Disconnected,
-            }),
-        });
+        insert_terminal(&mut *s, attachable_id, Some(HostName::new("test-host")), command, cwd);
     }
     store
 }
@@ -709,14 +639,10 @@ fn terminal_resolve_pushes_command_onto_context() {
 
     // Verify a Command was pushed onto the context
     assert_eq!(context.actions.len(), 1);
-    match &context.actions[0] {
-        ResolvedAction::Command(args) => {
-            assert_eq!(args[0], Arg::Quoted("cleat".into()));
-            assert_eq!(args[1], Arg::Literal("attach".into()));
-            assert_eq!(args[2], Arg::Literal(att_id.to_string()));
-        }
-        other => panic!("expected Command, got {other:?}"),
-    }
+    let args = expect_command(&context.actions[0]);
+    assert_eq!(args[0], Arg::Quoted("cleat".into()));
+    assert_eq!(args[1], Arg::Literal("attach".into()));
+    assert_eq!(args[2], Arg::Literal(att_id.to_string()));
 
     // Verify the pool received the correct arguments
     let calls = pool.recorded_calls();
@@ -901,20 +827,12 @@ fn hop_resolver_remote_run_command_with_always_wrap() {
 
     // Should have 1 action: the wrapped Command
     assert_eq!(resolved.0.len(), 1);
-    match &resolved.0[0] {
-        ResolvedAction::Command(args) => {
-            assert_eq!(args[0], Arg::Literal("ssh".into()));
-            assert_eq!(args[1], Arg::Quoted("feta".into()));
-            match &args[2] {
-                Arg::NestedCommand(inner) => {
-                    assert_eq!(inner[0], Arg::Literal("echo".into()));
-                    assert_eq!(inner[1], Arg::Literal("hello".into()));
-                }
-                other => panic!("expected NestedCommand, got {other:?}"),
-            }
-        }
-        other => panic!("expected Command, got {other:?}"),
-    }
+    let args = expect_command(&resolved.0[0]);
+    assert_eq!(args[0], Arg::Literal("ssh".into()));
+    assert_eq!(args[1], Arg::Quoted("feta".into()));
+    let inner = expect_nested(&args[2]);
+    assert_eq!(inner[0], Arg::Literal("echo".into()));
+    assert_eq!(inner[1], Arg::Literal("hello".into()));
 
     // Verify resolve_wrap was called
     let remote_calls = remote.recorded_calls();
@@ -939,29 +857,17 @@ fn hop_resolver_remote_run_command_with_always_send_keys() {
     // Should have 2 actions: SendKeys (bottom) + SSH Command (top)
     assert_eq!(resolved.0.len(), 2);
 
-    match &resolved.0[0] {
-        ResolvedAction::SendKeys { steps } => {
-            assert_eq!(steps.len(), 2);
-            match &steps[0] {
-                SendKeyStep::Type(text) => {
-                    assert!(text.contains("echo"), "SendKeys should contain inner command: {text}");
-                    assert!(text.contains("hello"), "SendKeys should contain inner command args: {text}");
-                }
-                other => panic!("expected Type step, got {other:?}"),
-            }
-            assert_eq!(steps[1], SendKeyStep::WaitForPrompt);
-        }
-        other => panic!("expected SendKeys, got {other:?}"),
-    }
+    let steps = expect_send_keys(&resolved.0[0]);
+    assert_eq!(steps.len(), 2);
+    let text = expect_type_step(&steps[0]);
+    assert!(text.contains("echo"), "SendKeys should contain inner command: {text}");
+    assert!(text.contains("hello"), "SendKeys should contain inner command args: {text}");
+    assert_eq!(steps[1], SendKeyStep::WaitForPrompt);
 
-    match &resolved.0[1] {
-        ResolvedAction::Command(args) => {
-            assert_eq!(args[0], Arg::Literal("ssh".into()));
-            assert_eq!(args[1], Arg::Quoted("feta".into()));
-            assert_eq!(args.len(), 2, "SSH enter command should not have nested command");
-        }
-        other => panic!("expected Command, got {other:?}"),
-    }
+    let args = expect_command(&resolved.0[1]);
+    assert_eq!(args[0], Arg::Literal("ssh".into()));
+    assert_eq!(args[1], Arg::Quoted("feta".into()));
+    assert_eq!(args.len(), 2, "SSH enter command should not have nested command");
 
     // Verify resolve_enter was called
     let remote_calls = remote.recorded_calls();
@@ -984,13 +890,8 @@ fn hop_resolver_collapses_remote_to_local_host() {
 
     // Should have just the RunCommand action — remote hop collapsed
     assert_eq!(resolved.0.len(), 1);
-    match &resolved.0[0] {
-        ResolvedAction::Command(args) => {
-            assert_eq!(args[0], Arg::Literal("ls".into()));
-            assert_eq!(args.len(), 1);
-        }
-        other => panic!("expected Command, got {other:?}"),
-    }
+    let args = expect_command(&resolved.0[0]);
+    assert_eq!(args, [Arg::Literal("ls".into())]);
 
     // SSH resolver should NOT have been called
     assert!(remote.recorded_calls().is_empty());
@@ -1010,20 +911,12 @@ fn hop_resolver_remote_attach_terminal_with_always_wrap() {
     // Terminal resolver pushes Command(mock-attach, sess-1)
     // Then remote resolver wraps it: ssh feta <NestedCommand(mock-attach, sess-1)>
     assert_eq!(resolved.0.len(), 1);
-    match &resolved.0[0] {
-        ResolvedAction::Command(args) => {
-            assert_eq!(args[0], Arg::Literal("ssh".into()));
-            assert_eq!(args[1], Arg::Quoted("feta".into()));
-            match &args[2] {
-                Arg::NestedCommand(inner) => {
-                    assert_eq!(inner[0], Arg::Literal("mock-attach".into()));
-                    assert_eq!(inner[1], Arg::Quoted("sess-1".into()));
-                }
-                other => panic!("expected NestedCommand, got {other:?}"),
-            }
-        }
-        other => panic!("expected Command, got {other:?}"),
-    }
+    let args = expect_command(&resolved.0[0]);
+    assert_eq!(args[0], Arg::Literal("ssh".into()));
+    assert_eq!(args[1], Arg::Quoted("feta".into()));
+    let inner = expect_nested(&args[2]);
+    assert_eq!(inner[0], Arg::Literal("mock-attach".into()));
+    assert_eq!(inner[1], Arg::Quoted("sess-1".into()));
 
     // Terminal resolver was called first (inside-out), then remote resolver wrapped
     assert_eq!(terminal.recorded_calls().len(), 1);
@@ -1057,13 +950,7 @@ fn hop_resolver_run_command_only() {
     let resolved = resolver.resolve(&plan, &mut context).expect("resolve should succeed");
 
     assert_eq!(resolved.0.len(), 1);
-    match &resolved.0[0] {
-        ResolvedAction::Command(args) => {
-            assert_eq!(args[0], Arg::Literal("cargo".into()));
-            assert_eq!(args[1], Arg::Literal("build".into()));
-        }
-        other => panic!("expected Command, got {other:?}"),
-    }
+    assert_eq!(expect_command(&resolved.0[0]), [Arg::Literal("cargo".into()), Arg::Literal("build".into())]);
 
     // No resolvers should have been called
     assert!(remote.recorded_calls().is_empty());
@@ -1125,13 +1012,7 @@ fn hop_resolver_attach_terminal_only() {
     let resolved = resolver.resolve(&plan, &mut context).expect("resolve should succeed");
 
     assert_eq!(resolved.0.len(), 1);
-    match &resolved.0[0] {
-        ResolvedAction::Command(args) => {
-            assert_eq!(args[0], Arg::Literal("mock-attach".into()));
-            assert_eq!(args[1], Arg::Quoted("term-local".into()));
-        }
-        other => panic!("expected Command, got {other:?}"),
-    }
+    assert_eq!(expect_command(&resolved.0[0]), [Arg::Literal("mock-attach".into()), Arg::Quoted("term-local".into())]);
 
     assert_eq!(terminal.recorded_calls().len(), 1);
     assert!(remote.recorded_calls().is_empty(), "remote resolver should not be called for local terminal attach");
@@ -1151,23 +1032,12 @@ fn hop_resolver_remote_attach_terminal_with_always_send_keys() {
     // Remote resolve_enter pops it, converts to SendKeys, pushes SSH Command
     assert_eq!(resolved.0.len(), 2);
 
-    match &resolved.0[0] {
-        ResolvedAction::SendKeys { steps } => match &steps[0] {
-            SendKeyStep::Type(text) => {
-                assert!(text.contains("mock-attach"), "SendKeys should contain terminal command: {text}");
-            }
-            other => panic!("expected Type step, got {other:?}"),
-        },
-        other => panic!("expected SendKeys, got {other:?}"),
-    }
+    let text = expect_type_step(&expect_send_keys(&resolved.0[0])[0]);
+    assert!(text.contains("mock-attach"), "SendKeys should contain terminal command: {text}");
 
-    match &resolved.0[1] {
-        ResolvedAction::Command(args) => {
-            assert_eq!(args[0], Arg::Literal("ssh".into()));
-            assert_eq!(args[1], Arg::Quoted("feta".into()));
-        }
-        other => panic!("expected Command, got {other:?}"),
-    }
+    let args = expect_command(&resolved.0[1]);
+    assert_eq!(args[0], Arg::Literal("ssh".into()));
+    assert_eq!(args[1], Arg::Quoted("feta".into()));
 
     assert_eq!(terminal.recorded_calls().len(), 1);
     let remote_calls = remote.recorded_calls();
@@ -1182,24 +1052,7 @@ use super::builder::HopPlanBuilder;
 /// Helper: create an in-memory store with a terminal attachable in a set with the given host affinity.
 fn builder_store_with_host(attachable_id: &AttachableId, host_affinity: Option<HostName>) -> InMemoryAttachableStore {
     let mut store = InMemoryAttachableStore::new();
-    let set_id = store.allocate_set_id();
-    store.insert_set(AttachableSet {
-        id: set_id.clone(),
-        host_affinity,
-        checkout: None,
-        template_identity: None,
-        members: vec![attachable_id.clone()],
-    });
-    store.insert_attachable(Attachable {
-        id: attachable_id.clone(),
-        set_id,
-        content: AttachableContent::Terminal(TerminalAttachable {
-            purpose: TerminalPurpose { checkout: "feat".to_string(), role: "shell".to_string(), index: 0 },
-            command: "bash".to_string(),
-            working_directory: PathBuf::from("/repo/wt-feat"),
-            status: TerminalStatus::Disconnected,
-        }),
-    });
+    insert_terminal(&mut store, attachable_id, host_affinity, "bash", Path::new("/repo/wt-feat"));
     store
 }
 
@@ -1310,10 +1163,7 @@ fn snapshot_remote_terminal_attach_always_wrap() {
     insta::assert_debug_snapshot!(resolved);
 
     // Also snapshot the flattened output
-    let flat = match &resolved.0[0] {
-        ResolvedAction::Command(args) => flatten(args, 0),
-        other => panic!("expected Command, got {other:?}"),
-    };
+    let flat = flatten(expect_command(&resolved.0[0]), 0);
     insta::assert_snapshot!("remote_terminal_attach_always_wrap_flat", flat);
 }
 
@@ -1416,14 +1266,7 @@ fn snapshot_e2e_workspace_creation_flow() {
     insta::assert_debug_snapshot!("e2e_workspace_resolved_plan", &resolved);
 
     // Step 4: Flatten each action to shell strings and snapshot
-    let flattened: Vec<String> = resolved
-        .0
-        .iter()
-        .map(|action| match action {
-            ResolvedAction::Command(args) => format!("Command: {}", flatten(args, 0)),
-            ResolvedAction::SendKeys { steps } => format!("SendKeys: {steps:?}"),
-        })
-        .collect();
+    let flattened = flatten_actions(&resolved.0);
     insta::assert_debug_snapshot!("e2e_workspace_flattened_commands", &flattened);
 }
 
@@ -1461,10 +1304,7 @@ fn snapshot_e2e_local_workspace_creation() {
     insta::assert_debug_snapshot!("e2e_local_workspace_resolved_plan", &resolved);
 
     // Flatten and snapshot
-    let flat = match &resolved.0[0] {
-        ResolvedAction::Command(args) => flatten(args, 0),
-        other => panic!("expected Command, got {other:?}"),
-    };
+    let flat = flatten(expect_command(&resolved.0[0]), 0);
     insta::assert_snapshot!("e2e_local_workspace_flattened", flat);
 }
 
@@ -1503,13 +1343,6 @@ fn snapshot_e2e_remote_workspace_send_keys() {
     insta::assert_debug_snapshot!("e2e_remote_send_keys_resolved_plan", &resolved);
 
     // Flatten and snapshot each action
-    let flattened: Vec<String> = resolved
-        .0
-        .iter()
-        .map(|action| match action {
-            ResolvedAction::Command(args) => format!("Command: {}", flatten(args, 0)),
-            ResolvedAction::SendKeys { steps } => format!("SendKeys: {steps:?}"),
-        })
-        .collect();
+    let flattened = flatten_actions(&resolved.0);
     insta::assert_debug_snapshot!("e2e_remote_send_keys_flattened", &flattened);
 }
