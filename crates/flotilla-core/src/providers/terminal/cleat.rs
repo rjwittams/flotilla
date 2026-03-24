@@ -56,7 +56,7 @@ impl TerminalPool for CleatTerminalPool {
                     session_name: session.id,
                     status,
                     command: session.cmd,
-                    working_directory: session.cwd.map(ExecutionEnvironmentPath::from),
+                    working_directory: session.cwd.map(ExecutionEnvironmentPath::new),
                 }
             })
             .collect())

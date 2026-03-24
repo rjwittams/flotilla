@@ -51,12 +51,6 @@ impl fmt::Display for DaemonHostPath {
     }
 }
 
-impl From<PathBuf> for DaemonHostPath {
-    fn from(p: PathBuf) -> Self {
-        Self(p)
-    }
-}
-
 // --- ExecutionEnvironmentPath impls ---
 
 impl ExecutionEnvironmentPath {
@@ -89,8 +83,3 @@ impl fmt::Display for ExecutionEnvironmentPath {
     }
 }
 
-impl From<PathBuf> for ExecutionEnvironmentPath {
-    fn from(p: PathBuf) -> Self {
-        Self(p)
-    }
-}
