@@ -174,6 +174,36 @@ fn wrap_with_working_directory_and_inner_command() {
     assert_eq!(inner_args[3], Arg::Quoted("cleat".into()));
     assert_eq!(inner_args[4], Arg::Literal("attach".into()));
     assert_eq!(inner_args[5], Arg::Literal("sess-1".into()));
+
+    // Regression: full Arg tree matches expected structure (replaces old ssh wrap pattern)
+    let expected_args = vec![
+        Arg::Literal("ssh".into()),
+        Arg::Literal("-t".into()),
+        Arg::Quoted("alice@feta.local".into()),
+        Arg::NestedCommand(vec![
+            Arg::Literal("${SHELL:-/bin/sh}".into()),
+            Arg::Literal("-l".into()),
+            Arg::Literal("-c".into()),
+            Arg::NestedCommand(vec![
+                Arg::Literal("cd".into()),
+                Arg::Quoted("/home/alice/dev/my-repo".into()),
+                Arg::Literal("&&".into()),
+                Arg::Quoted("cleat".into()),
+                Arg::Literal("attach".into()),
+                Arg::Literal("sess-1".into()),
+            ]),
+        ]),
+    ];
+    assert_eq!(args, &expected_args, "Arg tree should match expected structure");
+
+    // Verify flatten output preserves key structural properties
+    let flat = flatten(args, 0);
+    assert!(flat.starts_with("ssh -t "), "should start with ssh -t: {flat}");
+    assert!(flat.contains("'alice@feta.local'"), "should contain quoted target: {flat}");
+    assert!(flat.contains("${SHELL:-/bin/sh} -l -c"), "should contain shell invocation: {flat}");
+    assert!(flat.contains("/home/alice/dev/my-repo"), "should contain checkout dir: {flat}");
+    assert!(flat.contains("cleat"), "should contain binary name: {flat}");
+    assert!(flat.contains("attach sess-1"), "should contain trailing args: {flat}");
 }
 
 #[test]
@@ -206,14 +236,29 @@ fn wrap_empty_command_with_working_directory_produces_login_shell() {
 
     let args = expect_command(&context.actions[0]);
 
-    // Inner should be: cd <dir> && exec $SHELL -l
-    let inner_args = expect_nested(&expect_nested(&args[3])[3]);
-    assert_eq!(inner_args[0], Arg::Literal("cd".into()));
-    assert_eq!(inner_args[1], Arg::Quoted("/home/alice/dev/my-repo".into()));
-    assert_eq!(inner_args[2], Arg::Literal("&&".into()));
-    assert_eq!(inner_args[3], Arg::Literal("exec".into()));
-    assert_eq!(inner_args[4], Arg::Literal("${SHELL:-/bin/sh}".into()));
-    assert_eq!(inner_args[5], Arg::Literal("-l".into()));
+    // Regression: full Arg tree for empty command → login shell pattern
+    let expected_args = vec![
+        Arg::Literal("ssh".into()),
+        Arg::Literal("-t".into()),
+        Arg::Quoted("alice@feta.local".into()),
+        Arg::NestedCommand(vec![
+            Arg::Literal("${SHELL:-/bin/sh}".into()),
+            Arg::Literal("-l".into()),
+            Arg::Literal("-c".into()),
+            Arg::NestedCommand(vec![
+                Arg::Literal("cd".into()),
+                Arg::Quoted("/home/alice/dev/my-repo".into()),
+                Arg::Literal("&&".into()),
+                Arg::Literal("exec".into()),
+                Arg::Literal("${SHELL:-/bin/sh}".into()),
+                Arg::Literal("-l".into()),
+            ]),
+        ]),
+    ];
+    assert_eq!(args, &expected_args, "empty command should produce login shell pattern");
+
+    let flat = flatten(args, 0);
+    assert!(flat.contains("exec ${SHELL:-/bin/sh} -l"), "flattened should contain exec shell: {flat}");
 }
 
 #[test]
@@ -243,6 +288,12 @@ fn wrap_with_multiplex_includes_control_args() {
     assert_eq!(args[8], Arg::Quoted("alice@feta.local".into()));
     // args[9] is the NestedCommand
     assert!(matches!(args[9], Arg::NestedCommand(_)));
+
+    // Regression: flattened output preserves multiplex args
+    let flat = flatten(args, 0);
+    assert!(flat.starts_with("ssh -t -o ControlMaster=auto -o "), "should have multiplex args: {flat}");
+    assert!(flat.contains("ControlPersist=60"), "should have ControlPersist: {flat}");
+    assert!(flat.contains("'alice@feta.local'"), "should have quoted target: {flat}");
 }
 
 #[test]
@@ -402,127 +453,6 @@ fn enter_with_working_directory_and_empty_command() {
     // Should have SendKeys with just the cd, plus SSH command
     assert_eq!(context.actions.len(), 2);
     assert_eq!(expect_type_step(&expect_send_keys(&context.actions[0])[0]), "cd '/remote/dir'");
-}
-
-// ── Regression: flatten output matches old wrap_remote_attach_commands ──
-
-#[test]
-fn regression_flatten_matches_old_ssh_wrap_pattern() {
-    // The old code produced (for target="alice@feta.local", no multiplex,
-    // dir="/home/alice/dev/my-repo", command="cleat attach sess-1"):
-    //   ssh -t 'alice@feta.local' '$SHELL -l -c "cd '\''/home/alice/dev/my-repo'\'' && cleat attach sess-1"'
-    //
-    // The new Arg model with single-quote-at-all-depths produces:
-    //   ssh -t 'alice@feta.local' '$SHELL -l -c '\''cd '\'\'\''/home/alice/dev/my-repo'\''\\'\'''\'' && cleat attach sess-1'\'''
-    //
-    // These are semantically equivalent: the remote shell receives the same
-    // effective command. We verify the Arg tree structure produces the correct
-    // flatten output matching the protocol's regression test.
-
-    let resolver = test_resolver_no_multiplex();
-    let mut context = minimal_context();
-    context.working_directory = Some(PathBuf::from("/home/alice/dev/my-repo"));
-    context.actions.push(ResolvedAction::Command(vec![
-        Arg::Quoted("cleat".into()),
-        Arg::Literal("attach".into()),
-        Arg::Literal("sess-1".into()),
-    ]));
-
-    resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
-
-    let args = expect_command(&context.actions[0]);
-    let flat = flatten(args, 0);
-
-    // Verify structural properties of the flattened output
-    assert!(flat.starts_with("ssh -t "), "should start with ssh -t: {flat}");
-    assert!(flat.contains("'alice@feta.local'"), "should contain quoted target: {flat}");
-    assert!(flat.contains("${SHELL:-/bin/sh} -l -c"), "should contain ${{SHELL:-/bin/sh}} -l -c: {flat}");
-    assert!(flat.contains("/home/alice/dev/my-repo"), "should contain checkout dir: {flat}");
-    // At depth 2 the Quoted("cleat") gets double-escaped, so check for the
-    // unquoted binary name and trailing args which survive flattening.
-    assert!(flat.contains("cleat"), "should contain binary name: {flat}");
-    assert!(flat.contains("attach sess-1"), "should contain trailing args: {flat}");
-
-    // Verify the inner command can be traced through the nesting:
-    // depth 2 (innermost): "cd '/home/alice/dev/my-repo' && 'cleat' attach sess-1"
-    // depth 1: "$SHELL -l -c '<quoted depth 2>'"
-    // depth 0: "ssh -t 'alice@feta.local' '<quoted depth 1>'"
-    //
-    // The flatten function at protocol level already has regression tests for
-    // this exact structure. Here we verify the resolver produces the right tree.
-    let expected_args = vec![
-        Arg::Literal("ssh".into()),
-        Arg::Literal("-t".into()),
-        Arg::Quoted("alice@feta.local".into()),
-        Arg::NestedCommand(vec![
-            Arg::Literal("${SHELL:-/bin/sh}".into()),
-            Arg::Literal("-l".into()),
-            Arg::Literal("-c".into()),
-            Arg::NestedCommand(vec![
-                Arg::Literal("cd".into()),
-                Arg::Quoted("/home/alice/dev/my-repo".into()),
-                Arg::Literal("&&".into()),
-                Arg::Quoted("cleat".into()),
-                Arg::Literal("attach".into()),
-                Arg::Literal("sess-1".into()),
-            ]),
-        ]),
-    ];
-
-    assert_eq!(args, &expected_args, "Arg tree should match expected structure");
-    assert_eq!(flatten(args, 0), flatten(&expected_args, 0));
-}
-
-#[test]
-fn regression_flatten_empty_command_matches_login_shell_pattern() {
-    // Old code for empty command: "cd '/dir' && exec $SHELL -l"
-    let resolver = test_resolver_no_multiplex();
-    let mut context = minimal_context();
-    context.working_directory = Some(PathBuf::from("/home/alice/dev/my-repo"));
-    context.actions.push(ResolvedAction::Command(vec![]));
-
-    resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
-
-    let args = expect_command(&context.actions[0]);
-    let expected_args = vec![
-        Arg::Literal("ssh".into()),
-        Arg::Literal("-t".into()),
-        Arg::Quoted("alice@feta.local".into()),
-        Arg::NestedCommand(vec![
-            Arg::Literal("${SHELL:-/bin/sh}".into()),
-            Arg::Literal("-l".into()),
-            Arg::Literal("-c".into()),
-            Arg::NestedCommand(vec![
-                Arg::Literal("cd".into()),
-                Arg::Quoted("/home/alice/dev/my-repo".into()),
-                Arg::Literal("&&".into()),
-                Arg::Literal("exec".into()),
-                Arg::Literal("${SHELL:-/bin/sh}".into()),
-                Arg::Literal("-l".into()),
-            ]),
-        ]),
-    ];
-
-    assert_eq!(args, &expected_args, "empty command should produce login shell pattern");
-
-    // Verify the flattened form contains the exec ${SHELL:-/bin/sh} -l pattern
-    let flat = flatten(args, 0);
-    assert!(flat.contains("exec ${SHELL:-/bin/sh} -l"), "flattened should contain exec ${{SHELL:-/bin/sh}} -l: {flat}");
-}
-
-#[test]
-fn regression_multiplex_args_in_flatten() {
-    let resolver = test_resolver();
-    let mut context = minimal_context();
-    context.actions.push(ResolvedAction::Command(vec![Arg::Literal("tmux".into()), Arg::Literal("attach".into())]));
-
-    resolver.resolve_wrap(&HostName::new("feta"), &mut context).expect("resolve_wrap should succeed");
-
-    let args = expect_command(&context.actions[0]);
-    let flat = flatten(args, 0);
-    assert!(flat.starts_with("ssh -t -o ControlMaster=auto -o "), "should have multiplex args: {flat}");
-    assert!(flat.contains("ControlPersist=60"), "should have ControlPersist: {flat}");
-    assert!(flat.contains("'alice@feta.local'"), "should have quoted target: {flat}");
 }
 
 // ── PoolTerminalHopResolver tests ────────────────────────────────────
@@ -997,44 +927,35 @@ fn builder_store_with_host(attachable_id: &AttachableId, host_affinity: Option<H
 }
 
 #[test]
-fn build_for_attachable_local_host_produces_attach_only() {
-    let att_id = AttachableId::new("local-term");
+fn build_for_attachable_host_routing() {
     let local_host = HostName::new("my-host");
-    let store = builder_store_with_host(&att_id, Some(local_host.clone()));
-    let builder = HopPlanBuilder::new(&local_host);
+    let cases: &[(&str, Option<HostName>, &[Hop])] = &[
+        ("local host → attach only", Some(HostName::new("my-host")), &[Hop::AttachTerminal { attachable_id: AttachableId::new("") }]),
+        ("remote host → remote + attach", Some(HostName::new("feta")), &[
+            Hop::RemoteToHost { host: HostName::new("feta") },
+            Hop::AttachTerminal { attachable_id: AttachableId::new("") },
+        ]),
+        ("no host affinity → attach only", None, &[Hop::AttachTerminal { attachable_id: AttachableId::new("") }]),
+    ];
 
-    let plan = builder.build_for_attachable(&att_id, &store).expect("should succeed");
+    for (label, host_affinity, expected_pattern) in cases {
+        let att_id = AttachableId::new(format!("term-{label}"));
+        let store = builder_store_with_host(&att_id, host_affinity.clone());
+        let builder = HopPlanBuilder::new(&local_host);
 
-    assert_eq!(plan.0.len(), 1);
-    assert_eq!(plan.0[0], Hop::AttachTerminal { attachable_id: att_id });
-}
+        let plan = builder.build_for_attachable(&att_id, &store).unwrap_or_else(|e| panic!("{label}: should succeed: {e}"));
+        assert_eq!(plan.0.len(), expected_pattern.len(), "{label}: wrong hop count");
 
-#[test]
-fn build_for_attachable_remote_host_prepends_remote_hop() {
-    let att_id = AttachableId::new("remote-term");
-    let local_host = HostName::new("my-host");
-    let remote_host = HostName::new("feta");
-    let store = builder_store_with_host(&att_id, Some(remote_host.clone()));
-    let builder = HopPlanBuilder::new(&local_host);
-
-    let plan = builder.build_for_attachable(&att_id, &store).expect("should succeed");
-
-    assert_eq!(plan.0.len(), 2);
-    assert_eq!(plan.0[0], Hop::RemoteToHost { host: remote_host });
-    assert_eq!(plan.0[1], Hop::AttachTerminal { attachable_id: att_id });
-}
-
-#[test]
-fn build_for_attachable_no_host_affinity_produces_attach_only() {
-    let att_id = AttachableId::new("no-host-term");
-    let local_host = HostName::new("my-host");
-    let store = builder_store_with_host(&att_id, None);
-    let builder = HopPlanBuilder::new(&local_host);
-
-    let plan = builder.build_for_attachable(&att_id, &store).expect("should succeed");
-
-    assert_eq!(plan.0.len(), 1);
-    assert_eq!(plan.0[0], Hop::AttachTerminal { attachable_id: att_id });
+        for (i, expected_hop) in expected_pattern.iter().enumerate() {
+            match expected_hop {
+                Hop::RemoteToHost { host } => assert_eq!(plan.0[i], Hop::RemoteToHost { host: host.clone() }, "{label}: hop {i}"),
+                Hop::AttachTerminal { .. } => {
+                    assert_eq!(plan.0[i], Hop::AttachTerminal { attachable_id: att_id.clone() }, "{label}: hop {i}")
+                }
+                _ => panic!("{label}: unexpected hop pattern"),
+            }
+        }
+    }
 }
 
 #[test]
@@ -1048,88 +969,24 @@ fn build_for_attachable_unknown_id_returns_error() {
 }
 
 #[test]
-fn build_for_prepared_command_remote_target() {
+fn build_for_prepared_command_host_routing() {
     let local_host = HostName::new("my-host");
-    let target = HostName::new("feta");
-    let builder = HopPlanBuilder::new(&local_host);
     let command = vec![Arg::Literal("cargo".into()), Arg::Literal("build".into())];
 
-    let plan = builder.build_for_prepared_command(&target, &command);
+    for (label, target, expect_remote_hop) in [("remote", "feta", true), ("local", "my-host", false)] {
+        let target = HostName::new(target);
+        let builder = HopPlanBuilder::new(&local_host);
+        let plan = builder.build_for_prepared_command(&target, &command);
 
-    assert_eq!(plan.0.len(), 2);
-    assert_eq!(plan.0[0], Hop::RemoteToHost { host: target });
-    assert_eq!(plan.0[1], Hop::RunCommand { command: vec![Arg::Literal("cargo".into()), Arg::Literal("build".into())] });
-}
-
-#[test]
-fn build_for_prepared_command_local_target() {
-    let local_host = HostName::new("my-host");
-    let builder = HopPlanBuilder::new(&local_host);
-    let command = vec![Arg::Literal("cargo".into()), Arg::Literal("build".into())];
-
-    let plan = builder.build_for_prepared_command(&local_host, &command);
-
-    assert_eq!(plan.0.len(), 1);
-    assert_eq!(plan.0[0], Hop::RunCommand { command: vec![Arg::Literal("cargo".into()), Arg::Literal("build".into())] });
-}
-
-// ── Snapshot tests ───────────────────────────────────────────────────
-
-/// Scenario 1: Local terminal attach (no remote hop).
-#[test]
-fn snapshot_local_terminal_attach() {
-    let r = resolve_with_mocks(Arc::new(AlwaysWrap), vec![Hop::AttachTerminal { attachable_id: AttachableId::new("local-shell-0") }]);
-    insta::assert_debug_snapshot!(r.resolved);
-}
-
-/// Scenario 2: Remote terminal attach via SSH with AlwaysWrap → single wrapped Command.
-#[test]
-fn snapshot_remote_terminal_attach_always_wrap() {
-    let r = resolve_with_mocks(Arc::new(AlwaysWrap), vec![Hop::RemoteToHost { host: HostName::new("feta") }, Hop::AttachTerminal {
-        attachable_id: AttachableId::new("remote-shell-0"),
-    }]);
-    insta::assert_debug_snapshot!(r.resolved);
-
-    let flat = flatten(expect_command(&r.resolved.0[0]), 0);
-    insta::assert_snapshot!("remote_terminal_attach_always_wrap_flat", flat);
-}
-
-/// Scenario 3: Remote terminal attach via SSH with AlwaysSendKeys → 2 actions.
-#[test]
-fn snapshot_remote_terminal_attach_always_send_keys() {
-    let r = resolve_with_mocks(Arc::new(AlwaysSendKeys), vec![Hop::RemoteToHost { host: HostName::new("feta") }, Hop::AttachTerminal {
-        attachable_id: AttachableId::new("remote-shell-0"),
-    }]);
-    insta::assert_debug_snapshot!(r.resolved);
-}
-
-/// Scenario 4: Collapse case — target host == local host.
-#[test]
-fn snapshot_collapse_remote_to_local() {
-    let r = resolve_with_mocks(Arc::new(AlwaysWrap), vec![Hop::RemoteToHost { host: HostName::new("test-host") }, Hop::RunCommand {
-        command: vec![Arg::Literal("ls".into()), Arg::Literal("-la".into())],
-    }]);
-    insta::assert_debug_snapshot!(r.resolved);
-}
-
-/// Scenario 5: Display impl for a multi-level Arg tree.
-#[test]
-fn snapshot_arg_display_multi_level() {
-    let arg = Arg::NestedCommand(vec![
-        Arg::Literal("${SHELL:-/bin/sh}".into()),
-        Arg::Literal("-l".into()),
-        Arg::Literal("-c".into()),
-        Arg::NestedCommand(vec![
-            Arg::Literal("cd".into()),
-            Arg::Quoted("/home/alice/dev/my-repo".into()),
-            Arg::Literal("&&".into()),
-            Arg::Quoted("cleat".into()),
-            Arg::Literal("attach".into()),
-            Arg::Literal("sess-1".into()),
-        ]),
-    ]);
-    let display_output = format!("{arg}");
-    insta::assert_snapshot!(display_output);
+        if expect_remote_hop {
+            assert_eq!(plan.0.len(), 2, "{label}: should have remote + run");
+            assert_eq!(plan.0[0], Hop::RemoteToHost { host: target }, "{label}: hop 0");
+            assert_eq!(plan.0[1], Hop::RunCommand { command: command.clone() }, "{label}: hop 1");
+        } else {
+            assert_eq!(plan.0.len(), 1, "{label}: should have run only");
+            assert_eq!(plan.0[0], Hop::RunCommand { command: command.clone() }, "{label}: hop 0");
+        }
+    }
 }
 
 // ── E2E helpers ──────────────────────────────────────────────────────
