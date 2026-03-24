@@ -39,6 +39,7 @@ libc = "0.2"
 [dev-dependencies]
 flotilla-protocol = { path = "../flotilla-protocol", features = ["test-support"] }
 tempfile = "3"
+insta = "1"
 
 [[test]]
 name = "in_process_daemon"

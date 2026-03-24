@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
 };
 
-use flotilla_protocol::{CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath};
+use flotilla_protocol::{arg::Arg, CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath, ResolvedPaneCommand};
 use tracing::{debug, error, info};
 
 use self::{
@@ -329,7 +329,10 @@ pub(crate) struct ExecutorStepResolver {
 impl ExecutorStepResolver {
     /// Construct a `TerminalManager` from the registry's preferred terminal pool, if one exists.
     fn terminal_manager(&self) -> Option<TerminalManager> {
-        self.registry.terminal_pools.preferred().map(|pool| TerminalManager::new(Arc::clone(pool), self.attachable_store.clone()))
+        self.registry
+            .terminal_pools
+            .preferred()
+            .map(|pool| TerminalManager::new(Arc::clone(pool), self.attachable_store.clone(), self.local_host.clone()))
     }
 }
 
@@ -514,11 +517,17 @@ impl StepResolver for ExecutorStepResolver {
                             })
                             .await?
                     } else if !requested_commands.is_empty() {
-                        requested_commands.to_vec()
+                        requested_commands
+                            .iter()
+                            .map(|cmd| ResolvedPaneCommand { role: cmd.role.clone(), args: vec![Arg::Literal(cmd.command.clone())] })
+                            .collect()
                     } else {
                         terminals::render_fallback_commands(|| {
                             workspace_config(&self.repo.root, &co.branch, &checkout_path, "claude", &self.config_base)
                         })
+                        .into_iter()
+                        .map(|cmd| ResolvedPaneCommand { role: cmd.role, args: vec![Arg::Literal(cmd.command)] })
+                        .collect()
                     };
                     Ok(StepOutcome::CompletedWith(CommandValue::TerminalPrepared {
                         repo_identity: self.repo.identity.clone(),

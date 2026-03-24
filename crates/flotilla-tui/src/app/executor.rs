@@ -145,7 +145,7 @@ pub fn handle_result(result: CommandValue, app: &mut App) {
 mod tests {
     use std::path::PathBuf;
 
-    use flotilla_protocol::{CheckoutStatus, CommandAction, HostName, PreparedTerminalCommand, RepoIdentity, WorkItemIdentity};
+    use flotilla_protocol::{arg::Arg, CheckoutStatus, CommandAction, HostName, RepoIdentity, ResolvedPaneCommand, WorkItemIdentity};
 
     use super::*;
     use crate::app::{test_support::stub_app, ui_state::BranchInputKind};
@@ -161,7 +161,7 @@ mod tests {
                 branch: "feat-x".into(),
                 checkout_path: PathBuf::from("/remote/feat-x"),
                 attachable_set_id: Some(flotilla_protocol::AttachableSetId::new("set-1")),
-                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }],
+                commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash -l".into())] }],
             },
             &mut app,
         );
@@ -174,7 +174,7 @@ mod tests {
                 assert_eq!(branch, "feat-x");
                 assert_eq!(checkout_path, PathBuf::from("/remote/feat-x"));
                 assert_eq!(attachable_set_id, Some(flotilla_protocol::AttachableSetId::new("set-1")));
-                assert_eq!(commands, vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }]);
+                assert_eq!(commands, vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash -l".into())] }]);
             }
             other => panic!("expected CreateWorkspaceFromPreparedTerminal, got {other:?}"),
         }
@@ -192,7 +192,7 @@ mod tests {
                 branch: "feat-x".into(),
                 checkout_path: PathBuf::from("/remote/feat-x"),
                 attachable_set_id: None,
-                commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }],
+                commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash -l".into())] }],
             },
             &mut app,
         );

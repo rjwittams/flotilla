@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use flotilla_protocol::{
-    AttachableSetId, CommandValue, DaemonEvent, HostName, HostPath, PreparedTerminalCommand, RepoIdentity, StepStatus,
+    AttachableSetId, CommandValue, DaemonEvent, HostName, HostPath, PreparedTerminalCommand, RepoIdentity, ResolvedPaneCommand, StepStatus,
 };
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -85,7 +85,7 @@ pub enum StepAction {
         branch: String,
         checkout_path: PathBuf,
         attachable_set_id: Option<AttachableSetId>,
-        commands: Vec<PreparedTerminalCommand>,
+        commands: Vec<ResolvedPaneCommand>,
     },
     SelectWorkspace {
         ws_ref: String,

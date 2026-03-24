@@ -7,7 +7,6 @@ use super::{
     build_plan,
     checkout::{resolve_checkout_branch, validate_checkout_target, write_branch_issue_links, CheckoutIntent},
     session_actions::resolve_attach_command,
-    terminals::{escape_for_double_quotes, wrap_remote_attach_commands},
     workspace_config, ExecutorStepResolver, RepoExecutionContext,
 };
 use crate::{
@@ -35,9 +34,10 @@ fn desc(name: &str) -> ProviderDescriptor {
 }
 use async_trait::async_trait;
 use flotilla_protocol::{
+    arg::Arg,
     test_support::{TestCheckout, TestIssue, TestSession},
     CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath, PreparedTerminalCommand, RepoSelector,
-    TerminalStatus,
+    ResolvedPaneCommand, TerminalStatus,
 };
 
 fn hp(path: &str) -> HostPath {
@@ -517,7 +517,7 @@ async fn prepare_terminal_for_checkout_returns_terminal_commands() {
             assert_eq!(branch, "feat");
             assert_eq!(checkout_path, path);
             assert!(attachable_set_id.is_some(), "prepare should allocate an attachable set");
-            assert_eq!(commands, vec![PreparedTerminalCommand { role: "main".into(), command: "claude".into() }]);
+            assert_eq!(commands, vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("claude".into())] }]);
         }
         other => panic!("expected TerminalPrepared, got {other:?}"),
     }
@@ -617,7 +617,7 @@ async fn create_workspace_from_prepared_terminal_wraps_remote_commands_in_ssh() 
             branch: "feat".into(),
             checkout_path: PathBuf::from("/remote/feat"),
             attachable_set_id: None,
-            commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }],
+            commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash -l".into())] }],
         },
         registry,
         empty_data(),
@@ -639,7 +639,7 @@ async fn create_workspace_from_prepared_terminal_wraps_remote_commands_in_ssh() 
     assert!(resolved[0].1.contains("desktop.local"));
     assert!(resolved[0].1.contains("/remote/feat"));
     assert!(resolved[0].1.contains("bash -l"));
-    assert!(resolved[0].1.contains("$SHELL -l -c"), "expected login shell wrapper, got: {}", resolved[0].1);
+    assert!(resolved[0].1.contains("${SHELL:-/bin/sh} -l -c"), "expected login shell wrapper, got: {}", resolved[0].1);
 }
 
 #[tokio::test]
@@ -664,7 +664,7 @@ async fn create_workspace_from_prepared_terminal_prefixes_name_with_host() {
             branch: "feat".into(),
             checkout_path: PathBuf::from("/remote/feat"),
             attachable_set_id: None,
-            commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }],
+            commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash".into())] }],
         },
         registry,
         empty_data(),
@@ -704,7 +704,7 @@ async fn create_workspace_from_prepared_terminal_persists_remote_attachable_set_
             branch: "feat".into(),
             checkout_path: PathBuf::from("/remote/feat"),
             attachable_set_id: Some(set_id.clone()),
-            commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }],
+            commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash".into())] }],
         },
         registry,
         empty_data(),
@@ -800,7 +800,7 @@ async fn create_workspace_from_prepared_terminal_uses_local_fallback_for_remote_
             branch: "feat".into(),
             checkout_path: PathBuf::from("/remote/feat"),
             attachable_set_id: None,
-            commands: vec![PreparedTerminalCommand { role: "main".into(), command: "bash -l".into() }],
+            commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash -l".into())] }],
         },
         registry,
         empty_data(),
@@ -817,7 +817,7 @@ async fn create_workspace_from_prepared_terminal_uses_local_fallback_for_remote_
     assert!(!created[0].working_directory.to_string_lossy().starts_with("<remote>/"));
     assert!(created[0].working_directory.exists(), "fallback working directory should exist");
     let resolved = created[0].resolved_commands.as_ref().expect("resolved commands");
-    assert!(resolved[0].1.contains("$SHELL -l -c"), "expected login shell wrapper, got: {}", resolved[0].1);
+    assert!(resolved[0].1.contains("${SHELL:-/bin/sh} -l -c"), "expected login shell wrapper, got: {}", resolved[0].1);
 }
 
 #[tokio::test]
@@ -1060,14 +1060,14 @@ impl TerminalPool for MockTerminalPool {
     async fn ensure_session(&self, _session_name: &str, _cmd: &str, _cwd: &Path) -> Result<(), String> {
         Ok(())
     }
-    async fn attach_command(
+    fn attach_args(
         &self,
         session_name: &str,
         _cmd: &str,
         _cwd: &Path,
         _env_vars: &crate::providers::terminal::TerminalEnvVars,
-    ) -> Result<String, String> {
-        Ok(format!("attach:{session_name}"))
+    ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
+        Ok(vec![flotilla_protocol::arg::Arg::Literal(format!("attach:{session_name}"))])
     }
     async fn kill_session(&self, session_name: &str) -> Result<(), String> {
         self.killed.lock().await.push(session_name.to_string());
@@ -2222,7 +2222,7 @@ fn resolve_checkout_branch_query_ambiguous() {
 async fn resolve_workspace_commands_no_template_uses_default() {
     let mock_pool: Arc<dyn TerminalPool> = Arc::new(MockTerminalPool { killed: tokio::sync::Mutex::new(vec![]) });
     let store = crate::attachable::shared_in_memory_attachable_store();
-    let tm = crate::terminal_manager::TerminalManager::new(mock_pool, store);
+    let tm = crate::terminal_manager::TerminalManager::new(mock_pool, store, HostName::local());
     let mut config = WorkspaceConfig {
         name: "test-branch".to_string(),
         working_directory: PathBuf::from("/repo/wt"),
@@ -2245,7 +2245,7 @@ async fn resolve_workspace_commands_no_template_uses_default() {
 async fn resolve_workspace_commands_skips_non_terminal_content() {
     let mock_pool: Arc<dyn TerminalPool> = Arc::new(MockTerminalPool { killed: tokio::sync::Mutex::new(vec![]) });
     let store = crate::attachable::shared_in_memory_attachable_store();
-    let tm = crate::terminal_manager::TerminalManager::new(mock_pool, store);
+    let tm = crate::terminal_manager::TerminalManager::new(mock_pool, store, HostName::local());
     let yaml = r#"
 content:
   - role: docs
@@ -2271,7 +2271,7 @@ content:
 async fn prepare_terminal_commands_wraps_requested_commands_via_terminal_manager() {
     let mock_pool: Arc<dyn TerminalPool> = Arc::new(MockTerminalPool { killed: tokio::sync::Mutex::new(vec![]) });
     let store = crate::attachable::shared_in_memory_attachable_store();
-    let tm = crate::terminal_manager::TerminalManager::new(mock_pool, store);
+    let tm = crate::terminal_manager::TerminalManager::new(mock_pool, store, HostName::local());
 
     let service = super::terminals::TerminalPreparationService::new(&tm, None);
     let requested = vec![PreparedTerminalCommand { role: "main".into(), command: "claude".into() }, PreparedTerminalCommand {
@@ -2288,15 +2288,16 @@ async fn prepare_terminal_commands_wraps_requested_commands_via_terminal_manager
     assert_eq!(result.len(), 2);
     assert_eq!(result[0].role, "main");
     assert_eq!(result[1].role, "main");
-    // Attach commands use the attachable ID as session name
-    assert!(result[0].command.starts_with("attach:"), "expected attach: prefix, got: {}", result[0].command);
+    // Args should contain structured Arg from attach_args(), not Literal-wrapped strings
+    let flat = flotilla_protocol::arg::flatten(&result[0].args, 0);
+    assert!(flat.starts_with("attach:"), "expected attach: prefix, got: {flat}");
 }
 
 #[tokio::test]
 async fn resolve_workspace_commands_invalid_template_uses_default() {
     let mock_pool: Arc<dyn TerminalPool> = Arc::new(MockTerminalPool { killed: tokio::sync::Mutex::new(vec![]) });
     let store = crate::attachable::shared_in_memory_attachable_store();
-    let tm = crate::terminal_manager::TerminalManager::new(mock_pool, store);
+    let tm = crate::terminal_manager::TerminalManager::new(mock_pool, store, HostName::local());
     let mut config = WorkspaceConfig {
         name: "test-branch".to_string(),
         working_directory: PathBuf::from("/repo/wt"),
@@ -2421,127 +2422,6 @@ async fn validate_existing_branch_fails_when_neither_exists() {
 
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("branch not found"));
-}
-
-#[test]
-fn wrap_remote_attach_commands_uses_login_shell() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        temp.path().join("hosts.toml"),
-        "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
-    )
-    .expect("write hosts config");
-
-    let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "claude".into() }];
-    let result = wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path())
-        .expect("wrap remote attach commands");
-
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].role, "main");
-    assert!(result[0].command.contains("$SHELL -l -c"), "expected login shell wrapper, got: {}", result[0].command);
-    assert!(result[0].command.contains("ssh -t"), "expected ssh -t, got: {}", result[0].command);
-    assert!(result[0].command.contains("desktop.local"), "expected host, got: {}", result[0].command);
-    assert!(result[0].command.contains("/home/dev/project"), "expected remote dir, got: {}", result[0].command);
-    assert!(result[0].command.contains("claude"), "expected command, got: {}", result[0].command);
-}
-
-#[test]
-fn escape_for_double_quotes_handles_special_chars() {
-    assert_eq!(escape_for_double_quotes("hello"), "hello");
-    assert_eq!(escape_for_double_quotes(r#"say "hi""#), r#"say \"hi\""#);
-    assert_eq!(escape_for_double_quotes("$HOME"), r"\$HOME");
-    assert_eq!(escape_for_double_quotes("a`cmd`b"), r"a\`cmd\`b");
-    assert_eq!(escape_for_double_quotes(r"back\slash"), r"back\\slash");
-    assert_eq!(escape_for_double_quotes(""), "");
-    assert_eq!(
-        escape_for_double_quotes("shpool --socket /tmp/s.sock attach flotilla/feat/main/0"),
-        "shpool --socket /tmp/s.sock attach flotilla/feat/main/0"
-    );
-}
-
-#[test]
-fn wrap_remote_attach_commands_includes_multiplex_args() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        temp.path().join("hosts.toml"),
-        "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
-    )
-    .expect("write hosts config");
-
-    let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
-    let result = wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path())
-        .expect("wrap remote attach commands");
-
-    // Default is multiplex=true
-    assert!(result[0].command.contains("ControlMaster=auto"), "expected ControlMaster, got: {}", result[0].command);
-    assert!(result[0].command.contains("ControlPersist=60"), "expected ControlPersist, got: {}", result[0].command);
-}
-
-#[test]
-fn wrap_remote_attach_commands_omits_multiplex_when_disabled() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        temp.path().join("hosts.toml"),
-        "[ssh]\nmultiplex = false\n\n[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
-    )
-    .expect("write hosts config");
-
-    let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
-    let result = wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path())
-        .expect("wrap remote attach commands");
-
-    assert!(!result[0].command.contains("ControlMaster"), "should not have ControlMaster when disabled, got: {}", result[0].command);
-}
-
-#[test]
-fn wrap_remote_attach_commands_per_host_multiplex_override() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        temp.path().join("hosts.toml"),
-        "[ssh]\nmultiplex = true\n\n[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\nssh_multiplex = false\n",
-    )
-    .expect("write hosts config");
-
-    let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
-    let result = wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path())
-        .expect("wrap remote attach commands");
-
-    assert!(!result[0].command.contains("ControlMaster"), "per-host override should disable multiplex, got: {}", result[0].command);
-}
-
-#[test]
-fn wrap_remote_attach_commands_unknown_host_errors() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        temp.path().join("hosts.toml"),
-        "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
-    )
-    .expect("write hosts config");
-
-    let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
-    let err = wrap_remote_attach_commands(&HostName::new("laptop"), &PathBuf::from("/home/dev/project"), &commands, temp.path())
-        .expect_err("unknown host should error");
-
-    assert!(err.contains("unknown remote host"));
-}
-
-#[test]
-fn wrap_remote_attach_commands_disables_multiplex_when_control_dir_creation_fails() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        temp.path().join("hosts.toml"),
-        "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/flotilla.sock\"\n",
-    )
-    .expect("write hosts config");
-    // `wrap_remote_attach_commands` creates `<config_base>/ssh/<host>` for its control socket.
-    // A plain file at `<config_base>/ssh` makes `create_dir_all` fail and forces the no-multiplex fallback.
-    std::fs::write(temp.path().join("ssh"), "not-a-directory").expect("create conflicting ssh file");
-
-    let commands = vec![PreparedTerminalCommand { role: "main".into(), command: "bash".into() }];
-    let result = wrap_remote_attach_commands(&HostName::new("desktop"), &PathBuf::from("/home/dev/project"), &commands, temp.path())
-        .expect("wrap remote attach commands");
-
-    assert!(!result[0].command.contains("ControlMaster"), "multiplex should be disabled when ctrl dir creation fails");
 }
 
 // -----------------------------------------------------------------------

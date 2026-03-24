@@ -205,7 +205,8 @@ async fn refresh_providers(
     };
 
     let terminal_manager = registry.terminal_pools.preferred_with_desc().map(|(desc, tp)| {
-        let tm = crate::terminal_manager::TerminalManager::new(Arc::clone(tp), attachable_store.clone());
+        let tm =
+            crate::terminal_manager::TerminalManager::new(Arc::clone(tp), attachable_store.clone(), flotilla_protocol::HostName::local());
         (desc.display_name.clone(), tm)
     });
     let tp_fut = async {
@@ -605,14 +606,14 @@ mod tests {
             Ok(())
         }
 
-        async fn attach_command(
+        fn attach_args(
             &self,
             _session_name: &str,
             _command: &str,
             _cwd: &Path,
             _env_vars: &crate::providers::terminal::TerminalEnvVars,
-        ) -> Result<String, String> {
-            Ok("mock attach".into())
+        ) -> Result<Vec<flotilla_protocol::arg::Arg>, String> {
+            Ok(vec![flotilla_protocol::arg::Arg::Literal("mock attach".into())])
         }
 
         async fn kill_session(&self, _session_name: &str) -> Result<(), String> {
