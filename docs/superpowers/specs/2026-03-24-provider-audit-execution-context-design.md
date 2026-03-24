@@ -206,26 +206,41 @@ Phase B makes ConfigStore opaque (no path leakage) but keeps it as a concrete st
 
 ## Implementation Plan
 
-### Step 1: Make ConfigStore opaque
+### PR 1: Newtype migration (the audit)
 
-Remove `flotilla_config_dir()` as a public function. Remove `config.base_path()` or any path-exposing API. Code that currently computes paths from ConfigStore's base directory (shpool socket, tmux/zellij state) moves to appropriate store abstractions. ConfigStore serves data, not paths.
+Introduce `DaemonHostPath` and `ExecutionEnvironmentPath`. Classify every `PathBuf`/`&Path` in the provider and discovery layer as one or the other. Change signatures, let the compiler find every conflation point.
 
-### Step 2: Path policy module (internal)
+Key signatures that change:
+- `Factory::probe()`: `repo_root: &Path` → `&ExecutionEnvironmentPath`
+- Provider struct fields: binary paths, working dirs → `ExecutionEnvironmentPath`
+- `ConfigStore` internals, store base paths → `DaemonHostPath`
+- `EnvironmentBag` assertion paths (binary locations) → `ExecutionEnvironmentPath`
 
-New module (`crates/flotilla-core/src/path_policy.rs`) implementing `PathPolicy::from_env()`. Used internally by stores and the daemon to locate their own files. Classify existing files into config/data/state/cache per #367. Not exposed to providers.
+This PR is the audit. Instead of a document listing violations, the compiler finds them all. Every place where a `DaemonHostPath` is passed where an `ExecutionEnvironmentPath` is expected (or vice versa) is a conflation that needs resolving.
 
-### Step 3: Separate state storage from config
+Classification decisions that will surface:
+- Shpool socket: `DaemonHostPath` on the daemon, but mounted at an `ExecutionEnvironmentPath` inside a container. The mount configuration is the explicit crossing point.
+- Cmux binary: `ExecutionEnvironmentPath` — it's discovered in the execution environment via the runner.
+- `repo_root`: `ExecutionEnvironmentPath` — it's where code lives in the execution environment.
 
-Shpool socket paths, tmux/zellij workspace state, and similar runtime state move out of ConfigStore's directory into proper state storage (via PathPolicy's `state_dir`). Access through store methods, not path computation.
+### PR 2: Fix detector host assumptions
 
-### Step 4: Fix probe-time re-reads
+Claude, Codex, and Cmux detectors use `env.get("HOME")` (from the injected `EnvVars` trait) instead of `dirs::home_dir()`. Detectors resolve HOME-dependent paths and put results into the bag. Factories then read resolved paths from the bag, never computing paths from HOME themselves.
 
-Codex auth, Cursor API key, Zellij session name, Cmux binary path — resolve at probe, pass to constructor. The pattern: detect during probe using `EnvironmentBag` and `CommandRunner`, store in the provider struct, never re-read.
+Cmux: the `/Applications/cmux.app/...` path is correct for macOS — cmux is never on PATH. The detector checks this known location via the runner (`runner.exists(path, &["--version"])`), not via `path.is_file()`. Inside a container, the detector won't find cmux, probe fails with `UnmetRequirement`, provider isn't constructed. Correct behavior.
 
-### Step 5: Fix detector host assumptions
+### PR 3: Fix probe-time re-reads
 
-Claude and Codex detectors use `HOME` from env vars (via `EnvVars` trait) instead of `dirs::home_dir()`. Platform-aware binary lookup uses the runner to check known locations.
+**Codex:** resolve auth *path* at probe (from `EnvironmentBag`), pass to constructor. Runtime re-reads of auth.json go through the runner at the resolved path — not frozen at probe time, because auth tokens refresh. The change: the *location* is resolved once; the *content* is read at runtime through the runner.
 
-### Step 6: Verification
+**Cursor:** pass `$CURSOR_API_KEY` value to constructor (already validated during probe).
 
-Run existing test suite + CI gates (fmt, clippy, test). Add test that constructs a `PathPolicy` from explicit env vars and verifies all paths resolve correctly. Verify that `Factory::probe()` for git and cleat works with a mock runner and custom env vars (simulating container-interior discovery).
+**Zellij:** always use `session_name_override` — factory already supports this. Remove `std::env::var` fallback.
+
+### PR 4: ConfigStore opacity + path policy
+
+Remove `flotilla_config_dir()` as a public function. ConfigStore constructor takes an explicit `DaemonHostPath` base. Path policy module resolves the base internally (XDG → `dirs::` fallback). State paths (shpool socket, tmux/zellij state) move to appropriate `DaemonHostPath` locations via the path policy, not computed from config base. No paths leak through public APIs.
+
+### Verification
+
+Each PR runs the full CI gate (fmt, clippy, test). PR 1 (newtypes) adds a compile-time guarantee that no new conflation is introduced. PR 4 adds a test that constructs a `PathPolicy` from explicit env vars and verifies all paths resolve correctly.
