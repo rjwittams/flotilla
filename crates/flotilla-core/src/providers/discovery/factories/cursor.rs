@@ -39,14 +39,18 @@ impl Factory for CursorCodingAgentFactory {
         if env.find_binary("agent").is_none() {
             unmet.push(UnmetRequirement::MissingBinary("agent".into()));
         }
-        if env.find_env_var("CURSOR_API_KEY").is_none() {
-            unmet.push(UnmetRequirement::MissingEnvVar("CURSOR_API_KEY".into()));
-        }
+        let api_key = match env.find_env_var("CURSOR_API_KEY") {
+            Some(key) => key.to_string(),
+            None => {
+                unmet.push(UnmetRequirement::MissingEnvVar("CURSOR_API_KEY".into()));
+                return Err(unmet);
+            }
+        };
         if !unmet.is_empty() {
             return Err(unmet);
         }
         let http = Arc::new(ReqwestHttpClient::new());
-        Ok(Arc::new(CursorCodingAgent::new("cursor".into(), http)))
+        Ok(Arc::new(CursorCodingAgent::new("cursor".into(), api_key, http)))
     }
 }
 

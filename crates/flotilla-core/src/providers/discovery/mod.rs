@@ -160,11 +160,13 @@ impl EnvironmentBag {
     }
 
     pub fn has_auth(&self, provider: &str) -> bool {
-        self.assertions.iter().any(|a| {
-            matches!(
-                a,
-                EnvironmentAssertion::AuthFileExists { provider: p, .. } if p == provider
-            )
+        self.find_auth_path(provider).is_some()
+    }
+
+    pub fn find_auth_path(&self, provider: &str) -> Option<&ExecutionEnvironmentPath> {
+        self.assertions.iter().find_map(|a| match a {
+            EnvironmentAssertion::AuthFileExists { provider: p, path } if p == provider => Some(path),
+            _ => None,
         })
     }
 

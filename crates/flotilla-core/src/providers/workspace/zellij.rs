@@ -102,13 +102,12 @@ impl ZellijWorkspaceManager {
         Ok(())
     }
 
-    /// Return the current Zellij session name, preferring the override if set,
-    /// otherwise falling back to the `ZELLIJ_SESSION_NAME` environment variable.
+    /// Return the current Zellij session name. The session name must have been
+    /// resolved at probe time and passed to `with_session_name()`.
     pub fn session_name(&self) -> Result<String, String> {
-        if let Some(ref name) = self.session_name_override {
-            return Ok(name.clone());
-        }
-        std::env::var("ZELLIJ_SESSION_NAME").map_err(|_| "not running inside a zellij session (ZELLIJ_SESSION_NAME not set)".to_string())
+        self.session_name_override
+            .clone()
+            .ok_or_else(|| "zellij session name not resolved at probe time (ZELLIJ_SESSION_NAME was not set)".to_string())
     }
 
     /// Return the state file path: `~/.config/flotilla/zellij/{session}/state.toml`.

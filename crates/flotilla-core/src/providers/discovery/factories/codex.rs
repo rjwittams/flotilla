@@ -35,12 +35,11 @@ impl Factory for CodexCodingAgentFactory {
         _repo_root: &ExecutionEnvironmentPath,
         _runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn CloudAgentService>, Vec<UnmetRequirement>> {
-        if env.has_auth("codex") {
-            let http = Arc::new(ReqwestHttpClient::new());
-            Ok(Arc::new(CodexCodingAgent::new("codex".into(), http)))
-        } else {
-            Err(vec![UnmetRequirement::MissingAuth("codex".into())])
-        }
+        let Some(auth_path) = env.find_auth_path("codex") else {
+            return Err(vec![UnmetRequirement::MissingAuth("codex".into())]);
+        };
+        let http = Arc::new(ReqwestHttpClient::new());
+        Ok(Arc::new(CodexCodingAgent::new("codex".into(), auth_path.clone(), http)))
     }
 }
 
