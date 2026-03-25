@@ -21,7 +21,7 @@ pub struct Command {
 }
 ```
 
-`host` + `environment` together are the proto-`ProvisioningTarget`. `host` alone means bare host (today's behavior). `host` + `environment` means provision a container on that host. `#[serde(default)]` for wire compatibility.
+`host` + `environment` together are the proto-`ProvisioningTarget`. `host` alone means bare host (today's behavior). `host` + `environment` means provision a container on that host. `#[serde(default, skip_serializing_if = "Option::is_none")]` for consistency with existing optional fields on `Command`.
 
 ## Step System
 
@@ -57,7 +57,7 @@ The `ExecutorStepResolver` gains:
 
 `CreateEnvironment { image, opts }` — creates sandbox socket via `EnvironmentSocketRegistry::add()`, passes socket path in `CreateOpts`. Calls `provider.create(image, opts)`. Stores the `EnvironmentHandle`. Returns `Produced(EnvironmentId)`.
 
-`DiscoverEnvironmentProviders { env_id }` — retrieves handle, calls `handle.env_vars()`, runs `FactoryRegistry::probe()` through the handle's runner with the captured env vars. Stores the resulting per-environment `ProviderRegistry`. Returns `Completed`.
+`DiscoverEnvironmentProviders { env_id }` — retrieves handle, calls `handle.env_vars()` to get raw `HashMap<String, String>`. Runs the host-level and repo-level detectors through the environment runner to build an `EnvironmentBag` from the container's environment (same detection pipeline as host discovery, routed through the runner). Then runs `FactoryRegistry::probe()` with the environment's `EnvironmentBag` and runner. Stores the resulting per-environment `ProviderRegistry`. Returns `Completed`.
 
 `DestroyEnvironment { env_id }` — calls `handle.destroy()`, removes sandbox socket via `EnvironmentSocketRegistry::remove()`. Returns `Completed`.
 
@@ -97,7 +97,11 @@ struct CloneCheckoutManager {
 
 `create_checkout(branch)` → `git clone --reference /ref/repo <remote_url> /workspace/<branch>`. The remote URL is read from the reference repo: `git --git-dir /ref/repo remote get-url origin`. For fresh branches, clones default branch then `git checkout -b <branch>`.
 
+For fresh branches, clones with `--no-checkout` then `git checkout -b <branch>` from the default branch.
+
 Uses the same `CheckoutManager` trait as the worktree implementation. The plan builder and step resolver don't know about the difference — they call `create_checkout()` and the discovered provider handles the rest.
+
+**Failure/rollback:** If a mid-plan step fails after the environment is created (e.g., checkout fails), the container is left running. Phase D does not add automatic rollback — `run_step_plan` stops on first error. Cleanup is manual (`docker rm -f`) or via a future `DestroyEnvironment` command. Automatic compensating actions are deferred.
 
 ### Factory
 
@@ -119,7 +123,7 @@ RemoteToHost(feta) → EnterEnvironment(env_id, "docker") → AttachTerminal(ses
 
 ### Workspace Orchestrator
 
-`resolve_prepared_commands_via_hop_chain()` in `executor/workspace.rs` currently uses `NoopEnvironmentHopResolver`. When creating a workspace inside an environment, it constructs `DockerEnvironmentHopResolver` with the container name mapping (from the `EnvironmentHandle` in resolver state) and passes it to the `HopResolver`.
+`resolve_prepared_commands_via_hop_chain()` in `executor/workspace.rs` currently uses `NoopEnvironmentHopResolver`. When creating a workspace inside an environment, it constructs `DockerEnvironmentHopResolver` with the container name mapping and passes it to the `HopResolver`. The mapping comes from the `EnvironmentHandle` in resolver state — `DockerProvisionedEnvironment` knows its container name internally, exposed via a method that the resolver calls to build the `EnvironmentId → container_name` map.
 
 ## Refresh and Host Summary
 
