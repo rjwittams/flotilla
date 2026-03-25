@@ -358,6 +358,18 @@ async fn run_control_command(cli: &Cli, command: Command, format: OutputFormat) 
     flotilla_tui::cli::run_command(&*daemon, command, format).await.map_err(|e| color_eyre::eyre::eyre!(e))
 }
 
+fn set_context_repo(cmd: &mut Command, cli: &Cli) {
+    if cmd.context_repo.is_some() {
+        return;
+    }
+    let repo_selector = match (&cli.repo, std::env::var("FLOTILLA_REPO").ok()) {
+        (Some(repo), _) => Some(RepoSelector::Query(repo.clone())),
+        (None, Some(repo)) if !repo.is_empty() => Some(RepoSelector::Query(repo)),
+        _ => None,
+    };
+    cmd.context_repo = repo_selector;
+}
+
 fn inject_repo_context(cmd: &mut Command, cli: &Cli) -> Result<()> {
     let repo_selector = match (&cli.repo, std::env::var("FLOTILLA_REPO").ok()) {
         (Some(repo), _) => Some(RepoSelector::Query(repo.clone())),
@@ -383,19 +395,18 @@ fn inject_repo_context(cmd: &mut Command, cli: &Cli) -> Result<()> {
 }
 
 async fn dispatch(resolved: flotilla_commands::Resolved, cli: &Cli, format: OutputFormat) -> Result<()> {
-    use flotilla_commands::Resolved;
+    use flotilla_commands::{RepoContext, Resolved};
     reset_sigpipe();
-    let cmd = match resolved {
-        Resolved::Command(mut cmd) => {
-            inject_repo_context(&mut cmd, cli)?;
-            cmd
+    match resolved {
+        Resolved::Ready(cmd) => run_control_command(cli, cmd, format).await,
+        Resolved::NeedsContext { mut command, repo, .. } => {
+            match repo {
+                RepoContext::Required => inject_repo_context(&mut command, cli)?,
+                RepoContext::Inferred => set_context_repo(&mut command, cli),
+            }
+            run_control_command(cli, command, format).await
         }
-        Resolved::RequiresRepoContext(mut cmd) => {
-            inject_repo_context(&mut cmd, cli)?;
-            cmd
-        }
-    };
-    run_control_command(cli, cmd, format).await
+    }
 }
 
 async fn run_topology_command(cli: &Cli, format: OutputFormat) -> Result<()> {
