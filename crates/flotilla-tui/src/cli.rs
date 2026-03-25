@@ -482,15 +482,27 @@ pub async fn run_watch(socket_path: &Path, format: OutputFormat) -> Result<(), S
     Ok(())
 }
 
+fn is_query_result(result: &CommandValue) -> bool {
+    matches!(
+        result,
+        CommandValue::RepoDetail(_)
+            | CommandValue::RepoProviders(_)
+            | CommandValue::RepoWork(_)
+            | CommandValue::HostList(_)
+            | CommandValue::HostStatus(_)
+            | CommandValue::HostProviders(_)
+    )
+}
+
 pub async fn run_command(daemon: &dyn DaemonHandle, command: Command, format: OutputFormat) -> Result<(), String> {
     let mut rx = daemon.subscribe();
     let command_id = daemon.execute(command).await?;
 
     loop {
         match rx.recv().await {
-            Ok(event @ DaemonEvent::CommandStarted { command_id: id, .. }) if id == command_id => {
-                if matches!(format, OutputFormat::Human) {
-                    println!("{}", format_event_human(&event));
+            Ok(ref event @ DaemonEvent::CommandStarted { command_id: id, ref description, .. }) if id == command_id => {
+                if matches!(format, OutputFormat::Human) && !description.starts_with("query") {
+                    println!("{}", format_event_human(event));
                 }
             }
             Ok(event @ DaemonEvent::CommandStepUpdate { command_id: id, .. }) if id == command_id => {
@@ -501,7 +513,11 @@ pub async fn run_command(daemon: &dyn DaemonHandle, command: Command, format: Ou
             Ok(ref event @ DaemonEvent::CommandFinished { command_id: id, ref result, .. }) if id == command_id => {
                 match format {
                     OutputFormat::Human => {
-                        println!("{}", format_event_human(event));
+                        if is_query_result(result) {
+                            print!("{}", format_command_result(result));
+                        } else {
+                            println!("{}", format_event_human(event));
+                        }
                     }
                     OutputFormat::Json => {
                         println!("{}", flotilla_protocol::output::json_pretty(&result));
