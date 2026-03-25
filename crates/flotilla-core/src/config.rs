@@ -312,6 +312,10 @@ pub fn path_to_slug(path: &Path) -> String {
     slug.trim_matches('-').to_string()
 }
 
+fn repo_file_key(path: &Path) -> String {
+    urlencoding::encode(&path.to_string_lossy()).into_owned()
+}
+
 /// Owns daemon-side paths and caches the global `FlotillaConfig`.
 ///
 /// NOTE: This struct is accumulating path responsibilities beyond pure config.
@@ -353,7 +357,7 @@ impl ConfigStore {
         self.base.join("tab-order.json")
     }
 
-    /// Load all persisted repo paths from config dir, sorted alphabetically by slug.
+    /// Load all persisted repo paths from config dir, sorted alphabetically by path.
     pub fn load_repos(&self) -> Vec<ExecutionEnvironmentPath> {
         let dir = self.repos_dir();
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -367,7 +371,7 @@ impl ConfigStore {
                 let config: RepoConfig = toml::from_str(&content).ok()?;
                 let path = PathBuf::from(&config.path);
                 if path.is_dir() {
-                    Some((e.file_name().to_string_lossy().to_string(), ExecutionEnvironmentPath::new(path)))
+                    Some((config.path, ExecutionEnvironmentPath::new(path)))
                 } else {
                     None
                 }
@@ -381,8 +385,8 @@ impl ConfigStore {
     pub fn save_repo(&self, path: &ExecutionEnvironmentPath) {
         let dir = self.repos_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let slug = path_to_slug(path.as_path());
-        let file = dir.join(format!("{slug}.toml"));
+        let key = repo_file_key(path.as_path());
+        let file = dir.join(format!("{key}.toml"));
         if file.as_path().exists() {
             return;
         }
@@ -395,8 +399,8 @@ impl ConfigStore {
     /// Remove a repo's config file.
     pub fn remove_repo(&self, path: &ExecutionEnvironmentPath) {
         let dir = self.repos_dir();
-        let slug = path_to_slug(path.as_path());
-        let file = dir.join(format!("{slug}.toml"));
+        let key = repo_file_key(path.as_path());
+        let file = dir.join(format!("{key}.toml"));
         let _ = std::fs::remove_file(file.as_path());
     }
 
@@ -486,11 +490,18 @@ impl ConfigStore {
     /// Resolve checkout config for a repo: per-repo override > global > defaults.
     pub fn resolve_checkout_config(&self, repo_root: &ExecutionEnvironmentPath) -> ResolvedCheckoutConfig {
         let global = self.load_config();
-        let slug = path_to_slug(repo_root.as_path());
-        let repo_file = self.repos_dir().join(format!("{slug}.toml"));
+        let key = repo_file_key(repo_root.as_path());
+        let repo_file = self.repos_dir().join(format!("{key}.toml"));
         if let Ok(content) = std::fs::read_to_string(repo_file.as_path()) {
             match toml::from_str::<RepoFileConfig>(&content) {
                 Ok(repo_cfg) => {
+                    if repo_cfg.path != repo_root.as_path().to_string_lossy() {
+                        tracing::warn!(path = %repo_file, expected = %repo_root.as_path().display(), actual = %repo_cfg.path, "repo config path mismatch");
+                        return ResolvedCheckoutConfig {
+                            strategy: global.vcs.git.checkout_strategy.clone(),
+                            path: global.vcs.git.checkout_path.clone(),
+                        };
+                    }
                     return ResolvedCheckoutConfig {
                         strategy: repo_cfg.vcs.git.checkout_strategy.unwrap_or_else(|| global.vcs.git.checkout_strategy.clone()),
                         path: repo_cfg.vcs.git.checkout_path.unwrap_or_else(|| global.vcs.git.checkout_path.clone()),
