@@ -34,6 +34,8 @@ pub struct Checkout {
     pub last_commit: Option<CommitInfo>,
     pub correlation_keys: Vec<CorrelationKey>,
     pub association_keys: Vec<AssociationKey>,
+    #[serde(default)]
+    pub environment_id: Option<EnvironmentId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +236,8 @@ pub struct CloudAgentSession {
     /// receive snapshots from a remote daemon and needs display context.
     #[serde(default)]
     pub item_noun: String,
+    #[serde(default)]
+    pub environment_id: Option<EnvironmentId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,6 +390,7 @@ mod tests {
                 last_commit: None,
                 correlation_keys: vec![],
                 association_keys: vec![],
+                environment_id: None,
             },
             Checkout {
                 branch: "feat-x".into(),
@@ -396,6 +401,7 @@ mod tests {
                 last_commit: Some(CommitInfo { short_sha: "abc".into(), message: "feat: add login".into() }),
                 correlation_keys: vec![CorrelationKey::Branch("feat-x".into()), CorrelationKey::CheckoutPath(hp("/repos/proj/wt-1"))],
                 association_keys: vec![AssociationKey::IssueRef("gh".into(), "10".into())],
+                environment_id: None,
             },
         ];
 
@@ -469,6 +475,7 @@ mod tests {
                 provider_name: String::new(),
                 provider_display_name: String::new(),
                 item_noun: String::new(),
+                environment_id: None,
             },
             CloudAgentSession {
                 title: "T".into(),
@@ -479,6 +486,7 @@ mod tests {
                 provider_name: String::new(),
                 provider_display_name: String::new(),
                 item_noun: String::new(),
+                environment_id: None,
             },
         ];
         for case in &session_cases {
@@ -587,6 +595,7 @@ mod tests {
             last_commit: None,
             correlation_keys: vec![],
             association_keys: vec![],
+            environment_id: None,
         });
 
         assert_roundtrip(&pd);

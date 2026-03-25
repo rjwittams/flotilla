@@ -166,6 +166,7 @@ fn checkout(branch: &str) -> Checkout {
         last_commit: None,
         correlation_keys: vec![],
         association_keys: vec![],
+        environment_id: None,
     }
 }
 

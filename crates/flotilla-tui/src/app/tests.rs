@@ -324,6 +324,7 @@ fn apply_snapshot_sets_unseen_changes_for_inactive_tab() {
             last_commit: None,
             correlation_keys: vec![],
             association_keys: vec![],
+            environment_id: None,
         },
     );
     snap2.providers = different_providers;
@@ -423,6 +424,7 @@ fn apply_delta_data_change_on_inactive_tab_sets_unseen() {
             provider_name: String::new(),
             provider_display_name: String::new(),
             item_noun: String::new(),
+            environment_id: None,
         }),
     }]);
     app.apply_delta(change);

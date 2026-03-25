@@ -83,6 +83,7 @@ impl CloudAgentService for SlowCloudAgent {
             provider_name: String::new(),
             provider_display_name: String::new(),
             item_noun: String::new(),
+            environment_id: None,
         })])
     }
 
@@ -380,6 +381,7 @@ async fn list_hosts_counts_remote_repo_overlay_and_get_topology_returns_mirrored
         last_commit: None,
         correlation_keys: vec![],
         association_keys: vec![],
+        environment_id: None,
     });
     daemon.send_event(DaemonEvent::PeerStatusChanged { host: HostName::new("remote"), status: PeerConnectionState::Connected });
     daemon.set_peer_providers(&repo, vec![(HostName::new("remote"), peer_data)], 0).await;
@@ -871,6 +873,7 @@ async fn set_peer_providers_emits_host_snapshot_for_overlay_only_host() {
         last_commit: None,
         correlation_keys: vec![],
         association_keys: vec![],
+        environment_id: None,
     });
 
     daemon.set_peer_providers(&repo, vec![(overlay_host.clone(), peer_data)], 0).await;
@@ -906,6 +909,7 @@ async fn replay_since_includes_overlay_only_hosts() {
         last_commit: None,
         correlation_keys: vec![],
         association_keys: vec![],
+        environment_id: None,
     });
 
     daemon.set_peer_providers(&repo, vec![(overlay_host.clone(), peer_data)], 0).await;
@@ -936,6 +940,7 @@ async fn list_hosts_and_replay_drop_stale_non_configured_hosts() {
         last_commit: None,
         correlation_keys: vec![],
         association_keys: vec![],
+        environment_id: None,
     });
 
     daemon.publish_peer_connection_status(&transient_host, PeerConnectionState::Connected).await;
@@ -1043,6 +1048,7 @@ async fn replay_since_includes_peer_checkouts_with_correct_host() {
         last_commit: None,
         correlation_keys: vec![],
         association_keys: vec![],
+        environment_id: None,
     });
 
     daemon.set_peer_providers(&repo, vec![(peer_host.clone(), peer_data)], 0).await;
@@ -1098,6 +1104,7 @@ async fn replay_since_unknown_seq_includes_peer_checkouts_with_correct_host() {
         last_commit: None,
         correlation_keys: vec![],
         association_keys: vec![],
+        environment_id: None,
     });
 
     daemon.set_peer_providers(&repo, vec![(peer_host.clone(), peer_data)], 0).await;
@@ -1158,6 +1165,7 @@ async fn replay_since_delta_replay_includes_peer_data() {
         last_commit: None,
         correlation_keys: vec![],
         association_keys: vec![],
+        environment_id: None,
     });
 
     daemon.set_peer_providers(&repo, vec![(peer_host.clone(), peer_data)], 0).await;
@@ -1388,6 +1396,7 @@ async fn get_local_providers_excludes_peer_overlay_data() {
         last_commit: None,
         correlation_keys: vec![],
         association_keys: vec![],
+        environment_id: None,
     });
 
     daemon.set_peer_providers(&repo, vec![(HostName::new("follower"), peer_data)], 0).await;
@@ -1428,6 +1437,7 @@ async fn get_state_does_not_reattribute_peer_checkouts_after_poll() {
         last_commit: None,
         correlation_keys: vec![],
         association_keys: vec![],
+        environment_id: None,
     });
 
     // Set peer providers
@@ -1477,6 +1487,7 @@ async fn set_peer_providers_after_poll_does_not_duplicate_checkouts() {
             last_commit: None,
             correlation_keys: vec![],
             association_keys: vec![],
+            environment_id: None,
         });
         pd
     };
@@ -1563,6 +1574,7 @@ async fn in_process_daemon_keeps_remote_attachable_set_anchor_when_local_workspa
             CorrelationKey::CheckoutPath(remote_checkout.clone()),
         ],
         association_keys: vec![],
+        environment_id: None,
     });
     // The remote host projects sets matching its own checkouts, so
     // peer data includes the attachable set (simulating what the
@@ -1657,6 +1669,7 @@ async fn in_process_daemon_correlates_workspace_into_one_remote_checkout_item() 
         last_commit: None,
         correlation_keys: vec![CorrelationKey::Branch("issue-356-watch".into()), CorrelationKey::CheckoutPath(remote_checkout.clone())],
         association_keys: vec![],
+        environment_id: None,
     });
     // The remote host projects sets matching its own checkouts, so
     // peer data includes the attachable set (simulating what the
@@ -1945,6 +1958,7 @@ async fn add_virtual_repo_emits_repo_tracked_then_snapshot_and_is_queryable() {
             last_commit: None,
             correlation_keys: vec![CorrelationKey::Branch("feat-remote".into())],
             association_keys: vec![],
+            environment_id: None,
         })]),
         ..Default::default()
     })];
@@ -2113,6 +2127,7 @@ async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
             last_commit: None,
             correlation_keys: vec![CorrelationKey::Branch("feat-branch".into())],
             association_keys: vec![AssociationKey::IssueRef("fake-issues".into(), "42".into())],
+            environment_id: None,
         })])
         .await;
 
@@ -2214,6 +2229,7 @@ async fn attachable_set_cascade_deletes_on_checkout_removal() {
             last_commit: None,
             correlation_keys: vec![CorrelationKey::Branch("feat-lifecycle".into()), CorrelationKey::CheckoutPath(host_path.clone())],
             association_keys: vec![],
+            environment_id: None,
         })])
         .await;
 
