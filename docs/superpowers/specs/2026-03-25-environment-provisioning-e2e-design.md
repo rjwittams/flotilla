@@ -37,11 +37,12 @@ Phase C added `environment_id: Option<EnvironmentId>` to both `Checkout` and `Cl
 
 ```rust
 EnsureEnvironmentImage { spec: EnvironmentSpec },
-CreateEnvironment { image: ImageId, opts: CreateOpts },
-EnsureRepoInEnvironment { env_id: EnvironmentId, repo_slug: String },
+CreateEnvironment { env_id: EnvironmentId, image: ImageId, opts: CreateOpts },
 DiscoverEnvironmentProviders { env_id: EnvironmentId },
 DestroyEnvironment { env_id: EnvironmentId },
 ```
+
+Note: `EnsureRepoInEnvironment` is removed — see Codebase Access section. The `EnvironmentId` is passed to `CreateEnvironment` rather than generated inside `provider.create()`, so the step resolver can pre-allocate the socket and staging directory before calling the provider.
 
 ### StepHost Extension
 
@@ -64,9 +65,7 @@ The `ExecutorStepResolver` gains:
 
 `EnsureEnvironmentImage { spec }` — looks up `EnvironmentProvider` from the host's registry, calls `ensure_image(spec)`. Returns `Produced(ImageId)`.
 
-`CreateEnvironment { image, opts }` — creates sandbox socket via `EnvironmentSocketRegistry::add()`, passes socket path in `CreateOpts`. Creates a per-environment staging directory at `$FLOTILLA_STATE_DIR/env-{id}/refs/` on the host and mounts it into the container at `/ref/`. Calls `provider.create(image, opts)`. Stores the `EnvironmentHandle`. Returns `Produced(EnvironmentId)`.
-
-`EnsureRepoInEnvironment { env_id, repo_slug }` — makes a repo's source available inside the environment. The step resolver resolves the repo's location on the host from the execution context (e.g., `git rev-parse --git-common-dir` for git repos). It then creates a symlink at `$FLOTILLA_STATE_DIR/env-{id}/refs/{repo_slug}/` pointing to the resolved path. Since the staging directory is already mounted inside the container, the symlink appears immediately at `/ref/{repo_slug}/`. No container restart needed. The protocol-level step action carries only the repo slug — the git-specific resolution is an implementation detail of the step resolver. Returns `Completed`.
+`CreateEnvironment { env_id, image, opts }` — the `env_id` is pre-allocated by the plan builder (UUID). The resolver creates the sandbox socket via `EnvironmentSocketRegistry::add(env_id, ...)` and populates `CreateOpts` with the socket path and reference repo mount. Calls `provider.create(env_id, image, opts)` (the provider API changes to accept the pre-allocated ID rather than generating one internally). Stores the `EnvironmentHandle`. Returns `Produced(EnvironmentId)`.
 
 `DiscoverEnvironmentProviders { env_id }` — retrieves handle, calls `handle.env_vars()` to get raw `HashMap<String, String>`. Runs the host-level and repo-level detectors through the environment runner to build an `EnvironmentBag` from the container's environment (same detection pipeline as host discovery, routed through the runner). Then runs `FactoryRegistry::probe()` with the environment's `EnvironmentBag` and runner. Stores the resulting per-environment `ProviderRegistry`. Returns `Completed`.
 
@@ -79,37 +78,38 @@ The `ExecutorStepResolver` gains:
 `build_plan()` in `executor.rs` checks `cmd.environment`. When present and the command involves checkout/workspace creation, it prepends environment lifecycle steps:
 
 ```
-1. EnsureEnvironmentImage { spec }             on Remote(host)
-2. CreateEnvironment { image, opts }           on Remote(host)
-3. EnsureRepoInEnvironment { env_id, repo }    on Remote(host)
-4. DiscoverEnvironmentProviders { env_id }     on Remote(host)
-5. CreateCheckout { branch, ... }              on Environment(env_id)
-6. PrepareTerminalForCheckout { ... }          on Environment(env_id)
-7. CreateWorkspaceFromPreparedTerminal { ... } on Environment(env_id)
-8. ResolveAttachCommand { ... }                → HopPlan with EnterEnvironment
+1. EnsureEnvironmentImage { spec }             on Local
+2. CreateEnvironment { env_id, image, opts }   on Local
+3. DiscoverEnvironmentProviders { env_id }     on Local
+4. CreateCheckout { branch, ... }              on Environment(env_id)
+5. PrepareTerminalForCheckout { ... }          on Environment(env_id)
+6. CreateWorkspaceFromPreparedTerminal { ... } on Environment(env_id)
+7. ResolveAttachCommand { ... }                → HopPlan with EnterEnvironment
 ```
 
-Steps 1-4 run on the host (the host daemon orchestrates the environment and mounts the repo). Steps 5-7 run inside the environment (routed through the environment's providers). Step 8 produces a hop plan that includes the `EnterEnvironment` hop for correct attach resolution.
+**Why `Local`, not `Remote(host)`:** Today the whole `Command` is forwarded to the target host's daemon via peer routing (based on `Command.host`). That daemon plans and executes all steps locally. Step-level remote dispatch (#464) is a separate concern — Phase D does not require it. All steps are `Local` from the executing daemon's perspective.
+
+Steps 1-3 manage the environment on the host. Steps 4-6 run inside the environment (routed through the environment's providers via `StepHost::Environment`). Step 7 produces a hop plan with `EnterEnvironment` for correct attach resolution.
 
 `CreateOpts` is populated by the plan builder:
-- `daemon_socket_path` — from the sandbox socket registry (step 2 creates it)
-- `staging_dir` — `$FLOTILLA_STATE_DIR/env-{id}/refs/`, mounted into the container at `/ref/`
+- `daemon_socket_path` — pre-created via `EnvironmentSocketRegistry::add(env_id, ...)`
+- `reference_repo` — resolved from the host repo's git common dir (`git rev-parse --git-common-dir`), mounted read-only at `/ref/repo` inside the container
 - `tokens` — passed through from `Command` context (Phase D: programmatic, Phase E: from config)
 
-Note: `CreateOpts` no longer carries `reference_repo` directly. The staging directory is mounted as a whole, and `EnsureRepoInEnvironment` symlinks individual repos into it. This supports multiple repos in one environment without restarting the container.
+The reference repo is mounted directly as a single `-v` bind mount at container creation time. This is a Docker-specific optimisation for fast `git clone --reference`. For VMs or cloud instances (future), the checkout strategy would clone from the remote without a reference. Multi-repo environments would require multiple mounts at creation time or a different strategy; deferred as an open question.
 
 ## CloneCheckoutManager
 
-New `CheckoutManager` implementation for environments. Discovered inside the container by its factory when the `EnvironmentBag` indicates a container context (presence of `FLOTILLA_ENVIRONMENT_ID` env var and `/ref/` directory with repo references).
+New `CheckoutManager` implementation for environments. Discovered inside the container by its factory when the `EnvironmentBag` indicates a container context (presence of `FLOTILLA_ENVIRONMENT_ID` env var and `/ref/repo` reference mount).
 
 ```rust
 struct CloneCheckoutManager {
     runner: Arc<dyn CommandRunner>,
-    reference_dir: ExecutionEnvironmentPath,  // /ref/{repo-slug}
+    reference_dir: ExecutionEnvironmentPath,  // /ref/repo
 }
 ```
 
-`create_checkout(branch)` → `git clone --reference /ref/{repo-slug} <remote_url> /workspace/<branch>`. The remote URL is read from the reference: `git --git-dir /ref/{repo-slug} remote get-url origin`. For fresh branches, clones with `--no-checkout` then `git checkout -b <branch>` from the default branch.
+`create_checkout(branch)` → `git clone --reference /ref/repo <remote_url> /workspace/<branch>`. The remote URL is read from the reference: `git --git-dir /ref/repo remote get-url origin`. For fresh branches, clones with `--no-checkout` then `git checkout -b <branch>` from the default branch.
 
 Uses the same `CheckoutManager` trait as the worktree implementation. The plan builder and step resolver don't know about the difference — they call `create_checkout()` and the discovered provider handles the rest.
 
@@ -119,15 +119,21 @@ Uses the same `CheckoutManager` trait as the worktree implementation. The plan b
 
 `CloneCheckoutManagerFactory` probes for:
 - `FLOTILLA_ENVIRONMENT_ID` in `EnvironmentBag` (we're inside a container)
-- `/ref/` directory exists with at least one repo reference subdirectory
+- `/ref/repo` exists and is a valid git directory (reference mount is available)
 
-If both conditions are met, it returns a `CloneCheckoutManager` pointed at the appropriate `/ref/{repo-slug}` for the current repo context. Priority should be higher than the worktree factory inside environments (worktree creation doesn't make sense inside a disposable container).
+If both conditions are met, it returns a `CloneCheckoutManager` pointed at `/ref/repo`. Priority should be higher than the worktree factory inside environments (worktree creation doesn't make sense inside a disposable container).
+
+## Attachable Environment Awareness
+
+`AttachableSet` gains `environment_id: Option<EnvironmentId>`. When terminals are allocated inside an environment, the set is tagged with the environment ID. This field is the data path that the hop chain builder reads to know when to insert `EnterEnvironment` hops.
+
+`build_for_prepared_command()` also needs environment context — it gains an `environment_id: Option<EnvironmentId>` parameter, passed by the workspace orchestrator when building commands for environment-hosted panes.
 
 ## Hop Chain Wiring
 
 ### HopPlanBuilder
 
-`build_for_attachable()` and `build_for_prepared_command()` gain environment awareness. When the target attachable or command is inside an environment (determined from `AttachableStore` metadata — attachables carry `environment_id`), the builder inserts `Hop::EnterEnvironment` between `RemoteToHost` and the terminal/command hop:
+`build_for_attachable()` and `build_for_prepared_command()` gain environment awareness. When the target attachable set carries `environment_id` (read from `AttachableStore`), or when the caller passes an explicit `environment_id`, the builder inserts `Hop::EnterEnvironment` between `RemoteToHost` and the terminal/command hop:
 
 ```
 RemoteToHost(feta) → EnterEnvironment(env_id, "docker") → AttachTerminal(sess)
@@ -145,10 +151,10 @@ RemoteToHost(feta) → EnterEnvironment(env_id, "docker") → AttachTerminal(ses
 
 ## Sandbox Socket Lifecycle
 
-`CreateEnvironment` step resolver:
+`CreateEnvironment` step resolver (env_id is pre-allocated):
 1. Calls `EnvironmentSocketRegistry::add(env_id, state_dir, spawn_fn)` → gets socket path
-2. Passes socket path in `CreateOpts::daemon_socket_path`
-3. Calls `EnvironmentProvider::create(image, opts)` — container starts with socket mounted
+2. Populates `CreateOpts` with socket path and reference repo mount
+3. Calls `EnvironmentProvider::create(env_id, image, opts)` — container starts with socket and repo mounted
 
 `DestroyEnvironment` step resolver:
 1. Calls `handle.destroy()` — container removed
@@ -175,6 +181,16 @@ Construct `Command { host: Some(feta), environment: Some(spec), action: Checkout
 
 Same flow with `REPLAY=passthrough` against real Docker using the `flotilla-dev-env` image. Validates the entire chain against a real container.
 
+## Dependencies
+
+- **#464 (step-level remote routing)** — not required for Phase D. Today the whole command is forwarded to the target host's daemon, which plans and executes locally. Phase D uses `StepHost::Local` for all host-side steps. #464 enables future plans where individual steps target different hosts, but the single-host environment case works without it.
+
+## Open Questions
+
+- **Multi-repo environments:** A single bind mount per container limits each environment to one reference repo. Multiple repos would need multiple `-v` mounts at creation time (requires advance knowledge) or a different strategy (full clone from remote). Deferred.
+- **Environment reuse:** Phase D creates a new environment per checkout command. Sharing an existing environment (e.g., "use the container that's already running for this branch") requires environment lookup and lifecycle management beyond create/destroy.
+- **EnvironmentProvider API change:** `create()` currently generates the `EnvironmentId` internally. Phase D needs pre-allocated IDs (for socket setup before container creation). The `DockerEnvironment::create()` signature must change to accept an `EnvironmentId` parameter.
+
 ## Not in Scope (Phase E)
 
 - CLI noun/verb changes (environment noun, provisioning target routing)
@@ -182,3 +198,5 @@ Same flow with `REPLAY=passthrough` against real Docker using the `flotilla-dev-
 - `.flotilla/environment.yaml` parsing
 - Token config resolution (tokens passed programmatically)
 - `ProvisioningTarget` enum (proto-form is `host` + `environment` on `Command`)
+- Step-level remote routing (#464)
+- Multi-repo environment support
