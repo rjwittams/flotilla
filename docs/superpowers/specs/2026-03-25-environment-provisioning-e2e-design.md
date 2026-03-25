@@ -210,6 +210,7 @@ Same flow with `REPLAY=passthrough` against real Docker using the `flotilla-dev-
 ## Dependencies
 
 - **#464 phase 1 (step-level remote routing)** — merged (#513). `build_plan()` now extracts `Command.host` and stamps steps with `StepHost::Remote(host)`. `run_step_plan_with_remote_executor()` dispatches remote steps via the `RemoteStepExecutor` trait. Phase D uses this infrastructure: environment lifecycle steps target the host that owns Docker, while workspace creation stays local on the presentation host.
+- **#486 (WorkspaceConfig spans execution/presentation daemon phases)** — in progress. The current `TerminalPrepared` → `CreateWorkspaceFromPreparedTerminal` two-step flow is being rewritten to use steps in one plan. Phase D's `environment_id` data path from remote terminal prep to local workspace creation depends on how this rewrite lands. Wait for this before implementing Phase D's hop chain wiring.
 
 ## Open Questions
 
