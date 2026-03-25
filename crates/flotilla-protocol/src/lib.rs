@@ -17,8 +17,8 @@ pub mod test_support;
 
 pub use environment::{EnvironmentBinding, EnvironmentId, EnvironmentInfo, EnvironmentSpec, EnvironmentStatus, ImageId, ImageSource};
 pub use host::{HostName, HostPath, RepoIdentity};
-pub use path_context::{DaemonHostPath, ExecutionEnvironmentPath};
 pub use host_summary::{DiscoveryFact, HostEnvironment, HostProviderStatus, HostSnapshot, HostSummary, SystemInfo, ToolInventory};
+pub use path_context::{DaemonHostPath, ExecutionEnvironmentPath};
 pub use peer::{CommandPeerEvent, GoodbyeReason, PeerDataKind, PeerDataMessage, PeerWireMessage, RoutedPeerMessage, VectorClock};
 
 #[cfg(test)]

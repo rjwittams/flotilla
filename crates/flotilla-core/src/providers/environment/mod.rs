@@ -1,3 +1,4 @@
+pub mod docker;
 pub mod runner;
 
 #[cfg(test)]
