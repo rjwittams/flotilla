@@ -55,6 +55,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Clear the transient command echo on every key press.
+        self.ui.command_echo = None;
+
         // Snapshot selection so we can detect changes for infinite scroll.
         let prev_selection = self.active_page_selection();
 
@@ -266,6 +269,11 @@ impl App {
             tracing::warn!(?intent, host = %item.host, "blocked intent on remote item");
             self.model.status_message = Some("Cannot perform this action on a remote item".to_string());
             return;
+        }
+
+        // Echo the command tokens to the status bar for this action cycle.
+        if let Some(tokens) = intent.to_command_tokens(item) {
+            self.ui.command_echo = Some(tokens.join(" "));
         }
 
         if let Some(cmd) = intent.resolve(item, self) {
