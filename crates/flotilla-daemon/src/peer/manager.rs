@@ -133,6 +133,14 @@ pub struct PendingPeerSend {
     pub msg: PeerWireMessage,
 }
 
+pub async fn dispatch_pending_sends(pending_sends: Vec<PendingPeerSend>) {
+    for pending in pending_sends {
+        if let Err(e) = pending.sender.send(pending.msg).await {
+            warn!(err = %e, "failed to dispatch queued peer message");
+        }
+    }
+}
+
 /// Pre-computed overlay update to apply to InProcessDaemon after releasing the PeerManager lock.
 ///
 /// For `SetProviders`, the caller resolves `identity` → local path at apply time

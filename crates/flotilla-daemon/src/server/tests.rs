@@ -687,9 +687,7 @@ async fn handle_inbound_command_request_does_not_hold_peer_manager_lock_across_s
                 .await;
             let pending_sends = pm.take_pending_sends();
             drop(pm);
-            for pending in pending_sends {
-                let _ = pending.sender.send(pending.msg).await;
-            }
+            crate::peer::dispatch_pending_sends(pending_sends).await;
         }
     });
 
