@@ -32,6 +32,9 @@ impl DockerEnvironment {
 
 #[async_trait]
 impl EnvironmentProvider for DockerEnvironment {
+    // TODO: images built from Dockerfiles accumulate as `flotilla-env-{uuid}` tags.
+    // destroy() removes the container but not the image. Phase D should add image
+    // lifecycle management (prune unused flotilla images, or reuse by content hash).
     async fn ensure_image(&self, spec: &EnvironmentSpec) -> Result<ImageId, String> {
         match &spec.image {
             ImageSource::Dockerfile(path) => {

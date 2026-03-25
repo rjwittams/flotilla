@@ -8,6 +8,15 @@ pub struct EnvironmentSocketRegistry {
     sockets: HashMap<EnvironmentId, (JoinHandle<()>, DaemonHostPath)>,
 }
 
+impl Drop for EnvironmentSocketRegistry {
+    fn drop(&mut self) {
+        for (_id, (handle, path)) in self.sockets.drain() {
+            handle.abort();
+            let _ = std::fs::remove_file(path.as_path());
+        }
+    }
+}
+
 impl Default for EnvironmentSocketRegistry {
     fn default() -> Self {
         Self::new()
