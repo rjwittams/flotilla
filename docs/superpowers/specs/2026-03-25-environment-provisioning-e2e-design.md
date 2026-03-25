@@ -33,70 +33,84 @@ Phase C added `environment_id: Option<EnvironmentId>` to both `Checkout` and `Cl
 
 ## Step System
 
+### StepExecutionContext (replaces StepHost)
+
+`StepHost` is renamed to `StepExecutionContext`. The old name conflated transport routing (which daemon?) with provider context (which providers?). The new name separates these: the `HostName` determines transport routing, the `EnvironmentId` determines provider context.
+
+```rust
+enum StepExecutionContext {
+    Host(HostName),
+    Environment(HostName, EnvironmentId),
+}
+```
+
+`Local` is removed — every step explicitly names its daemon. The plan builder stamps `Host(local_host)` on steps that run here, `Host(feta)` on steps that run there. No ambiguity about "local relative to whom." Plans are self-contained and portable.
+
+**Transport routing:** The step runner extracts the `HostName` from either variant. Steps targeting the same daemon are batched together regardless of whether they're `Host` or `Environment`. The `RemoteStepExecutor` sends the batch to that daemon.
+
+**Resolver dispatch:** On the receiving daemon, the resolver checks the variant. `Host` → use the daemon's host providers. `Environment(_, env_id)` → look up the environment's `ProviderRegistry` and resolve against those providers. The resolver also builds a different `RepoExecutionContext` for environment steps: the `repo_root` is the interior path (e.g., `/workspace/branch`), and checkout data comes from the environment's provider tree, not the host's `providers_data`.
+
 ### New StepAction Variants
 
 ```rust
 EnsureEnvironmentImage { spec: EnvironmentSpec },
-CreateEnvironment { env_id: EnvironmentId, image: ImageId, opts: CreateOpts },
+CreateEnvironment { env_id: EnvironmentId, image: ImageId },
 DiscoverEnvironmentProviders { env_id: EnvironmentId },
 DestroyEnvironment { env_id: EnvironmentId },
 ```
 
-Note: `EnsureRepoInEnvironment` is removed — see Codebase Access section. The `EnvironmentId` is passed to `CreateEnvironment` rather than generated inside `provider.create()`, so the step resolver can pre-allocate the socket and staging directory before calling the provider.
+Actions carry no environment context — `StepExecutionContext` handles that. The `EnvironmentId` is pre-allocated by the plan builder so the resolver can set up sockets before calling the provider.
 
-### StepHost Extension
-
-```rust
-pub enum StepHost {
-    Local,
-    Remote(HostName),
-    Environment(EnvironmentId),
-}
-```
+Note: `CreateOpts` is constructed by the resolver (not the plan builder), since the resolver has access to `EnvironmentSocketRegistry` and can resolve the reference repo path. The plan builder doesn't have these.
 
 ### Step Resolver
 
 The `ExecutorStepResolver` gains:
 - `environment_handles: HashMap<EnvironmentId, EnvironmentHandle>` — populated by `CreateEnvironment`, consumed by subsequent steps.
-- `environment_registries: HashMap<EnvironmentId, Arc<ProviderRegistry>>` — populated by `DiscoverEnvironmentProviders`, used when `StepHost::Environment` routes actions through environment providers.
+- `environment_registries: HashMap<EnvironmentId, Arc<ProviderRegistry>>` — populated by `DiscoverEnvironmentProviders`.
 - `environment_sockets: Arc<Mutex<EnvironmentSocketRegistry>>` — passed in from the daemon server.
 
 **Resolution of new actions:**
 
 `EnsureEnvironmentImage { spec }` — looks up `EnvironmentProvider` from the host's registry, calls `ensure_image(spec)`. Returns `Produced(ImageId)`.
 
-`CreateEnvironment { env_id, image, opts }` — the `env_id` is pre-allocated by the plan builder (UUID). The resolver creates the sandbox socket via `EnvironmentSocketRegistry::add(env_id, ...)` and populates `CreateOpts` with the socket path and reference repo mount. Calls `provider.create(env_id, image, opts)` (the provider API changes to accept the pre-allocated ID rather than generating one internally). Stores the `EnvironmentHandle`. Returns `Produced(EnvironmentId)`.
+`CreateEnvironment { env_id, image }` — the resolver:
+1. Creates sandbox socket via `EnvironmentSocketRegistry::add(env_id, ...)` → gets socket path.
+2. Resolves reference repo path on the host (`git rev-parse --git-common-dir`).
+3. Builds `CreateOpts` with socket path, reference repo mount, and tokens.
+4. Calls `provider.create(env_id, image, opts)`.
+5. If `create()` fails, cleans up the socket via `EnvironmentSocketRegistry::remove(env_id)`.
+6. Stores the `EnvironmentHandle`. Returns `Produced(EnvironmentId)`.
 
-`DiscoverEnvironmentProviders { env_id }` — retrieves handle, calls `handle.env_vars()` to get raw `HashMap<String, String>`. Runs the host-level and repo-level detectors through the environment runner to build an `EnvironmentBag` from the container's environment (same detection pipeline as host discovery, routed through the runner). Then runs `FactoryRegistry::probe()` with the environment's `EnvironmentBag` and runner. Stores the resulting per-environment `ProviderRegistry`. Returns `Completed`.
+`DiscoverEnvironmentProviders { env_id }` — retrieves handle, calls `handle.env_vars()` to get raw `HashMap<String, String>`. Runs host-level and repo-level detectors through the environment runner to build an `EnvironmentBag` (same detection pipeline as host discovery, routed through the runner). Runs `FactoryRegistry::probe()` with the environment's `EnvironmentBag` and runner. Stores the resulting per-environment `ProviderRegistry`. Returns `Completed`.
 
 `DestroyEnvironment { env_id }` — calls `handle.destroy()`, removes sandbox socket via `EnvironmentSocketRegistry::remove()`. Returns `Completed`.
 
-**Routing for `StepHost::Environment(env_id)`:** `run_step_plan_with_remote_executor()` currently handles `Local` and `Remote`. Phase D adds `Environment(env_id)` as a third arm — treated like `Local` (the environment is on the same daemon), but the resolver looks up the environment's `ProviderRegistry` and routes the step's action through those providers instead of the host's. Existing step actions (checkout, terminal prep) work unchanged — they just run against different providers.
+**Environment execution context:** When the resolver receives a step with `StepExecutionContext::Environment(_, env_id)`, it builds a `RepoExecutionContext` using the environment's providers, runner, and interior paths. Specifically:
+- `repo_root` → the checkout path inside the container (from the `CreateCheckout` step outcome)
+- `providers` → from `environment_registries[env_id]`
+- `runner` → from `environment_handles[env_id].runner(host_runner)`
+- Checkout validation uses the environment's Vcs provider, not the host's
+
+This means existing step actions (checkout, terminal prep) don't need modification — they operate through the `RepoExecutionContext` interface, which is now polymorphic on host vs environment.
 
 ## Plan Builder
 
 `build_plan()` in `executor.rs` checks `cmd.environment`. When present and the command involves checkout/workspace creation, it prepends environment lifecycle steps:
 
 ```
-1. EnsureEnvironmentImage { spec }             on host_step (Remote or Local)
-2. CreateEnvironment { env_id, image, opts }   on host_step
-3. DiscoverEnvironmentProviders { env_id }     on host_step
-4. CreateCheckout { branch, ... }              on Environment(env_id)
-5. PrepareTerminalForCheckout { ... }          on Environment(env_id)
-6. CreateWorkspaceFromPreparedTerminal { ... } on Local (presentation host)
+1. EnsureEnvironmentImage { spec }             on Host(target_host)
+2. CreateEnvironment { env_id, image }         on Host(target_host)
+3. DiscoverEnvironmentProviders { env_id }     on Host(target_host)
+4. CreateCheckout { branch, ... }              on Environment(target_host, env_id)
+5. PrepareTerminalForCheckout { ... }          on Environment(target_host, env_id)
+6. CreateWorkspaceFromPreparedTerminal { ... } on Host(local_host)
 7. ResolveAttachCommand { ... }                → HopPlan with EnterEnvironment
 ```
 
-**Step routing:** #464 phase 1 (step-level remote routing) is now merged. `build_plan()` extracts `Command.host` and computes `host_step` — `StepHost::Remote(host)` if the target differs from the local daemon, `StepHost::Local` if same. Steps 1-3 (environment lifecycle) use `host_step` — they run on the daemon that owns Docker. Steps 4-5 use `StepHost::Environment(env_id)` — routed through the environment's providers. Step 6 (workspace creation) stays `Local` on the presentation host, following the existing pattern where workspace manager runs locally. Step 7 produces the hop plan.
+Steps 1-3 use `Host(target_host)` — they manage the environment on the daemon that owns Docker. Steps 4-5 use `Environment(target_host, env_id)` — same daemon, but the resolver uses environment providers. Step 6 uses `Host(local_host)` — workspace creation stays on the presentation host. Step 7 produces the hop plan.
 
-The `RemoteStepExecutor` infrastructure batches consecutive remote steps and dispatches via the peer mesh. Environment steps arriving at the remote daemon are resolved locally against that daemon's `EnvironmentProvider` and environment registries.
-
-**`StepHost::Environment` dispatch:** When `run_step_plan_with_remote_executor()` encounters `StepHost::Environment(env_id)`, it resolves the step locally using the environment's `ProviderRegistry` (from `DiscoverEnvironmentProviders`). The environment's providers are already local to the daemon — they use the `EnvironmentRunner` decorator. No additional remote dispatch is needed; the step just runs against different providers than the host's.
-
-`CreateOpts` is populated by the plan builder:
-- `daemon_socket_path` — pre-created via `EnvironmentSocketRegistry::add(env_id, ...)`
-- `reference_repo` — resolved from the host repo's git common dir (`git rev-parse --git-common-dir`), mounted read-only at `/ref/repo` inside the container
-- `tokens` — passed through from `Command` context (Phase D: programmatic, Phase E: from config)
+The step runner batches steps 1-5 together (same `HostName`) and sends them to `target_host` via `RemoteStepExecutor`. Step 6 executes locally. The receiving daemon distinguishes `Host` from `Environment` steps at resolution time.
 
 The reference repo is mounted directly as a single `-v` bind mount at container creation time. This is a Docker-specific optimisation for fast `git clone --reference`. For VMs or cloud instances (future), the checkout strategy would clone from the remote without a reference. Multi-repo environments would require multiple mounts at creation time or a different strategy; deferred as an open question.
 
@@ -145,20 +159,30 @@ RemoteToHost(feta) → EnterEnvironment(env_id, "docker") → AttachTerminal(ses
 
 `resolve_prepared_commands_via_hop_chain()` in `executor/workspace.rs` currently uses `NoopEnvironmentHopResolver`. When creating a workspace inside an environment, it constructs `DockerEnvironmentHopResolver` with the container name mapping and passes it to the `HopResolver`. The mapping comes from the `EnvironmentHandle` in resolver state — `DockerProvisionedEnvironment` knows its container name internally, exposed via a method that the resolver calls to build the `EnvironmentId → container_name` map.
 
+**Data path for environment_id to the workspace step:** The workspace creation step (step 6) runs on the presentation host. It needs the `environment_id` to build hop plans with `EnterEnvironment`. This data flows through the step outcome chain:
+- `PrepareTerminalForCheckout` (step 5, on the remote daemon) produces a `CommandValue::TerminalPrepared` result. This type gains `environment_id: Option<EnvironmentId>`.
+- `CreateWorkspaceFromPreparedTerminal` (step 6, on the presentation host) reads the environment_id from the prior step's outcome.
+- The workspace orchestrator passes it to `resolve_prepared_commands_via_hop_chain()` and `build_for_prepared_command()`.
+
+Similarly, `CommandAction::CreateWorkspaceFromPreparedTerminal` in the protocol gains `environment_id: Option<EnvironmentId>` so the action carries the context when constructed from step outcomes.
+
 ## Refresh and Host Summary
 
-`refresh_providers()` in `refresh.rs` gains a call to `EnvironmentProvider::list()` alongside existing provider refreshes. Results populate `ProviderData` with environment info.
+Environment listing is a host-level concern, not per-repo. `refresh_providers()` (which runs per-repo) does **not** call `EnvironmentProvider::list()` — that would duplicate work for every tracked repo.
 
-`build_local_host_summary()` reads environment provider results and populates `HostSummary.environments` with `EnvironmentInfo` entries. Remote daemons see environment availability via the host summary exchange.
+Instead, `build_local_host_summary()` in `host_summary.rs` queries the `EnvironmentProvider` from the host-level provider registry and calls `list()` to populate `HostSummary.environments` with `EnvironmentInfo` entries. This runs once per host summary build (periodic, not per-repo). Remote daemons see environment availability via the host summary exchange.
 
 ## Sandbox Socket Lifecycle
 
-`CreateEnvironment` step resolver (env_id is pre-allocated):
-1. Calls `EnvironmentSocketRegistry::add(env_id, state_dir, spawn_fn)` → gets socket path
-2. Populates `CreateOpts` with socket path and reference repo mount
-3. Calls `EnvironmentProvider::create(env_id, image, opts)` — container starts with socket and repo mounted
+**Ownership:** The step resolver (not the plan builder) manages sockets. The plan builder has no access to `EnvironmentSocketRegistry` — it only builds the step plan. The resolver has the registry, passed from the daemon server.
 
-`DestroyEnvironment` step resolver:
+**`CreateEnvironment` step resolver** (env_id is pre-allocated by plan builder):
+1. Calls `EnvironmentSocketRegistry::add(env_id, state_dir, spawn_fn)` → gets socket path
+2. Resolves reference repo path, builds `CreateOpts` with socket path, reference mount, tokens
+3. Calls `EnvironmentProvider::create(env_id, image, opts)`
+4. **On failure:** calls `EnvironmentSocketRegistry::remove(env_id)` to clean up the orphaned socket before propagating the error
+
+**`DestroyEnvironment` step resolver:**
 1. Calls `handle.destroy()` — container removed
 2. Calls `EnvironmentSocketRegistry::remove(env_id)` — socket cleaned up
 
