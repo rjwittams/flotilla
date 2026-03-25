@@ -238,8 +238,24 @@ fn dismiss_cascade_clears_multi_select_fourth() {
 }
 
 #[test]
-fn dismiss_cascade_quits_when_nothing_to_clear() {
+fn dismiss_cascade_clears_selection_fifth() {
     let mut page = page_with_items(vec![issue_item("1")]);
+    // After page_with_items, the first item is auto-selected.
+    assert!(page.table.selected_work_item().is_some());
+
+    let mut harness = TestWidgetHarness::new();
+    let mut ctx = harness.ctx();
+
+    let outcome = page.handle_action(Action::Dismiss, &mut ctx);
+    assert!(matches!(outcome, Outcome::Consumed));
+    assert!(!ctx.app_actions.iter().any(|a| matches!(a, AppAction::Quit)));
+    assert!(page.table.selected_work_item().is_none());
+}
+
+#[test]
+fn dismiss_cascade_quits_when_nothing_to_clear() {
+    // Empty table: no selection, no search, no providers — should quit.
+    let mut page = page_with_items(vec![]);
 
     let mut harness = TestWidgetHarness::new();
     let mut ctx = harness.ctx();

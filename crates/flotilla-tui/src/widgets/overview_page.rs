@@ -53,7 +53,9 @@ impl InteractiveWidget for OverviewPage {
                 Outcome::Consumed
             }
             Action::ToggleHelp => Outcome::Push(Box::new(super::help::HelpWidget::new())),
-            Action::OpenCommandPalette => Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new())),
+            Action::OpenCommandPalette | Action::OpenContextualPalette => {
+                Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new()))
+            }
             _ => Outcome::Ignored,
         }
     }

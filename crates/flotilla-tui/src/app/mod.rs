@@ -441,7 +441,7 @@ impl App {
     }
 
     fn active_repo_is_remote_only(&self) -> bool {
-        self.model.active_repo_root().starts_with(Path::new("<remote>"))
+        self.model.active_repo_root_opt().is_some_and(|p| p.starts_with(Path::new("<remote>")))
     }
 
     pub fn visible_status_items(&self) -> Vec<VisibleStatusItem> {
@@ -526,16 +526,20 @@ impl App {
     }
 
     pub fn build_widget_context(&mut self) -> crate::widgets::WidgetContext<'_> {
+        let my_host = self.model.my_host().cloned();
+        let active_repo_is_remote_only = self.active_repo_is_remote_only();
         crate::widgets::WidgetContext {
             model: &self.model,
             keymap: &self.keymap,
             config: &self.config,
             in_flight: &self.in_flight,
             target_host: self.ui.target_host.as_ref(),
+            my_host,
             active_repo: self.model.active_repo,
             repo_order: &self.model.repo_order,
             commands: &mut self.proto_commands,
             is_config: &mut self.ui.is_config,
+            active_repo_is_remote_only,
             app_actions: Vec::new(),
         }
     }

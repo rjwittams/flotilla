@@ -98,10 +98,12 @@ pub struct WidgetContext<'a> {
     pub config: &'a ConfigStore,
     pub in_flight: &'a HashMap<u64, InFlightCommand>,
     pub target_host: Option<&'a HostName>,
+    pub my_host: Option<HostName>,
     pub active_repo: usize,
     pub repo_order: &'a [RepoIdentity],
     pub commands: &'a mut CommandQueue,
     pub is_config: &'a mut bool,
+    pub active_repo_is_remote_only: bool,
     pub app_actions: Vec<AppAction>,
 }
 
