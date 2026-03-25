@@ -1111,6 +1111,7 @@ pub fn fake_discovery_with_provider_set(providers: FakeDiscoveryProviders) -> Di
             ai_utilities: vec![],
             workspace_managers: workspace_manager_factories,
             terminal_pools: terminal_pool_factories,
+            environment_providers: vec![],
         },
         attachable_store,
     }
