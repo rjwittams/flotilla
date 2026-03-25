@@ -11,22 +11,40 @@
 
 Wire the shared command registry into the TUI. The command palette becomes a noun-verb parser with position-aware completions. Key-binding-triggered actions echo their resolved command in the status bar. Intents become thin adapters that construct command strings and resolve through the registry. Existing palette entries gain argument support.
 
-## Prerequisites
+## Prerequisites (landed)
 
-### #502: Unify queries and commands
+### #502: Unify queries and commands (PR #510, merged)
 
-Queries become `CommandAction` variants routed through the same `Command { host }` path as mutations. The 9 query variants on `Resolved` collapse.
+Queries are `CommandAction` variants routed through the same `Command { host }` path as mutations. The 9 query variants on `Resolved` are gone.
 
-### #506: Ambient context on command definitions
+### #506: Ambient context on command definitions (PR #510, merged)
 
-Each command declares what ambient context it needs — repo, provisioning target, subject host, provider host — via a `HostResolution` enum. `Resolved` carries these requirements so any dispatch layer (CLI, TUI, palette) can fill them:
+Each command declares what ambient context it needs — repo (`RepoContext::Required` / `Inferred`), host (`HostResolution`) — via typed metadata on `Resolved::NeedsContext`. #505 subsumed.
+
+### #464: Step-level remote routing (PR #513, merged)
+
+`Command.host` is now consumed by `build_plan()` which stamps steps with `StepHost::Remote(host)`. Remote steps execute via `RemoteStepExecutor` trait. This means the `HostResolution` → `Command.host` pipeline feeds directly into step routing.
+
+### Landed types:
 
 ```rust
+pub enum RepoContext {
+    Required,  // SENTINEL RepoSelector::Query("") must be filled; error if unavailable
+    Inferred,  // Set context_repo if available; no error if unavailable
+}
+
+pub enum HostResolution {
+    Local,
+    ProvisioningTarget,
+    SubjectHost,
+    ProviderHost,
+}
+
 pub enum Resolved {
     Ready(Command),
     NeedsContext {
         command: Command,
-        repo: bool,
+        repo: RepoContext,
         host: HostResolution,
     },
 }
@@ -34,7 +52,7 @@ pub enum Resolved {
 
 This replaces the current TUI-specific routing helpers (`targeted_command`, `item_host_repo_command`, `provider_repo_command`) with a generic mechanism. #505 (`RequiresRepoContext`) is subsumed by this.
 
-Together, these prerequisites give the palette a single dispatch path with correct host and repo resolution.
+All prerequisites are merged. The palette has a single dispatch path with correct host and repo resolution.
 
 ## Palette Overhaul
 
@@ -239,7 +257,7 @@ impl Intent {
 }
 ```
 
-When `to_command_tokens` returns `None`, the dispatch falls back to the existing `intent.resolve(item, app)` path (which will also use the #506 context model once it lands).
+When `to_command_tokens` returns `None`, the dispatch falls back to the existing `intent.resolve(item, app)` path.
 
 `Intent::is_available` and `Intent::is_allowed_for_host` stay unchanged — they still gate whether the intent is offered.
 
@@ -329,11 +347,15 @@ fn tui_dispatch(resolved: Resolved, item: Option<&WorkItem>, app: &mut App) {
             app.push_command(cmd);
         }
         Resolved::NeedsContext { mut command, repo, host } => {
-            if repo {
-                let repo_sel = RepoSelector::Identity(app.model.active_repo_identity().clone());
-                command.context_repo = Some(repo_sel.clone());
-                // Fill sentinel fields in the action
-                fill_repo_sentinels(&mut command.action, repo_sel);
+            let repo_sel = RepoSelector::Identity(app.model.active_repo_identity().clone());
+            match repo {
+                RepoContext::Required => {
+                    command.context_repo = Some(repo_sel.clone());
+                    fill_repo_sentinels(&mut command.action, repo_sel);
+                }
+                RepoContext::Inferred => {
+                    command.context_repo = Some(repo_sel);
+                }
             }
             command.host = resolve_host(host, item, app);
             app.push_command(command);
@@ -372,10 +394,10 @@ This replaces the current `resolve_and_push` for intent-driven actions (for conv
 | Command echo in status bar | `flotilla-tui` |
 | Key binding changes (?, h, Esc) | `flotilla-tui` |
 | Palette-local command definitions | `flotilla-tui` |
-| `Resolved::NeedsContext` + `HostResolution` | `flotilla-commands` (delivered by #502 + #506) |
+| `Resolved::NeedsContext` + `HostResolution` + `RepoContext` | `flotilla-commands` (already landed) |
 | `Esc` clears selection | `flotilla-tui` |
 
-`flotilla-commands` gains `parse_noun_command()` and `parse_host_command()` — convenience wrappers for parsing token sequences. `HostResolution` and `Resolved::NeedsContext` are delivered by #502 + #506. No changes to `flotilla-core`, `flotilla-protocol`, or `flotilla-daemon`.
+`flotilla-commands` gains `parse_noun_command()` and `parse_host_command()` — convenience wrappers for parsing token sequences. `HostResolution`, `RepoContext`, and `Resolved::NeedsContext` are already landed. No changes to `flotilla-core`, `flotilla-protocol`, or `flotilla-daemon`.
 
 ## Testing
 
