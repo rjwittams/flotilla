@@ -225,6 +225,58 @@ impl Intent {
     pub fn enter_priority() -> &'static [Intent] {
         &[Intent::SwitchToWorkspace, Intent::TeleportSession, Intent::CreateWorkspace, Intent::CreateCheckout, Intent::GenerateBranchName]
     }
+
+    /// Build a command token vector from a work item, or None if this intent
+    /// cannot be expressed as a simple noun-verb command.
+    pub fn to_command_tokens(&self, item: &WorkItem) -> Option<Vec<String>> {
+        match self {
+            Intent::OpenChangeRequest => {
+                let id = item.change_request_key.as_ref()?;
+                Some(vec!["cr".into(), id.clone(), "open".into()])
+            }
+            Intent::CloseChangeRequest => {
+                let id = item.change_request_key.as_ref()?;
+                Some(vec!["cr".into(), id.clone(), "close".into()])
+            }
+            Intent::OpenIssue => {
+                let id = item.issue_keys.first()?;
+                Some(vec!["issue".into(), id.clone(), "open".into()])
+            }
+            Intent::ArchiveSession => {
+                let key = item.session_key.as_ref()?;
+                Some(vec!["agent".into(), key.clone(), "archive".into()])
+            }
+            Intent::TeleportSession => {
+                let key = item.session_key.as_ref()?;
+                let mut tokens = vec!["agent".into(), key.clone(), "teleport".into()];
+                if let Some(branch) = &item.branch {
+                    tokens.extend(["--branch".into(), branch.clone()]);
+                }
+                Some(tokens)
+            }
+            Intent::SwitchToWorkspace => {
+                let ws_ref = item.workspace_refs.first()?;
+                Some(vec!["workspace".into(), ws_ref.clone(), "select".into()])
+            }
+            Intent::CreateCheckout => {
+                let branch = item.branch.as_ref()?;
+                let mut tokens = vec!["checkout".into(), "create".into(), "--branch".into(), branch.clone()];
+                if item.kind != WorkItemKind::RemoteBranch && item.kind != WorkItemKind::ChangeRequest {
+                    tokens.push("--fresh".into());
+                }
+                Some(tokens)
+            }
+            Intent::GenerateBranchName => {
+                if item.issue_keys.is_empty() {
+                    return None;
+                }
+                let ids = item.issue_keys.join(",");
+                Some(vec!["issue".into(), ids, "suggest-branch".into()])
+            }
+            // Non-convertible intents
+            Intent::RemoveCheckout | Intent::CreateWorkspace | Intent::LinkIssuesToChangeRequest => None,
+        }
+    }
 }
 
 #[cfg(test)]

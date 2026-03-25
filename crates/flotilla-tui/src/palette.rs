@@ -42,9 +42,78 @@ pub fn filter_entries<'a>(entries: &'a [PaletteEntry], prefix: &str) -> Vec<&'a 
     entries.iter().filter(|e| e.name.to_lowercase().starts_with(&lower)).collect()
 }
 
+/// Result of parsing a palette-local command (built-in noun-free commands).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaletteLocalResult<'a> {
+    /// A layout subcommand was matched (e.g. "layout zoom").
+    SetLayout(&'a str),
+    /// A target subcommand was matched (e.g. "target feta").
+    SetTarget(&'a str),
+    /// A search subcommand was matched with a query (e.g. "search bug fix").
+    Search(&'a str),
+    /// A bare palette entry action was matched.
+    Action(Action),
+}
+
+/// Parse a palette-local (built-in) command from the input string.
+///
+/// Returns `None` if the input is not a recognised palette-local command
+/// (e.g. it looks like a noun-verb command).
+pub fn parse_palette_local(_input: &str) -> Option<PaletteLocalResult<'_>> {
+    todo!("implement in Task 5")
+}
+
+/// Return completions for the current palette-local input.
+pub fn palette_local_completions(_input: &str) -> Vec<String> {
+    todo!("implement in Task 5")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_layout_command() {
+        let result = parse_palette_local("layout zoom");
+        assert_eq!(result, Some(PaletteLocalResult::SetLayout("zoom")));
+    }
+
+    #[test]
+    fn parse_target_command() {
+        let result = parse_palette_local("target feta");
+        assert_eq!(result, Some(PaletteLocalResult::SetTarget("feta")));
+    }
+
+    #[test]
+    fn parse_search_with_query() {
+        let result = parse_palette_local("search bug fix");
+        assert_eq!(result, Some(PaletteLocalResult::Search("bug fix")));
+    }
+
+    #[test]
+    fn parse_bare_search_falls_through_to_entry() {
+        let result = parse_palette_local("search");
+        // "search" without trailing space returns the no-arg entry action
+        assert!(matches!(result, Some(PaletteLocalResult::Action(Action::OpenIssueSearch))));
+    }
+
+    #[test]
+    fn parse_noun_returns_none() {
+        let result = parse_palette_local("cr #42 open");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn layout_completions() {
+        let completions = palette_local_completions("layout z");
+        assert_eq!(completions, vec!["zoom"]);
+    }
+
+    #[test]
+    fn layout_completions_all() {
+        let completions = palette_local_completions("layout ");
+        assert_eq!(completions.len(), 4);
+    }
 
     #[test]
     fn all_entries_returns_expected_count() {

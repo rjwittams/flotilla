@@ -927,6 +927,105 @@ fn bare_item_has_no_intents_available() {
     assert!(available.is_empty(), "bare item should have no intents, got {available:?}");
 }
 
+// ── to_command_tokens tests ──
+
+#[test]
+fn open_cr_produces_tokens() {
+    let mut item = bare_item();
+    item.change_request_key = Some("#42".into());
+    assert_eq!(Intent::OpenChangeRequest.to_command_tokens(&item), Some(vec!["cr".into(), "#42".into(), "open".into()]));
+}
+
+#[test]
+fn close_cr_produces_tokens() {
+    let mut item = bare_item();
+    item.change_request_key = Some("#42".into());
+    assert_eq!(Intent::CloseChangeRequest.to_command_tokens(&item), Some(vec!["cr".into(), "#42".into(), "close".into()]));
+}
+
+#[test]
+fn open_issue_produces_tokens() {
+    let mut item = bare_item();
+    item.issue_keys = vec!["#7".into()];
+    assert_eq!(Intent::OpenIssue.to_command_tokens(&item), Some(vec!["issue".into(), "#7".into(), "open".into()]));
+}
+
+#[test]
+fn archive_session_produces_tokens() {
+    let mut item = bare_item();
+    item.session_key = Some("claude-1".into());
+    assert_eq!(Intent::ArchiveSession.to_command_tokens(&item), Some(vec!["agent".into(), "claude-1".into(), "archive".into()]));
+}
+
+#[test]
+fn teleport_session_with_branch() {
+    let mut item = bare_item();
+    item.session_key = Some("claude-1".into());
+    item.branch = Some("feat".into());
+    assert_eq!(
+        Intent::TeleportSession.to_command_tokens(&item),
+        Some(vec!["agent".into(), "claude-1".into(), "teleport".into(), "--branch".into(), "feat".into()])
+    );
+}
+
+#[test]
+fn switch_workspace_produces_tokens() {
+    let mut item = bare_item();
+    item.workspace_refs = vec!["ws-1".into()];
+    assert_eq!(Intent::SwitchToWorkspace.to_command_tokens(&item), Some(vec!["workspace".into(), "ws-1".into(), "select".into()]));
+}
+
+#[test]
+fn generate_branch_name_produces_tokens() {
+    let mut item = bare_item();
+    item.issue_keys = vec!["#1".into(), "#5".into()];
+    assert_eq!(Intent::GenerateBranchName.to_command_tokens(&item), Some(vec!["issue".into(), "#1,#5".into(), "suggest-branch".into()]));
+}
+
+#[test]
+fn remove_checkout_returns_none() {
+    let mut item = bare_item();
+    item.branch = Some("feat".into());
+    assert!(Intent::RemoveCheckout.to_command_tokens(&item).is_none());
+}
+
+#[test]
+fn create_workspace_returns_none() {
+    let item = bare_item();
+    assert!(Intent::CreateWorkspace.to_command_tokens(&item).is_none());
+}
+
+#[test]
+fn link_issues_returns_none() {
+    let mut item = bare_item();
+    item.change_request_key = Some("#42".into());
+    item.issue_keys = vec!["#1".into()];
+    assert!(Intent::LinkIssuesToChangeRequest.to_command_tokens(&item).is_none());
+}
+
+#[test]
+fn create_checkout_remote_branch_no_fresh_flag() {
+    let item = remote_branch_item("feat/upstream");
+    let tokens = Intent::CreateCheckout.to_command_tokens(&item);
+    assert_eq!(tokens, Some(vec!["checkout".into(), "create".into(), "--branch".into(), "feat/upstream".into()]));
+}
+
+#[test]
+fn create_checkout_change_request_no_fresh_flag() {
+    let item = pr_item("99");
+    let tokens = Intent::CreateCheckout.to_command_tokens(&item);
+    assert_eq!(tokens, Some(vec!["checkout".into(), "create".into(), "--branch".into(), "feat/pr-branch".into()]));
+}
+
+#[test]
+fn create_checkout_issue_adds_fresh_flag() {
+    let mut item = bare_item();
+    item.branch = Some("feat/new".into());
+    // kind is WorkItemKind::Issue (bare_item default), not RemoteBranch/ChangeRequest
+    let tokens = Intent::CreateCheckout.to_command_tokens(&item);
+    assert_eq!(tokens, Some(vec!["checkout".into(), "create".into(), "--branch".into(), "feat/new".into(), "--fresh".into()]));
+}
+
 // ── requires_local_host tests ──
 
 #[test]
