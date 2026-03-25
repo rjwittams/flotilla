@@ -60,7 +60,7 @@ Remove noun-verb query methods:
 - `get_repo_detail()`, `get_repo_providers()`, `get_repo_work()`
 - `list_hosts()`, `get_host_status()`, `get_host_providers()`
 
-Keep infrastructure methods: `get_state`, `list_repos`, `get_status`, `get_topology`, `subscribe`, `replay_since`, `execute`, `cancel`.
+Keep infrastructure methods: `get_state`, `list_repos`, `get_status`, `get_topology`, `subscribe`, `replay_since`, `execute`, `cancel`. These serve top-level admin commands (`flotilla status`, `flotilla topology`) and TUI bootstrapping — not noun-verb commands. Their standalone CLI runners (`run_status`, `run_topology`, `run_watch`) are also unchanged.
 
 The removed methods become private helpers inside `InProcessDaemon`, called by `execute()` when it handles Query\* actions. `SocketDaemon` loses these methods too — the CLI sends queries as Commands through `execute()`.
 
@@ -124,15 +124,18 @@ pub fn set_host(&mut self, host: String) {
 
 ### CLI dispatch (`main.rs`)
 
+`inject_repo_context` does two things today: (1) fill SENTINEL fields in Checkout/SearchIssues actions (errors if no `--repo`), and (2) set `context_repo` on any command from `--repo`/`FLOTILLA_REPO` if not already set (fallthrough, never errors). Both behaviors must be preserved. The CLI calls `inject_repo_context` on all commands regardless of variant — the SENTINEL matching inside the function handles the error case, and the fallthrough sets optional `context_repo` for commands that use it (e.g., `GenerateBranchName`, `OpenChangeRequest`).
+
 ```rust
-match resolved {
-    Resolved::Command(cmd) => run_control_command(cli, cmd, format).await,
-    Resolved::RequiresRepoContext(mut cmd) => {
-        inject_repo_context(&mut cmd, cli)?;
-        run_control_command(cli, cmd, format).await
-    }
-}
+let mut cmd = match resolved {
+    Resolved::Command(cmd) => cmd,
+    Resolved::RequiresRepoContext(cmd) => cmd,
+};
+inject_repo_context(&mut cmd, cli)?;
+run_control_command(cli, cmd, format).await
 ```
+
+The `RequiresRepoContext` variant exists so that non-CLI dispatch layers (TUI palette in Phase 2) know which commands require repo context. At the CLI level, `inject_repo_context` handles both variants identically — the SENTINEL pattern-matching inside the function determines whether a missing repo is an error.
 
 All query and command dispatch goes through `run_control_command` → `run_command`.
 
@@ -196,21 +199,30 @@ pub enum Resolved {
 
 ### Context table
 
-| Command | repo | host |
-|---|---|---|
-| Checkout (create) | true (SENTINEL) | ProvisioningTarget |
-| RemoveCheckout / FetchCheckoutStatus | false | SubjectHost |
-| OpenChangeRequest / CloseChangeRequest | false | ProviderHost |
-| OpenIssue | false | ProviderHost |
-| ArchiveSession | false | ProviderHost |
-| GenerateBranchName | true | ProvisioningTarget |
-| SearchIssues | true (SENTINEL) | Local |
-| SelectWorkspace | false | Local |
-| TeleportSession | false | Local |
-| TrackRepoPath / UntrackRepo / Refresh | false | Local |
-| Query\* variants | depends on query | Local (host set by routing) |
+The `repo` column indicates whether the command has a SENTINEL `RepoSelector::Query("")` field that must be filled. Commands without a SENTINEL may still receive `context_repo` from the CLI's blanket injection — that is ambient context, not a requirement.
 
-Commands where all context is already resolved (e.g., `repo myslug checkout main` where the repo is explicit, or query commands with explicit RepoSelector) return `Ready(cmd)`.
+| Command | repo (SENTINEL) | host | Notes |
+|---|---|---|---|
+| Checkout (create) | true | ProvisioningTarget | Bare `checkout create` only; `repo myslug checkout main` has explicit repo → `Ready` |
+| RemoveCheckout / FetchCheckoutStatus | false | SubjectHost | |
+| OpenChangeRequest / CloseChangeRequest | false | ProviderHost | |
+| OpenIssue | false | ProviderHost | Opens URL via provider — in remote-only repos, provider runs on remote host |
+| LinkIssuesToChangeRequest | false | ProviderHost | |
+| ArchiveSession | false | ProviderHost | Provider is the coding agent service on the session's host |
+| GenerateBranchName | false | ProvisioningTarget | No SENTINEL; uses `context_repo` from Command envelope |
+| SearchIssues | true | Local | |
+| SelectWorkspace | false | Local | |
+| TeleportSession | false | Local | |
+| PrepareTerminalForCheckout | false | SubjectHost | Reached via `repo <slug> prepare-terminal <path>` |
+| TrackRepoPath / UntrackRepo / Refresh | false | Local | |
+| QueryRepoDetail / QueryRepoProviders / QueryRepoWork | false | Local | Host set by `host <name>` routing if needed |
+| QueryHostList / QueryHostStatus / QueryHostProviders | false | Local | Host set by routing |
+
+Commands where all context is already resolved (e.g., `repo myslug checkout main` where the repo is explicit, or query commands with explicit RepoSelector) return `Ready(cmd)`. Commands with no SENTINEL and `host: Local` also return `Ready(cmd)` — they have no unresolved context.
+
+**Ready vs NeedsContext rule:** A command returns `NeedsContext` only if it has a SENTINEL repo field (`repo: true`) OR a non-Local host resolution. If both `repo` is false and `host` is `Local`, the command returns `Ready`.
+
+TUI-internal commands not reachable from `flotilla-commands` nouns (`CreateWorkspaceForCheckout`, `CreateWorkspaceFromPreparedTerminal`, `SetIssueViewport`, `FetchMoreIssues`, `ClearIssueSearch`) are not in this table — they are constructed directly by the TUI or daemon with full context.
 
 ### Noun resolve() changes
 
@@ -248,19 +260,18 @@ pub fn set_host(&mut self, host: String) {
 
 ### CLI dispatch (`main.rs`)
 
+As in #502, the CLI calls `inject_repo_context` on all commands. The `NeedsContext` metadata is for TUI dispatch (Phase 2), not the CLI. The CLI dispatch simplifies to:
+
 ```rust
-match resolved {
-    Resolved::Ready(cmd) => run_control_command(cli, cmd, format).await,
-    Resolved::NeedsContext { mut command, repo, .. } => {
-        if repo {
-            inject_repo_context(&mut command, cli)?;
-        }
-        // ProvisioningTarget: host already set if wrapped in `host <name> ...`
-        // SubjectHost / ProviderHost: N/A in CLI (no item context) — runs locally
-        run_control_command(cli, command, format).await
-    }
-}
+let mut cmd = match resolved {
+    Resolved::Ready(cmd) => cmd,
+    Resolved::NeedsContext { command, .. } => command,
+};
+inject_repo_context(&mut cmd, cli)?;
+run_control_command(cli, cmd, format).await
 ```
+
+`HostResolution` has no effect at the CLI edge — `SubjectHost` and `ProviderHost` require item context (TUI-only), and `ProvisioningTarget` is handled by wrapping the command in `host <name> ...` syntax, which sets `Command.host` during noun resolution. The CLI dispatch does not need to interpret `HostResolution`.
 
 ### TUI impact
 
