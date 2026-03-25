@@ -41,6 +41,20 @@ pub struct ResolvedPaneCommand {
     pub args: Vec<Arg>,
 }
 
+/// Execution-side workspace preparation artifact.
+/// Produced on the checkout host and consumed by the presentation-host attach step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedWorkspace {
+    pub label: String,
+    pub target_host: crate::HostName,
+    pub checkout_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachable_set_id: Option<AttachableSetId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_yaml: Option<String>,
+    pub prepared_commands: Vec<ResolvedPaneCommand>,
+}
+
 /// Routed command envelope shared by all frontends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Command {
@@ -562,6 +576,20 @@ mod tests {
         for result in cases {
             assert_json_roundtrip(&result);
         }
+    }
+
+    #[test]
+    fn prepared_workspace_roundtrip_preserves_fields() {
+        let prepared = PreparedWorkspace {
+            label: "feat-x".into(),
+            target_host: HostName::new("desktop"),
+            checkout_path: PathBuf::from("/remote/repo/feat-x"),
+            attachable_set_id: Some(AttachableSetId::new("set-1")),
+            template_yaml: Some("layout: []\ncontent: []\n".into()),
+            prepared_commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash".into())] }],
+        };
+
+        assert_json_roundtrip(&prepared);
     }
 
     #[test]

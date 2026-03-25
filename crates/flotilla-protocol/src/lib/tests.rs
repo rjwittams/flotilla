@@ -449,3 +449,29 @@ fn step_roundtrip_covers_command_values() {
     let outcome = StepOutcome::Produced(CommandValue::CheckoutPathResolved { path: PathBuf::from("/repo/wt-feat-x") });
     test_helpers::assert_roundtrip(&outcome);
 }
+
+#[test]
+fn step_roundtrip_covers_prepare_and_attach_workspace_actions() {
+    let prepared = PreparedWorkspace {
+        label: "feat/x".into(),
+        target_host: HostName::new("feta"),
+        checkout_path: PathBuf::from("/repo/wt-feat-x"),
+        attachable_set_id: Some(AttachableSetId::new("attachable-set")),
+        template_yaml: Some("layout: []\ncontent: []\n".into()),
+        prepared_commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![arg::Arg::Literal("bash".into())] }],
+    };
+
+    let prepare = Step {
+        description: "Prepare workspace".to_string(),
+        host: StepHost::Remote(HostName::new("feta")),
+        action: StepAction::PrepareWorkspace { checkout_path: ExecutionEnvironmentPath::new("/repo/wt-feat-x"), label: "feat/x".into() },
+    };
+    test_helpers::assert_roundtrip(&prepare);
+
+    let attach = Step {
+        description: "Attach workspace".to_string(),
+        host: StepHost::Local,
+        action: StepAction::AttachWorkspace { prepared_workspace: prepared },
+    };
+    test_helpers::assert_roundtrip(&attach);
+}

@@ -33,3 +33,13 @@ pub struct WorkspaceConfig {
     /// Used when a TerminalPool has pre-started persistent sessions.
     pub resolved_commands: Option<Vec<(String, String)>>,
 }
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceAttachRequest {
+    pub name: String,
+    pub working_directory: ExecutionEnvironmentPath,
+    pub template_vars: HashMap<String, String>,
+    pub template_yaml: Option<String>,
+    /// Final local commands used to attach to or reach prepared workspace surfaces.
+    pub attach_commands: Vec<(String, String)>,
+}
