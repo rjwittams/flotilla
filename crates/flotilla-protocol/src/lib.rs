@@ -5,6 +5,7 @@ pub mod framing;
 mod host;
 mod host_summary;
 pub mod output;
+pub mod path_context;
 pub mod peer;
 pub mod provider_data;
 pub mod query;
@@ -14,6 +15,7 @@ pub mod snapshot;
 pub mod test_support;
 
 pub use host::{HostName, HostPath, RepoIdentity};
+pub use path_context::{DaemonHostPath, ExecutionEnvironmentPath};
 pub use host_summary::{DiscoveryFact, HostEnvironment, HostProviderStatus, HostSnapshot, HostSummary, SystemInfo, ToolInventory};
 pub use peer::{CommandPeerEvent, GoodbyeReason, PeerDataKind, PeerDataMessage, PeerWireMessage, RoutedPeerMessage, VectorClock};
 
