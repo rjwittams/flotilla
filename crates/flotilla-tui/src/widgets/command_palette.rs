@@ -1,6 +1,7 @@
 use std::any::Any;
 
 use crossterm::event::{KeyCode, KeyEvent};
+use flotilla_commands::{RepoContext, Resolved};
 use flotilla_protocol::{Command, CommandAction, RepoSelector};
 use ratatui::{
     layout::Rect,
@@ -15,7 +16,7 @@ use super::{AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext}
 use crate::{
     binding_table::{BindingModeId, KeyBindingMode, StatusContent, StatusFragment},
     keymap::Action,
-    palette::{self, PaletteEntry, MAX_PALETTE_ROWS},
+    palette::{self, PaletteEntry, PaletteLocalResult, PaletteParseResult, MAX_PALETTE_ROWS},
 };
 
 pub struct CommandPaletteWidget {
@@ -57,41 +58,79 @@ impl CommandPaletteWidget {
     fn confirm(&mut self, ctx: &mut WidgetContext) -> Outcome {
         let text = self.input.value().to_string();
 
-        // "search <terms>" — apply filter directly, empty clears
-        if let Some(query) = text.strip_prefix("search ") {
-            let query = query.trim().to_string();
-            let Some(repo_identity) = ctx.model.active_repo_identity_opt().cloned() else {
-                ctx.app_actions.push(AppAction::ShowStatus("No active repo".into()));
-                return Outcome::Finished;
-            };
-            if query.is_empty() {
-                // Clear the active issue search
-                let cmd = Command {
-                    host: None,
-                    context_repo: None,
-                    action: CommandAction::ClearIssueSearch { repo: RepoSelector::Identity(repo_identity.clone()) },
-                };
-                ctx.commands.push(cmd);
-                ctx.app_actions.push(AppAction::ClearSearchQuery { repo: repo_identity });
-            } else {
-                let cmd = Command {
-                    host: None,
-                    context_repo: None,
-                    action: CommandAction::SearchIssues { repo: RepoSelector::Identity(repo_identity.clone()), query: query.clone() },
-                };
-                ctx.commands.push(cmd);
-                ctx.app_actions.push(AppAction::SetSearchQuery { repo: repo_identity, query });
+        match palette::parse_palette_input(&text) {
+            Ok(PaletteParseResult::Local(local)) => self.dispatch_local(local, ctx),
+            Ok(PaletteParseResult::Resolved(resolved)) => self.dispatch_resolved(resolved, ctx),
+            Err(err) => {
+                // If parse failed, fall back to the selected entry's action (fuzzy match)
+                let filtered = self.filtered();
+                if let Some(entry) = filtered.get(self.selected) {
+                    let action = entry.action;
+                    return self.dispatch_palette_action(action, ctx);
+                }
+                ctx.app_actions.push(AppAction::ShowStatus(err));
+                Outcome::Finished
             }
-            return Outcome::Finished;
+        }
+    }
+
+    fn dispatch_local(&mut self, local: PaletteLocalResult<'_>, ctx: &mut WidgetContext) -> Outcome {
+        match local {
+            PaletteLocalResult::Action(action) => self.dispatch_palette_action(action, ctx),
+            PaletteLocalResult::SetLayout(name) => {
+                ctx.app_actions.push(AppAction::SetLayout(name.to_string()));
+                Outcome::Finished
+            }
+            PaletteLocalResult::SetTheme(name) => {
+                ctx.app_actions.push(AppAction::SetTheme(name.to_string()));
+                Outcome::Finished
+            }
+            PaletteLocalResult::SetTarget(name) => {
+                ctx.app_actions.push(AppAction::SetTarget(name.to_string()));
+                Outcome::Finished
+            }
+            PaletteLocalResult::Search(query) => {
+                let query = query.trim().to_string();
+                let Some(repo_identity) = ctx.model.active_repo_identity_opt().cloned() else {
+                    ctx.app_actions.push(AppAction::ShowStatus("No active repo".into()));
+                    return Outcome::Finished;
+                };
+                if query.is_empty() {
+                    let cmd = Command {
+                        host: None,
+                        context_repo: None,
+                        action: CommandAction::ClearIssueSearch { repo: RepoSelector::Identity(repo_identity.clone()) },
+                    };
+                    ctx.commands.push(cmd);
+                    ctx.app_actions.push(AppAction::ClearSearchQuery { repo: repo_identity });
+                } else {
+                    let cmd = Command {
+                        host: None,
+                        context_repo: None,
+                        action: CommandAction::SearchIssues { repo: RepoSelector::Identity(repo_identity.clone()), query: query.clone() },
+                    };
+                    ctx.commands.push(cmd);
+                    ctx.app_actions.push(AppAction::SetSearchQuery { repo: repo_identity, query });
+                }
+                Outcome::Finished
+            }
+        }
+    }
+
+    fn dispatch_resolved(&self, resolved: Resolved, ctx: &mut WidgetContext) -> Outcome {
+        // Reject repo-scoped commands on the overview tab
+        if let Resolved::NeedsContext { repo: RepoContext::Required | RepoContext::Inferred, .. } = &resolved {
+            if *ctx.is_config {
+                ctx.app_actions.push(AppAction::ShowStatus("switch to a repo tab first".into()));
+                return Outcome::Finished;
+            }
         }
 
-        // Otherwise dispatch the selected entry's action
-        let filtered = self.filtered();
-        if let Some(entry) = filtered.get(self.selected) {
-            let action = entry.action;
-            return self.dispatch_palette_action(action, ctx);
-        }
-
+        let command = match resolved {
+            Resolved::Ready(cmd) => cmd,
+            Resolved::NeedsContext { command, .. } => command,
+        };
+        ctx.commands.push(command);
         Outcome::Finished
     }
 
@@ -600,5 +639,69 @@ mod tests {
 
         let outcome = widget.handle_action(Action::PrevTab, &mut ctx);
         assert!(matches!(outcome, Outcome::Ignored));
+    }
+
+    #[test]
+    fn confirm_noun_verb_pushes_command() {
+        let mut widget = CommandPaletteWidget::new();
+        widget.input = Input::from("cr #42 close");
+        let mut harness = TestWidgetHarness::new();
+        let mut ctx = harness.ctx();
+
+        let outcome = widget.handle_action(Action::Confirm, &mut ctx);
+        assert!(matches!(outcome, Outcome::Finished));
+
+        let (cmd, _) = harness.commands.take_next().expect("expected command");
+        assert!(matches!(cmd.action, CommandAction::CloseChangeRequest { ref id } if id == "#42"));
+    }
+
+    #[test]
+    fn confirm_noun_verb_on_overview_tab_rejects() {
+        let mut widget = CommandPaletteWidget::new();
+        widget.input = Input::from("cr #42 close");
+        let mut harness = TestWidgetHarness::new();
+        harness.is_config = true;
+        let mut ctx = harness.ctx();
+
+        let outcome = widget.handle_action(Action::Confirm, &mut ctx);
+        assert!(matches!(outcome, Outcome::Finished));
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::ShowStatus(msg) if msg.contains("repo tab"))));
+        assert!(harness.commands.take_next().is_none());
+    }
+
+    #[test]
+    fn confirm_layout_set_pushes_app_action() {
+        let mut widget = CommandPaletteWidget::new();
+        widget.input = Input::from("layout zoom");
+        let mut harness = TestWidgetHarness::new();
+        let mut ctx = harness.ctx();
+
+        let outcome = widget.handle_action(Action::Confirm, &mut ctx);
+        assert!(matches!(outcome, Outcome::Finished));
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::SetLayout(name) if name == "zoom")));
+    }
+
+    #[test]
+    fn confirm_theme_set_pushes_app_action() {
+        let mut widget = CommandPaletteWidget::new();
+        widget.input = Input::from("theme catppuccin-mocha");
+        let mut harness = TestWidgetHarness::new();
+        let mut ctx = harness.ctx();
+
+        let outcome = widget.handle_action(Action::Confirm, &mut ctx);
+        assert!(matches!(outcome, Outcome::Finished));
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::SetTheme(name) if name == "catppuccin-mocha")));
+    }
+
+    #[test]
+    fn confirm_target_set_pushes_app_action() {
+        let mut widget = CommandPaletteWidget::new();
+        widget.input = Input::from("target feta");
+        let mut harness = TestWidgetHarness::new();
+        let mut ctx = harness.ctx();
+
+        let outcome = widget.handle_action(Action::Confirm, &mut ctx);
+        assert!(matches!(outcome, Outcome::Finished));
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::SetTarget(name) if name == "feta")));
     }
 }

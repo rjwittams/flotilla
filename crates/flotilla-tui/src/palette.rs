@@ -1,5 +1,7 @@
 use std::sync::OnceLock;
 
+use flotilla_commands::Resolved;
+
 use crate::keymap::Action;
 
 pub const MAX_PALETTE_ROWS: usize = 8;
@@ -85,8 +87,78 @@ pub fn palette_local_completions(input: &str) -> Vec<&'static str> {
     }
 }
 
+/// Result of parsing palette input text.
+#[derive(Debug)]
+pub enum PaletteParseResult<'a> {
+    /// A palette-local command (layout, theme, target, search, etc.)
+    Local(PaletteLocalResult<'a>),
+    /// A noun-verb command resolved through the registry.
+    Resolved(Resolved),
+}
+
+/// Tokenize palette input. Like shell splitting with quote support, but without
+/// treating `#` as a comment character (users type `cr #42 open`, not shell scripts).
+fn tokenize_palette_input(input: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double_quote => in_single_quote = !in_single_quote,
+            '"' if !in_single_quote => in_double_quote = !in_double_quote,
+            '\\' if !in_single_quote => {
+                // Backslash escaping: take next char literally
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            ' ' | '\t' if !in_single_quote && !in_double_quote => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if in_single_quote || in_double_quote {
+        return Err("unclosed quote".to_string());
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
+/// Parse palette input text. Tries palette-local commands first, then noun-verb commands.
+pub fn parse_palette_input(input: &str) -> Result<PaletteParseResult<'_>, String> {
+    // 1. Try palette-local
+    if let Some(local) = parse_palette_local(input) {
+        return Ok(PaletteParseResult::Local(local));
+    }
+    // 2. Tokenize (quote-aware split without shell comment handling)
+    let tokens = tokenize_palette_input(input)?;
+    let token_refs: Vec<&str> = tokens.iter().map(|s| s.as_str()).collect();
+    if token_refs.is_empty() {
+        return Err("empty command".into());
+    }
+    // 3. Route: host uses parse_host_command, else parse_noun_command → resolve
+    if token_refs[0] == "host" {
+        flotilla_commands::parse_host_command(&token_refs).map(PaletteParseResult::Resolved)
+    } else {
+        let noun = flotilla_commands::parse_noun_command(&token_refs)?;
+        noun.resolve().map(PaletteParseResult::Resolved)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use flotilla_commands::Resolved;
+    use flotilla_protocol::CommandAction;
+
     use super::*;
 
     #[test]
@@ -167,5 +239,36 @@ mod tests {
         let entries = all_entries();
         let filtered = filter_entries(entries, "zzz");
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn parse_palette_input_cr_close() {
+        let result = parse_palette_input("cr #42 close").expect("should parse");
+        assert!(matches!(result, PaletteParseResult::Resolved(Resolved::NeedsContext { ref command, .. })
+                if matches!(command.action, CommandAction::CloseChangeRequest { .. })));
+    }
+
+    #[test]
+    fn parse_palette_input_layout() {
+        let result = parse_palette_input("layout zoom").expect("should parse");
+        assert!(matches!(result, PaletteParseResult::Local(PaletteLocalResult::SetLayout("zoom"))));
+    }
+
+    #[test]
+    fn parse_palette_input_host_routed() {
+        let result = parse_palette_input("host feta cr #42 open").expect("should parse");
+        assert!(matches!(result, PaletteParseResult::Resolved(Resolved::NeedsContext { ref command, .. })
+                if command.host.is_some()));
+    }
+
+    #[test]
+    fn parse_palette_input_unknown_errors() {
+        assert!(parse_palette_input("bogus command").is_err());
+    }
+
+    #[test]
+    fn parse_palette_input_search_with_query() {
+        let result = parse_palette_input("search bug fix").expect("should parse");
+        assert!(matches!(result, PaletteParseResult::Local(PaletteLocalResult::Search("bug fix"))));
     }
 }

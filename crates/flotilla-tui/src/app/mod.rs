@@ -553,6 +553,9 @@ impl App {
                     let next = (idx + 1) % themes.len();
                     self.theme = (themes[next].1)();
                 }
+                AppAction::SetTheme(name) => {
+                    self.theme = crate::theme::theme_by_name(&name);
+                }
                 AppAction::CycleLayout => {
                     // Cycle the active page's layout (handles both the direct
                     // repo_page path where the page already cycled, and the
@@ -566,9 +569,36 @@ impl App {
                     }
                     self.persist_layout();
                 }
+                AppAction::SetLayout(name) => {
+                    let layout = match name.as_str() {
+                        "auto" => RepoViewLayout::Auto,
+                        "zoom" => RepoViewLayout::Zoom,
+                        "right" => RepoViewLayout::Right,
+                        "below" => RepoViewLayout::Below,
+                        _ => {
+                            self.set_status_message(Some(format!("unknown layout: {name}")));
+                            continue;
+                        }
+                    };
+                    self.ui.view_layout = layout;
+                    if !self.model.repo_order.is_empty() {
+                        let identity = &self.model.repo_order[self.model.active_repo];
+                        if let Some(page) = self.screen.repo_pages.get_mut(identity) {
+                            page.layout = layout;
+                        }
+                    }
+                    self.persist_layout();
+                }
                 AppAction::CycleHost => {
                     let peer_hosts = self.model.peer_host_names();
                     self.ui.cycle_target_host(&peer_hosts);
+                }
+                AppAction::SetTarget(name) => {
+                    if name == "local" {
+                        self.ui.target_host = None;
+                    } else {
+                        self.ui.target_host = Some(HostName::new(&name));
+                    }
                 }
                 AppAction::ToggleDebug => {
                     self.ui.show_debug = !self.ui.show_debug;

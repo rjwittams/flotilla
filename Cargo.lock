@@ -1193,6 +1193,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "flotilla-client",
+ "flotilla-commands",
  "flotilla-core",
  "flotilla-protocol",
  "futures",
