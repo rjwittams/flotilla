@@ -210,33 +210,6 @@ mod tests {
             Ok(flotilla_protocol::StatusResponse { repos: vec![] })
         }
 
-        async fn get_repo_detail(&self, _repo: &flotilla_protocol::RepoSelector) -> Result<flotilla_protocol::RepoDetailResponse, String> {
-            Err("stub".into())
-        }
-
-        async fn get_repo_providers(
-            &self,
-            _repo: &flotilla_protocol::RepoSelector,
-        ) -> Result<flotilla_protocol::RepoProvidersResponse, String> {
-            Err("stub".into())
-        }
-
-        async fn get_repo_work(&self, _repo: &flotilla_protocol::RepoSelector) -> Result<flotilla_protocol::RepoWorkResponse, String> {
-            Err("stub".into())
-        }
-
-        async fn list_hosts(&self) -> Result<flotilla_protocol::HostListResponse, String> {
-            Err("stub".into())
-        }
-
-        async fn get_host_status(&self, _host: &str) -> Result<flotilla_protocol::HostStatusResponse, String> {
-            Err("stub".into())
-        }
-
-        async fn get_host_providers(&self, _host: &str) -> Result<flotilla_protocol::HostProvidersResponse, String> {
-            Err("stub".into())
-        }
-
         async fn get_topology(&self) -> Result<flotilla_protocol::TopologyResponse, String> {
             Err("stub".into())
         }
