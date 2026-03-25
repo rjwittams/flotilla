@@ -13,7 +13,10 @@ use flotilla_core::{
     config::ConfigStore,
     daemon::DaemonHandle,
     in_process::InProcessDaemon,
-    providers::discovery::test_support::{fake_discovery, git_process_discovery, init_git_repo_with_remote},
+    providers::discovery::test_support::{
+        fake_discovery, fake_discovery_with_provider_set, git_process_discovery, init_git_repo_with_remote, FakeDiscoveryProviders,
+        FakeWorkspaceManager,
+    },
 };
 use flotilla_protocol::{
     AgentEventType, AgentHarness, AgentHookEvent, AgentStatus, AttachableId, Checkout, CheckoutTarget, Command, CommandAction,
@@ -768,9 +771,12 @@ async fn remote_command_remote_step_events_remap_to_presentation_command_id_and_
 async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
-    let repo_identity = init_git_repo_with_remote(&repo, "git@github.com:owner/repo.git");
+    init_git_repo_with_remote(&repo, "git@github.com:owner/repo.git");
     let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config, git_process_discovery(false), HostName::new("local")).await;
+    let workspace_manager = Arc::new(FakeWorkspaceManager::new());
+    let discovery =
+        fake_discovery_with_provider_set(FakeDiscoveryProviders::new().with_workspace_manager(workspace_manager.clone() as Arc<_>));
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, discovery, HostName::new("local")).await;
     daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh repo");
 
     let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
@@ -795,7 +801,7 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
             host: Some(HostName::new("feta")),
             context_repo: None,
             action: CommandAction::Checkout {
-                repo: RepoSelector::Identity(repo_identity.clone()),
+                repo: RepoSelector::Path(repo.clone()),
                 target: CheckoutTarget::FreshBranch("feat-workspace-local".into()),
                 issue_ids: vec![],
             },
@@ -860,7 +866,7 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
                     if description == "Create checkout for branch feat-workspace-local" && status == StepStatus::Started {
                         saw_remote_step = true;
                     }
-                    if description == "Create workspace" && status == StepStatus::Started {
+                    if description == "Create workspace" && status == StepStatus::Succeeded {
                         return host;
                     }
                 }
@@ -889,6 +895,12 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
         branch: "feat-workspace-local".into(),
         path: PathBuf::from("/srv/feta/repo/wt-feat-workspace-local"),
     });
+
+    let created_workspaces = workspace_manager.workspaces.lock().await.clone();
+    assert_eq!(created_workspaces.len(), 1, "expected local workspace creation");
+    assert_eq!(created_workspaces[0].0, "workspace:1");
+    assert_eq!(created_workspaces[0].1.name, "feat-workspace-local");
+    assert_eq!(created_workspaces[0].1.directories, vec![PathBuf::from("/srv/feta/repo/wt-feat-workspace-local")]);
 }
 
 #[tokio::test]
