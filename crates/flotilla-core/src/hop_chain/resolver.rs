@@ -55,6 +55,9 @@ impl HopResolver {
                 Hop::AttachTerminal { attachable_id } => {
                     self.terminal.resolve(attachable_id, context)?;
                 }
+                // Phase C: `provider` field is unused — a single EnvironmentHopResolver
+                // handles all environments. Phase D will use it to route to provider-specific
+                // resolvers when multiple environment backends coexist.
                 Hop::EnterEnvironment { env_id, .. } => {
                     if context.current_environment.as_ref() == Some(env_id) {
                         continue; // collapse — already inside this environment

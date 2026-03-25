@@ -12,6 +12,9 @@ use uuid::Uuid;
 use super::{runner::EnvironmentRunner, CreateOpts, EnvironmentHandle, EnvironmentProvider, ProvisionedEnvironment};
 use crate::providers::{ChannelLabel, CommandRunner};
 
+/// Fixed path inside the container where the daemon socket is mounted.
+const CONTAINER_SOCKET_PATH: &str = "/run/flotilla.sock";
+
 // ---------------------------------------------------------------------------
 // DockerEnvironment
 // ---------------------------------------------------------------------------
@@ -55,8 +58,9 @@ impl EnvironmentProvider for DockerEnvironment {
         let env_id_str = id.to_string();
         let image_str = image.as_str().to_string();
         let label_val = format!("flotilla.environment={}", id);
-        let socket_mount = format!("{}:/run/flotilla.sock", socket_str);
+        let socket_mount = format!("{}:{CONTAINER_SOCKET_PATH}", socket_str);
         let env_id_env = format!("FLOTILLA_ENVIRONMENT_ID={}", env_id_str);
+        let socket_env = format!("FLOTILLA_DAEMON_SOCKET={CONTAINER_SOCKET_PATH}");
 
         let mut args = vec![
             "run",
@@ -68,7 +72,7 @@ impl EnvironmentProvider for DockerEnvironment {
             "-v",
             &socket_mount,
             "-e",
-            "FLOTILLA_DAEMON_SOCKET=/run/flotilla.sock",
+            &socket_env,
             "-e",
             &env_id_env,
         ];
@@ -170,6 +174,9 @@ impl ProvisionedEnvironment for DockerProvisionedEnvironment {
         let output =
             self.runner.run("docker", &["exec", &self.container_name, "sh", "-lc", "env"], Path::new("/"), &ChannelLabel::Noop).await?;
 
+        // Note: `sh -lc env` output is line-delimited. Values containing newlines
+        // (e.g. PEM certificates) will be silently truncated. Acceptable for Phase 1;
+        // a structured query (docker inspect) could provide the full picture if needed.
         let vars = output
             .lines()
             .filter_map(|line| {

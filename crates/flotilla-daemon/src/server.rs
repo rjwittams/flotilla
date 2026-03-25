@@ -439,8 +439,15 @@ async fn handle_client(
                         );
                         return;
                     }
+                } else {
+                    // Per-environment sockets are new infrastructure — all clients connecting to
+                    // them should send environment_id. Fail-closed: reject unidentified connections.
+                    warn!(
+                        %expected,
+                        "connection on per-environment socket without environment_id — dropping"
+                    );
+                    return;
                 }
-                // No environment_id in Hello is fine — old client connecting to a scoped socket.
             }
             // environment_context is None: main socket, accept whatever the client sends.
             PeerConnection::new(daemon, shutdown_rx, peer_data_tx, peer_manager, peer_connected_tx, client_count, client_notify)
