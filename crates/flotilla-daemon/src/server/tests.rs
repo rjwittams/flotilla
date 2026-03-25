@@ -904,6 +904,108 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
 }
 
 #[tokio::test]
+async fn remote_checkout_failure_with_empty_response_still_stops_local_workspace_creation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    init_git_repo_with_remote(&repo, "git@github.com:owner/repo.git");
+    let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
+    let workspace_manager = Arc::new(FakeWorkspaceManager::new());
+    let discovery =
+        fake_discovery_with_provider_set(FakeDiscoveryProviders::new().with_workspace_manager(workspace_manager.clone() as Arc<_>));
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, discovery, HostName::new("local")).await;
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh repo");
+
+    let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
+    let pending_remote_commands = Arc::new(Mutex::new(HashMap::new()));
+    let forwarded_commands = Arc::new(Mutex::new(HashMap::new()));
+    let pending_remote_cancels = Arc::new(Mutex::new(HashMap::new()));
+    let next_remote_command_id = Arc::new(AtomicU64::new(1 << 62));
+    let sent = Arc::new(StdMutex::new(Vec::new()));
+    peer_manager.lock().await.register_sender(HostName::new("feta"), Arc::new(MockPeerSender { sent: Arc::clone(&sent) }));
+    let remote_command_router = make_remote_command_router(
+        &daemon,
+        &peer_manager,
+        &pending_remote_commands,
+        &forwarded_commands,
+        &pending_remote_cancels,
+        &next_remote_command_id,
+    );
+
+    let mut rx = daemon.subscribe();
+    let command_id = remote_command_router
+        .dispatch_execute(Command {
+            host: Some(HostName::new("feta")),
+            context_repo: None,
+            action: CommandAction::Checkout {
+                repo: RepoSelector::Path(repo.clone()),
+                target: CheckoutTarget::FreshBranch("feat-workspace-failure".into()),
+                issue_ids: vec![],
+            },
+        })
+        .await
+        .expect("dispatch execute");
+
+    let request_id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(request_id) = sent.lock().expect("lock").iter().find_map(|msg| match msg {
+                PeerWireMessage::Routed(RoutedPeerMessage::RemoteStepRequest { request_id, .. }) => Some(*request_id),
+                _ => None,
+            }) {
+                return request_id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timeout waiting for remote step request");
+
+    remote_command_router
+        .emit_remote_step_event(
+            request_id,
+            HostName::new("feta"),
+            0,
+            1,
+            "Create checkout for branch feat-workspace-failure".into(),
+            StepStatus::Started,
+        )
+        .await;
+    remote_command_router
+        .emit_remote_step_event(
+            request_id,
+            HostName::new("feta"),
+            0,
+            1,
+            "Create checkout for branch feat-workspace-failure".into(),
+            StepStatus::Failed { message: "checkout failed".into() },
+        )
+        .await;
+    remote_command_router.complete_remote_step(request_id, HostName::new("feta"), vec![]).await;
+
+    let (workspace_started, finished_result) = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut workspace_started = false;
+        loop {
+            match rx.recv().await.expect("broadcast channel should stay open") {
+                DaemonEvent::CommandStepUpdate { command_id: id, description, status, .. } if id == command_id => {
+                    if description == "Create workspace" && status == StepStatus::Started {
+                        workspace_started = true;
+                    }
+                }
+                DaemonEvent::CommandFinished { command_id: id, result, .. } if id == command_id => {
+                    return (workspace_started, result);
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for failed command");
+
+    assert!(!workspace_started, "local workspace step should not run after remote checkout failure");
+    assert_eq!(finished_result, CommandValue::Error { message: "checkout failed".into() });
+    assert!(workspace_manager.workspaces.lock().await.is_empty(), "workspace manager should remain unused");
+}
+
+#[tokio::test]
 async fn dispatch_request_execute_remote_does_not_hold_peer_manager_lock_across_send() {
     let (_tmp, daemon) = empty_daemon().await;
     let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));

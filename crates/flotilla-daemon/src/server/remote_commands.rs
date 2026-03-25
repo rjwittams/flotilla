@@ -79,6 +79,9 @@ struct PendingRemoteStepCancel {
 }
 
 type PendingRemoteStepCancelMap = Arc<Mutex<HashMap<u64, PendingRemoteStepCancel>>>;
+// TODO(phase-2): if the requester disconnects while a forwarded remote step
+// batch is still running, proactively clear the inbound batch state instead of
+// waiting for normal task completion.
 type ForwardedRemoteStepBatchMap = Arc<Mutex<HashMap<u64, ForwardedRemoteStepBatch>>>;
 
 #[derive(Clone)]
