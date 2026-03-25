@@ -433,6 +433,64 @@ async fn remote_failure_stops_execution() {
 }
 
 #[tokio::test]
+async fn remote_error_emits_failed_step_update_without_progress_failure() {
+    struct PanicResolver;
+
+    #[async_trait::async_trait]
+    impl StepResolver for PanicResolver {
+        async fn resolve(&self, _desc: &str, _action: StepAction, _prior: &[StepOutcome]) -> Result<StepOutcome, String> {
+            panic!("local resolver should not be called after remote failure");
+        }
+    }
+
+    let (cancel, tx) = setup();
+    let mut rx = tx.subscribe();
+    let plan = StepPlan::new(vec![
+        Step { description: "remote".into(), host: StepHost::Remote(HostName::new("feta")), action: StepAction::Noop },
+        make_step("local"),
+    ]);
+    let remote = TestRemoteExecutor::new(vec![TestRemoteBatch {
+        assert_host: HostName::new("feta"),
+        progress: vec![RemoteStepProgressUpdate {
+            batch_step_index: 0,
+            batch_step_count: 1,
+            description: "remote".into(),
+            status: StepStatus::Started,
+        }],
+        wait_for_cancel: None,
+        result: Err("boom".into()),
+    }]);
+
+    let result = run_step_plan_with_remote_executor(
+        plan,
+        1,
+        HostName::local(),
+        RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
+        ExecutionEnvironmentPath::new("/repo"),
+        cancel,
+        tx,
+        &PanicResolver,
+        &remote,
+    )
+    .await;
+
+    assert_eq!(result, CommandValue::Error { message: "boom".into() });
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            DaemonEvent::CommandStepUpdate {
+                step_index: 0,
+                description,
+                status: StepStatus::Failed { message },
+                ..
+            } if description == "remote" && message == "boom"
+        )
+    }));
+}
+
+#[tokio::test]
 async fn remote_progress_maps_to_global_step_indices() {
     let (cancel, tx) = setup();
     let mut rx = tx.subscribe();

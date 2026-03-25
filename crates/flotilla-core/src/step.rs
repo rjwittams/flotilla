@@ -222,7 +222,20 @@ pub async fn run_step_plan_with_remote_executor(
                         }
                         outcomes.extend(step_outcomes);
                     }
-                    Err(e) => return prior_result_or_error(&outcomes, e),
+                    Err(e) => {
+                        emit_step_update(
+                            &event_tx,
+                            command_id,
+                            host.clone(),
+                            repo_identity.clone(),
+                            repo.as_path().to_path_buf(),
+                            segment_start,
+                            step_count,
+                            steps[segment_start].description.clone(),
+                            StepStatus::Failed { message: e.clone() },
+                        );
+                        return prior_result_or_error(&outcomes, e);
+                    }
                 }
             }
         }
