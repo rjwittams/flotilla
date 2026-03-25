@@ -21,8 +21,8 @@ use flotilla_core::{
 use flotilla_protocol::{
     AgentEventType, AgentHarness, AgentHookEvent, AgentStatus, AttachableId, Checkout, CheckoutTarget, Command, CommandAction,
     CommandPeerEvent, CommandValue, ConfigLabel, DaemonEvent, HostName, HostPath, HostSummary, Message, PeerConnectionState, PeerDataKind,
-    PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RepoSelector, Request, Response, ResponseResult, RoutedPeerMessage,
-    StepAction, StepHost, StepStatus, StreamKey, VectorClock, PROTOCOL_VERSION,
+    PeerDataMessage, PeerWireMessage, PreparedWorkspace, ProviderData, RepoIdentity, RepoSelector, Request, Response, ResponseResult,
+    RoutedPeerMessage, StepAction, StepHost, StepOutcome, StepStatus, StreamKey, VectorClock, PROTOCOL_VERSION,
 };
 use indexmap::IndexMap;
 use tokio::{
@@ -645,7 +645,7 @@ async fn remote_command_mutations_route_remote_step_requests() {
             assert_eq!(identity, repo_identity);
             assert_eq!(repo_path, repo);
             assert_eq!(step_offset, 0);
-            assert_eq!(steps.len(), 2, "checkout with issue links should batch both remote steps");
+            assert_eq!(steps.len(), 3, "checkout with issue links should batch all remote pre-attach steps");
             assert!(steps.iter().all(|step| step.host == StepHost::Remote(HostName::new("feta"))));
             assert!(matches!(
                 steps[0].action,
@@ -656,6 +656,7 @@ async fn remote_command_mutations_route_remote_step_requests() {
                 } if branch == "feat-remote-step"
             ));
             assert!(matches!(steps[1].action, StepAction::LinkIssuesToBranch { .. }));
+            assert!(matches!(steps[2].action, StepAction::PrepareWorkspace { .. }));
         }
         other => panic!("expected remote step request, got {other:?}"),
     }
@@ -719,7 +720,7 @@ async fn remote_command_remote_step_events_remap_to_presentation_command_id_and_
             request_id,
             HostName::new("feta"),
             0,
-            2,
+            3,
             "Create checkout for branch feat-remap".into(),
             StepStatus::Started,
         )
@@ -729,16 +730,16 @@ async fn remote_command_remote_step_events_remap_to_presentation_command_id_and_
             request_id,
             HostName::new("feta"),
             0,
-            2,
+            3,
             "Create checkout for branch feat-remap".into(),
             StepStatus::Succeeded,
         )
         .await;
     remote_command_router
-        .emit_remote_step_event(request_id, HostName::new("feta"), 1, 2, "Link issues to branch".into(), StepStatus::Started)
+        .emit_remote_step_event(request_id, HostName::new("feta"), 1, 3, "Link issues to branch".into(), StepStatus::Started)
         .await;
     remote_command_router
-        .emit_remote_step_event(request_id, HostName::new("feta"), 1, 2, "Link issues to branch".into(), StepStatus::Succeeded)
+        .emit_remote_step_event(request_id, HostName::new("feta"), 1, 3, "Link issues to branch".into(), StepStatus::Succeeded)
         .await;
     remote_command_router.complete_remote_step(request_id, HostName::new("feta"), vec![]).await;
 
@@ -760,10 +761,10 @@ async fn remote_command_remote_step_events_remap_to_presentation_command_id_and_
     .expect("timeout waiting for remapped step updates");
 
     assert_eq!(observed, vec![
-        (0, 3, "Create checkout for branch feat-remap".into(), StepStatus::Started),
-        (0, 3, "Create checkout for branch feat-remap".into(), StepStatus::Succeeded),
-        (1, 3, "Link issues to branch".into(), StepStatus::Started),
-        (1, 3, "Link issues to branch".into(), StepStatus::Succeeded),
+        (0, 4, "Create checkout for branch feat-remap".into(), StepStatus::Started),
+        (0, 4, "Create checkout for branch feat-remap".into(), StepStatus::Succeeded),
+        (1, 4, "Link issues to branch".into(), StepStatus::Started),
+        (1, 4, "Link issues to branch".into(), StepStatus::Succeeded),
     ]);
 }
 
@@ -815,8 +816,9 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
                 PeerWireMessage::Routed(RoutedPeerMessage::RemoteStepRequest { request_id, step_offset, steps, target_host, .. }) => {
                     assert_eq!(*target_host, HostName::new("feta"));
                     assert_eq!(*step_offset, 0);
-                    assert_eq!(steps.len(), 1, "workspace step should stay local");
+                    assert_eq!(steps.len(), 2, "only attach should stay local");
                     assert!(matches!(steps[0].action, StepAction::CreateCheckout { .. }));
+                    assert!(matches!(steps[1].action, StepAction::PrepareWorkspace { .. }));
                     Some(*request_id)
                 }
                 _ => None,
@@ -834,7 +836,7 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
             request_id,
             HostName::new("feta"),
             0,
-            1,
+            2,
             "Create checkout for branch feat-workspace-local".into(),
             StepStatus::Started,
         )
@@ -844,29 +846,61 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
             request_id,
             HostName::new("feta"),
             0,
-            1,
+            2,
             "Create checkout for branch feat-workspace-local".into(),
             StepStatus::Succeeded,
         )
         .await;
     remote_command_router
-        .complete_remote_step(request_id, HostName::new("feta"), vec![flotilla_protocol::StepOutcome::CompletedWith(
-            CommandValue::CheckoutCreated {
+        .emit_remote_step_event(
+            request_id,
+            HostName::new("feta"),
+            1,
+            2,
+            "Prepare workspace for feat-workspace-local@feta".into(),
+            StepStatus::Started,
+        )
+        .await;
+    remote_command_router
+        .emit_remote_step_event(
+            request_id,
+            HostName::new("feta"),
+            1,
+            2,
+            "Prepare workspace for feat-workspace-local@feta".into(),
+            StepStatus::Succeeded,
+        )
+        .await;
+    remote_command_router
+        .complete_remote_step(request_id, HostName::new("feta"), vec![
+            StepOutcome::CompletedWith(CommandValue::CheckoutCreated {
                 branch: "feat-workspace-local".into(),
                 path: PathBuf::from("/srv/feta/repo/wt-feat-workspace-local"),
-            },
-        )])
+            }),
+            StepOutcome::Produced(CommandValue::PreparedWorkspace(PreparedWorkspace {
+                label: "feat-workspace-local@feta".into(),
+                target_host: HostName::new("feta"),
+                checkout_path: PathBuf::from("/srv/feta/repo/wt-feat-workspace-local"),
+                attachable_set_id: None,
+                template_yaml: None,
+                prepared_commands: vec![],
+            })),
+        ])
         .await;
 
-    let mut saw_remote_step = false;
+    let mut saw_remote_checkout_step = false;
+    let mut saw_remote_prepare_step = false;
     let workspace_event = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             match rx.recv().await.expect("broadcast channel should stay open") {
                 DaemonEvent::CommandStepUpdate { command_id: id, host, description, status, .. } if id == command_id => {
                     if description == "Create checkout for branch feat-workspace-local" && status == StepStatus::Started {
-                        saw_remote_step = true;
+                        saw_remote_checkout_step = true;
                     }
-                    if description == "Create workspace" && status == StepStatus::Succeeded {
+                    if description == "Prepare workspace for feat-workspace-local@feta" && status == StepStatus::Started {
+                        saw_remote_prepare_step = true;
+                    }
+                    if description == "Attach workspace" && status == StepStatus::Succeeded {
                         return host;
                     }
                 }
@@ -877,7 +911,8 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
     .await
     .expect("timeout waiting for local workspace step");
 
-    assert!(saw_remote_step, "expected remote checkout progress before workspace creation");
+    assert!(saw_remote_checkout_step, "expected remote checkout progress before local attach");
+    assert!(saw_remote_prepare_step, "expected remote workspace preparation before local attach");
     assert_eq!(workspace_event, HostName::new("local"));
 
     let finished = tokio::time::timeout(Duration::from_secs(2), async {
@@ -899,8 +934,8 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
     let created_workspaces = workspace_manager.workspaces.lock().await.clone();
     assert_eq!(created_workspaces.len(), 1, "expected local workspace creation");
     assert_eq!(created_workspaces[0].0, "workspace:1");
-    assert_eq!(created_workspaces[0].1.name, "feat-workspace-local");
-    assert_eq!(created_workspaces[0].1.directories, vec![PathBuf::from("/srv/feta/repo/wt-feat-workspace-local")]);
+    assert_eq!(created_workspaces[0].1.name, "feat-workspace-local@feta");
+    assert_eq!(created_workspaces[0].1.directories, vec![repo.clone()]);
 }
 
 #[tokio::test]
@@ -964,7 +999,7 @@ async fn remote_checkout_failure_with_empty_response_still_stops_local_workspace
             request_id,
             HostName::new("feta"),
             0,
-            1,
+            2,
             "Create checkout for branch feat-workspace-failure".into(),
             StepStatus::Started,
         )
@@ -974,7 +1009,7 @@ async fn remote_checkout_failure_with_empty_response_still_stops_local_workspace
             request_id,
             HostName::new("feta"),
             0,
-            1,
+            2,
             "Create checkout for branch feat-workspace-failure".into(),
             StepStatus::Failed { message: "checkout failed".into() },
         )
@@ -986,7 +1021,7 @@ async fn remote_checkout_failure_with_empty_response_still_stops_local_workspace
         loop {
             match rx.recv().await.expect("broadcast channel should stay open") {
                 DaemonEvent::CommandStepUpdate { command_id: id, description, status, .. } if id == command_id => {
-                    if description == "Create workspace" && status == StepStatus::Started {
+                    if description == "Attach workspace" && status == StepStatus::Started {
                         workspace_started = true;
                     }
                 }
@@ -1279,7 +1314,7 @@ async fn cancel_active_remote_segment_routes_remote_step_cancel_and_finishes_com
             match rx.recv().await.expect("broadcast channel should stay open") {
                 DaemonEvent::CommandFinished { command_id: id, result, .. } if id == command_id => return result,
                 DaemonEvent::CommandStepUpdate { command_id: id, description, status, .. }
-                    if id == command_id && description == "Create workspace" =>
+                    if id == command_id && description == "Attach workspace" =>
                 {
                     panic!("local workspace step should not run after cancellation, saw {status:?}");
                 }
