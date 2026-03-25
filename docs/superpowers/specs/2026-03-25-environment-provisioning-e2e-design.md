@@ -71,25 +71,27 @@ The `ExecutorStepResolver` gains:
 
 `DestroyEnvironment { env_id }` — calls `handle.destroy()`, removes sandbox socket via `EnvironmentSocketRegistry::remove()`. Returns `Completed`.
 
-**Routing for `StepHost::Environment(env_id)`:** The resolver looks up the environment's `ProviderRegistry` and routes the step's action through those providers instead of the host's. Existing step actions (checkout, terminal prep, workspace creation) work unchanged — they just run against different providers.
+**Routing for `StepHost::Environment(env_id)`:** `run_step_plan_with_remote_executor()` currently handles `Local` and `Remote`. Phase D adds `Environment(env_id)` as a third arm — treated like `Local` (the environment is on the same daemon), but the resolver looks up the environment's `ProviderRegistry` and routes the step's action through those providers instead of the host's. Existing step actions (checkout, terminal prep) work unchanged — they just run against different providers.
 
 ## Plan Builder
 
 `build_plan()` in `executor.rs` checks `cmd.environment`. When present and the command involves checkout/workspace creation, it prepends environment lifecycle steps:
 
 ```
-1. EnsureEnvironmentImage { spec }             on Local
-2. CreateEnvironment { env_id, image, opts }   on Local
-3. DiscoverEnvironmentProviders { env_id }     on Local
+1. EnsureEnvironmentImage { spec }             on host_step (Remote or Local)
+2. CreateEnvironment { env_id, image, opts }   on host_step
+3. DiscoverEnvironmentProviders { env_id }     on host_step
 4. CreateCheckout { branch, ... }              on Environment(env_id)
 5. PrepareTerminalForCheckout { ... }          on Environment(env_id)
-6. CreateWorkspaceFromPreparedTerminal { ... } on Environment(env_id)
+6. CreateWorkspaceFromPreparedTerminal { ... } on Local (presentation host)
 7. ResolveAttachCommand { ... }                → HopPlan with EnterEnvironment
 ```
 
-**Why `Local`, not `Remote(host)`:** Today the whole `Command` is forwarded to the target host's daemon via peer routing (based on `Command.host`). That daemon plans and executes all steps locally. Step-level remote dispatch (#464) is a separate concern — Phase D does not require it. All steps are `Local` from the executing daemon's perspective.
+**Step routing:** #464 phase 1 (step-level remote routing) is now merged. `build_plan()` extracts `Command.host` and computes `host_step` — `StepHost::Remote(host)` if the target differs from the local daemon, `StepHost::Local` if same. Steps 1-3 (environment lifecycle) use `host_step` — they run on the daemon that owns Docker. Steps 4-5 use `StepHost::Environment(env_id)` — routed through the environment's providers. Step 6 (workspace creation) stays `Local` on the presentation host, following the existing pattern where workspace manager runs locally. Step 7 produces the hop plan.
 
-Steps 1-3 manage the environment on the host. Steps 4-6 run inside the environment (routed through the environment's providers via `StepHost::Environment`). Step 7 produces a hop plan with `EnterEnvironment` for correct attach resolution.
+The `RemoteStepExecutor` infrastructure batches consecutive remote steps and dispatches via the peer mesh. Environment steps arriving at the remote daemon are resolved locally against that daemon's `EnvironmentProvider` and environment registries.
+
+**`StepHost::Environment` dispatch:** When `run_step_plan_with_remote_executor()` encounters `StepHost::Environment(env_id)`, it resolves the step locally using the environment's `ProviderRegistry` (from `DiscoverEnvironmentProviders`). The environment's providers are already local to the daemon — they use the `EnvironmentRunner` decorator. No additional remote dispatch is needed; the step just runs against different providers than the host's.
 
 `CreateOpts` is populated by the plan builder:
 - `daemon_socket_path` — pre-created via `EnvironmentSocketRegistry::add(env_id, ...)`
@@ -183,7 +185,7 @@ Same flow with `REPLAY=passthrough` against real Docker using the `flotilla-dev-
 
 ## Dependencies
 
-- **#464 (step-level remote routing)** — not required for Phase D. Today the whole command is forwarded to the target host's daemon, which plans and executes locally. Phase D uses `StepHost::Local` for all host-side steps. #464 enables future plans where individual steps target different hosts, but the single-host environment case works without it.
+- **#464 phase 1 (step-level remote routing)** — merged (#513). `build_plan()` now extracts `Command.host` and stamps steps with `StepHost::Remote(host)`. `run_step_plan_with_remote_executor()` dispatches remote steps via the `RemoteStepExecutor` trait. Phase D uses this infrastructure: environment lifecycle steps target the host that owns Docker, while workspace creation stays local on the presentation host.
 
 ## Open Questions
 
@@ -198,5 +200,4 @@ Same flow with `REPLAY=passthrough` against real Docker using the `flotilla-dev-
 - `.flotilla/environment.yaml` parsing
 - Token config resolution (tokens passed programmatically)
 - `ProvisioningTarget` enum (proto-form is `host` + `environment` on `Command`)
-- Step-level remote routing (#464)
 - Multi-repo environment support
