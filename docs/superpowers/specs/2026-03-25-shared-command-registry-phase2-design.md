@@ -105,8 +105,8 @@ The palette parse flow:
 
 ```
 user text ("cr #42 close")
-    ↓ split into tokens
-    ↓ try palette-local commands first (layout, theme, search, etc.)
+    ↓ tokenize with shlex (shell-style quoting: "path with spaces" works)
+    ↓ try palette-local commands first (layout, theme, search, target, etc.)
     ↓ if first token is "host": parse_host_command(tokens)
     ↓ otherwise: parse_noun_command(tokens)
     ↓ resolve()
@@ -115,7 +115,7 @@ Resolved::Ready(cmd) or Resolved::NeedsContext { command, repo, host }
     ↓ dispatch to daemon
 ```
 
-**Precedence rule:** Palette-local commands are tried first because they are short, unambiguous names that don't conflict with noun names (except `host` — see below). If no palette-local command matches the first token, the input is parsed as a noun-verb command.
+**Precedence rule:** Palette-local commands are tried first. Their names (`layout`, `theme`, `target`, `search`, `refresh`, etc.) don't conflict with noun names. If no palette-local command matches the first token, the input is parsed as a noun-verb command.
 
 **Host parsing:** `NounCommand` excludes `Host` because host uses two-stage parsing (`HostNounPartial` → `refine()` → `HostNoun`). The palette needs a separate entry point for host commands:
 
@@ -131,7 +131,7 @@ pub fn parse_host_command(tokens: &[&str]) -> Result<Resolved, String> {
 
 The palette checks the first token: if `"host"`, it calls `parse_host_command`; otherwise `parse_noun_command`. This mirrors the CLI's existing two-path dispatch (`SubCommand::Host(partial) => partial.refine()?.resolve()`).
 
-**`host` ambiguity:** `host` exists as both a palette-local command (set active host) and a registry noun (with verbs like `status`, `providers`, and routing). Resolution: `host <name>` with a single argument and no verb is treated as the palette-local "set host" command. `host <name> <verb>` or `host <name> <noun> ...` is parsed as the registry noun. The palette checks whether the second token matches a known `HostVerb` or noun name to disambiguate.
+**No `host` ambiguity:** The palette-local command for setting the provisioning target is `target <name>`, not `host <name>`. This avoids collision with the `host` registry noun (whose names are unconstrained strings — a peer named `status` or `repo` would be ambiguous under a shared name). `target` is also semantically clearer — it sets the provisioning target, not "the host."
 
 For `NeedsContext`, the palette resolves ambient context from the TUI environment — repo from the active tab (`model.active_repo_identity()`), host from `HostResolution` via `resolve_host()`. Commands are pushed via `proto_commands.push(...)` on the app's command queue.
 
@@ -160,10 +160,14 @@ Completions come from the in-memory `AppModel` snapshot. No daemon queries.
 | `issue` | `providers.issues` — issue IDs |
 | `agent` | `providers.cloud_agents` — agent/session IDs |
 | `workspace` | `providers.workspaces` — workspace refs |
-| `repo` | `model.repos` — repo slugs |
+| `repo` | `model.repos` — `RepoIdentity.path` (e.g., `flotilla-org/flotilla`). If two authorities share the same path, show `authority:path` to disambiguate. |
 | `host` | `model.hosts` — host names |
 
 Verb and flag completions come from the clap `Command` tree (same as the Phase 1 static completion engine).
+
+### Context-aware filtering
+
+Commands that require an active repo (`RepoContext::Required`) are excluded from completions when no repo tab is active. For example, `checkout create` does not appear on the overview page. This prevents users from selecting commands that would immediately error.
 
 ### Tab behavior
 
@@ -181,7 +185,7 @@ Existing no-arg palette entries become argument-bearing commands. They are palet
 |---------|-----------|-------------|
 | `layout <name>` | `auto`, `zoom`, `right`, `below` | Fixed set |
 | `theme <name>` | Available theme names | Fixed set |
-| `host <name>` | `local`, known peer hostnames | From model |
+| `target <name>` | `local`, known peer hostnames | From model |
 | `search <query>` | Free text | None |
 | `refresh` | None | — |
 | `help` | None | — (toggles help overlay) |
@@ -192,7 +196,7 @@ Existing no-arg palette entries become argument-bearing commands. They are palet
 | `select` | None | — (toggle multi-select) |
 | `add-repo` | None | — (opens file picker) |
 
-The no-arg commands work as before. The argument-bearing commands (`layout`, `theme`, `host`, `search`) show completions after a space.
+The no-arg commands work as before. The argument-bearing commands (`layout`, `theme`, `target`, `search`) show completions after a space.
 
 ## Intent Adapter
 
@@ -317,15 +321,16 @@ After `intent.to_command_tokens()` produces tokens, join them into a display str
 
 ## Key Binding Changes
 
-| Key | Old action | New action |
-|-----|-----------|------------|
-| `?` | `ToggleHelp` | Contextual palette (pre-filled) |
-| `h` | `CycleHost` | `ToggleHelp` |
-| `Esc` (Normal mode) | (quit or no-op) | Clear table selection |
+| Binding | Old | New |
+|---------|-----|-----|
+| `Shared ?` | `ToggleHelp` | Remove |
+| `Normal ?` | `ToggleHelp` (hint "Help") | `OpenContextualPalette` (hint "Ctx") |
+| `Help ?` | `ToggleHelp` (hint "Close") | Remove (use `h` or `esc` to close) |
+| `Normal h` | `CycleHost` | `ToggleHelp` (hint "Help") |
+| `Help h` | (unbound) | `ToggleHelp` (hint "Close") |
+| `Esc` (Normal mode) | (quit chain) | Clear table selection (before quit in chain) |
 
-`CycleHost` has no direct replacement key — host selection moves to the palette (`host <name>`).
-
-All other bindings unchanged.
+`CycleHost` has no direct replacement key — host/target selection moves to the palette (`target <name>`).
 
 ### Esc behavior
 
@@ -341,24 +346,29 @@ All other bindings unchanged.
 The palette and intent adapter both produce `Resolved` values. The TUI needs a dispatch function analogous to `main.rs::dispatch()`:
 
 ```rust
-fn tui_dispatch(resolved: Resolved, item: Option<&WorkItem>, app: &mut App) {
+fn tui_dispatch(resolved: Resolved, item: Option<&WorkItem>, app: &mut App) -> Result<(), String> {
     match resolved {
         Resolved::Ready(cmd) => {
             app.push_command(cmd);
+            Ok(())
         }
         Resolved::NeedsContext { mut command, repo, host } => {
-            let repo_sel = RepoSelector::Identity(app.model.active_repo_identity().clone());
             match repo {
                 RepoContext::Required => {
+                    let repo_sel = app.model.active_repo_identity_opt()
+                        .map(|id| RepoSelector::Identity(id.clone()))
+                        .ok_or("no active repo — switch to a repo tab first")?;
                     command.context_repo = Some(repo_sel.clone());
                     fill_repo_sentinels(&mut command.action, repo_sel);
                 }
                 RepoContext::Inferred => {
-                    command.context_repo = Some(repo_sel);
+                    command.context_repo = app.model.active_repo_identity_opt()
+                        .map(|id| RepoSelector::Identity(id.clone()));
                 }
             }
             command.host = resolve_host(host, item, app);
             app.push_command(command);
+            Ok(())
         }
     }
 }
@@ -495,7 +505,7 @@ fn no_echo_for_non_convertible_intent() {
 - `/` opens global palette (empty)
 - `Esc` clears table selection in Normal mode
 - Help moves to `h`
-- Palette-local commands gain argument support (`layout <name>`, `theme <name>`, `host <name>`)
+- Palette-local commands gain argument support (`layout <name>`, `theme <name>`, `target <name>`)
 - Intents construct command token strings, resolve through registry
 - Command echo in status bar on key-binding actions
 - Status bar shows pre-fill preview when work item selected
