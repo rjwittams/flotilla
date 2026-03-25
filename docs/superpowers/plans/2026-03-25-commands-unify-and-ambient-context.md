@@ -16,9 +16,10 @@
 
 | File | Changes |
 |------|---------|
-| `crates/flotilla-protocol/src/commands.rs` | Add 6 CommandAction query variants, 6 CommandValue result variants, description() arms |
+| `crates/flotilla-protocol/src/commands.rs` | Add 6 CommandAction query variants, 6 CommandValue result variants, description() arms, update roundtrip tests |
 | `crates/flotilla-protocol/src/lib.rs` | Remove 6 Request variants, 6 Response variants |
 | `crates/flotilla-commands/src/resolved.rs` | Replace 10-variant Resolved with Ready/NeedsContext + RepoContext + HostResolution |
+| `crates/flotilla-commands/src/lib.rs` | Re-export RepoContext and HostResolution |
 | `crates/flotilla-commands/src/commands/repo.rs` | resolve() produces Command with Query* actions instead of Resolved query variants |
 | `crates/flotilla-commands/src/commands/host.rs` | resolve() produces Command with Query* actions; set_host collapse |
 | `crates/flotilla-commands/src/commands/checkout.rs` | resolve() returns NeedsContext with RepoContext::Required |
@@ -28,10 +29,13 @@
 | `crates/flotilla-commands/src/commands/workspace.rs` | resolve() returns NeedsContext with RepoContext::Inferred |
 | `crates/flotilla-core/src/daemon.rs` | Remove 6 query methods from DaemonHandle trait |
 | `crates/flotilla-core/src/in_process.rs` | Handle Query* actions as daemon-level commands in execute() |
+| `crates/flotilla-core/src/in_process/tests.rs` | Add query execution tests through InProcessDaemon |
 | `crates/flotilla-client/src/lib.rs` | Remove 6 query method impls from SocketDaemon |
+| `crates/flotilla-client/src/lib/tests.rs` | Update tests that reference removed Request/Response variants |
 | `crates/flotilla-daemon/src/server/request_dispatch.rs` | Remove 6 query arms from dispatch() |
+| `crates/flotilla-daemon/src/server/tests.rs` | Update tests that reference removed Request/Response variants |
 | `src/main.rs` | Simplify dispatch() to Ready/NeedsContext match with RepoContext handling |
-| `crates/flotilla-tui/src/cli.rs` | Delete 6 standalone query runners, add CommandValue formatting in run_command |
+| `crates/flotilla-tui/src/cli.rs` | Delete 6 standalone query runners, add CommandValue formatting in run_command and format_command_result |
 | `crates/flotilla-tui/src/app/executor.rs` | Add ignore arms for 6 new CommandValue variants |
 
 ---
@@ -39,7 +43,7 @@
 ## Task 1: Add Query CommandAction and CommandValue Variants
 
 **Files:**
-- Modify: `crates/flotilla-protocol/src/commands.rs`
+- Modify: `crates/flotilla-protocol/src/commands.rs` (enum variants, description(), roundtrip tests)
 
 These are additive changes — nothing breaks.
 
@@ -85,12 +89,21 @@ CommandAction::QueryHostStatus { .. } => "query host status",
 CommandAction::QueryHostProviders { .. } => "query host providers",
 ```
 
-- [ ] **Step 4: Build and verify**
+- [ ] **Step 4: Update protocol roundtrip tests**
 
-Run: `cargo build --workspace --locked`
-Expected: compiles with warnings about unused variants (acceptable at this stage)
+In `crates/flotilla-protocol/src/commands.rs`, update the exhaustive roundtrip tests:
+- `command_roundtrip_covers_all_variants` — add entries for all 6 Query\* CommandAction variants
+- `command_value_roundtrip_covers_all_variants` — add entries for all 6 query result CommandValue variants
+- `command_description_covers_all_variants` — add entries for the 6 new description() arms
 
-- [ ] **Step 5: Commit**
+These tests use exhaustive matching to ensure every variant is covered, so they will fail to compile without the new arms.
+
+- [ ] **Step 5: Build and verify**
+
+Run: `cargo build --workspace --locked && cargo test -p flotilla-protocol --locked`
+Expected: compiles and protocol tests pass
+
+- [ ] **Step 6: Commit**
 
 ```
 feat: add query CommandAction and CommandValue variants (#502)
@@ -99,6 +112,8 @@ feat: add query CommandAction and CommandValue variants (#502)
 ---
 
 ## Task 2: Collapse Resolved Enum
+
+> **Note:** Tasks 2-4 form a single compile unit. The flotilla-commands crate will not compile after Task 2 alone — noun resolve() functions still reference deleted variants. Complete Tasks 3-4 before attempting a build. Commit at the end of Task 4.
 
 **Files:**
 - Modify: `crates/flotilla-commands/src/resolved.rs`
@@ -479,7 +494,20 @@ Ok(ref event @ DaemonEvent::CommandFinished { command_id: id, ref result, .. }) 
 
 The `format_repo_detail_human`, `format_host_list_human` etc. functions already exist in cli.rs — they are used by the standalone runners. Keep them, just stop exporting the standalone `run_*` functions.
 
-- [ ] **Step 3: Delete standalone query runner functions**
+- [ ] **Step 3: Update format_command_result**
+
+In `crates/flotilla-tui/src/cli.rs`, the `format_command_result` function (around line 199) exhaustively matches `CommandValue`. Add arms for the 6 new variants:
+
+```rust
+CommandValue::RepoDetail(ref detail) => format_repo_detail_human(detail),
+CommandValue::RepoProviders(ref providers) => format_repo_providers_human(providers),
+CommandValue::RepoWork(ref work) => format_repo_work_human(work),
+CommandValue::HostList(ref hosts) => format_host_list_human(hosts),
+CommandValue::HostStatus(ref status) => format_host_status_human(status),
+CommandValue::HostProviders(ref providers) => format_host_providers_human(providers),
+```
+
+- [ ] **Step 4: Delete standalone query runner functions**
 
 Delete from `crates/flotilla-tui/src/cli.rs`:
 - `run_repo_detail()`
@@ -489,14 +517,14 @@ Delete from `crates/flotilla-tui/src/cli.rs`:
 - `run_host_status()`
 - `run_host_providers()`
 
-Keep the `format_*_human` helper functions — they're now called from `run_command`.
+Keep the `format_*_human` helper functions — they're now called from `run_command` and `format_command_result`.
 
-- [ ] **Step 4: Build and verify**
+- [ ] **Step 5: Build and verify**
 
 Run: `cargo build --workspace --locked`
-Expected: May fail if DaemonHandle methods are still referenced elsewhere. Fix any remaining call sites.
+Expected: Will still have the old DaemonHandle query methods on the trait (unused by CLI now but still present). Remaining callers to verify: `request_dispatch.rs` (uses trait methods for Request dispatch — addressed in Task 7), `SocketDaemon` (implements trait — addressed in Task 6). The build should succeed at this point since the trait methods still exist.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```
 refactor: simplify CLI dispatch to two-arm Resolved match (#502)
@@ -568,6 +596,8 @@ refactor: remove DaemonHandle query methods, handle queries in execute() (#502)
 **Files:**
 - Modify: `crates/flotilla-protocol/src/lib.rs`
 - Modify: `crates/flotilla-daemon/src/server/request_dispatch.rs`
+- Modify: `crates/flotilla-daemon/src/server/tests.rs`
+- Modify: `crates/flotilla-client/src/lib.rs` (test module)
 - Modify: `crates/flotilla-tui/src/app/executor.rs`
 
 - [ ] **Step 1: Remove Request/Response query variants**
@@ -594,7 +624,15 @@ Remove from `Response`:
 
 In `crates/flotilla-daemon/src/server/request_dispatch.rs`, remove the match arms for the deleted Request variants. Query traffic now arrives as `Request::Execute { command }` and routes through RemoteCommandRouter.
 
-- [ ] **Step 3: Add ignore arms in TUI executor.rs**
+- [ ] **Step 3: Update daemon server tests**
+
+In `crates/flotilla-daemon/src/server/tests.rs`, find all tests that reference the removed Request variants (`GetRepoDetail`, `GetRepoProviders`, `GetRepoWork`, `ListHosts`, `GetHostStatus`, `GetHostProviders`). Update them to send queries as `Request::Execute { command: Command { action: CommandAction::QueryRepoDetail { .. }, .. } }` instead.
+
+- [ ] **Step 4: Update client tests**
+
+In `crates/flotilla-client/src/lib/tests.rs` (or `crates/flotilla-client/src/lib.rs` test module), find tests that reference `Request::ListHosts`, `Response::ListHosts`, and other removed variants. Update to use the new query Command path.
+
+- [ ] **Step 5: Add ignore arms in TUI executor.rs**
 
 In `crates/flotilla-tui/src/app/executor.rs`, in the `handle_result` function's match on `CommandValue`, add:
 
@@ -609,20 +647,20 @@ CommandValue::RepoDetail(_)
 }
 ```
 
-- [ ] **Step 4: Build and run full test suite**
+- [ ] **Step 6: Build and run full test suite**
 
 Run: `cargo build --workspace --locked && cargo test --workspace --locked`
 Expected: All pass. This completes #502.
 
-- [ ] **Step 5: Run clippy**
+- [ ] **Step 7: Run clippy**
 
 Run: `cargo clippy --workspace --all-targets --locked -- -D warnings`
 
-- [ ] **Step 6: Run fmt check**
+- [ ] **Step 8: Run fmt check**
 
 Run: `cargo +nightly-2026-03-12 fmt --check`
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```
 refactor: remove protocol query Request/Response variants, complete #502
@@ -630,10 +668,48 @@ refactor: remove protocol query Request/Response variants, complete #502
 
 ---
 
-## Task 8: Add RepoContext and HostResolution Enums
+## Task 8: Add Query Execution Tests Through InProcessDaemon
+
+**Files:**
+- Modify: `crates/flotilla-core/src/in_process/tests.rs` (or create a new test that uses InProcessDaemon)
+
+The spec requires testing that Query\* CommandActions through `execute()` produce correct CommandValue results.
+
+- [ ] **Step 1: Write a test for QueryRepoDetail through execute()**
+
+Use the existing `InProcessDaemon` test infrastructure. Create an InProcessDaemon, track a repo, then execute a `QueryRepoDetail` command and verify the result is `CommandValue::RepoDetail(...)`.
+
+The test pattern:
+1. Create InProcessDaemon with a test repo tracked
+2. Call `daemon.execute(Command { action: QueryRepoDetail { repo: RepoSelector::Query("slug") }, .. })`
+3. Subscribe and receive the CommandFinished event
+4. Assert the result matches `CommandValue::RepoDetail(_)`
+
+- [ ] **Step 2: Write a test for QueryHostList**
+
+Similar pattern but for host queries — no repo needed:
+1. Create InProcessDaemon
+2. Execute `QueryHostList`
+3. Assert result matches `CommandValue::HostList(_)`
+
+- [ ] **Step 3: Run the tests**
+
+Run: `cargo test -p flotilla-core --locked -- query`
+Expected: PASS
+
+- [ ] **Step 4: Commit**
+
+```
+test: add query execution tests through InProcessDaemon (#502)
+```
+
+---
+
+## Task 9: Add RepoContext and HostResolution Enums
 
 **Files:**
 - Modify: `crates/flotilla-commands/src/resolved.rs`
+- Modify: `crates/flotilla-commands/src/lib.rs`
 
 This begins #506 work.
 
@@ -665,12 +741,20 @@ pub enum HostResolution {
 }
 ```
 
-- [ ] **Step 2: Build to verify**
+- [ ] **Step 2: Add re-exports in lib.rs**
+
+In `crates/flotilla-commands/src/lib.rs`, add to the existing `pub use resolved::` line:
+
+```rust
+pub use resolved::{HostResolution, Refinable, RepoContext, Resolved};
+```
+
+- [ ] **Step 3: Build to verify**
 
 Run: `cargo build -p flotilla-commands --locked`
 Expected: Compiles (additive, nothing uses these yet)
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```
 feat: add RepoContext and HostResolution enums (#506)
@@ -678,7 +762,7 @@ feat: add RepoContext and HostResolution enums (#506)
 
 ---
 
-## Task 9: Reshape Resolved to Ready/NeedsContext
+## Task 10: Reshape Resolved to Ready/NeedsContext
 
 **Files:**
 - Modify: `crates/flotilla-commands/src/resolved.rs`
@@ -756,7 +840,7 @@ impl Resolved {
 
 Apply the context table. Key pattern per noun:
 
-**repo.rs:** Queries and daemon-level commands → `Ready`. Checkout with explicit repo → `Ready`. PrepareTerminal → assess and set appropriately.
+**repo.rs:** Queries and daemon-level commands → `Ready`. Checkout with explicit repo → `Ready`. PrepareTerminal → `NeedsContext { repo: Inferred, host: SubjectHost }` (current code sets context_repo explicitly via `RepoSelector::Query(subject)`, so this is actually `Ready` — but the spec says SubjectHost, and the TUI intent uses `item_host_repo_command`. Set to `Ready` since the repo is explicit in the noun form `repo <slug> prepare-terminal <path>`).
 
 **checkout.rs:** Create → `NeedsContext { repo: Required, host: ProvisioningTarget }`. Remove/Status → `NeedsContext { repo: Inferred, host: SubjectHost }`.
 
@@ -768,9 +852,9 @@ Apply the context table. Key pattern per noun:
 
 **workspace.rs:** Select → `NeedsContext { repo: Inferred, host: Local }`.
 
-**host.rs:** Queries → `Ready`. Refresh → `Ready` (already has host set). Route → resolve inner, call set_host.
+**host.rs:** Queries → `Ready`. Refresh → `Ready` (already has host set). Route → resolve inner, call `set_host()`.
 
-For host-routed commands, the inner noun resolves to NeedsContext. `set_host()` sets the host on the NeedsContext command. The routed result keeps its NeedsContext status.
+For host-routed commands, the inner noun may resolve to `NeedsContext`. `set_host()` sets `Command.host` on the NeedsContext's command field. The `HostResolution` metadata from the inner noun is preserved — `set_host()` does not override it. This is correct: the CLI dispatch ignores `HostResolution` (uses `..`), and the TUI's Phase 2 `tui_dispatch` should check if `Command.host` is already set before calling `resolve_host()`.
 
 - [ ] **Step 5: Update main.rs dispatch**
 
@@ -837,7 +921,7 @@ feat: reshape Resolved to Ready/NeedsContext with RepoContext and HostResolution
 
 ---
 
-## Task 10: Final Verification
+## Task 11: Final Verification
 
 - [ ] **Step 1: Run the full CI gate**
 
