@@ -18,6 +18,13 @@ fn write_repo_file(base: &Path, filename: &str, content: &str) {
     std::fs::write(repos_dir.join(filename), content).unwrap();
 }
 
+fn colliding_repo_paths(base: &Path) -> (PathBuf, PathBuf) {
+    let repo_a = make_dir(&make_dir(base, "a-b"), "c");
+    let repo_b = make_dir(&make_dir(base, "a"), "b-c");
+    assert_eq!(path_to_slug(&repo_a), path_to_slug(&repo_b), "test setup should produce a legacy slug collision");
+    (repo_a, repo_b)
+}
+
 #[test]
 fn path_to_slug_covers_core_shapes() {
     let cases = [
@@ -48,6 +55,33 @@ fn save_repo_roundtrip_is_idempotent_and_removable() {
 
     store.remove_repo(&repo_ee);
     assert!(store.load_repos().is_empty());
+}
+
+#[test]
+fn save_repo_tracks_paths_with_same_legacy_slug_independently() {
+    let dir = tempdir().unwrap();
+    let base = dir.path();
+    let (repo_a, repo_b) = colliding_repo_paths(base);
+
+    let store = ConfigStore::with_base(base);
+    store.save_repo(&ee(&repo_a));
+    store.save_repo(&ee(&repo_b));
+
+    assert_eq!(store.load_repos(), vec![ee(repo_a), ee(repo_b)]);
+}
+
+#[test]
+fn remove_repo_only_removes_matching_path_when_legacy_slugs_collide() {
+    let dir = tempdir().unwrap();
+    let base = dir.path();
+    let (repo_a, repo_b) = colliding_repo_paths(base);
+
+    let store = ConfigStore::with_base(base);
+    store.save_repo(&ee(&repo_a));
+
+    store.remove_repo(&ee(&repo_b));
+
+    assert_eq!(store.load_repos(), vec![ee(repo_a)]);
 }
 
 #[test]
@@ -224,11 +258,28 @@ fn resolve_checkout_config_uses_global_when_repo_file_missing_or_invalid() {
     assert_eq!(from_global.path, "/global/path");
     assert_eq!(from_global.strategy, "wt");
 
-    let slug = path_to_slug(&repo);
-    write_repo_file(base, &format!("{slug}.toml"), "{{invalid toml!!!");
+    let key = repo_file_key(&repo);
+    write_repo_file(base, &format!("{key}.toml"), "{{invalid toml!!!");
     let from_invalid = store.resolve_checkout_config(&repo_ee);
     assert_eq!(from_invalid.path, "/global/path");
     assert_eq!(from_invalid.strategy, "wt");
+}
+
+#[test]
+fn resolve_checkout_config_does_not_apply_override_from_different_colliding_path() {
+    let dir = tempdir().unwrap();
+    let base = dir.path();
+    std::fs::write(base.join("config.toml"), "[vcs.git]\ncheckout_path = \"/global/path\"\ncheckout_strategy = \"wt\"\n").unwrap();
+
+    let (repo_a, repo_b) = colliding_repo_paths(base);
+    let store = ConfigStore::with_base(base);
+    let key = repo_file_key(&repo_a);
+    let repo_toml = format!("path = \"{}\"\n[vcs.git]\ncheckout_path = \"/repo-a/path\"\n", repo_a.display());
+    write_repo_file(base, &format!("{key}.toml"), &repo_toml);
+
+    let resolved = store.resolve_checkout_config(&ee(&repo_b));
+    assert_eq!(resolved.path, "/global/path");
+    assert_eq!(resolved.strategy, "wt");
 }
 
 #[test]
@@ -240,25 +291,25 @@ fn resolve_checkout_config_repo_override_merges_with_global() {
     let repo = make_dir(base, "repo");
     let repo_ee = ee(&repo);
     let store = ConfigStore::with_base(base);
-    let slug = path_to_slug(&repo);
+    let key = repo_file_key(&repo);
 
     // Override path only — strategy inherited from global
     let repo_toml = format!("path = \"{}\"\n[vcs.git]\ncheckout_path = \"/repo/path\"\n", repo.display());
-    write_repo_file(base, &format!("{slug}.toml"), &repo_toml);
+    write_repo_file(base, &format!("{key}.toml"), &repo_toml);
     let resolved = store.resolve_checkout_config(&repo_ee);
     assert_eq!(resolved.path, "/repo/path");
     assert_eq!(resolved.strategy, "wt");
 
     // Override strategy only — path inherited from global
     let repo_toml = format!("path = \"{}\"\n[vcs.git]\ncheckout_strategy = \"git\"\n", repo.display());
-    write_repo_file(base, &format!("{slug}.toml"), &repo_toml);
+    write_repo_file(base, &format!("{key}.toml"), &repo_toml);
     let resolved = store.resolve_checkout_config(&repo_ee);
     assert_eq!(resolved.path, "/global/path");
     assert_eq!(resolved.strategy, "git");
 
     // No overrides — both from global
     let repo_toml = format!("path = \"{}\"\n", repo.display());
-    write_repo_file(base, &format!("{slug}.toml"), &repo_toml);
+    write_repo_file(base, &format!("{key}.toml"), &repo_toml);
     let resolved = store.resolve_checkout_config(&repo_ee);
     assert_eq!(resolved.path, "/global/path");
     assert_eq!(resolved.strategy, "wt");
