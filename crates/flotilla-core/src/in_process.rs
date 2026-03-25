@@ -36,8 +36,7 @@ use crate::{
     refresh::RefreshSnapshot,
     repo_state::{RepoRootState, RepoState, SnapshotBuildContext},
     step::{
-        run_step_plan_with_remote_executor, RemoteStepBatchRequest, RemoteStepExecutor, RemoteStepProgressSink, StepOutcome,
-        StepResolver,
+        run_step_plan_with_remote_executor, RemoteStepBatchRequest, RemoteStepExecutor, RemoteStepProgressSink, StepOutcome, StepResolver,
     },
 };
 
@@ -1733,7 +1732,8 @@ impl InProcessDaemon {
                     Ok(v) => flotilla_protocol::CommandValue::HostList(Box::new(v)),
                     Err(message) => flotilla_protocol::CommandValue::Error { message },
                 },
-                flotilla_protocol::CommandAction::QueryHostStatus { target_host } => match self.get_host_status_internal(target_host).await {
+                flotilla_protocol::CommandAction::QueryHostStatus { target_host } => match self.get_host_status_internal(target_host).await
+                {
                     Ok(v) => flotilla_protocol::CommandValue::HostStatus(Box::new(v)),
                     Err(message) => flotilla_protocol::CommandValue::Error { message },
                 },
@@ -1956,12 +1956,12 @@ impl InProcessDaemon {
                         config_base: resolver_config_base,
                         attachable_store: resolver_attachable_store,
                         daemon_socket_path: daemon_socket_dhp.clone(),
-                        local_host: resolver_local_host,
+                        local_host: resolver_local_host.clone(),
                     };
                     let result = run_step_plan_with_remote_executor(
                         step_plan,
                         id,
-                        command_host.clone(),
+                        resolver_local_host,
                         repo_identity.clone(),
                         ExecutionEnvironmentPath::new(&repo_path),
                         token,

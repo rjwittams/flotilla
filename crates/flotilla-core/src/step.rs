@@ -79,7 +79,7 @@ impl StepPlan {
 pub async fn run_step_plan(
     plan: StepPlan,
     command_id: u64,
-    host: HostName,
+    local_host: HostName,
     repo_identity: RepoIdentity,
     repo: ExecutionEnvironmentPath,
     cancel: CancellationToken,
@@ -87,7 +87,8 @@ pub async fn run_step_plan(
     resolver: &dyn StepResolver,
 ) -> CommandValue {
     let remote_executor = UnsupportedRemoteStepExecutor;
-    run_step_plan_with_remote_executor(plan, command_id, host, repo_identity, repo, cancel, event_tx, resolver, &remote_executor).await
+    run_step_plan_with_remote_executor(plan, command_id, local_host, repo_identity, repo, cancel, event_tx, resolver, &remote_executor)
+        .await
 }
 
 /// Execute a step plan with explicit remote-step handling.
@@ -95,7 +96,7 @@ pub async fn run_step_plan(
 pub async fn run_step_plan_with_remote_executor(
     plan: StepPlan,
     command_id: u64,
-    host: HostName,
+    local_host: HostName,
     repo_identity: RepoIdentity,
     repo: ExecutionEnvironmentPath,
     cancel: CancellationToken,
@@ -119,7 +120,7 @@ pub async fn run_step_plan_with_remote_executor(
                 emit_step_update(
                     &event_tx,
                     command_id,
-                    host.clone(),
+                    local_host.clone(),
                     repo_identity.clone(),
                     repo.as_path().to_path_buf(),
                     i,
@@ -145,7 +146,7 @@ pub async fn run_step_plan_with_remote_executor(
                         emit_step_update(
                             &event_tx,
                             command_id,
-                            host.clone(),
+                            local_host.clone(),
                             repo_identity.clone(),
                             repo.as_path().to_path_buf(),
                             i,
@@ -159,7 +160,7 @@ pub async fn run_step_plan_with_remote_executor(
                         emit_step_update(
                             &event_tx,
                             command_id,
-                            host.clone(),
+                            local_host.clone(),
                             repo_identity.clone(),
                             repo.as_path().to_path_buf(),
                             i,
@@ -254,6 +255,7 @@ pub async fn run_step_plan_with_remote_executor(
         .unwrap_or(CommandValue::Ok)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_step_update(
     event_tx: &broadcast::Sender<DaemonEvent>,
     command_id: u64,
@@ -317,7 +319,7 @@ impl EventForwardingProgressSink {
 
         Some(SynthesizedRemoteFailure {
             batch_step_index: state.latest_batch_step_index,
-            description: state.latest_description.clone().unwrap_or_else(|| message),
+            description: state.latest_description.clone().unwrap_or(message),
         })
     }
 }

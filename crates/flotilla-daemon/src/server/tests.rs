@@ -765,6 +765,133 @@ async fn remote_command_remote_step_events_remap_to_presentation_command_id_and_
 }
 
 #[tokio::test]
+async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let repo_identity = init_git_repo_with_remote(&repo, "git@github.com:owner/repo.git");
+    let config = Arc::new(ConfigStore::with_base(tmp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, git_process_discovery(false), HostName::new("local")).await;
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh repo");
+
+    let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
+    let pending_remote_commands = Arc::new(Mutex::new(HashMap::new()));
+    let forwarded_commands = Arc::new(Mutex::new(HashMap::new()));
+    let pending_remote_cancels = Arc::new(Mutex::new(HashMap::new()));
+    let next_remote_command_id = Arc::new(AtomicU64::new(1 << 62));
+    let sent = Arc::new(StdMutex::new(Vec::new()));
+    peer_manager.lock().await.register_sender(HostName::new("feta"), Arc::new(MockPeerSender { sent: Arc::clone(&sent) }));
+    let remote_command_router = make_remote_command_router(
+        &daemon,
+        &peer_manager,
+        &pending_remote_commands,
+        &forwarded_commands,
+        &pending_remote_cancels,
+        &next_remote_command_id,
+    );
+
+    let mut rx = daemon.subscribe();
+    let command_id = remote_command_router
+        .dispatch_execute(Command {
+            host: Some(HostName::new("feta")),
+            context_repo: None,
+            action: CommandAction::Checkout {
+                repo: RepoSelector::Identity(repo_identity.clone()),
+                target: CheckoutTarget::FreshBranch("feat-workspace-local".into()),
+                issue_ids: vec![],
+            },
+        })
+        .await
+        .expect("dispatch execute");
+
+    let request_id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(request_id) = sent.lock().expect("lock").iter().find_map(|msg| match msg {
+                PeerWireMessage::Routed(RoutedPeerMessage::RemoteStepRequest { request_id, step_offset, steps, target_host, .. }) => {
+                    assert_eq!(*target_host, HostName::new("feta"));
+                    assert_eq!(*step_offset, 0);
+                    assert_eq!(steps.len(), 1, "workspace step should stay local");
+                    assert!(matches!(steps[0].action, StepAction::CreateCheckout { .. }));
+                    Some(*request_id)
+                }
+                _ => None,
+            }) {
+                return request_id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timeout waiting for remote step request");
+
+    remote_command_router
+        .emit_remote_step_event(
+            request_id,
+            HostName::new("feta"),
+            0,
+            1,
+            "Create checkout for branch feat-workspace-local".into(),
+            StepStatus::Started,
+        )
+        .await;
+    remote_command_router
+        .emit_remote_step_event(
+            request_id,
+            HostName::new("feta"),
+            0,
+            1,
+            "Create checkout for branch feat-workspace-local".into(),
+            StepStatus::Succeeded,
+        )
+        .await;
+    remote_command_router
+        .complete_remote_step(request_id, HostName::new("feta"), vec![flotilla_protocol::StepOutcome::CompletedWith(
+            CommandValue::CheckoutCreated {
+                branch: "feat-workspace-local".into(),
+                path: PathBuf::from("/srv/feta/repo/wt-feat-workspace-local"),
+            },
+        )])
+        .await;
+
+    let mut saw_remote_step = false;
+    let workspace_event = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match rx.recv().await.expect("broadcast channel should stay open") {
+                DaemonEvent::CommandStepUpdate { command_id: id, host, description, status, .. } if id == command_id => {
+                    if description == "Create checkout for branch feat-workspace-local" && status == StepStatus::Started {
+                        saw_remote_step = true;
+                    }
+                    if description == "Create workspace" && status == StepStatus::Started {
+                        return host;
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for local workspace step");
+
+    assert!(saw_remote_step, "expected remote checkout progress before workspace creation");
+    assert_eq!(workspace_event, HostName::new("local"));
+
+    let finished = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match rx.recv().await.expect("broadcast channel should stay open") {
+                DaemonEvent::CommandFinished { command_id: id, result, .. } if id == command_id => return result,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for command completion");
+
+    assert_eq!(finished, CommandValue::CheckoutCreated {
+        branch: "feat-workspace-local".into(),
+        path: PathBuf::from("/srv/feta/repo/wt-feat-workspace-local"),
+    });
+}
+
+#[tokio::test]
 async fn dispatch_request_execute_remote_does_not_hold_peer_manager_lock_across_send() {
     let (_tmp, daemon) = empty_daemon().await;
     let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
@@ -1001,10 +1128,7 @@ async fn cancel_active_remote_segment_routes_remote_step_cancel_and_finishes_com
     let remote_pending_remote_cancels = Arc::new(Mutex::new(HashMap::new()));
     let remote_next_remote_command_id = Arc::new(AtomicU64::new(1 << 62));
     let remote_sent = Arc::new(StdMutex::new(Vec::new()));
-    remote_peer_manager
-        .lock()
-        .await
-        .register_sender(HostName::new("local"), Arc::new(MockPeerSender { sent: Arc::clone(&remote_sent) }));
+    remote_peer_manager.lock().await.register_sender(HostName::new("local"), Arc::new(MockPeerSender { sent: Arc::clone(&remote_sent) }));
     let remote_router = make_remote_command_router(
         &remote_daemon,
         &remote_peer_manager,
@@ -1014,12 +1138,8 @@ async fn cancel_active_remote_segment_routes_remote_step_cancel_and_finishes_com
         &remote_next_remote_command_id,
     );
     let remote_cancel = CancellationToken::new();
-    remote_router
-        .insert_running_forwarded_remote_step_batch_for_test(request_id, remote_cancel.clone())
-        .await;
-    remote_router
-        .cancel_forwarded_remote_step_batch_for_test(cancel_id, HostName::new("local"), HostName::new("local"), request_id)
-        .await;
+    remote_router.insert_running_forwarded_remote_step_batch_for_test(request_id, remote_cancel.clone()).await;
+    remote_router.cancel_forwarded_remote_step_batch_for_test(cancel_id, HostName::new("local"), HostName::new("local"), request_id).await;
     assert!(remote_cancel.is_cancelled(), "target-host cancel path should cancel the active remote batch token");
 
     let remote_cancel_error = {

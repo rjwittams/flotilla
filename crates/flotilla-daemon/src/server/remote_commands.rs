@@ -221,6 +221,7 @@ impl RemoteCommandRouter {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn spawn_forwarded_remote_step_batch(
         &self,
         request_id: u64,
@@ -570,14 +571,11 @@ impl RemoteCommandRouter {
     }
 
     #[cfg(test)]
-    pub(super) async fn insert_running_forwarded_remote_step_batch_for_test(
-        &self,
-        request_id: u64,
-        cancel: CancellationToken,
-    ) {
-        self.forwarded_remote_step_batches.lock().await.insert(request_id, ForwardedRemoteStepBatch {
-            state: ForwardedRemoteStepBatchState::Running { cancel },
-        });
+    pub(super) async fn insert_running_forwarded_remote_step_batch_for_test(&self, request_id: u64, cancel: CancellationToken) {
+        self.forwarded_remote_step_batches
+            .lock()
+            .await
+            .insert(request_id, ForwardedRemoteStepBatch { state: ForwardedRemoteStepBatchState::Running { cancel } });
     }
 
     #[cfg(test)]
@@ -699,6 +697,7 @@ impl RemoteCommandRouter {
         sender.send(PeerWireMessage::Routed(second)).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_forwarded_remote_step_batch(
         &self,
         request_id: u64,

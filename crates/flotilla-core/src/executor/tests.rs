@@ -1854,6 +1854,36 @@ async fn build_plan_create_checkout_uses_command_host_for_checkout_steps() {
 }
 
 #[tokio::test]
+async fn build_plan_remote_checkout_with_issue_links_keeps_workspace_local() {
+    let mut registry = empty_registry();
+    registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
+    registry.workspace_managers.insert("cmux", desc("cmux"), Arc::new(MockWorkspaceManager::succeeding()));
+
+    let plan = build_plan(
+        command_with_host("feta", CommandAction::Checkout {
+            repo: repo_selector(),
+            target: CheckoutTarget::FreshBranch("feat-x".to_string()),
+            issue_ids: vec![("github".into(), "123".into())],
+        }),
+        RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+        Arc::new(registry),
+        Arc::new(empty_data()),
+        config_base(),
+        test_attachable_store(&config_base()),
+        None,
+        local_host(),
+    )
+    .await
+    .expect("build plan");
+
+    assert_eq!(plan.steps.len(), 3);
+    assert_eq!(plan.steps[0].host, StepHost::Remote(HostName::new("feta")));
+    assert_eq!(plan.steps[1].host, StepHost::Remote(HostName::new("feta")));
+    assert_eq!(plan.steps[2].description, "Create workspace");
+    assert_eq!(plan.steps[2].host, StepHost::Local);
+}
+
+#[tokio::test]
 async fn build_plan_create_checkout_treats_local_host_as_local() {
     let mut registry = empty_registry();
     registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));

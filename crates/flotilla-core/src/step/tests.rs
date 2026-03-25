@@ -567,11 +567,8 @@ async fn remote_error_does_not_duplicate_failed_progress() {
 
     let (cancel, tx) = setup();
     let mut rx = tx.subscribe();
-    let plan = StepPlan::new(vec![Step {
-        description: "remote".into(),
-        host: StepHost::Remote(HostName::new("feta")),
-        action: StepAction::Noop,
-    }]);
+    let plan =
+        StepPlan::new(vec![Step { description: "remote".into(), host: StepHost::Remote(HostName::new("feta")), action: StepAction::Noop }]);
     let remote = TestRemoteExecutor::new(vec![TestRemoteBatch {
         assert_host: HostName::new("feta"),
         progress: vec![
