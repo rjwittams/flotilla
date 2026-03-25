@@ -129,15 +129,36 @@ pub struct PendingResyncRequest {
 }
 
 pub struct PendingPeerSend {
+    pub target: HostName,
     pub sender: Arc<dyn PeerSender>,
     pub msg: PeerWireMessage,
 }
 
 pub async fn dispatch_pending_sends(pending_sends: Vec<PendingPeerSend>) {
     for pending in pending_sends {
+        let msg_kind = peer_wire_message_kind(&pending.msg);
         if let Err(e) = pending.sender.send(pending.msg).await {
-            warn!(err = %e, "failed to dispatch queued peer message");
+            warn!(peer = %pending.target, msg_kind, err = %e, "failed to dispatch queued peer message");
         }
+    }
+}
+
+fn peer_wire_message_kind(msg: &PeerWireMessage) -> &'static str {
+    match msg {
+        PeerWireMessage::Data(_) => "data",
+        PeerWireMessage::HostSummary(_) => "host_summary",
+        PeerWireMessage::Routed(msg) => match msg {
+            RoutedPeerMessage::RequestResync { .. } => "request_resync",
+            RoutedPeerMessage::ResyncSnapshot { .. } => "resync_snapshot",
+            RoutedPeerMessage::CommandRequest { .. } => "command_request",
+            RoutedPeerMessage::CommandCancelRequest { .. } => "command_cancel_request",
+            RoutedPeerMessage::CommandEvent { .. } => "command_event",
+            RoutedPeerMessage::CommandResponse { .. } => "command_response",
+            RoutedPeerMessage::CommandCancelResponse { .. } => "command_cancel_response",
+        },
+        PeerWireMessage::Goodbye { .. } => "goodbye",
+        PeerWireMessage::Ping { .. } => "ping",
+        PeerWireMessage::Pong { .. } => "pong",
     }
 }
 
@@ -684,7 +705,11 @@ impl PeerManager {
                     data,
                 };
                 if let Some(sender) = self.senders.get(&reverse_hop.next_hop).cloned() {
-                    self.pending_sends.push(PendingPeerSend { sender, msg: PeerWireMessage::Routed(forwarded) });
+                    self.pending_sends.push(PendingPeerSend {
+                        target: reverse_hop.next_hop.clone(),
+                        sender,
+                        msg: PeerWireMessage::Routed(forwarded),
+                    });
                 }
                 self.reverse_paths.remove(&key);
                 HandleResult::Ignored
@@ -777,7 +802,11 @@ impl PeerManager {
                     event,
                 };
                 if let Some(sender) = self.senders.get(&reverse_hop.next_hop).cloned() {
-                    self.pending_sends.push(PendingPeerSend { sender, msg: PeerWireMessage::Routed(forwarded) });
+                    self.pending_sends.push(PendingPeerSend {
+                        target: reverse_hop.next_hop.clone(),
+                        sender,
+                        msg: PeerWireMessage::Routed(forwarded),
+                    });
                 }
                 HandleResult::Ignored
             }
@@ -808,7 +837,11 @@ impl PeerManager {
                     result,
                 };
                 if let Some(sender) = self.senders.get(&reverse_hop.next_hop).cloned() {
-                    self.pending_sends.push(PendingPeerSend { sender, msg: PeerWireMessage::Routed(forwarded) });
+                    self.pending_sends.push(PendingPeerSend {
+                        target: reverse_hop.next_hop.clone(),
+                        sender,
+                        msg: PeerWireMessage::Routed(forwarded),
+                    });
                 }
                 self.command_reverse_paths.remove(&key);
                 HandleResult::Ignored
@@ -844,7 +877,11 @@ impl PeerManager {
                     error,
                 };
                 if let Some(sender) = self.senders.get(&reverse_hop.next_hop).cloned() {
-                    self.pending_sends.push(PendingPeerSend { sender, msg: PeerWireMessage::Routed(forwarded) });
+                    self.pending_sends.push(PendingPeerSend {
+                        target: reverse_hop.next_hop.clone(),
+                        sender,
+                        msg: PeerWireMessage::Routed(forwarded),
+                    });
                 }
                 self.command_reverse_paths.remove(&key);
                 HandleResult::Ignored
@@ -1131,8 +1168,10 @@ impl PeerManager {
     }
 
     fn queue_send_to(&mut self, name: &HostName, msg: PeerWireMessage) {
-        if let Ok(sender) = self.resolve_sender(name) {
-            self.pending_sends.push(PendingPeerSend { sender, msg });
+        let msg_kind = peer_wire_message_kind(&msg);
+        match self.resolve_sender(name) {
+            Ok(sender) => self.pending_sends.push(PendingPeerSend { target: name.clone(), sender, msg }),
+            Err(e) => warn!(peer = %name, msg_kind, err = %e, "failed to queue peer message"),
         }
     }
 
