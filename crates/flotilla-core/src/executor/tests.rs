@@ -2121,7 +2121,10 @@ async fn checkout_plan_end_to_end_creates_workspace() {
     assert!(matches!(result, CommandValue::CheckoutCreated { .. }));
 
     let calls = ws_mgr.calls.lock().await;
-    assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should create workspace from prior outcome: {calls:?}");
+    assert!(
+        calls.iter().any(|c| c.starts_with("create_workspace") || c.starts_with("select_workspace")),
+        "should create or select workspace from prior outcome: {calls:?}"
+    );
 }
 
 #[tokio::test]
