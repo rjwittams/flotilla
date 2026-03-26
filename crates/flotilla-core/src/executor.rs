@@ -94,9 +94,15 @@ pub async fn build_plan(
     daemon_socket_path: Option<DaemonHostPath>,
     local_host: HostName,
 ) -> Result<StepPlan, CommandValue> {
-    let Command { host, action, .. } = cmd;
+    let Command { host, environment, action, .. } = cmd;
     let target_host = host.unwrap_or_else(|| local_host.clone());
     let checkout_host = StepExecutionContext::Host(target_host.clone());
+
+    if let Some(spec) = environment {
+        if let CommandAction::Checkout { target, issue_ids, .. } = action {
+            return Ok(build_environment_checkout_plan(spec, target, issue_ids, target_host, local_host));
+        }
+    }
 
     match action {
         CommandAction::Checkout { target, issue_ids, .. } => {
@@ -262,6 +268,71 @@ fn build_create_checkout_plan(
 
     let workspace_label = workspace_label_for_host(&branch, &workspace_host, &local_host);
     steps.extend(build_create_workspace_plan(workspace_label, None, workspace_host, local_host).steps);
+
+    StepPlan::new(steps)
+}
+
+/// Build a step plan for an environment-targeted checkout.
+///
+/// Steps:
+/// 1. EnsureEnvironmentImage on Host(target_host)
+/// 2. CreateEnvironment on Host(target_host)
+/// 3. DiscoverEnvironmentProviders on Host(target_host)
+/// 4. CreateCheckout on Environment(target_host, env_id)
+/// 5. PrepareWorkspace on Environment(target_host, env_id)
+/// 6. AttachWorkspace on Host(local_host)
+fn build_environment_checkout_plan(
+    spec: flotilla_protocol::EnvironmentSpec,
+    target: CheckoutTarget,
+    issue_ids: Vec<(String, String)>,
+    target_host: HostName,
+    local_host: HostName,
+) -> StepPlan {
+    let (branch, create_branch, intent) = match target {
+        CheckoutTarget::Branch(branch) => (branch, false, CheckoutIntent::ExistingBranch),
+        CheckoutTarget::FreshBranch(branch) => (branch, true, CheckoutIntent::FreshBranch),
+    };
+
+    let env_id = flotilla_protocol::EnvironmentId::new(uuid::Uuid::new_v4().to_string());
+    let host_context = StepExecutionContext::Host(target_host.clone());
+    let env_context = StepExecutionContext::Environment(target_host.clone(), env_id.clone());
+
+    let mut steps = vec![
+        Step {
+            description: "Ensure environment image".to_string(),
+            host: host_context.clone(),
+            action: StepAction::EnsureEnvironmentImage { spec },
+        },
+        Step {
+            description: format!("Create environment {env_id}"),
+            host: host_context.clone(),
+            action: StepAction::CreateEnvironment { env_id: env_id.clone(), image: flotilla_protocol::ImageId::new("placeholder") },
+        },
+        Step {
+            description: format!("Discover providers in environment {env_id}"),
+            host: host_context,
+            action: StepAction::DiscoverEnvironmentProviders { env_id: env_id.clone() },
+        },
+        Step {
+            description: format!("Create checkout for branch {branch}"),
+            host: env_context.clone(),
+            action: StepAction::CreateCheckout { branch: branch.clone(), create_branch, intent, issue_ids },
+        },
+    ];
+
+    let workspace_label = if target_host == local_host { branch.clone() } else { format!("{branch}@{target_host}") };
+
+    steps.push(Step {
+        description: format!("Prepare workspace for {workspace_label}"),
+        host: env_context,
+        action: StepAction::PrepareWorkspace { checkout_path: None, label: workspace_label },
+    });
+
+    steps.push(Step {
+        description: "Attach workspace".to_string(),
+        host: StepExecutionContext::Host(local_host),
+        action: StepAction::AttachWorkspace,
+    });
 
     StepPlan::new(steps)
 }
@@ -750,9 +821,7 @@ impl StepResolver for ExecutorStepResolver {
             StepAction::EnsureEnvironmentImage { .. }
             | StepAction::CreateEnvironment { .. }
             | StepAction::DiscoverEnvironmentProviders { .. }
-            | StepAction::DestroyEnvironment { .. } => {
-                Err("environment lifecycle steps not yet wired".to_string())
-            }
+            | StepAction::DestroyEnvironment { .. } => Err("environment lifecycle steps not yet wired".to_string()),
             StepAction::Noop => Ok(StepOutcome::Completed),
         }
     }

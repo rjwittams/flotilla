@@ -2333,6 +2333,126 @@ async fn build_plan_simple_command_returns_ok() {
 }
 
 // -----------------------------------------------------------------------
+// Tests: environment checkout plan
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn build_plan_with_environment_prepends_lifecycle_steps() {
+    let registry = empty_registry();
+    let data = empty_data();
+
+    let spec = flotilla_protocol::EnvironmentSpec {
+        image: flotilla_protocol::ImageSource::Registry("flotilla-dev-env:latest".to_string()),
+        token_requirements: vec!["github".to_string()],
+    };
+    let cmd = Command {
+        host: Some(HostName::new("feta")),
+        environment: Some(spec),
+        context_repo: Some(repo_selector()),
+        action: CommandAction::Checkout {
+            repo: repo_selector(),
+            target: CheckoutTarget::FreshBranch("feature-x".to_string()),
+            issue_ids: vec![],
+        },
+    };
+
+    let plan = build_plan(
+        cmd,
+        RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+        Arc::new(registry),
+        Arc::new(data),
+        config_base(),
+        test_attachable_store(&config_base()),
+        None,
+        HostName::new("laptop"),
+    )
+    .await
+    .expect("build_plan should succeed");
+
+    // Verify 6 steps
+    assert_eq!(plan.steps.len(), 6);
+
+    // Verify step actions in order
+    assert!(matches!(plan.steps[0].action, StepAction::EnsureEnvironmentImage { .. }));
+    assert!(matches!(plan.steps[1].action, StepAction::CreateEnvironment { .. }));
+    assert!(matches!(plan.steps[2].action, StepAction::DiscoverEnvironmentProviders { .. }));
+    assert!(matches!(plan.steps[3].action, StepAction::CreateCheckout { .. }));
+    assert!(matches!(plan.steps[4].action, StepAction::PrepareWorkspace { .. }));
+    assert!(matches!(plan.steps[5].action, StepAction::AttachWorkspace));
+
+    // Verify host assignments — steps 0-2: Host(feta)
+    assert_eq!(*plan.steps[0].host.host_name(), HostName::new("feta"));
+    assert_eq!(*plan.steps[1].host.host_name(), HostName::new("feta"));
+    assert_eq!(*plan.steps[2].host.host_name(), HostName::new("feta"));
+    assert!(matches!(&plan.steps[0].host, StepExecutionContext::Host(_)));
+    assert!(matches!(&plan.steps[1].host, StepExecutionContext::Host(_)));
+    assert!(matches!(&plan.steps[2].host, StepExecutionContext::Host(_)));
+
+    // Steps 3-4: Environment(feta, env_id)
+    assert!(matches!(&plan.steps[3].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
+    assert!(matches!(&plan.steps[4].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
+
+    // Step 5: Host(laptop) — attach on local
+    assert_eq!(*plan.steps[5].host.host_name(), HostName::new("laptop"));
+    assert!(matches!(&plan.steps[5].host, StepExecutionContext::Host(_)));
+
+    // Verify workspace label includes remote host suffix
+    if let StepAction::PrepareWorkspace { ref label, .. } = plan.steps[4].action {
+        assert_eq!(label, "feature-x@feta");
+    } else {
+        panic!("step 4 should be PrepareWorkspace");
+    }
+}
+
+#[tokio::test]
+async fn build_plan_with_environment_local_host_omits_suffix() {
+    let registry = empty_registry();
+    let data = empty_data();
+
+    let spec = flotilla_protocol::EnvironmentSpec {
+        image: flotilla_protocol::ImageSource::Registry("dev:latest".to_string()),
+        token_requirements: vec![],
+    };
+    let cmd = Command {
+        host: Some(HostName::new("laptop")),
+        environment: Some(spec),
+        context_repo: Some(repo_selector()),
+        action: CommandAction::Checkout { repo: repo_selector(), target: CheckoutTarget::Branch("main".to_string()), issue_ids: vec![] },
+    };
+
+    let plan = build_plan(
+        cmd,
+        RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+        Arc::new(registry),
+        Arc::new(data),
+        config_base(),
+        test_attachable_store(&config_base()),
+        None,
+        HostName::new("laptop"),
+    )
+    .await
+    .expect("build_plan should succeed");
+
+    assert_eq!(plan.steps.len(), 6);
+
+    // When target_host == local_host, workspace label should be just the branch
+    if let StepAction::PrepareWorkspace { ref label, .. } = plan.steps[4].action {
+        assert_eq!(label, "main");
+    } else {
+        panic!("step 4 should be PrepareWorkspace");
+    }
+
+    // Checkout step should use ExistingBranch intent
+    if let StepAction::CreateCheckout { ref branch, create_branch, intent, .. } = plan.steps[3].action {
+        assert_eq!(branch, "main");
+        assert!(!create_branch);
+        assert_eq!(intent, CheckoutIntent::ExistingBranch);
+    } else {
+        panic!("step 3 should be CreateCheckout");
+    }
+}
+
+// -----------------------------------------------------------------------
 // Tests: resolve_checkout_branch
 // -----------------------------------------------------------------------
 
