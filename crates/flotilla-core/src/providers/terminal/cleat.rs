@@ -117,6 +117,7 @@ impl TerminalPool for CleatTerminalPool {
         Ok(vec![
             Arg::Literal(self.binary.clone()),
             Arg::Literal("attach".into()),
+            // Session names are UUIDs (attachable IDs) — always shell-safe, no quoting needed.
             Arg::Literal(session_name.into()),
             Arg::Literal("--cwd".into()),
             Arg::Quoted(cwd.as_path().display().to_string()),
@@ -320,5 +321,23 @@ mod tests {
 
         // No --cmd, no NestedCommand
         assert_eq!(flat, "cleat attach sess --cwd '/wd'");
+    }
+
+    #[tokio::test]
+    async fn ensure_session_terminal_env_defaults_appear_before_caller_env() {
+        let create_json = r#"{"id":"sess","cwd":"/repo","cmd":"env TERM='xterm-256color' FOO='bar' claude","status":"Detached"}"#;
+        let runner = Arc::new(MockRunner::new(vec![Ok("[]".into()), Ok(create_json.into())]));
+        let env_defaults = vec![("TERM".to_string(), "xterm-256color".to_string())];
+        let pool = CleatTerminalPool::new(Arc::clone(&runner) as Arc<dyn CommandRunner>, "cleat").with_terminal_env_defaults(env_defaults);
+        let caller_env = vec![("FOO".to_string(), "bar".to_string())];
+
+        pool.ensure_session("sess", "claude", &ExecutionEnvironmentPath::new("/repo"), &caller_env).await.expect("ensure session");
+
+        let calls = runner.calls();
+        let cmd_idx = calls[1].1.iter().position(|a| a == "--cmd").expect("--cmd present");
+        let cmd_val = &calls[1].1[cmd_idx + 1];
+        let term_pos = cmd_val.find("TERM=").expect("should contain TERM");
+        let foo_pos = cmd_val.find("FOO=").expect("should contain FOO");
+        assert!(term_pos < foo_pos, "terminal defaults should appear before caller env vars: {cmd_val}");
     }
 }

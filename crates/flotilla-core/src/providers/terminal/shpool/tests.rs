@@ -14,6 +14,15 @@ fn test_pool(runner: Arc<MockRunner>) -> (ShpoolTerminalPool, tempfile::TempDir)
     (pool, dir)
 }
 
+fn test_pool_with_env(runner: Arc<MockRunner>, terminal_env: TerminalEnvVars) -> (ShpoolTerminalPool, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("create tempdir for shpool test");
+    let socket_path = DaemonHostPath::new(dir.path().join("shpool.socket"));
+    let config_path = DaemonHostPath::new(dir.path().join("config.toml"));
+    ShpoolTerminalPool::write_config(config_path.as_path());
+    let pool = ShpoolTerminalPool { runner, socket_path, config_path, terminal_env_defaults: terminal_env };
+    (pool, dir)
+}
+
 #[test]
 fn write_config_writes_expected_content() {
     let dir = tempfile::tempdir().expect("create tempdir");
@@ -302,4 +311,21 @@ async fn ensure_session_empty_command_starts_login_shell() {
     let cmd_idx = calls[1].1.iter().position(|a| a == "--cmd").expect("--cmd present");
     let cmd_val = &calls[1].1[cmd_idx + 1];
     assert!(!cmd_val.contains("-lic"), "empty command should not have -lic: {cmd_val}");
+}
+
+#[tokio::test]
+async fn ensure_session_terminal_env_defaults_appear_before_caller_env() {
+    let runner = Arc::new(MockRunner::new(vec![Ok(EMPTY_LIST_JSON.into()), Ok(String::new()), Ok(String::new())]));
+    let env_defaults = vec![("TERM".to_string(), "xterm-256color".to_string())];
+    let (pool, _dir) = test_pool_with_env(runner.clone(), env_defaults);
+    let caller_env = vec![("FLOTILLA_ATTACHABLE_ID".to_string(), "test-uuid".to_string())];
+
+    pool.ensure_session("sess", "claude", &ExecutionEnvironmentPath::new("/repo"), &caller_env).await.expect("ensure_session");
+
+    let calls = runner.calls();
+    let cmd_idx = calls[1].1.iter().position(|a| a == "--cmd").expect("--cmd present");
+    let cmd_val = &calls[1].1[cmd_idx + 1];
+    let term_pos = cmd_val.find("TERM=").expect("should contain TERM");
+    let flotilla_pos = cmd_val.find("FLOTILLA_ATTACHABLE_ID=").expect("should contain FLOTILLA_ATTACHABLE_ID");
+    assert!(term_pos < flotilla_pos, "terminal defaults should appear before caller env vars: {cmd_val}");
 }

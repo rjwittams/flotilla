@@ -594,6 +594,7 @@ impl TerminalPool for ShpoolTerminalPool {
             Arg::Literal("--force".into()),
             Arg::Literal("--dir".into()),
             Arg::Quoted(cwd.as_path().display().to_string()),
+            // Session names are UUIDs (attachable IDs) — always shell-safe, no quoting needed.
             Arg::Literal(session_name.into()),
         ])
     }
