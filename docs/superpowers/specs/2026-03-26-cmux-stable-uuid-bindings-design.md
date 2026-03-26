@@ -105,7 +105,7 @@ fn lookup_workspace_ref_for_set(
 
 Scans bindings where `object_kind == AttachableSet` and `object_id == set_id`, returns the `external_ref`. Linear scan over a small list.
 
-**1:1 binding invariant for workspace→set:** When `persist_workspace_binding` writes a new binding (ws_ref → set_id), it must also remove any existing workspace binding for the same set_id (same provider category/name). The current `replace_binding` is keyed by `external_ref`, so after a workspace is recreated with a new stable ID, the old binding persists alongside the new one. Without cleanup, the reverse lookup could return the stale ref. Enforcing 1:1 (one workspace per attachable set per provider) ensures the reverse lookup is unambiguous.
+**1:1 binding invariant for workspace→set:** When any code path writes a workspace binding (ws_ref → set_id), it must also remove any existing workspace binding for the same set_id (same provider category/name). This applies to both `persist_workspace_binding` and `persist_workspace_binding_for_set` — both are write paths for workspace bindings. The current `replace_binding` is keyed by `external_ref`, so after a workspace is recreated with a new stable ID, the old binding persists alongside the new one. Without cleanup, the reverse lookup could return the stale ref. Enforcing 1:1 (one workspace per attachable set per provider) ensures the reverse lookup is unambiguous. The cleanest implementation is to enforce this in `replace_binding` itself: when writing an `AttachableSet` binding, remove any existing binding with the same `(provider_category, provider_name, object_kind, object_id)` tuple before inserting.
 
 ### `WorkspaceManager` trait (workspace/mod.rs)
 
