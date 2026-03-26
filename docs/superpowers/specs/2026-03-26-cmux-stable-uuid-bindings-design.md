@@ -130,10 +130,12 @@ fn binding_scope_prefix(&self) -> String;
 During `project_attachable_data`, after iterating over live workspaces:
 
 1. Collect the set of live ws_refs from `list_workspaces()`
-2. Get the provider's `binding_scope_prefix()`
-3. For each workspace_manager binding in the store: if the binding's `external_ref` starts with the scope prefix but is NOT in the live set, remove it
+2. Get the provider's `binding_scope_prefix()` and `provider_name`
+3. For each workspace_manager binding in the store where `binding.provider_name == provider_name` AND `binding.external_ref` starts with the scope prefix: if the ws_ref is NOT in the live set, remove it
 
-This is safe because the scope prefix restricts pruning to bindings the current provider instance is authoritative about. Bindings from other sessions, server instances, or providers are untouched.
+The provider_name filter is essential — without it, cmux's empty scope prefix would match bindings from all providers. Pruning must be scoped to the specific provider first, then to the scope prefix within that provider.
+
+This is safe because it only removes bindings the current provider instance is authoritative about. Bindings from other providers, sessions, or server instances are untouched.
 
 Note: the exact shape of this scoping mechanism may evolve (e.g., into something richer when we model multi-session properly), but the semantics are correct: "prune only what I'm the authority on."
 
@@ -147,7 +149,9 @@ The current `select_existing_workspace` consults `list_workspaces()` and matches
 
 ### Migration
 
-None. We are in a no-backwards-compat phase. Existing bindings keyed on old-format refs become dead entries — and will be cleaned up by the new pruning logic on the next refresh cycle. New bindings use stable identifiers. Existing TOML state files become unused — they can be left in place or cleaned up manually.
+None. We are in a no-backwards-compat phase. New bindings use stable identifiers. Existing TOML state files become unused — they can be left in place or cleaned up manually.
+
+Legacy bindings keyed on old-format refs (plain tab/window names for zellij/tmux, `workspace:N` for cmux) become dead entries. The new pruning logic will NOT clean these up automatically: zellij/tmux legacy refs lack the `{session}:` or `{start_time}:{session}:` prefix so they fall outside the scope prefix match. cmux legacy refs (`workspace:N`) will be pruned since cmux's scope is exhaustive (empty prefix). For zellij/tmux, the legacy entries are harmless dead weight — they won't match any live workspace and can be cleaned up manually or by a one-time migration if desired.
 
 ### Tests
 
