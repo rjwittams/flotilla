@@ -1,39 +1,50 @@
-# cmux Stable UUID Bindings
+# Stable Workspace Identity for cmux and zellij
 
 ## Problem
 
-cmux workspace refs (`workspace:N`) are positional and get reused when workspaces are destroyed and recreated. The attachable binding system uses these refs as keys, so a stale binding from a deleted workspace can match a newly created workspace that happens to reuse the same ref number. This causes workspaces to be associated with the wrong repo through the correlation engine.
+Workspace manager bindings use workspace refs as keys in the attachable registry. Both cmux and zellij use unstable identifiers that can be reused or change, causing stale bindings to associate workspaces with the wrong repo.
 
-**Observed symptom:** The cleat repo's main checkout was associated with attachable set `cd72eaf4-` whose cmux binding pointed to `workspace:5` — a flotilla worktree workspace ("meta-agents-sdlc-streamlining"). The binding was created when workspace:5 was originally a cleat workspace; after that workspace was destroyed and cmux reused the ref for a flotilla workspace, the stale binding persisted.
+**cmux:** Positional refs (`workspace:N`) get reused when workspaces are destroyed and recreated. Observed symptom: the cleat repo's main checkout was associated with a flotilla worktree workspace because the stale binding from a deleted cleat workspace matched a new flotilla workspace that reused the same ref number.
+
+**zellij:** Tab names (used as ws_ref) can be renamed by the user, and duplicate names are possible. The current `query-tab-names` command returns only names with no stable identity.
 
 ## Solution
 
-Switch the cmux workspace provider to use cmux's stable UUIDs as the canonical workspace identity. cmux exposes UUIDs via `--id-format uuids` (or `--id-format both` for UUID + positional ref). UUIDs are never reused, eliminating the stale binding collision.
+Switch both providers to use stable identifiers as their canonical workspace identity (ws_ref).
+
+- **cmux:** Use cmux's stable UUIDs, exposed via `--id-format uuids`.
+- **zellij:** Use `{session_name}:{tab_id}` where `tab_id` comes from the new `list-tabs --json` output. The `tab_id` is stable within a zellij session. Prefixing with the session name prevents cross-session collisions if the daemon connects to a different zellij session.
 
 ## Scope
 
-Narrow fix to the cmux provider only. The broader attachable set lifecycle (stale binding cleanup, orphaned sets, validation during refresh) is out of scope — to be addressed separately.
+Narrow fix to the cmux and zellij workspace providers. The broader attachable set lifecycle (stale binding cleanup, orphaned sets, validation during refresh) is out of scope.
 
 ## Changes
 
 ### `CmuxWorkspaceManager` (cmux.rs)
 
-**`list_workspaces()`:** Pass `--id-format uuids` to the `list-workspaces` command. Update `parse_workspaces()` to read the `id` field (UUID) instead of `ref` as the ws_ref.
+**`list_workspaces()`:** Pass `--id-format uuids` to `list-workspaces`. Update `parse_workspaces()` to read the `id` field (UUID) instead of `ref` as the ws_ref.
 
-**`create_workspace()`:** The `new-workspace` command always returns `OK workspace:N` regardless of id-format flags. After creation, issue a follow-up `list-workspaces --id-format both` call, match by the returned positional ref to find the UUID, and return the UUID as the ws_ref.
+**`create_workspace()`:** The `new-workspace` command returns `OK workspace:N` regardless of id-format flags. After creation, issue a follow-up `list-workspaces --id-format both` call, match by the returned positional ref to find the UUID, and return the UUID as the ws_ref.
 
 **`select_workspace()`:** No change — cmux accepts UUIDs for `--workspace` arguments.
 
-**`parse_workspaces()`:** Read `id` field instead of `ref`.
+### `ZellijWorkspaceManager` (zellij.rs)
+
+**`list_workspaces()`:** Replace `query-tab-names` with `list-tabs --json`. Parse each tab's `tab_id` and `name`. Return ws_ref as `{session_name}:{tab_id}`. Use the `name` field for the `Workspace.name`.
+
+**`create_workspace()`:** `new-tab` now returns the tab_id to stdout. Construct ws_ref as `{session_name}:{tab_id}`.
+
+**`select_workspace()`:** Parse the tab_id from the ws_ref (after the `:`), call `go-to-tab-by-id {tab_id}` instead of `go-to-tab-name`.
 
 ### Downstream (no changes)
 
-The orchestrator, binding system, refresh, and correlation all treat ws_ref as an opaque string. Swapping positional refs for UUIDs requires no changes outside the cmux provider.
+The orchestrator, binding system, refresh, and correlation all treat ws_ref as an opaque string. Swapping identifiers requires no changes outside the workspace providers.
 
 ### Migration
 
-None. We are in a no-backwards-compat phase. Existing bindings keyed on `workspace:N` become dead entries (they won't match any workspace from `list_workspaces` since that now returns UUIDs). New bindings use UUIDs. Orphaned old bindings are harmless and can be cleaned up as part of future lifecycle work.
+None. We are in a no-backwards-compat phase. Existing bindings keyed on old-format refs become dead entries. New bindings use stable identifiers. Orphaned old bindings are harmless and can be cleaned up as part of future lifecycle work.
 
 ### Tests
 
-Update existing cmux replay fixtures to reflect `--id-format uuids`/`--id-format both` in commands and UUID-format responses. Verify parsed ws_ref values are UUIDs.
+Update existing cmux and zellij replay fixtures to reflect the new commands and response formats. Verify parsed ws_ref values use the new formats.
