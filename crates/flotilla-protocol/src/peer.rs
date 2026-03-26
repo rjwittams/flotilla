@@ -213,8 +213,8 @@ pub enum PeerDataKind {
 mod tests {
     use super::*;
     use crate::{
-        Command, CommandAction, CommandValue, HostEnvironment, HostProviderStatus, HostSummary, RepoSelector, StepAction, StepHost,
-        SystemInfo, ToolInventory,
+        Command, CommandAction, CommandValue, HostEnvironment, HostProviderStatus, HostSummary, RepoSelector, StepAction,
+        StepExecutionContext, SystemInfo, ToolInventory,
     };
 
     fn sample_host_summary() -> HostSummary {
@@ -528,7 +528,7 @@ mod tests {
             step_offset: 2,
             steps: vec![Step {
                 description: "Prepare terminal".into(),
-                host: StepHost::Remote(HostName::new("feta")),
+                host: StepExecutionContext::Host(HostName::new("feta")),
                 action: StepAction::PrepareTerminalForCheckout {
                     checkout_path: crate::ExecutionEnvironmentPath::new("/repo"),
                     commands: vec![],

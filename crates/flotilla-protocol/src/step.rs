@@ -12,11 +12,22 @@ pub enum CheckoutIntent {
     FreshBranch,
 }
 
-/// Which host a step should execute on.
+/// Execution context for a step: which daemon (transport) and which provider scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StepHost {
-    Local,
-    Remote(HostName),
+pub enum StepExecutionContext {
+    /// Run on a host daemon using the host's own providers.
+    Host(HostName),
+    /// Run on a host daemon but resolve against an environment's providers.
+    Environment(HostName, crate::EnvironmentId),
+}
+
+impl StepExecutionContext {
+    /// The daemon host that will execute this step (determines transport routing).
+    pub fn host_name(&self) -> &HostName {
+        match self {
+            Self::Host(h) | Self::Environment(h, _) => h,
+        }
+    }
 }
 
 /// Outcome of a single step execution.
@@ -122,6 +133,6 @@ pub enum StepAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     pub description: String,
-    pub host: StepHost,
+    pub host: StepExecutionContext,
     pub action: StepAction,
 }

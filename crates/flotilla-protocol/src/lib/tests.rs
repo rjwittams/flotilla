@@ -4,7 +4,12 @@ use super::*;
 use crate::test_support::hp;
 
 fn sample_command() -> Command {
-    Command { host: None, environment: None, context_repo: None, action: CommandAction::TrackRepoPath { path: PathBuf::from("/tmp/my-repo") } }
+    Command {
+        host: None,
+        environment: None,
+        context_repo: None,
+        action: CommandAction::TrackRepoPath { path: PathBuf::from("/tmp/my-repo") },
+    }
 }
 
 #[test]
@@ -434,7 +439,7 @@ fn message_peer_goodbye_roundtrip() {
 fn step_roundtrip_covers_command_values() {
     let step = Step {
         description: "Create workspace".to_string(),
-        host: StepHost::Remote(HostName::new("feta")),
+        host: StepExecutionContext::Host(HostName::new("feta")),
         action: StepAction::CreateWorkspaceFromPreparedTerminal {
             target_host: HostName::new("feta"),
             branch: "feat/x".to_string(),
@@ -462,7 +467,7 @@ fn step_roundtrip_covers_prepare_and_attach_workspace_actions() {
 
     let prepare = Step {
         description: "Prepare workspace".to_string(),
-        host: StepHost::Remote(HostName::new("feta")),
+        host: StepExecutionContext::Host(HostName::new("feta")),
         action: StepAction::PrepareWorkspace {
             checkout_path: Some(ExecutionEnvironmentPath::new("/repo/wt-feat-x")),
             label: "feat/x".into(),
@@ -473,6 +478,10 @@ fn step_roundtrip_covers_prepare_and_attach_workspace_actions() {
     let produced = StepOutcome::Produced(CommandValue::PreparedWorkspace(prepared.clone()));
     test_helpers::assert_roundtrip(&produced);
 
-    let attach = Step { description: "Attach workspace".to_string(), host: StepHost::Local, action: StepAction::AttachWorkspace };
+    let attach = Step {
+        description: "Attach workspace".to_string(),
+        host: StepExecutionContext::Host(HostName::local()),
+        action: StepAction::AttachWorkspace,
+    };
     test_helpers::assert_roundtrip(&attach);
 }

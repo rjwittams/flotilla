@@ -22,7 +22,7 @@ use flotilla_protocol::{
     AgentEventType, AgentHarness, AgentHookEvent, AgentStatus, AttachableId, Checkout, CheckoutTarget, Command, CommandAction,
     CommandPeerEvent, CommandValue, ConfigLabel, DaemonEvent, HostName, HostPath, HostSummary, Message, PeerConnectionState, PeerDataKind,
     PeerDataMessage, PeerWireMessage, PreparedWorkspace, ProviderData, RepoIdentity, RepoSelector, Request, Response, ResponseResult,
-    RoutedPeerMessage, StepAction, StepHost, StepOutcome, StepStatus, StreamKey, VectorClock, PROTOCOL_VERSION,
+    RoutedPeerMessage, StepAction, StepExecutionContext, StepOutcome, StepStatus, StreamKey, VectorClock, PROTOCOL_VERSION,
 };
 use indexmap::IndexMap;
 use tokio::{
@@ -651,7 +651,7 @@ async fn remote_command_mutations_route_remote_step_requests() {
             assert_eq!(repo_path, repo);
             assert_eq!(step_offset, 0);
             assert_eq!(steps.len(), 3, "checkout with issue links should batch all remote pre-attach steps");
-            assert!(steps.iter().all(|step| step.host == StepHost::Remote(HostName::new("feta"))));
+            assert!(steps.iter().all(|step| step.host == StepExecutionContext::Host(HostName::new("feta"))));
             assert!(matches!(
                 steps[0].action,
                 StepAction::CreateCheckout {
@@ -1558,7 +1558,12 @@ async fn execute_forwarded_command_proxies_lifecycle_and_response() {
             7,
             HostName::new("desktop"),
             HostName::new("relay"),
-            Command { host: Some(daemon.host_name().clone()), environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } },
+            Command {
+                host: Some(daemon.host_name().clone()),
+                environment: None,
+                context_repo: None,
+                action: CommandAction::Refresh { repo: None },
+            },
             ready,
         )
         .await;

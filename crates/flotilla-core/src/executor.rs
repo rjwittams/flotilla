@@ -30,7 +30,7 @@ use crate::{
     path_context::{DaemonHostPath, ExecutionEnvironmentPath},
     provider_data::ProviderData,
     providers::{registry::ProviderRegistry, run, types::WorkspaceConfig, CommandRunner},
-    step::{Step, StepAction, StepHost, StepOutcome, StepPlan, StepResolver},
+    step::{Step, StepAction, StepExecutionContext, StepOutcome, StepPlan, StepResolver},
     terminal_manager::TerminalManager,
 };
 
@@ -95,7 +95,8 @@ pub async fn build_plan(
     local_host: HostName,
 ) -> Result<StepPlan, CommandValue> {
     let Command { host, action, .. } = cmd;
-    let remote_host = host.as_ref().filter(|target_host| **target_host != local_host).cloned().map_or(StepHost::Local, StepHost::Remote);
+    let target_host = host.unwrap_or_else(|| local_host.clone());
+    let checkout_host = StepExecutionContext::Host(target_host.clone());
 
     match action {
         CommandAction::Checkout { target, issue_ids, .. } => {
@@ -103,7 +104,7 @@ pub async fn build_plan(
                 CheckoutTarget::Branch(branch) => (branch, false, CheckoutIntent::ExistingBranch),
                 CheckoutTarget::FreshBranch(branch) => (branch, true, CheckoutIntent::FreshBranch),
             };
-            Ok(build_create_checkout_plan(branch, create_branch, intent, issue_ids, remote_host))
+            Ok(build_create_checkout_plan(branch, create_branch, intent, issue_ids, checkout_host, local_host))
         }
 
         CommandAction::TeleportSession { session_id, branch, checkout_key } => {
@@ -130,25 +131,26 @@ pub async fn build_plan(
                     .filter(|(hp, co)| co.branch == branch && hp.host == local_host)
                     .map(|(hp, _)| hp.clone())
                     .collect();
-                Ok(build_remove_checkout_plan(branch, deleted_paths))
+                Ok(build_remove_checkout_plan(branch, deleted_paths, local_host))
             }
             Err(message) => Err(CommandValue::Error { message }),
         },
 
-        CommandAction::ArchiveSession { session_id } => Ok(build_archive_session_plan(session_id)),
+        CommandAction::ArchiveSession { session_id } => Ok(build_archive_session_plan(session_id, local_host)),
 
-        CommandAction::GenerateBranchName { issue_keys } => Ok(build_generate_branch_name_plan(issue_keys)),
+        CommandAction::GenerateBranchName { issue_keys } => Ok(build_generate_branch_name_plan(issue_keys, local_host)),
 
         CommandAction::CreateWorkspaceForCheckout { checkout_path, label } => Ok(build_create_workspace_plan(
-            workspace_label_for_host(&label, &remote_host),
+            workspace_label_for_host(&label, &checkout_host, &local_host),
             Some(ExecutionEnvironmentPath::new(checkout_path)),
-            remote_host,
+            checkout_host,
+            local_host,
         )),
 
         CommandAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, attachable_set_id, commands } => {
             Ok(StepPlan::new(vec![Step {
                 description: format!("Create workspace from prepared terminal for {branch}"),
-                host: StepHost::Local,
+                host: StepExecutionContext::Host(local_host),
                 action: StepAction::CreateWorkspaceFromPreparedTerminal {
                     target_host,
                     branch,
@@ -161,19 +163,19 @@ pub async fn build_plan(
 
         CommandAction::SelectWorkspace { ws_ref } => Ok(StepPlan::new(vec![Step {
             description: format!("Select workspace {ws_ref}"),
-            host: StepHost::Local,
+            host: StepExecutionContext::Host(local_host),
             action: StepAction::SelectWorkspace { ws_ref },
         }])),
 
         CommandAction::PrepareTerminalForCheckout { checkout_path, commands } => Ok(StepPlan::new(vec![Step {
             description: "Prepare terminal for checkout".to_string(),
-            host: remote_host,
+            host: checkout_host,
             action: StepAction::PrepareTerminalForCheckout { checkout_path: ExecutionEnvironmentPath::new(checkout_path), commands },
         }])),
 
         CommandAction::FetchCheckoutStatus { branch, checkout_path, change_request_id } => Ok(StepPlan::new(vec![Step {
             description: format!("Fetch checkout status for {branch}"),
-            host: StepHost::Local,
+            host: StepExecutionContext::Host(local_host),
             action: StepAction::FetchCheckoutStatus {
                 branch,
                 checkout_path: checkout_path.map(ExecutionEnvironmentPath::new),
@@ -183,25 +185,25 @@ pub async fn build_plan(
 
         CommandAction::OpenChangeRequest { id } => Ok(StepPlan::new(vec![Step {
             description: format!("Open change request {id}"),
-            host: StepHost::Local,
+            host: StepExecutionContext::Host(local_host),
             action: StepAction::OpenChangeRequest { id },
         }])),
 
         CommandAction::CloseChangeRequest { id } => Ok(StepPlan::new(vec![Step {
             description: format!("Close change request {id}"),
-            host: StepHost::Local,
+            host: StepExecutionContext::Host(local_host),
             action: StepAction::CloseChangeRequest { id },
         }])),
 
         CommandAction::OpenIssue { id } => Ok(StepPlan::new(vec![Step {
             description: format!("Open issue {id}"),
-            host: StepHost::Local,
+            host: StepExecutionContext::Host(local_host),
             action: StepAction::OpenIssue { id },
         }])),
 
         CommandAction::LinkIssuesToChangeRequest { change_request_id, issue_ids } => Ok(StepPlan::new(vec![Step {
             description: format!("Link issues to change request {change_request_id}"),
-            host: StepHost::Local,
+            host: StepExecutionContext::Host(local_host),
             action: StepAction::LinkIssuesToChangeRequest { change_request_id, issue_ids },
         }])),
 
@@ -238,7 +240,8 @@ fn build_create_checkout_plan(
     create_branch: bool,
     intent: CheckoutIntent,
     issue_ids: Vec<(String, String)>,
-    checkout_host: StepHost,
+    checkout_host: StepExecutionContext,
+    local_host: HostName,
 ) -> StepPlan {
     let mut steps = Vec::new();
     let workspace_host = checkout_host.clone();
@@ -257,27 +260,38 @@ fn build_create_checkout_plan(
         });
     }
 
-    let workspace_label = workspace_label_for_host(&branch, &workspace_host);
-    steps.extend(build_create_workspace_plan(workspace_label, None, workspace_host).steps);
+    let workspace_label = workspace_label_for_host(&branch, &workspace_host, &local_host);
+    steps.extend(build_create_workspace_plan(workspace_label, None, workspace_host, local_host).steps);
 
     StepPlan::new(steps)
 }
 
-fn build_create_workspace_plan(label: String, checkout_path: Option<ExecutionEnvironmentPath>, checkout_host: StepHost) -> StepPlan {
+fn build_create_workspace_plan(
+    label: String,
+    checkout_path: Option<ExecutionEnvironmentPath>,
+    checkout_host: StepExecutionContext,
+    local_host: HostName,
+) -> StepPlan {
     StepPlan::new(vec![
         Step {
             description: format!("Prepare workspace for {label}"),
             host: checkout_host,
             action: StepAction::PrepareWorkspace { checkout_path, label },
         },
-        Step { description: "Attach workspace".to_string(), host: StepHost::Local, action: StepAction::AttachWorkspace },
+        Step {
+            description: "Attach workspace".to_string(),
+            host: StepExecutionContext::Host(local_host),
+            action: StepAction::AttachWorkspace,
+        },
     ])
 }
 
-fn workspace_label_for_host(label: &str, host: &StepHost) -> String {
-    match host {
-        StepHost::Local => label.to_string(),
-        StepHost::Remote(target_host) => format!("{label}@{target_host}"),
+fn workspace_label_for_host(label: &str, host: &StepExecutionContext, local_host: &HostName) -> String {
+    let target = host.host_name();
+    if *target == *local_host {
+        label.to_string()
+    } else {
+        format!("{label}@{target}")
     }
 }
 
@@ -321,17 +335,17 @@ async fn build_teleport_session_plan(
     let steps = vec![
         Step {
             description: format!("Resolve attach command for session {session_id}"),
-            host: StepHost::Local,
+            host: StepExecutionContext::Host(local_host.clone()),
             action: StepAction::ResolveAttachCommand { session_id: session_id.clone() },
         },
         Step {
             description: "Ensure checkout for teleport".to_string(),
-            host: StepHost::Local,
+            host: StepExecutionContext::Host(local_host.clone()),
             action: StepAction::EnsureCheckoutForTeleport { branch: branch.clone(), checkout_key: checkout_key_ee, initial_path },
         },
         Step {
             description: "Create workspace with teleport command".to_string(),
-            host: StepHost::Local,
+            host: StepExecutionContext::Host(local_host),
             action: StepAction::CreateTeleportWorkspace { session_id, branch },
         },
     ];
@@ -344,10 +358,10 @@ async fn build_teleport_session_plan(
 /// Steps:
 /// 1. Remove the checkout via the checkout manager
 /// 2. Clean up correlated terminal sessions (best-effort)
-fn build_remove_checkout_plan(branch: String, deleted_checkout_paths: Vec<HostPath>) -> StepPlan {
+fn build_remove_checkout_plan(branch: String, deleted_checkout_paths: Vec<HostPath>, local_host: HostName) -> StepPlan {
     StepPlan::new(vec![Step {
         description: format!("Remove checkout for branch {branch}"),
-        host: StepHost::Local,
+        host: StepExecutionContext::Host(local_host),
         action: StepAction::RemoveCheckout { branch, deleted_checkout_paths },
     }])
 }
@@ -376,7 +390,13 @@ impl ExecutorStepResolver {
 
 #[async_trait::async_trait]
 impl StepResolver for ExecutorStepResolver {
-    async fn resolve(&self, _description: &str, action: StepAction, prior: &[StepOutcome]) -> Result<StepOutcome, String> {
+    async fn resolve(
+        &self,
+        _description: &str,
+        _context: &StepExecutionContext,
+        action: StepAction,
+        prior: &[StepOutcome],
+    ) -> Result<StepOutcome, String> {
         match action {
             StepAction::CreateCheckout { branch, create_branch, intent, .. } => {
                 let checkout_flow = CheckoutFlow {
@@ -730,18 +750,18 @@ impl StepResolver for ExecutorStepResolver {
     }
 }
 
-fn build_archive_session_plan(session_id: String) -> StepPlan {
+fn build_archive_session_plan(session_id: String, local_host: HostName) -> StepPlan {
     StepPlan::new(vec![Step {
         description: format!("Archive session {session_id}"),
-        host: StepHost::Local,
+        host: StepExecutionContext::Host(local_host),
         action: StepAction::ArchiveSession { session_id },
     }])
 }
 
-fn build_generate_branch_name_plan(issue_keys: Vec<String>) -> StepPlan {
+fn build_generate_branch_name_plan(issue_keys: Vec<String>, local_host: HostName) -> StepPlan {
     StepPlan::new(vec![Step {
         description: "Generate branch name".to_string(),
-        host: StepHost::Local,
+        host: StepExecutionContext::Host(local_host),
         action: StepAction::GenerateBranchName { issue_keys },
     }])
 }

@@ -27,7 +27,7 @@ use crate::{
         workspace::WorkspaceManager,
         CommandRunner,
     },
-    step::{StepAction, StepHost, StepOutcome, StepResolver},
+    step::{StepAction, StepExecutionContext, StepOutcome, StepResolver},
 };
 
 fn desc(name: &str) -> ProviderDescriptor {
@@ -1850,9 +1850,9 @@ async fn build_plan_create_checkout_uses_command_host_for_checkout_steps() {
     .expect("build plan");
 
     assert_eq!(plan.steps.len(), 3);
-    assert_eq!(plan.steps[0].host, StepHost::Remote(HostName::new("feta")));
-    assert_eq!(plan.steps[1].host, StepHost::Remote(HostName::new("feta")));
-    assert_eq!(plan.steps[2].host, StepHost::Local);
+    assert_eq!(plan.steps[0].host, StepExecutionContext::Host(HostName::new("feta")));
+    assert_eq!(plan.steps[1].host, StepExecutionContext::Host(HostName::new("feta")));
+    assert_eq!(plan.steps[2].host, StepExecutionContext::Host(HostName::local()));
 }
 
 #[tokio::test]
@@ -1879,12 +1879,12 @@ async fn build_plan_remote_checkout_with_issue_links_keeps_workspace_local() {
     .expect("build plan");
 
     assert_eq!(plan.steps.len(), 4);
-    assert_eq!(plan.steps[0].host, StepHost::Remote(HostName::new("feta")));
-    assert_eq!(plan.steps[1].host, StepHost::Remote(HostName::new("feta")));
+    assert_eq!(plan.steps[0].host, StepExecutionContext::Host(HostName::new("feta")));
+    assert_eq!(plan.steps[1].host, StepExecutionContext::Host(HostName::new("feta")));
     assert_eq!(plan.steps[2].description, "Prepare workspace for feat-x@feta");
-    assert_eq!(plan.steps[2].host, StepHost::Remote(HostName::new("feta")));
+    assert_eq!(plan.steps[2].host, StepExecutionContext::Host(HostName::new("feta")));
     assert_eq!(plan.steps[3].description, "Attach workspace");
-    assert_eq!(plan.steps[3].host, StepHost::Local);
+    assert_eq!(plan.steps[3].host, StepExecutionContext::Host(HostName::local()));
 }
 
 #[tokio::test]
@@ -1909,9 +1909,9 @@ async fn build_plan_create_checkout_treats_local_host_as_local() {
     .expect("build plan");
 
     assert_eq!(plan.steps.len(), 3);
-    assert_eq!(plan.steps[0].host, StepHost::Local);
-    assert_eq!(plan.steps[1].host, StepHost::Local);
-    assert_eq!(plan.steps[2].host, StepHost::Local);
+    assert_eq!(plan.steps[0].host, StepExecutionContext::Host(HostName::local()));
+    assert_eq!(plan.steps[1].host, StepExecutionContext::Host(HostName::local()));
+    assert_eq!(plan.steps[2].host, StepExecutionContext::Host(HostName::local()));
 }
 
 #[tokio::test]
@@ -1977,7 +1977,7 @@ async fn build_plan_prepare_terminal_uses_command_host_for_terminal_step() {
     .expect("build plan");
 
     assert_eq!(plan.steps.len(), 1);
-    assert_eq!(plan.steps[0].host, StepHost::Remote(HostName::new("feta")));
+    assert_eq!(plan.steps[0].host, StepExecutionContext::Host(HostName::new("feta")));
 }
 
 #[tokio::test]
@@ -2001,13 +2001,13 @@ async fn build_plan_create_workspace_for_checkout_uses_prepare_and_attach_steps_
     .expect("build plan");
 
     assert_eq!(plan.steps.len(), 2);
-    assert_eq!(plan.steps[0].host, StepHost::Local);
+    assert_eq!(plan.steps[0].host, StepExecutionContext::Host(HostName::local()));
     assert!(matches!(
         plan.steps[0].action,
         StepAction::PrepareWorkspace { ref checkout_path, ref label }
             if checkout_path == &Some(ExecutionEnvironmentPath::new(path.clone())) && label == "feat"
     ));
-    assert_eq!(plan.steps[1].host, StepHost::Local);
+    assert_eq!(plan.steps[1].host, StepExecutionContext::Host(HostName::local()));
     assert!(matches!(plan.steps[1].action, StepAction::AttachWorkspace));
 }
 
@@ -2032,13 +2032,13 @@ async fn build_plan_create_workspace_for_checkout_uses_remote_prepare_and_local_
     .expect("build plan");
 
     assert_eq!(plan.steps.len(), 2);
-    assert_eq!(plan.steps[0].host, StepHost::Remote(HostName::new("feta")));
+    assert_eq!(plan.steps[0].host, StepExecutionContext::Host(HostName::new("feta")));
     assert!(matches!(
         plan.steps[0].action,
         StepAction::PrepareWorkspace { ref checkout_path, ref label }
             if checkout_path == &Some(ExecutionEnvironmentPath::new(path.clone())) && label == "feat@feta"
     ));
-    assert_eq!(plan.steps[1].host, StepHost::Local);
+    assert_eq!(plan.steps[1].host, StepExecutionContext::Host(HostName::local()));
     assert!(matches!(plan.steps[1].action, StepAction::AttachWorkspace));
 }
 
@@ -2636,7 +2636,8 @@ async fn executor_step_resolver_prepare_workspace_produces_prepared_workspace() 
     let prior =
         vec![StepOutcome::CompletedWith(CommandValue::CheckoutCreated { branch: "feat".into(), path: PathBuf::from("/repo/wt-feat") })];
     let action = StepAction::PrepareWorkspace { label: "feat".into(), checkout_path: None };
-    let outcome = resolver.resolve("create workspace", action, &prior).await;
+    let context = StepExecutionContext::Host(local_host());
+    let outcome = resolver.resolve("create workspace", &context, action, &prior).await;
     match outcome {
         Ok(StepOutcome::Produced(CommandValue::PreparedWorkspace(prepared))) => {
             assert_eq!(prepared.label, "feat");
@@ -2663,6 +2664,7 @@ async fn executor_step_resolver_prepare_workspace_skips_when_no_checkout_path() 
     };
 
     let action = StepAction::PrepareWorkspace { label: "feat".into(), checkout_path: None };
-    let outcome = resolver.resolve("create workspace", action, &[]).await;
+    let context = StepExecutionContext::Host(local_host());
+    let outcome = resolver.resolve("create workspace", &context, action, &[]).await;
     assert!(matches!(outcome, Ok(StepOutcome::Skipped)), "should skip when no prior CheckoutCreated outcome: {outcome:?}");
 }

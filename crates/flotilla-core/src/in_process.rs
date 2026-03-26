@@ -1999,7 +1999,7 @@ async fn execute_local_remote_step_batch(
     let step_count = request.steps.len();
 
     for (index, step) in request.steps.into_iter().enumerate() {
-        if step.host != flotilla_protocol::StepHost::Remote(local_host.clone()) {
+        if *step.host.host_name() != local_host {
             return Err(format!("remote step {} targets {:?}, expected remote host {}", index, step.host, local_host));
         }
         if cancel.is_cancelled() {
@@ -2015,7 +2015,7 @@ async fn execute_local_remote_step_batch(
             })
             .await;
 
-        let outcome = resolver.resolve(&step.description, step.action, &outcomes).await;
+        let outcome = resolver.resolve(&step.description, &step.host, step.action, &outcomes).await;
         if cancel.is_cancelled() {
             return Err("cancelled".into());
         }

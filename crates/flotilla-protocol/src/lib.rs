@@ -21,7 +21,7 @@ pub use host::{HostName, HostPath, RepoIdentity};
 pub use host_summary::{DiscoveryFact, HostEnvironment, HostProviderStatus, HostSnapshot, HostSummary, SystemInfo, ToolInventory};
 pub use path_context::{DaemonHostPath, ExecutionEnvironmentPath};
 pub use peer::{CommandPeerEvent, GoodbyeReason, PeerDataKind, PeerDataMessage, PeerWireMessage, RoutedPeerMessage, VectorClock};
-pub use step::{CheckoutIntent, Step, StepAction, StepHost, StepOutcome};
+pub use step::{CheckoutIntent, Step, StepAction, StepExecutionContext, StepOutcome};
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
