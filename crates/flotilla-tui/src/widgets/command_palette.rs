@@ -228,7 +228,7 @@ impl CommandPaletteWidget {
                     .and_then(|r| r.parent())
                     .map(|p| p.to_path_buf())
                     .or_else(|| std::env::current_dir().ok())
-                    .or_else(|| dirs::home_dir())
+                    .or_else(dirs::home_dir)
                     .unwrap_or_default();
                 let input = Input::from(format!("{}/", start_dir.display()).as_str());
                 let dir_entries = refresh_dir_listing_standalone(input.value(), ctx.model);
