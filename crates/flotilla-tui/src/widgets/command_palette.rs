@@ -146,6 +146,10 @@ impl CommandPaletteWidget {
                 Outcome::Finished
             }
             PaletteLocalResult::Search(query) => {
+                if *ctx.is_config {
+                    ctx.app_actions.push(AppAction::ShowStatus("switch to a repo tab first".into()));
+                    return Outcome::Finished;
+                }
                 let query = query.trim().to_string();
                 let Some(repo_identity) = ctx.model.active_repo_identity_opt().cloned() else {
                     ctx.app_actions.push(AppAction::ShowStatus("No active repo".into()));
@@ -198,16 +202,16 @@ impl CommandPaletteWidget {
         match action {
             // Actions that open other widgets — use Swap to replace the palette
             Action::OpenBranchInput => {
-                if ctx.model.active_repo_identity_opt().is_none() {
-                    ctx.app_actions.push(AppAction::ShowStatus("No active repo".into()));
+                if *ctx.is_config || ctx.model.active_repo_identity_opt().is_none() {
+                    ctx.app_actions.push(AppAction::ShowStatus("switch to a repo tab first".into()));
                     return Outcome::Finished;
                 }
                 let widget = super::branch_input::BranchInputWidget::new(crate::app::ui_state::BranchInputKind::Manual);
                 Outcome::Swap(Box::new(widget))
             }
             Action::OpenIssueSearch => {
-                if ctx.model.active_repo_identity_opt().is_none() {
-                    ctx.app_actions.push(AppAction::ShowStatus("No active repo".into()));
+                if *ctx.is_config || ctx.model.active_repo_identity_opt().is_none() {
+                    ctx.app_actions.push(AppAction::ShowStatus("switch to a repo tab first".into()));
                     Outcome::Finished
                 } else {
                     Outcome::Swap(Box::new(super::issue_search::IssueSearchWidget::new()))
@@ -256,6 +260,10 @@ impl CommandPaletteWidget {
                 Outcome::Finished
             }
             Action::Refresh => {
+                if *ctx.is_config {
+                    ctx.app_actions.push(AppAction::ShowStatus("switch to a repo tab first".into()));
+                    return Outcome::Finished;
+                }
                 ctx.app_actions.push(AppAction::Refresh);
                 Outcome::Finished
             }
@@ -270,6 +278,10 @@ impl CommandPaletteWidget {
                 Outcome::Finished
             }
             Action::OpenActionMenu => {
+                if *ctx.is_config {
+                    ctx.app_actions.push(AppAction::ShowStatus("switch to a repo tab first".into()));
+                    return Outcome::Finished;
+                }
                 ctx.app_actions.push(AppAction::OpenActionMenu);
                 Outcome::Finished
             }
@@ -367,6 +379,9 @@ pub(crate) fn tui_dispatch(
                     fill_repo_sentinels(&mut command.action, repo_sel);
                 }
                 RepoContext::Inferred => {
+                    if is_config {
+                        return Err("no active repo — switch to a repo tab first".to_string());
+                    }
                     command.context_repo = tab_repo;
                 }
             }
@@ -797,8 +812,8 @@ mod tests {
     }
 
     #[test]
-    fn confirm_noun_verb_inferred_repo_on_overview_tab_proceeds() {
-        // `cr close` uses RepoContext::Inferred — should proceed on overview tab without context_repo
+    fn confirm_noun_verb_inferred_repo_on_overview_tab_rejects() {
+        // `cr #42 close` uses RepoContext::Inferred — should be rejected on overview tab
         let mut widget = CommandPaletteWidget::new();
         widget.input = Input::from("cr #42 close");
         let mut harness = TestWidgetHarness::new();
@@ -807,9 +822,8 @@ mod tests {
 
         let outcome = widget.handle_action(Action::Confirm, &mut ctx);
         assert!(matches!(outcome, Outcome::Finished));
-        let (cmd, _) = harness.commands.take_next().expect("expected command");
-        assert!(cmd.context_repo.is_none());
-        assert!(matches!(cmd.action, CommandAction::CloseChangeRequest { ref id } if id == "#42"));
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::ShowStatus(msg) if msg.contains("repo tab"))));
+        assert!(harness.commands.take_next().is_none());
     }
 
     #[test]
