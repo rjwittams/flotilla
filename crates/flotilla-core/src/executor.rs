@@ -50,10 +50,17 @@ struct CheckoutFlow<'a> {
     providers_data: &'a ProviderData,
     runner: &'a dyn CommandRunner,
     local_host: &'a HostName,
+    /// When true, skip host-side validation and de-duplication.
+    /// Environment checkouts delegate validation to `CloneCheckoutManager`.
+    is_environment: bool,
 }
 
 impl<'a> CheckoutFlow<'a> {
     fn existing_checkout_path(&self) -> Option<ExecutionEnvironmentPath> {
+        if self.is_environment {
+            // Environment namespaces are independent — host checkouts don't apply
+            return None;
+        }
         self.providers_data.checkouts.iter().find_map(|(hp, co)| {
             if hp.host == *self.local_host && co.branch == self.branch {
                 Some(ExecutionEnvironmentPath::new(&hp.path))
@@ -65,7 +72,13 @@ impl<'a> CheckoutFlow<'a> {
 
     async fn checkout_created_result(&self) -> Result<CommandValue, String> {
         let checkout_service = CheckoutService::new(self.registry, self.runner);
-        checkout_service.validate_target(self.repo_root.as_path(), self.branch, self.intent).await?;
+
+        // In environment context, skip host-side branch validation — the
+        // CloneCheckoutManager validates during clone (git clone -b fails if
+        // branch doesn't exist; --no-checkout handles fresh branches).
+        if !self.is_environment {
+            checkout_service.validate_target(self.repo_root.as_path(), self.branch, self.intent).await?;
+        }
 
         if let Some(path) = self.existing_checkout_path() {
             if matches!(self.intent, CheckoutIntent::FreshBranch) {
@@ -473,9 +486,12 @@ impl StepResolver for ExecutorStepResolver {
         prior: &[StepOutcome],
     ) -> Result<StepOutcome, String> {
         // Part F: Environment-polymorphic dispatch — determine the effective
-        // registry and runner based on whether we're inside an environment.
-        let (effective_registry, effective_runner) = match context {
-            StepExecutionContext::Host(_) => (self.registry.clone(), self.runner.clone()),
+        // registry, runner, repo root, and providers data based on whether
+        // we're inside an environment.
+        let (effective_registry, effective_runner, effective_repo_root, effective_providers_data) = match context {
+            StepExecutionContext::Host(_) => {
+                (self.registry.clone(), self.runner.clone(), self.repo.root.clone(), self.providers_data.clone())
+            }
             StepExecutionContext::Environment(_, env_id) => {
                 let registry = {
                     let registries = self.environment_registries.lock().expect("environment_registries lock");
@@ -486,8 +502,24 @@ impl StepResolver for ExecutorStepResolver {
                     let handle = handles.get(env_id).ok_or_else(|| format!("environment handle not found: {env_id}"))?;
                     handle.runner(self.runner.clone())
                 };
-                (registry, runner)
+                // Interior repo root from prior CreateCheckout outcome, or /workspace
+                let repo_root = prior
+                    .iter()
+                    .find_map(|o| match o {
+                        StepOutcome::CompletedWith(CommandValue::CheckoutCreated { path, .. }) => Some(ExecutionEnvironmentPath::new(path)),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| ExecutionEnvironmentPath::new("/workspace"));
+                // Environments have no pre-existing checkout/provider state from the host
+                let providers_data = Arc::new(ProviderData::default());
+                (registry, runner, repo_root, providers_data)
             }
+        };
+
+        // Extract environment_id from context for use in action handlers
+        let context_environment_id = match context {
+            StepExecutionContext::Environment(_, env_id) => Some(env_id.clone()),
+            _ => None,
         };
 
         match action {
@@ -496,11 +528,12 @@ impl StepResolver for ExecutorStepResolver {
                     branch: &branch,
                     create_branch,
                     intent,
-                    repo_root: &self.repo.root,
+                    repo_root: &effective_repo_root,
                     registry: effective_registry.as_ref(),
-                    providers_data: self.providers_data.as_ref(),
+                    providers_data: effective_providers_data.as_ref(),
                     runner: effective_runner.as_ref(),
                     local_host: &self.local_host,
+                    is_environment: context_environment_id.is_some(),
                 };
                 let result = checkout_flow.checkout_created_result().await?;
                 if let CommandValue::CheckoutCreated { ref path, .. } = result {
@@ -642,7 +675,7 @@ impl StepResolver for ExecutorStepResolver {
                     target_host: self.local_host.clone(),
                     checkout_path: checkout_path.into_path_buf(),
                     attachable_set_id,
-                    environment_id: None,
+                    environment_id: context_environment_id.clone(),
                     template_yaml,
                     prepared_commands,
                 })))
