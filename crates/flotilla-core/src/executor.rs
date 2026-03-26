@@ -320,7 +320,7 @@ fn build_environment_checkout_plan(
         Step {
             description: format!("Create environment {env_id}"),
             host: host_context.clone(),
-            action: StepAction::CreateEnvironment { env_id: env_id.clone(), image: flotilla_protocol::ImageId::new("placeholder") },
+            action: StepAction::CreateEnvironment { env_id: env_id.clone(), image: None },
         },
         Step {
             description: format!("Discover providers in environment {env_id}"),
@@ -945,8 +945,10 @@ impl StepResolver for ExecutorStepResolver {
                     bag = bag.with(crate::providers::discovery::EnvironmentAssertion::env_var(key, value));
                 }
 
-                // Probe factories with the environment runner
-                let config = crate::config::ConfigStore::with_base("/tmp/flotilla-env-discovery");
+                // Probe factories with the environment runner.
+                // Scope config to the environment ID to avoid collisions between concurrent discoveries.
+                let config_base = self.config_base.as_path().join(format!("env-discovery/{env_id}"));
+                let config = crate::config::ConfigStore::with_base(config_base);
                 let env_repo_root = ExecutionEnvironmentPath::new("/workspace");
                 let factory_registry = crate::providers::discovery::FactoryRegistry::default_all();
                 let provider_registry = factory_registry.probe_all(&bag, &config, &env_repo_root, env_runner).await;

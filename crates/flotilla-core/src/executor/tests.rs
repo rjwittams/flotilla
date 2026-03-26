@@ -2953,7 +2953,7 @@ async fn executor_step_resolver_create_environment() {
 
     // Prior step must have produced the image
     let prior = vec![StepOutcome::Produced(CommandValue::ImageEnsured { image: image_id.clone() })];
-    let action = StepAction::CreateEnvironment { env_id: env_id.clone(), image: image_id };
+    let action = StepAction::CreateEnvironment { env_id: env_id.clone(), image: None };
     let context = StepExecutionContext::Host(local_host());
     let outcome = resolver.resolve("create env", &context, action, &prior).await;
     match outcome {

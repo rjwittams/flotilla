@@ -30,23 +30,24 @@ impl CloneCheckoutManager {
         Self { runner, reference_dir }
     }
 
+    fn ref_dir_str(&self) -> Result<&str, String> {
+        self.reference_dir.as_path().to_str().ok_or_else(|| "reference dir path is not valid UTF-8".to_string())
+    }
+
     /// Get the remote URL from the reference repo.
     async fn remote_url(&self) -> Result<String, String> {
+        let ref_dir = self.ref_dir_str()?;
         let url = self
             .runner
-            .run(
-                "git",
-                &["--git-dir", self.reference_dir.as_path().to_str().unwrap_or("/ref/repo"), "remote", "get-url", "origin"],
-                self.reference_dir.as_path(),
-                &ChannelLabel::Noop,
-            )
+            .run("git", &["--git-dir", ref_dir, "remote", "get-url", "origin"], self.reference_dir.as_path(), &ChannelLabel::Noop)
             .await?;
         Ok(url.trim().to_string())
     }
 
     /// Sanitize a branch name for use as a directory name.
+    /// Uses `%2F` encoding for `/` to avoid collisions (e.g. `feat/foo` vs `feat-foo`).
     fn sanitize_branch(branch: &str) -> String {
-        branch.replace('/', "-")
+        branch.replace('/', "%2F")
     }
 }
 
@@ -115,18 +116,17 @@ impl super::CheckoutManager for CloneCheckoutManager {
         let remote_url = self.remote_url().await?;
         let sanitized = Self::sanitize_branch(branch);
         let checkout_dir = format!("{WORKSPACE_ROOT}/{sanitized}");
-        let ref_dir = self.reference_dir.as_path().to_str().unwrap_or("/ref/repo");
+        let ref_dir = self.ref_dir_str()?;
 
         info!(%branch, %checkout_dir, %create_branch, "clone: creating checkout");
 
         if create_branch {
             // Reject if branch already exists locally or remotely in the reference repo
-            let ref_path_str = self.reference_dir.as_path().to_str().unwrap_or("/ref/repo");
             let local_exists = self
                 .runner
                 .run(
                     "git",
-                    &["--git-dir", ref_path_str, "show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+                    &["--git-dir", ref_dir, "show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
                     std::path::Path::new("/"),
                     &ChannelLabel::Noop,
                 )
@@ -136,7 +136,7 @@ impl super::CheckoutManager for CloneCheckoutManager {
                 .runner
                 .run(
                     "git",
-                    &["--git-dir", ref_path_str, "show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")],
+                    &["--git-dir", ref_dir, "show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")],
                     std::path::Path::new("/"),
                     &ChannelLabel::Noop,
                 )
@@ -352,7 +352,7 @@ mod tests {
             .await
             .expect("create_checkout should succeed");
 
-        assert_eq!(path, ExecutionEnvironmentPath::new("/workspace/feature-deep-branch"));
+        assert_eq!(path, ExecutionEnvironmentPath::new("/workspace/feature%2Fdeep%2Fbranch"));
     }
 
     #[tokio::test]

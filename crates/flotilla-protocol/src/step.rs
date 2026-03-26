@@ -134,7 +134,9 @@ pub enum StepAction {
     },
     CreateEnvironment {
         env_id: crate::EnvironmentId,
-        image: crate::ImageId,
+        /// `None` means resolve from prior `EnsureEnvironmentImage` outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<crate::ImageId>,
     },
     DiscoverEnvironmentProviders {
         env_id: crate::EnvironmentId,
