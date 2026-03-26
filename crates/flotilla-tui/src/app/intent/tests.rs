@@ -995,6 +995,8 @@ fn generate_branch_name_produces_noun() {
     item.issue_keys = vec!["#1".into(), "#5".into()];
     let noun = Intent::GenerateBranchName.to_noun_command(&item).expect("should produce noun");
     assert_eq!(noun.to_string(), "issue #1,#5 suggest-branch");
+    // Comma-separated subjects resolve correctly — IssueNoun splits on commas
+    assert!(noun.resolve().is_ok());
 }
 
 #[test]
