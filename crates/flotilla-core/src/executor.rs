@@ -670,12 +670,18 @@ impl StepResolver for ExecutorStepResolver {
                         .collect()
                 };
 
+                let container_name = context_environment_id.as_ref().and_then(|env_id| {
+                    let handles = self.environment_handles.lock().expect("environment_handles lock");
+                    handles.get(env_id).and_then(|h| h.container_name().map(|s| s.to_string()))
+                });
+
                 Ok(StepOutcome::Produced(CommandValue::PreparedWorkspace(PreparedWorkspace {
                     label,
                     target_host: self.local_host.clone(),
                     checkout_path: checkout_path.into_path_buf(),
                     attachable_set_id,
                     environment_id: context_environment_id.clone(),
+                    container_name,
                     template_yaml,
                     prepared_commands,
                 })))
@@ -690,10 +696,9 @@ impl StepResolver for ExecutorStepResolver {
                     })
                     .ok_or_else(|| "prepared workspace not produced by prior step".to_string())?;
 
-                let container_name = prepared.environment_id.as_ref().and_then(|env_id| {
-                    let handles = self.environment_handles.lock().expect("environment_handles lock");
-                    handles.get(env_id).and_then(|h| h.container_name().map(|s| s.to_string()))
-                });
+                // container_name flows through the PreparedWorkspace payload from
+                // the remote daemon — no local handle lookup needed.
+                let container_name = prepared.container_name.clone();
 
                 let tm = self.terminal_manager();
                 let workspace_orchestrator = WorkspaceOrchestrator::new(
@@ -727,6 +732,7 @@ impl StepResolver for ExecutorStepResolver {
                             checkout_path: checkout_path.into_path_buf(),
                             attachable_set_id,
                             environment_id: None,
+                            container_name: None,
                             template_yaml: None,
                             prepared_commands: commands,
                         },

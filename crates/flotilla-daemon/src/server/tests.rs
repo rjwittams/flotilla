@@ -890,6 +890,7 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
                 checkout_path: PathBuf::from("/srv/feta/repo/wt-feat-workspace-local"),
                 attachable_set_id: None,
                 environment_id: None,
+                container_name: None,
                 template_yaml: None,
                 prepared_commands: vec![],
             })),

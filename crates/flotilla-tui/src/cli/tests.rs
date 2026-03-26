@@ -467,6 +467,7 @@ mod command_result_human {
             checkout_path: PathBuf::from("/tmp/wt"),
             attachable_set_id: None,
             environment_id: None,
+            container_name: None,
             template_yaml: Some("panes: []".into()),
             prepared_commands: vec![],
         });

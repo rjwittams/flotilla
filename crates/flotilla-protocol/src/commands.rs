@@ -52,6 +52,11 @@ pub struct PreparedWorkspace {
     pub attachable_set_id: Option<AttachableSetId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_id: Option<crate::EnvironmentId>,
+    /// Provider-specific transport handle (e.g. Docker container name).
+    /// Set by PrepareWorkspace on the remote daemon, consumed by AttachWorkspace
+    /// on the presentation host for hop chain construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_yaml: Option<String>,
     pub prepared_commands: Vec<ResolvedPaneCommand>,
@@ -551,6 +556,7 @@ mod tests {
                 checkout_path: PathBuf::from("/remote/repo/feat-x"),
                 attachable_set_id: Some(AttachableSetId::new("set-1")),
                 environment_id: None,
+                container_name: None,
                 template_yaml: Some("layout: []\ncontent: []\n".into()),
                 prepared_commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash".into())] }],
             }),
@@ -649,6 +655,7 @@ mod tests {
             checkout_path: PathBuf::from("/remote/repo/feat-x"),
             attachable_set_id: Some(AttachableSetId::new("set-1")),
             environment_id: None,
+            container_name: None,
             template_yaml: Some("layout: []\ncontent: []\n".into()),
             prepared_commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash".into())] }],
         };

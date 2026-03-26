@@ -120,6 +120,32 @@ impl super::CheckoutManager for CloneCheckoutManager {
         info!(%branch, %checkout_dir, %create_branch, "clone: creating checkout");
 
         if create_branch {
+            // Reject if branch already exists locally or remotely in the reference repo
+            let ref_path_str = self.reference_dir.as_path().to_str().unwrap_or("/ref/repo");
+            let local_exists = self
+                .runner
+                .run(
+                    "git",
+                    &["--git-dir", ref_path_str, "show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+                    std::path::Path::new("/"),
+                    &ChannelLabel::Noop,
+                )
+                .await
+                .is_ok();
+            let remote_exists = self
+                .runner
+                .run(
+                    "git",
+                    &["--git-dir", ref_path_str, "show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")],
+                    std::path::Path::new("/"),
+                    &ChannelLabel::Noop,
+                )
+                .await
+                .is_ok();
+            if local_exists || remote_exists {
+                return Err(format!("branch already exists: {branch}"));
+            }
+
             // Fresh branch: clone without checkout, then create branch
             self.runner
                 .run(
@@ -256,6 +282,10 @@ mod tests {
         let runner = Arc::new(RecordingRunner::new(vec![
             // remote_url: git --git-dir /ref/repo remote get-url origin
             Ok("https://github.com/org/repo.git\n".into()),
+            // show-ref local — not found
+            Err("".to_string()),
+            // show-ref remote — not found
+            Err("".to_string()),
             // git clone --reference /ref/repo --no-checkout ... /workspace/my-feature
             Ok(String::new()),
             // git -C /workspace/my-feature checkout -b my-feature
@@ -272,23 +302,44 @@ mod tests {
         assert_eq!(checkout.branch, "my-feature");
 
         let calls = runner.calls();
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 5);
 
         // First call: get remote URL
         assert_eq!(calls[0].0, "git");
         assert!(calls[0].1.contains(&"get-url".to_string()));
 
-        // Second call: git clone --reference ... --no-checkout
+        // Second + third calls: show-ref checks
         assert_eq!(calls[1].0, "git");
-        assert!(calls[1].1.contains(&"clone".to_string()));
-        assert!(calls[1].1.contains(&"--no-checkout".to_string()));
-        assert!(!calls[1].1.contains(&"-b".to_string()));
-
-        // Third call: git checkout -b
+        assert!(calls[1].1.contains(&"show-ref".to_string()));
         assert_eq!(calls[2].0, "git");
-        assert!(calls[2].1.contains(&"checkout".to_string()));
-        assert!(calls[2].1.contains(&"-b".to_string()));
-        assert!(calls[2].1.contains(&"my-feature".to_string()));
+        assert!(calls[2].1.contains(&"show-ref".to_string()));
+
+        // Fourth call: git clone --reference ... --no-checkout
+        assert_eq!(calls[3].0, "git");
+        assert!(calls[3].1.contains(&"clone".to_string()));
+        assert!(calls[3].1.contains(&"--no-checkout".to_string()));
+        assert!(!calls[3].1.contains(&"-b".to_string()));
+
+        // Fifth call: git checkout -b
+        assert_eq!(calls[4].0, "git");
+        assert!(calls[4].1.contains(&"checkout".to_string()));
+        assert!(calls[4].1.contains(&"-b".to_string()));
+        assert!(calls[4].1.contains(&"my-feature".to_string()));
+    }
+
+    #[tokio::test]
+    async fn create_checkout_fresh_branch_rejects_existing_remote_branch() {
+        let runner = Arc::new(RecordingRunner::new(vec![
+            Ok("https://github.com/org/repo.git\n".to_string()), // git remote get-url
+            Err("".to_string()),                                 // show-ref local — not found
+            Ok("".to_string()),                                  // show-ref remote — found!
+        ]));
+        let mgr = CloneCheckoutManager::new(runner.clone(), ExecutionEnvironmentPath::new("/ref/repo"));
+
+        let result = mgr.create_checkout(&ExecutionEnvironmentPath::new("/workspace"), "existing-branch", true).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already exists"));
     }
 
     #[tokio::test]
