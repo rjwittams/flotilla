@@ -2,7 +2,7 @@
 
 **Issue:** #474 (Phase D of #442)
 **Date:** 2026-03-25
-**Depends on:** #471 (hop chain, complete), #472 (provider audit, complete), #473 (EnvironmentProvider + Docker, complete)
+**Depends on:** #471 (hop chain, complete), #472 (provider audit, complete), #473 (EnvironmentProvider + Docker, complete), #486 (workspace daemon phases, complete)
 
 ## Summary
 
@@ -103,12 +103,11 @@ This means existing step actions (checkout, terminal prep) don't need modificati
 2. CreateEnvironment { env_id, image }         on Host(target_host)
 3. DiscoverEnvironmentProviders { env_id }     on Host(target_host)
 4. CreateCheckout { branch, ... }              on Environment(target_host, env_id)
-5. PrepareTerminalForCheckout { ... }          on Environment(target_host, env_id)
-6. CreateWorkspaceFromPreparedTerminal { ... } on Host(local_host)
-7. ResolveAttachCommand { ... }                → HopPlan with EnterEnvironment
+5. PrepareWorkspace { ... }                    on Environment(target_host, env_id)
+6. AttachWorkspace                             on Host(local_host)
 ```
 
-Steps 1-3 use `Host(target_host)` — they manage the environment on the daemon that owns Docker. Steps 4-5 use `Environment(target_host, env_id)` — same daemon, but the resolver uses environment providers. Step 6 uses `Host(local_host)` — workspace creation stays on the presentation host. Step 7 produces the hop plan.
+Steps 1-3 use `Host(target_host)` — they manage the environment on the daemon that owns Docker. Steps 4-5 use `Environment(target_host, env_id)` — same daemon, but the resolver uses environment providers. Step 5 produces a `PreparedWorkspace` payload (containing label, target host, checkout path, attachable set ID, template YAML, and prepared commands). Step 6 uses `Host(local_host)` — it consumes the `PreparedWorkspace` from prior step outcomes, wraps commands through the hop chain (inserting `EnterEnvironment`), and calls the local workspace manager.
 
 The step runner batches steps 1-5 together (same `HostName`) and sends them to `target_host` via `RemoteStepExecutor`. Step 6 executes locally. The receiving daemon distinguishes `Host` from `Environment` steps at resolution time.
 
@@ -143,7 +142,7 @@ If both conditions are met, it returns a `CloneCheckoutManager` pointed at `/ref
 
 `AttachableSet` gains `environment_id: Option<EnvironmentId>`. When terminals are allocated inside an environment, the set is tagged with the environment ID. This field is the data path that the hop chain builder reads to know when to insert `EnterEnvironment` hops.
 
-`build_for_prepared_command()` also needs environment context — it gains an `environment_id: Option<EnvironmentId>` parameter, passed by the workspace orchestrator when building commands for environment-hosted panes.
+`PreparedWorkspace` gains `environment_id: Option<EnvironmentId>`. The `PrepareWorkspace` resolver sets this when running inside an environment. The `AttachWorkspace` resolver reads it from the prior step's `PreparedWorkspace` outcome and passes it to `resolve_prepared_commands_via_hop_chain()` for hop chain construction.
 
 ## Hop Chain Wiring
 
@@ -155,16 +154,14 @@ If both conditions are met, it returns a `CloneCheckoutManager` pointed at `/ref
 RemoteToHost(feta) → EnterEnvironment(env_id, "docker") → AttachTerminal(sess)
 ```
 
-### Workspace Orchestrator
+### AttachWorkspace Resolver (Workspace Orchestrator)
 
 `resolve_prepared_commands_via_hop_chain()` in `executor/workspace.rs` currently uses `NoopEnvironmentHopResolver`. When creating a workspace inside an environment, it constructs `DockerEnvironmentHopResolver` with the container name mapping and passes it to the `HopResolver`. The mapping comes from the `EnvironmentHandle` in resolver state — `DockerProvisionedEnvironment` knows its container name internally, exposed via a method that the resolver calls to build the `EnvironmentId → container_name` map.
 
-**Data path for environment_id to the workspace step:** The workspace creation step (step 6) runs on the presentation host. It needs the `environment_id` to build hop plans with `EnterEnvironment`. This data flows through the step outcome chain:
-- `PrepareTerminalForCheckout` (step 5, on the remote daemon) produces a `CommandValue::TerminalPrepared` result. This type gains `environment_id: Option<EnvironmentId>`.
-- `CreateWorkspaceFromPreparedTerminal` (step 6, on the presentation host) reads the environment_id from the prior step's outcome.
-- The workspace orchestrator passes it to `resolve_prepared_commands_via_hop_chain()` and `build_for_prepared_command()`.
-
-Similarly, `CommandAction::CreateWorkspaceFromPreparedTerminal` in the protocol gains `environment_id: Option<EnvironmentId>` so the action carries the context when constructed from step outcomes.
+**Data path for environment_id to the attach step:** The `AttachWorkspace` step (step 6) runs on the presentation host. It needs the `environment_id` to build hop plans with `EnterEnvironment`. This data flows through the `PreparedWorkspace` payload:
+- `PrepareWorkspace` (step 5, on the remote daemon) produces `CommandValue::PreparedWorkspace(PreparedWorkspace { environment_id: Some(env_id), ... })`.
+- `AttachWorkspace` (step 6, on the presentation host) reads `environment_id` from the `PreparedWorkspace` in prior step outcomes.
+- The workspace orchestrator passes it to `resolve_prepared_commands_via_hop_chain()`.
 
 ## Refresh and Host Summary
 
@@ -201,7 +198,7 @@ The `spawn_fn` closure creates an accept loop calling `handle_client` with `envi
 
 ### In-process daemon test
 
-Construct `Command { host: Some(feta), environment: Some(spec), action: Checkout { ... } }`, execute through `InProcessDaemon`. Verify full step sequence: ensure image → create environment → discover → checkout → terminals → workspace. Verify attach command resolves with `EnterEnvironment` hop. All mock-backed via replay fixtures.
+Construct `Command { host: Some(feta), environment: Some(spec), action: Checkout { ... } }`, execute through `InProcessDaemon`. Verify full step sequence: ensure image → create environment → discover → checkout → prepare workspace → attach workspace. Verify `PreparedWorkspace` carries `environment_id` and attach step inserts `EnterEnvironment` hop. All mock-backed via replay fixtures.
 
 ### Real Docker (optional, not CI)
 
@@ -210,7 +207,7 @@ Same flow with `REPLAY=passthrough` against real Docker using the `flotilla-dev-
 ## Dependencies
 
 - **#464 phase 1 (step-level remote routing)** — merged (#513). `build_plan()` now extracts `Command.host` and stamps steps with `StepHost::Remote(host)`. `run_step_plan_with_remote_executor()` dispatches remote steps via the `RemoteStepExecutor` trait. Phase D uses this infrastructure: environment lifecycle steps target the host that owns Docker, while workspace creation stays local on the presentation host.
-- **#486 (WorkspaceConfig spans execution/presentation daemon phases)** — in progress. The current `TerminalPrepared` → `CreateWorkspaceFromPreparedTerminal` two-step flow is being rewritten to use steps in one plan. Phase D's `environment_id` data path from remote terminal prep to local workspace creation depends on how this rewrite lands. Wait for this before implementing Phase D's hop chain wiring.
+- **#486 (workspace daemon phases)** — merged (#515). Replaced the old `TerminalPrepared` → TUI follow-up `CreateWorkspaceFromPreparedTerminal` hack with a unified two-step plan: `PrepareWorkspace` (runs on checkout host, produces `PreparedWorkspace` payload) → `AttachWorkspace` (runs locally, consumes payload). The `WorkspaceManager` trait now takes `WorkspaceAttachRequest` instead of `WorkspaceConfig`. Phase D builds on this: environment workspace creation uses the same `PrepareWorkspace` → `AttachWorkspace` flow, with `PreparedWorkspace` carrying `environment_id` so the attach step can insert `EnterEnvironment` hops.
 
 ## Open Questions
 
