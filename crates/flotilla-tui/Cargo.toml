@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 flotilla-client = { path = "../flotilla-client" }
+flotilla-commands = { path = "../flotilla-commands" }
 flotilla-core = { path = "../flotilla-core" }
 flotilla-protocol = { path = "../flotilla-protocol" }
 tokio = { workspace = true }
@@ -28,12 +29,14 @@ tracing-appender = "0.2.4"
 time = { version = "0.3.47", features = ["local-offset"] }
 futures = "0.3"
 comfy-table = "7.2.2"
+clap = { version = "4", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 async-trait = { workspace = true }
+flotilla-core = { path = "../flotilla-core", features = ["test-support"] }
 flotilla-protocol = { path = "../flotilla-protocol", features = ["test-support"] }
 insta = "1"
 tempfile = "3"

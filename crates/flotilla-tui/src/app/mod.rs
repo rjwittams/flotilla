@@ -441,7 +441,7 @@ impl App {
     }
 
     fn active_repo_is_remote_only(&self) -> bool {
-        self.model.active_repo_root().starts_with(Path::new("<remote>"))
+        self.model.active_repo_root_opt().is_some_and(|p| p.starts_with(Path::new("<remote>")))
     }
 
     pub fn visible_status_items(&self) -> Vec<VisibleStatusItem> {
@@ -526,16 +526,20 @@ impl App {
     }
 
     pub fn build_widget_context(&mut self) -> crate::widgets::WidgetContext<'_> {
+        let my_host = self.model.my_host().cloned();
+        let active_repo_is_remote_only = self.active_repo_is_remote_only();
         crate::widgets::WidgetContext {
             model: &self.model,
             keymap: &self.keymap,
             config: &self.config,
             in_flight: &self.in_flight,
             target_host: self.ui.target_host.as_ref(),
+            my_host,
             active_repo: self.model.active_repo,
             repo_order: &self.model.repo_order,
             commands: &mut self.proto_commands,
             is_config: &mut self.ui.is_config,
+            active_repo_is_remote_only,
             app_actions: Vec::new(),
         }
     }
@@ -553,6 +557,9 @@ impl App {
                     let next = (idx + 1) % themes.len();
                     self.theme = (themes[next].1)();
                 }
+                AppAction::SetTheme(name) => {
+                    self.theme = crate::theme::theme_by_name(&name);
+                }
                 AppAction::CycleLayout => {
                     // Cycle the active page's layout (handles both the direct
                     // repo_page path where the page already cycled, and the
@@ -566,9 +573,36 @@ impl App {
                     }
                     self.persist_layout();
                 }
+                AppAction::SetLayout(name) => {
+                    let layout = match name.as_str() {
+                        "auto" => RepoViewLayout::Auto,
+                        "zoom" => RepoViewLayout::Zoom,
+                        "right" => RepoViewLayout::Right,
+                        "below" => RepoViewLayout::Below,
+                        _ => {
+                            self.set_status_message(Some(format!("unknown layout: {name}")));
+                            continue;
+                        }
+                    };
+                    self.ui.view_layout = layout;
+                    if !self.model.repo_order.is_empty() {
+                        let identity = &self.model.repo_order[self.model.active_repo];
+                        if let Some(page) = self.screen.repo_pages.get_mut(identity) {
+                            page.layout = layout;
+                        }
+                    }
+                    self.persist_layout();
+                }
                 AppAction::CycleHost => {
                     let peer_hosts = self.model.peer_host_names();
                     self.ui.cycle_target_host(&peer_hosts);
+                }
+                AppAction::SetTarget(name) => {
+                    if name == "local" {
+                        self.ui.target_host = None;
+                    } else {
+                        self.ui.target_host = Some(HostName::new(&name));
+                    }
                 }
                 AppAction::ToggleDebug => {
                     self.ui.show_debug = !self.ui.show_debug;
@@ -629,11 +663,7 @@ impl App {
                     self.config.save_tab_order(&self.persisted_tab_order_paths());
                 }
                 AppAction::OpenFilePicker => {
-                    if self.model.active_repo_root_opt().is_some() {
-                        self.open_file_picker_from_active_repo_parent();
-                    } else {
-                        self.set_status_message(Some("No active repo".into()));
-                    }
+                    self.open_file_picker_from_active_repo_parent();
                 }
                 AppAction::PrevTab => {
                     self.dismiss_modals();
@@ -1012,11 +1042,15 @@ impl App {
     }
 
     pub(super) fn open_file_picker_from_active_repo_parent(&mut self) {
-        let mut input = Input::default();
-        if let Some(parent) = self.model.active_repo_root().parent() {
-            let parent_str = format!("{}/", parent.display());
-            input = Input::from(parent_str.as_str());
-        }
+        let start_dir = self
+            .model
+            .active_repo_root_opt()
+            .and_then(|r| r.parent())
+            .map(|p| p.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let input = Input::from(format!("{}/", start_dir.display()).as_str());
         let dir_entries = crate::widgets::command_palette::refresh_dir_listing_standalone(input.value(), &self.model);
         self.screen.modal_stack.push(Box::new(crate::widgets::file_picker::FilePickerWidget::new(input, dir_entries)));
     }

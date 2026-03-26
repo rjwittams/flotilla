@@ -1,3 +1,13 @@
+use flotilla_commands::{
+    commands::{
+        agent::{AgentNoun, AgentVerb},
+        checkout::{CheckoutNoun, CheckoutVerb},
+        cr::{CrNoun, CrVerb},
+        issue::{IssueNoun, IssueVerb},
+        workspace::{WorkspaceNoun, WorkspaceVerb},
+    },
+    NounCommand,
+};
 use flotilla_protocol::{CheckoutTarget, Command, CommandAction, HostName, RepoLabels, WorkItem, WorkItemKind};
 
 use super::App;
@@ -216,6 +226,60 @@ impl Intent {
 
     pub fn enter_priority() -> &'static [Intent] {
         &[Intent::SwitchToWorkspace, Intent::TeleportSession, Intent::CreateWorkspace, Intent::CreateCheckout, Intent::GenerateBranchName]
+    }
+
+    /// Build a noun command struct from a work item, or None if this intent
+    /// cannot be expressed as a noun-verb command.
+    ///
+    /// The returned `NounCommand` can be `.resolve()`d for dispatch and
+    /// `.to_string()`d for echo/logging (via its `Display` impl).
+    pub fn to_noun_command(&self, item: &WorkItem) -> Option<NounCommand> {
+        match self {
+            Intent::OpenChangeRequest => {
+                let id = item.change_request_key.as_ref()?;
+                Some(NounCommand::Cr(CrNoun { subject: id.clone(), verb: CrVerb::Open }))
+            }
+            Intent::CloseChangeRequest => {
+                let id = item.change_request_key.as_ref()?;
+                Some(NounCommand::Cr(CrNoun { subject: id.clone(), verb: CrVerb::Close }))
+            }
+            Intent::OpenIssue => {
+                let id = item.issue_keys.first()?;
+                Some(NounCommand::Issue(IssueNoun { subject: Some(id.clone()), verb: Some(IssueVerb::Open) }))
+            }
+            Intent::ArchiveSession => {
+                let key = item.session_key.as_ref()?;
+                Some(NounCommand::Agent(AgentNoun { subject: key.clone(), verb: AgentVerb::Archive }))
+            }
+            Intent::TeleportSession => {
+                let key = item.session_key.as_ref()?;
+                Some(NounCommand::Agent(AgentNoun {
+                    subject: key.clone(),
+                    verb: AgentVerb::Teleport { branch: item.branch.clone(), checkout: item.checkout_key().map(|co| co.path.clone()) },
+                }))
+            }
+            Intent::SwitchToWorkspace => {
+                let ws_ref = item.workspace_refs.first()?;
+                Some(NounCommand::Workspace(WorkspaceNoun { subject: ws_ref.clone(), verb: WorkspaceVerb::Select }))
+            }
+            Intent::CreateCheckout => {
+                let branch = item.branch.as_ref()?;
+                let fresh = item.kind != WorkItemKind::RemoteBranch && item.kind != WorkItemKind::ChangeRequest;
+                Some(NounCommand::Checkout(CheckoutNoun {
+                    subject: None,
+                    verb: Some(CheckoutVerb::Create { branch: branch.clone(), fresh }),
+                }))
+            }
+            Intent::GenerateBranchName => {
+                if item.issue_keys.is_empty() {
+                    return None;
+                }
+                let ids = item.issue_keys.join(",");
+                Some(NounCommand::Issue(IssueNoun { subject: Some(ids), verb: Some(IssueVerb::SuggestBranch) }))
+            }
+            // Non-convertible intents
+            Intent::RemoveCheckout | Intent::CreateWorkspace | Intent::LinkIssuesToChangeRequest => None,
+        }
     }
 }
 

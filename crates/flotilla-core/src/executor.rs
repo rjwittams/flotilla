@@ -507,29 +507,21 @@ impl StepResolver for ExecutorStepResolver {
                 );
                 let attachable_set_id =
                     workspace_orchestrator.ensure_attachable_set_for_checkout(&self.local_host, checkout_path.as_path());
-                let template_yaml =
-                    workspace_config(self.repo.root.as_path(), &label, checkout_path.as_path(), "claude", self.config_base.as_path())
-                        .template_yaml;
+                let workspace_config =
+                    workspace_config(self.repo.root.as_path(), &label, checkout_path.as_path(), "claude", self.config_base.as_path());
+                let template_yaml = workspace_config.template_yaml.clone();
                 let prepared_commands = if let Some(ref tm) = tm {
                     let terminal_preparation = TerminalPreparationService::new(tm, self.daemon_socket_path.as_ref().map(|p| p.as_path()));
+                    let workspace_config = workspace_config.clone();
                     terminal_preparation
-                        .prepare_terminal_commands(&branch, checkout_path.as_path(), &[], || {
-                            workspace_config(
-                                self.repo.root.as_path(),
-                                &label,
-                                checkout_path.as_path(),
-                                "claude",
-                                self.config_base.as_path(),
-                            )
-                        })
+                        .prepare_terminal_commands(&branch, checkout_path.as_path(), &[], move || workspace_config.clone())
                         .await?
                 } else {
-                    terminals::render_fallback_commands(|| {
-                        workspace_config(self.repo.root.as_path(), &label, checkout_path.as_path(), "claude", self.config_base.as_path())
-                    })
-                    .into_iter()
-                    .map(|cmd| ResolvedPaneCommand { role: cmd.role, args: vec![Arg::Literal(cmd.command)] })
-                    .collect()
+                    let workspace_config = workspace_config.clone();
+                    terminals::render_fallback_commands(move || workspace_config.clone())
+                        .into_iter()
+                        .map(|cmd| ResolvedPaneCommand { role: cmd.role, args: vec![Arg::Literal(cmd.command)] })
+                        .collect()
                 };
 
                 Ok(StepOutcome::Produced(CommandValue::PreparedWorkspace(PreparedWorkspace {
@@ -733,6 +725,7 @@ impl StepResolver for ExecutorStepResolver {
                     }
                 }
             }
+            StepAction::Noop => Ok(StepOutcome::Completed),
         }
     }
 }

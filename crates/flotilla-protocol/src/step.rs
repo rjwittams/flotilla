@@ -113,6 +113,9 @@ pub enum StepAction {
         change_request_id: String,
         issue_ids: Vec<String>,
     },
+
+    /// No-op action — resolvers return `Completed` without side effects.
+    Noop,
 }
 
 /// A single step in a multi-step command.

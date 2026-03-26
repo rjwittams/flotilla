@@ -58,6 +58,7 @@ impl StatusBarWidget {
         error_items: Vec<crate::app::VisibleStatusItem>,
         mode_indicators: Vec<ModeIndicator>,
         show_keys: bool,
+        command_echo: Option<&str>,
         theme: &Theme,
         frame: &mut Frame,
         area: Rect,
@@ -85,6 +86,18 @@ impl StatusBarWidget {
 
         let mut spans = Vec::new();
         let mut x = 0usize;
+
+        // Command echo: dim text at the far left, before the status section.
+        if let Some(echo) = command_echo {
+            if !echo.is_empty() {
+                let echo_style = Style::default().fg(theme.muted).bg(theme.bar_bg);
+                let echo_text = format!(" {echo} ");
+                let echo_width = echo_text.width();
+                spans.push(Span::styled(echo_text, echo_style));
+                x += echo_width;
+            }
+        }
+
         let status_style = match status_section_clone {
             StatusSection::Error { .. } => Style::default().fg(theme.status_error).bg(theme.bar_bg).bold(),
             StatusSection::Plain(_) => Style::default().fg(theme.text).bg(theme.bar_bg),
@@ -209,7 +222,7 @@ impl InteractiveWidget for StatusBarWidget {
                 ctx.app_actions.push(AppAction::ClearError(id));
                 Outcome::Consumed
             }
-            None => Outcome::Ignored,
+            Some(StatusBarAction::None) | None => Outcome::Ignored,
         }
     }
 
@@ -236,7 +249,7 @@ impl InteractiveWidget for StatusBarWidget {
 
 /// Resolve the active in-flight task description for the current repo.
 pub(crate) fn active_task(model: &TuiModel, in_flight: &HashMap<u64, InFlightCommand>) -> Option<TaskSection> {
-    let active_repo = &model.repo_order[model.active_repo];
+    let active_repo = model.repo_order.get(model.active_repo)?;
     let repo_cmds: Vec<(&u64, &InFlightCommand)> = in_flight.iter().filter(|(_, cmd)| &cmd.repo_identity == active_repo).collect();
 
     // Highest command ID = most recently started (IDs are monotonically increasing AtomicU64).
@@ -272,7 +285,7 @@ pub(crate) fn normal_mode_indicators(ui: &UiState) -> Vec<ModeIndicator> {
 
     vec![
         ModeIndicator::new(layout_icon, layout_label, StatusBarAction::key(KeyCode::Char('l'))),
-        ModeIndicator::new("", &host_label, StatusBarAction::key(KeyCode::Char('h'))),
+        ModeIndicator::new("", &host_label, StatusBarAction::None),
     ]
 }
 

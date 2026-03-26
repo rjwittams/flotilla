@@ -196,7 +196,9 @@ pub(crate) struct TestWidgetHarness {
     pub in_flight: HashMap<u64, InFlightCommand>,
     pub commands: CommandQueue,
     pub target_host: Option<HostName>,
+    pub my_host: Option<HostName>,
     pub is_config: bool,
+    pub active_repo_is_remote_only: bool,
 }
 
 impl TestWidgetHarness {
@@ -209,7 +211,9 @@ impl TestWidgetHarness {
             in_flight: app.in_flight,
             commands: app.proto_commands,
             target_host: app.ui.target_host,
+            my_host: None,
             is_config: false,
+            active_repo_is_remote_only: false,
         }
     }
 
@@ -220,10 +224,12 @@ impl TestWidgetHarness {
             config: &self.config,
             in_flight: &self.in_flight,
             target_host: self.target_host.as_ref(),
+            my_host: self.my_host.clone(),
             active_repo: self.model.active_repo,
             repo_order: &self.model.repo_order,
             commands: &mut self.commands,
             is_config: &mut self.is_config,
+            active_repo_is_remote_only: self.active_repo_is_remote_only,
             app_actions: Vec::new(),
         }
     }
