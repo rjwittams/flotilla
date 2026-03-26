@@ -13,6 +13,10 @@ pub struct ShpoolTerminalPool {
     runner: Arc<dyn CommandRunner>,
     socket_path: DaemonHostPath,
     config_path: DaemonHostPath,
+    /// Terminal env defaults (TERM, COLORTERM) from discovery, injected into
+    /// sessions at creation time. Empty when the daemon environment already
+    /// has them (local case); populated for remote daemons started without a TTY.
+    terminal_env_defaults: TerminalEnvVars,
 }
 
 /// Shpool config content managed by flotilla.
@@ -43,7 +47,7 @@ enum ShpoolNoPidProbe {
 impl ShpoolTerminalPool {
     /// Create a new ShpoolTerminalPool, cleaning up stale sockets and
     /// spawning the daemon with flotilla's managed config.
-    pub async fn create(runner: Arc<dyn CommandRunner>, socket_path: DaemonHostPath) -> Self {
+    pub async fn create(runner: Arc<dyn CommandRunner>, socket_path: DaemonHostPath, terminal_env_defaults: TerminalEnvVars) -> Self {
         let config_path = DaemonHostPath::new(socket_path.as_path().parent().unwrap_or(Path::new(".")).join("config.toml"));
         let config_stale = Self::config_needs_update(config_path.as_path());
         let mut daemon_state = Self::detect_daemon_state(Arc::clone(&runner), socket_path.as_path(), config_path.as_path()).await;
@@ -85,7 +89,7 @@ impl ShpoolTerminalPool {
             Self::write_config(config_path.as_path());
         }
         Self::start_daemon(socket_path.as_path(), config_path.as_path()).await;
-        Self { runner, socket_path, config_path }
+        Self { runner, socket_path, config_path, terminal_env_defaults }
     }
 
     /// Sync constructor for tests — skips daemon lifecycle.
@@ -93,7 +97,7 @@ impl ShpoolTerminalPool {
     pub(crate) fn new(runner: Arc<dyn CommandRunner>, socket_path: DaemonHostPath) -> Self {
         let config_path = DaemonHostPath::new(socket_path.as_path().parent().unwrap_or(Path::new(".")).join("config.toml"));
         Self::write_config(config_path.as_path());
-        Self { runner, socket_path, config_path }
+        Self { runner, socket_path, config_path, terminal_env_defaults: vec![] }
     }
 
     /// Check if a process is alive. Returns true for both "alive and ours"
@@ -524,22 +528,14 @@ impl TerminalPool for ShpoolTerminalPool {
         // variable expansion), so all values must be literal. Quote values
         // so paths with spaces are handled correctly.
         //
-        // Inject TERM/COLORTERM defaults when the daemon process doesn't have
-        // them (common for remote daemons started via non-interactive SSH).
-        // shpool captures env at session creation, not at attach time, so
-        // sessions created without TERM get no color support. xterm-256color
-        // is the safe universal default (same as tmux/zellij).
+        // terminal_env_defaults (from discovery) provide TERM/COLORTERM
+        // fallbacks for daemons started without a TTY (e.g. remote SSH).
         let mut cmd_parts: Vec<String> = Vec::new();
-        let needs_env_prefix = !env_vars.is_empty()
-            || std::env::var("TERM").unwrap_or_default().is_empty()
-            || std::env::var("COLORTERM").unwrap_or_default().is_empty();
-        if needs_env_prefix {
+        let has_env = !env_vars.is_empty() || !self.terminal_env_defaults.is_empty();
+        if has_env {
             cmd_parts.push("env".to_string());
-            if std::env::var("TERM").unwrap_or_default().is_empty() {
-                cmd_parts.push("TERM=xterm-256color".to_string());
-            }
-            if std::env::var("COLORTERM").unwrap_or_default().is_empty() {
-                cmd_parts.push("COLORTERM=truecolor".to_string());
+            for (k, v) in &self.terminal_env_defaults {
+                cmd_parts.push(format!("{k}={}", flotilla_protocol::arg::shell_quote(v)));
             }
             for (k, v) in env_vars {
                 cmd_parts.push(format!("{k}={}", flotilla_protocol::arg::shell_quote(v)));

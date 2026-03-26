@@ -28,11 +28,17 @@ enum SessionStatus {
 pub struct CleatTerminalPool {
     runner: Arc<dyn CommandRunner>,
     binary: String,
+    terminal_env_defaults: TerminalEnvVars,
 }
 
 impl CleatTerminalPool {
     pub fn new(runner: Arc<dyn CommandRunner>, binary: impl Into<String>) -> Self {
-        Self { runner, binary: binary.into() }
+        Self { runner, binary: binary.into(), terminal_env_defaults: vec![] }
+    }
+
+    pub fn with_terminal_env_defaults(mut self, defaults: TerminalEnvVars) -> Self {
+        self.terminal_env_defaults = defaults;
+        self
     }
 
     fn parse_list_output(json: &str) -> Result<Vec<SessionInfo>, String> {
@@ -75,22 +81,15 @@ impl TerminalPool for CleatTerminalPool {
             return Ok(());
         }
 
-        // Inject TERM/COLORTERM defaults when the daemon process doesn't have
-        // them (common for remote daemons started via non-interactive SSH).
-        // cleat captures env at session creation, so sessions created without
-        // TERM get no color support. xterm-256color is the safe universal default.
-        let needs_env_prefix = !env_vars.is_empty()
-            || std::env::var("TERM").unwrap_or_default().is_empty()
-            || std::env::var("COLORTERM").unwrap_or_default().is_empty();
-        let effective_cmd = if !needs_env_prefix {
+        // terminal_env_defaults (from discovery) provide TERM/COLORTERM
+        // fallbacks for daemons started without a TTY (e.g. remote SSH).
+        let has_env = !env_vars.is_empty() || !self.terminal_env_defaults.is_empty();
+        let effective_cmd = if !has_env {
             command.to_string()
         } else {
             let mut parts = vec!["env".to_string()];
-            if std::env::var("TERM").unwrap_or_default().is_empty() {
-                parts.push("TERM=xterm-256color".to_string());
-            }
-            if std::env::var("COLORTERM").unwrap_or_default().is_empty() {
-                parts.push("COLORTERM=truecolor".to_string());
+            for (k, v) in &self.terminal_env_defaults {
+                parts.push(format!("{k}={}", flotilla_protocol::arg::shell_quote(v)));
             }
             for (k, v) in env_vars {
                 parts.push(format!("{k}={}", flotilla_protocol::arg::shell_quote(v)));
