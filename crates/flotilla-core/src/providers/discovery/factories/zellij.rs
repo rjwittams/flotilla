@@ -27,7 +27,7 @@ impl Factory for ZellijWorkspaceManagerFactory {
     async fn probe(
         &self,
         env: &EnvironmentBag,
-        config: &ConfigStore,
+        _config: &ConfigStore,
         _repo_root: &ExecutionEnvironmentPath,
         runner: Arc<dyn CommandRunner>,
     ) -> Result<Arc<dyn WorkspaceManager>, Vec<UnmetRequirement>> {
@@ -37,10 +37,9 @@ impl Factory for ZellijWorkspaceManagerFactory {
 
         ZellijWorkspaceManager::check_version(&*runner).await.map_err(|e| vec![UnmetRequirement::MissingBinary(e)])?;
 
-        let state_dir = config.state_dir().clone();
         let mgr = match env.find_env_var("ZELLIJ_SESSION_NAME") {
-            Some(name) => ZellijWorkspaceManager::with_session_name(runner, state_dir, name.to_string()),
-            None => ZellijWorkspaceManager::new(runner, state_dir),
+            Some(name) => ZellijWorkspaceManager::with_session_name(runner, name.to_string()),
+            None => ZellijWorkspaceManager::new(runner),
         };
         Ok(Arc::new(mgr))
     }
