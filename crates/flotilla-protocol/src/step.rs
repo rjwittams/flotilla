@@ -127,6 +127,21 @@ pub enum StepAction {
 
     /// No-op action — resolvers return `Completed` without side effects.
     Noop,
+
+    // Environment lifecycle
+    EnsureEnvironmentImage {
+        spec: crate::EnvironmentSpec,
+    },
+    CreateEnvironment {
+        env_id: crate::EnvironmentId,
+        image: crate::ImageId,
+    },
+    DiscoverEnvironmentProviders {
+        env_id: crate::EnvironmentId,
+    },
+    DestroyEnvironment {
+        env_id: crate::EnvironmentId,
+    },
 }
 
 /// A single step in a multi-step command.

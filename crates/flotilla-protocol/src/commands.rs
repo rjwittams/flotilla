@@ -282,6 +282,12 @@ pub enum CommandValue {
     HostList(Box<HostListResponse>),
     HostStatus(Box<HostStatusResponse>),
     HostProviders(Box<HostProvidersResponse>),
+    ImageEnsured {
+        image: crate::ImageId,
+    },
+    EnvironmentCreated {
+        env_id: crate::EnvironmentId,
+    },
 }
 
 /// Status of an individual step within a multi-step command.
@@ -333,7 +339,12 @@ mod tests {
                 context_repo: None,
                 action: CommandAction::Refresh { repo: Some(RepoSelector::Query("flotilla".into())) },
             },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::TrackRepoPath { path: PathBuf::from("/repo") } },
+            Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::TrackRepoPath { path: PathBuf::from("/repo") },
+            },
             Command {
                 host: None,
                 environment: None,
@@ -390,7 +401,12 @@ mod tests {
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
                 action: CommandAction::CreateWorkspaceForCheckout { checkout_path: PathBuf::from("/repo/wt"), label: "feat-x".into() },
             },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::SelectWorkspace { ws_ref: "ws://1".into() } },
+            Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::SelectWorkspace { ws_ref: "ws://1".into() },
+            },
             Command {
                 host: None,
                 environment: None,
@@ -483,8 +499,18 @@ mod tests {
                 action: CommandAction::QueryRepoWork { repo: RepoSelector::Path(PathBuf::from("/repo")) },
             },
             Command { host: None, environment: None, context_repo: None, action: CommandAction::QueryHostList {} },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::QueryHostStatus { target_host: "desktop".into() } },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::QueryHostProviders { target_host: "desktop".into() } },
+            Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::QueryHostStatus { target_host: "desktop".into() },
+            },
+            Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::QueryHostProviders { target_host: "desktop".into() },
+            },
         ];
 
         for cmd in cases {
@@ -494,7 +520,8 @@ mod tests {
 
     #[test]
     fn command_uses_snake_case_tag() {
-        let cmd = Command { host: None, environment: None, context_repo: None, action: CommandAction::SelectWorkspace { ws_ref: "x".into() } };
+        let cmd =
+            Command { host: None, environment: None, context_repo: None, action: CommandAction::SelectWorkspace { ws_ref: "x".into() } };
         let json = serde_json::to_value(&cmd).expect("serialize");
         assert_eq!(json.get("action").and_then(|v| v.as_str()), Some("select_workspace"));
     }
@@ -767,7 +794,12 @@ mod tests {
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/tmp"))),
                 action: CommandAction::TeleportSession { session_id: "s".into(), branch: None, checkout_key: None },
             },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::TrackRepoPath { path: PathBuf::from("/tmp") } },
+            Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::TrackRepoPath { path: PathBuf::from("/tmp") },
+            },
             Command {
                 host: None,
                 environment: None,
@@ -818,8 +850,18 @@ mod tests {
                 action: CommandAction::QueryRepoWork { repo: RepoSelector::Path(PathBuf::from("/tmp")) },
             },
             Command { host: None, environment: None, context_repo: None, action: CommandAction::QueryHostList {} },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::QueryHostStatus { target_host: "desktop".into() } },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::QueryHostProviders { target_host: "desktop".into() } },
+            Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::QueryHostStatus { target_host: "desktop".into() },
+            },
+            Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::QueryHostProviders { target_host: "desktop".into() },
+            },
         ];
         for cmd in cases {
             let desc = cmd.description();

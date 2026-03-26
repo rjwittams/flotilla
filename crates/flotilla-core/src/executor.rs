@@ -745,6 +745,12 @@ impl StepResolver for ExecutorStepResolver {
                     }
                 }
             }
+            StepAction::EnsureEnvironmentImage { .. }
+            | StepAction::CreateEnvironment { .. }
+            | StepAction::DiscoverEnvironmentProviders { .. }
+            | StepAction::DestroyEnvironment { .. } => {
+                Err("environment lifecycle steps not yet wired".to_string())
+            }
             StepAction::Noop => Ok(StepOutcome::Completed),
         }
     }
