@@ -226,6 +226,10 @@ impl super::WorkspaceManager for TmuxWorkspaceManager {
         self.tmux_cmd(&["select-window", "-t", ws_ref]).await?;
         Ok(())
     }
+
+    fn binding_scope_prefix(&self) -> String {
+        String::new()
+    }
 }
 
 #[cfg(test)]

@@ -142,6 +142,9 @@ impl WorkspaceManager for StubWorkspaceManager {
     async fn select_workspace(&self, _: &str) -> Result<(), String> {
         Ok(())
     }
+    fn binding_scope_prefix(&self) -> String {
+        String::new()
+    }
 }
 
 /// Build a ProviderRegistry with all provider slots populated.

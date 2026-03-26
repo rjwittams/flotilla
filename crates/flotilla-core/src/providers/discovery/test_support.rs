@@ -685,6 +685,9 @@ impl WorkspaceManager for FakeWorkspaceManager {
         self.selected.lock().await.push(ws_ref.to_string());
         Ok(())
     }
+    fn binding_scope_prefix(&self) -> String {
+        String::new()
+    }
 }
 
 pub struct FakeTerminalPool {

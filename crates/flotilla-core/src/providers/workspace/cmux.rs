@@ -209,6 +209,10 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
         self.cmux_cmd(&["select-workspace", "--workspace", ws_ref]).await?;
         Ok(())
     }
+
+    fn binding_scope_prefix(&self) -> String {
+        String::new()
+    }
 }
 
 #[cfg(test)]

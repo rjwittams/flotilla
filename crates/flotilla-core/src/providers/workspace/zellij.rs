@@ -273,6 +273,13 @@ impl super::WorkspaceManager for ZellijWorkspaceManager {
         self.zellij_action(&["go-to-tab-name", ws_ref]).await?;
         Ok(())
     }
+
+    fn binding_scope_prefix(&self) -> String {
+        match self.session_name() {
+            Ok(session) => format!("{session}:"),
+            Err(_) => String::new(),
+        }
+    }
 }
 
 #[cfg(test)]

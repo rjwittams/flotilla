@@ -167,6 +167,9 @@ impl WorkspaceManager for MockWorkspaceManager {
         let result = self.select_result.lock().await;
         result.clone()
     }
+    fn binding_scope_prefix(&self) -> String {
+        String::new()
+    }
 }
 
 /// A mock ChangeRequestTracker provider.
