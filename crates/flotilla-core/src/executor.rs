@@ -657,6 +657,11 @@ impl StepResolver for ExecutorStepResolver {
                     })
                     .ok_or_else(|| "prepared workspace not produced by prior step".to_string())?;
 
+                let container_name = prepared.environment_id.as_ref().and_then(|env_id| {
+                    let handles = self.environment_handles.lock().expect("environment_handles lock");
+                    handles.get(env_id).and_then(|h| h.container_name().map(|s| s.to_string()))
+                });
+
                 let tm = self.terminal_manager();
                 let workspace_orchestrator = WorkspaceOrchestrator::new(
                     self.repo.root.as_path(),
@@ -667,7 +672,7 @@ impl StepResolver for ExecutorStepResolver {
                     &self.local_host,
                     tm.as_ref(),
                 );
-                workspace_orchestrator.attach_prepared_workspace(&prepared).await?;
+                workspace_orchestrator.attach_prepared_workspace(&prepared, container_name.as_deref()).await?;
                 Ok(StepOutcome::Completed)
             }
             StepAction::CreateWorkspaceFromPreparedTerminal { target_host, branch, checkout_path, attachable_set_id, commands } => {
@@ -682,15 +687,18 @@ impl StepResolver for ExecutorStepResolver {
                     tm.as_ref(),
                 );
                 workspace_orchestrator
-                    .attach_prepared_workspace(&PreparedWorkspace {
-                        label: format!("{branch}@{target_host}"),
-                        target_host,
-                        checkout_path: checkout_path.into_path_buf(),
-                        attachable_set_id,
-                        environment_id: None,
-                        template_yaml: None,
-                        prepared_commands: commands,
-                    })
+                    .attach_prepared_workspace(
+                        &PreparedWorkspace {
+                            label: format!("{branch}@{target_host}"),
+                            target_host,
+                            checkout_path: checkout_path.into_path_buf(),
+                            attachable_set_id,
+                            environment_id: None,
+                            template_yaml: None,
+                            prepared_commands: commands,
+                        },
+                        None,
+                    )
                     .await?;
                 Ok(StepOutcome::Completed)
             }
