@@ -47,6 +47,9 @@ pub struct CommandPaletteWidget {
     entries: &'static [PaletteEntry],
     selected: usize,
     scroll_top: usize,
+    /// The work item that was selected when the contextual palette was opened.
+    /// Used by tui_dispatch for SubjectHost/ProviderHost resolution.
+    source_item: Option<WorkItem>,
 }
 
 impl Default for CommandPaletteWidget {
@@ -57,17 +60,18 @@ impl Default for CommandPaletteWidget {
 
 impl CommandPaletteWidget {
     pub fn new() -> Self {
-        Self { input: Input::default(), entries: palette::all_entries(), selected: 0, scroll_top: 0 }
+        Self { input: Input::default(), entries: palette::all_entries(), selected: 0, scroll_top: 0, source_item: None }
     }
 
     /// Create a palette widget with pre-filled input text and selection.
     pub fn with_state(input: Input, selected: usize, scroll_top: usize) -> Self {
-        Self { input, entries: palette::all_entries(), selected, scroll_top }
+        Self { input, entries: palette::all_entries(), selected, scroll_top, source_item: None }
     }
 
-    /// Create a palette widget with a pre-filled input string (cursor at end).
-    pub fn with_prefill(text: impl AsRef<str>) -> Self {
-        Self { input: Input::from(text.as_ref()), entries: palette::all_entries(), selected: 0, scroll_top: 0 }
+    /// Create a palette widget with a pre-filled input string (cursor at end)
+    /// and the work item that was selected when the palette was opened.
+    pub fn with_prefill(text: impl AsRef<str>, item: Option<WorkItem>) -> Self {
+        Self { input: Input::from(text.as_ref()), entries: palette::all_entries(), selected: 0, scroll_top: 0, source_item: item }
     }
 
     fn filtered(&self) -> Vec<&'static PaletteEntry> {
@@ -181,7 +185,7 @@ impl CommandPaletteWidget {
         let active_repo = ctx.model.active_repo_identity_opt().cloned();
         match tui_dispatch(
             resolved,
-            None,
+            self.source_item.as_ref(),
             *ctx.is_config,
             active_repo.as_ref(),
             &ctx.target_host.cloned(),

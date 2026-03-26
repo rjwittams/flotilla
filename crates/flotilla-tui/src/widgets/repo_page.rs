@@ -350,7 +350,7 @@ impl InteractiveWidget for RepoPage {
             Action::OpenContextualPalette => {
                 let widget = if let Some(item) = self.table.selected_work_item() {
                     match super::command_palette::palette_prefill(item) {
-                        Some(prefill) => super::command_palette::CommandPaletteWidget::with_prefill(prefill),
+                        Some(prefill) => super::command_palette::CommandPaletteWidget::with_prefill(prefill, Some(item.clone())),
                         None => super::command_palette::CommandPaletteWidget::new(),
                     }
                 } else {
