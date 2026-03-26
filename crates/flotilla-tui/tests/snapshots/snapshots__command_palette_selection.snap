@@ -1,6 +1,6 @@
 ---
 source: crates/flotilla-tui/tests/snapshots.rs
-assertion_line: 671
+assertion_line: 670
 expression: output
 ---
  ⚓  flotilla  | my-project | [+]
@@ -25,11 +25,11 @@ expression: output
 │                                                                      ││                                              │
 │                                                                      ││                                              │
 /                            <ENT> RUN  <ESC> CLOSE  <TAB> FILL                                   ◫ auto   @local
-  search     filter items in view                                                                                 /
-  refresh    refresh active repo                                                                                  r
-  branch     create a new branch                                                                                  n
-  help       show key bindings                                                                                    ?
-  quit       exit flotilla                                                                                        q
-  layout     cycle view layout                                                                                    l
-  host       cycle target host                                                                                    h
-  theme      cycle color theme
+  repo       Manage repositories
+  checkout   Manage checkouts
+  cr         Code review
+  pr         Code review
+  issue      Issues
+  agent      Cloud agents
+  workspace  Workspaces
+  host       Manage and route to hosts

@@ -162,6 +162,12 @@ impl WorkItemTable {
         }
     }
 
+    /// Clear the current table selection.
+    pub fn clear_selection(&mut self) {
+        self.selected_selectable_idx = None;
+        self.table_state.select(None);
+    }
+
     // ── Rendering ────────────────────────────────────────────────────
 
     /// Render the table using self-owned data. Called by `RepoPage` which passes

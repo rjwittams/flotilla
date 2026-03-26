@@ -272,6 +272,8 @@ impl RepoPage {
             self.rebuild_table(&data);
         } else if !self.multi_selected.is_empty() {
             self.multi_selected.clear();
+        } else if self.table.selected_work_item().is_some() {
+            self.table.clear_selection();
         } else {
             ctx.app_actions.push(AppAction::Quit);
         }
@@ -345,6 +347,17 @@ impl InteractiveWidget for RepoPage {
             }
             Action::OpenIssueSearch => Outcome::Push(Box::new(super::issue_search::IssueSearchWidget::new())),
             Action::OpenCommandPalette => Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new())),
+            Action::OpenContextualPalette => {
+                let widget = if let Some(item) = self.table.selected_work_item() {
+                    match super::command_palette::palette_prefill(item) {
+                        Some(prefill) => super::command_palette::CommandPaletteWidget::with_prefill(prefill, Some(item.clone())),
+                        None => super::command_palette::CommandPaletteWidget::new(),
+                    }
+                } else {
+                    super::command_palette::CommandPaletteWidget::new()
+                };
+                Outcome::Push(Box::new(widget))
+            }
             // Actions handled at the App level — return Ignored so they bubble up.
             Action::Confirm | Action::OpenActionMenu | Action::OpenFilePicker | Action::Dispatch(_) => Outcome::Ignored,
             _ => Outcome::Ignored,

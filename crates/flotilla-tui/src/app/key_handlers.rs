@@ -55,6 +55,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // Clear the transient command echo on every key press.
+        self.ui.command_echo = None;
+
         // Snapshot selection so we can detect changes for infinite scroll.
         let prev_selection = self.active_page_selection();
 
@@ -268,6 +271,73 @@ impl App {
             return;
         }
 
+        // Try registry path for convertible intents.
+        if let Some(noun) = intent.to_noun_command(item) {
+            self.ui.command_echo = Some(noun.to_string());
+
+            match noun.resolve() {
+                Ok(resolved) => {
+                    let is_config = self.ui.is_config;
+                    let active_repo = if is_config { None } else { Some(self.model.active_repo_identity()) };
+                    let target_host = self.ui.target_host.clone();
+                    let remote_only = self.active_repo_is_remote_only();
+
+                    match crate::widgets::command_palette::tui_dispatch(
+                        resolved,
+                        Some(item),
+                        is_config,
+                        active_repo,
+                        &target_host,
+                        &my_host,
+                        remote_only,
+                    ) {
+                        Ok(cmd) => {
+                            // Modal handling for convertible intents that need confirmation
+                            match intent {
+                                Intent::CloseChangeRequest => {
+                                    let id = match &cmd {
+                                        Command { action: CommandAction::CloseChangeRequest { id }, .. } => id.clone(),
+                                        _ => return,
+                                    };
+                                    let widget = crate::widgets::close_confirm::CloseConfirmWidget::new(
+                                        id,
+                                        item.description.clone(),
+                                        item.identity.clone(),
+                                        cmd,
+                                    );
+                                    self.screen.modal_stack.push(Box::new(widget));
+                                    return;
+                                }
+                                Intent::GenerateBranchName => {
+                                    self.screen
+                                        .modal_stack
+                                        .push(Box::new(crate::widgets::branch_input::BranchInputWidget::new(BranchInputKind::Generating)));
+                                }
+                                _ => {}
+                            }
+                            let pending_ctx = PendingActionContext {
+                                identity: item.identity.clone(),
+                                description: intent.label(self.model.active_labels()),
+                                repo_identity: self.model.active_repo_identity().clone(),
+                            };
+                            self.proto_commands.push_with_context(cmd, Some(pending_ctx));
+                            return;
+                        }
+                        Err(e) => {
+                            self.model.status_message = Some(e);
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Registry parse failed — clear stale echo and fall back to old path
+                    self.ui.command_echo = None;
+                    tracing::warn!(%e, ?intent, "registry parse failed, falling back to intent.resolve");
+                }
+            }
+        }
+
+        // Non-convertible intents (or registry fallback): use old path
         if let Some(cmd) = intent.resolve(item, self) {
             match intent {
                 Intent::RemoveCheckout => {

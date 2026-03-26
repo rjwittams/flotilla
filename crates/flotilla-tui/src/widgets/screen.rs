@@ -242,6 +242,7 @@ impl InteractiveWidget for Screen {
                         StatusBarAction::ClearError(id) => {
                             ctx.app_actions.push(AppAction::ClearError(id));
                         }
+                        StatusBarAction::None => {}
                     }
                     return Outcome::Consumed;
                 }
@@ -372,7 +373,18 @@ impl InteractiveWidget for Screen {
             chunks[2]
         };
 
-        self.status_bar.render_bespoke(status, key_chips, task, error_items, mode_indicators, show_keys, ctx.theme, frame, status_bar_area);
+        self.status_bar.render_bespoke(
+            status,
+            key_chips,
+            task,
+            error_items,
+            mode_indicators,
+            show_keys,
+            ctx.ui.command_echo.as_deref(),
+            ctx.theme,
+            frame,
+            status_bar_area,
+        );
 
         // 4. Modals on top
         for modal in &mut self.modal_stack {
