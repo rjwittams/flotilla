@@ -30,12 +30,22 @@ impl CrNoun {
     pub fn resolve(self) -> Result<Resolved, String> {
         match self.verb {
             CrVerb::Open => Ok(Resolved::NeedsContext {
-                command: Command { host: None, environment: None, context_repo: None, action: CommandAction::OpenChangeRequest { id: self.subject } },
+                command: Command {
+                    host: None,
+                    environment: None,
+                    context_repo: None,
+                    action: CommandAction::OpenChangeRequest { id: self.subject },
+                },
                 repo: RepoContext::Inferred,
                 host: HostResolution::ProviderHost,
             }),
             CrVerb::Close => Ok(Resolved::NeedsContext {
-                command: Command { host: None, environment: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: self.subject } },
+                command: Command {
+                    host: None,
+                    environment: None,
+                    context_repo: None,
+                    action: CommandAction::CloseChangeRequest { id: self.subject },
+                },
                 repo: RepoContext::Inferred,
                 host: HostResolution::ProviderHost,
             }),
@@ -90,7 +100,12 @@ mod tests {
     fn cr_open() {
         let resolved = parse(&["cr", "42", "open"]).resolve().unwrap();
         assert_eq!(resolved, Resolved::NeedsContext {
-            command: Command { host: None, environment: None, context_repo: None, action: CommandAction::OpenChangeRequest { id: "42".into() } },
+            command: Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::OpenChangeRequest { id: "42".into() }
+            },
             repo: RepoContext::Inferred,
             host: HostResolution::ProviderHost,
         });
@@ -100,7 +115,12 @@ mod tests {
     fn cr_close() {
         let resolved = parse(&["cr", "42", "close"]).resolve().unwrap();
         assert_eq!(resolved, Resolved::NeedsContext {
-            command: Command { host: None, environment: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } },
+            command: Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::CloseChangeRequest { id: "42".into() }
+            },
             repo: RepoContext::Inferred,
             host: HostResolution::ProviderHost,
         });
@@ -130,7 +150,12 @@ mod tests {
         // so we test the struct directly with the same args.
         let resolved = parse(&["pr", "42", "open"]).resolve().unwrap();
         assert_eq!(resolved, Resolved::NeedsContext {
-            command: Command { host: None, environment: None, context_repo: None, action: CommandAction::OpenChangeRequest { id: "42".into() } },
+            command: Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::OpenChangeRequest { id: "42".into() }
+            },
             repo: RepoContext::Inferred,
             host: HostResolution::ProviderHost,
         });

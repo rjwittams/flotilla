@@ -41,9 +41,12 @@ pub enum RepoVerb {
 impl RepoNoun {
     pub fn resolve(self) -> Result<Resolved, String> {
         match (self.subject, self.verb) {
-            (_, Some(RepoVerb::Add { path })) => {
-                Ok(Resolved::Ready(Command { host: None, environment: None, context_repo: None, action: CommandAction::TrackRepoPath { path } }))
-            }
+            (_, Some(RepoVerb::Add { path })) => Ok(Resolved::Ready(Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::TrackRepoPath { path },
+            })),
             (_, Some(RepoVerb::Remove { repo })) => Ok(Resolved::Ready(Command {
                 host: None,
                 environment: None,
@@ -53,7 +56,12 @@ impl RepoNoun {
             (subject, Some(RepoVerb::Refresh)) => {
                 // `repo myslug refresh` → refresh specific, `repo refresh` or `repo all refresh` → refresh all
                 let resolved_repo = subject.filter(|s| s != "all").map(RepoSelector::Query);
-                Ok(Resolved::Ready(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: resolved_repo } }))
+                Ok(Resolved::Ready(Command {
+                    host: None,
+                    environment: None,
+                    context_repo: None,
+                    action: CommandAction::Refresh { repo: resolved_repo },
+                }))
             }
             (Some(subject), Some(RepoVerb::Checkout { branch, fresh })) => {
                 let target = if fresh { CheckoutTarget::FreshBranch(branch) } else { CheckoutTarget::Branch(branch) };
@@ -169,7 +177,10 @@ mod tests {
     #[test]
     fn repo_refresh_all() {
         let resolved = parse(&["repo", "refresh"]).resolve().unwrap();
-        assert_eq!(resolved, Resolved::Ready(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } }));
+        assert_eq!(
+            resolved,
+            Resolved::Ready(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } })
+        );
     }
 
     #[test]
@@ -191,7 +202,10 @@ mod tests {
     fn repo_all_refresh() {
         // `repo all refresh` is the explicit "refresh everything" form
         let resolved = parse(&["repo", "all", "refresh"]).resolve().unwrap();
-        assert_eq!(resolved, Resolved::Ready(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } }));
+        assert_eq!(
+            resolved,
+            Resolved::Ready(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } })
+        );
     }
 
     #[test]
@@ -297,7 +311,10 @@ mod tests {
     fn repo_refresh_no_subject_is_all() {
         // `repo refresh` with no subject means refresh all (shorthand for `repo all refresh`)
         let resolved = parse(&["repo", "refresh"]).resolve().unwrap();
-        assert_eq!(resolved, Resolved::Ready(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } }));
+        assert_eq!(
+            resolved,
+            Resolved::Ready(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } })
+        );
     }
 
     #[test]

@@ -48,7 +48,12 @@ impl Factory for CloneCheckoutManagerFactory {
 
         // Require /ref/repo to exist as a valid git dir
         if runner
-            .run("git", &["--git-dir", "/ref/repo", "rev-parse", "--git-dir"], std::path::Path::new("/"), &crate::providers::ChannelLabel::Noop)
+            .run(
+                "git",
+                &["--git-dir", "/ref/repo", "rev-parse", "--git-dir"],
+                std::path::Path::new("/"),
+                &crate::providers::ChannelLabel::Noop,
+            )
             .await
             .is_err()
         {

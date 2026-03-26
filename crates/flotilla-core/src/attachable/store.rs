@@ -174,7 +174,14 @@ impl AttachableStoreState {
         }
 
         let id = self.allocate_set_id();
-        self.insert_set(AttachableSet { id: id.clone(), host_affinity, checkout, template_identity: None, environment_id: None, members: Vec::new() });
+        self.insert_set(AttachableSet {
+            id: id.clone(),
+            host_affinity,
+            checkout,
+            template_identity: None,
+            environment_id: None,
+            members: Vec::new(),
+        });
         (id, true)
     }
 

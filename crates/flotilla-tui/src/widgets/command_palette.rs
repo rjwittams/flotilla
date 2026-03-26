@@ -1009,7 +1009,8 @@ mod tests {
             attachable_set_id: None,
             agent_keys: Vec::new(),
         };
-        let cmd = Command { host: None, environment: None, context_repo: None, action: CommandAction::OpenChangeRequest { id: "#42".into() } };
+        let cmd =
+            Command { host: None, environment: None, context_repo: None, action: CommandAction::OpenChangeRequest { id: "#42".into() } };
         let my_host = Some(HostName::new("local-host"));
         // ProviderHost on a remote-only repo should derive host from the item
         let resolved = Resolved::NeedsContext { command: cmd, repo: RepoContext::Inferred, host: HostResolution::ProviderHost };

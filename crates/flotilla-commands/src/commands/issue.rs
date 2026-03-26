@@ -39,7 +39,12 @@ impl IssueNoun {
             (Some(subject), Some(IssueVerb::SuggestBranch)) => {
                 let issue_keys = subject.split(',').map(|s| s.trim().to_string()).collect();
                 Ok(Resolved::NeedsContext {
-                    command: Command { host: None, environment: None, context_repo: None, action: CommandAction::GenerateBranchName { issue_keys } },
+                    command: Command {
+                        host: None,
+                        environment: None,
+                        context_repo: None,
+                        action: CommandAction::GenerateBranchName { issue_keys },
+                    },
                     repo: RepoContext::Inferred,
                     host: HostResolution::ProvisioningTarget,
                 })

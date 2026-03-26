@@ -75,4 +75,3 @@ pub struct EnvironmentInfo {
     pub image: ImageId,
     pub status: EnvironmentStatus,
 }
-

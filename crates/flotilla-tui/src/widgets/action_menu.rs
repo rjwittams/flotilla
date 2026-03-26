@@ -365,7 +365,8 @@ mod tests {
     #[test]
     fn confirm_close_change_request_swaps_to_close_confirm_widget() {
         let item = pr_item("42");
-        let command = Command { host: None, environment: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } };
+        let command =
+            Command { host: None, environment: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } };
         let entries = vec![MenuEntry { intent: Intent::CloseChangeRequest, command }];
         let mut widget = ActionMenuWidget::new(entries, item);
         let mut harness = TestWidgetHarness::new();
@@ -381,8 +382,12 @@ mod tests {
     fn confirm_generate_branch_name_sets_branch_input_mode() {
         let mut item = checkout_item("feat/c", "/tmp/c", false);
         item.issue_keys = vec!["123".into()];
-        let command =
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::GenerateBranchName { issue_keys: vec!["123".into()] } };
+        let command = Command {
+            host: None,
+            environment: None,
+            context_repo: None,
+            action: CommandAction::GenerateBranchName { issue_keys: vec!["123".into()] },
+        };
         let entries = vec![MenuEntry { intent: Intent::GenerateBranchName, command }];
         let mut widget = ActionMenuWidget::new(entries, item);
         let mut harness = TestWidgetHarness::new();

@@ -90,7 +90,9 @@ impl Refinable for HostNounPartial {
 impl HostNoun {
     pub fn resolve(self) -> Result<Resolved, String> {
         match self.verb {
-            HostVerb::List => Ok(Resolved::Ready(Command { host: None, environment: None, context_repo: None, action: CommandAction::QueryHostList {} })),
+            HostVerb::List => {
+                Ok(Resolved::Ready(Command { host: None, environment: None, context_repo: None, action: CommandAction::QueryHostList {} }))
+            }
             HostVerb::Status => {
                 let host = self.subject.ok_or("status requires a host name")?;
                 Ok(Resolved::Ready(Command {
@@ -112,7 +114,8 @@ impl HostNoun {
             HostVerb::Refresh { repo } => {
                 let host = self.subject.ok_or("refresh requires a host name")?;
                 let resolved_repo = repo.map(RepoSelector::Query);
-                let mut cmd = Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: resolved_repo } };
+                let mut cmd =
+                    Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: resolved_repo } };
                 cmd.host = Some(HostName::new(&host));
                 Ok(Resolved::Ready(cmd))
             }

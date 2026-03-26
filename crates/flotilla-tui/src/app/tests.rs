@@ -674,7 +674,10 @@ fn command_queue_push_with_context() {
         description: "Archive session".into(),
         repo_identity: RepoIdentity { authority: "local".into(), path: "/tmp/test-repo".into() },
     };
-    q.push_with_context(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } }, Some(ctx));
+    q.push_with_context(
+        Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } },
+        Some(ctx),
+    );
     let (cmd, ctx) = q.take_next().expect("should have one entry");
     assert!(matches!(cmd.action, CommandAction::Refresh { .. }));
     assert!(ctx.is_some());

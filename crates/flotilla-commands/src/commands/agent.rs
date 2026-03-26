@@ -45,7 +45,12 @@ impl AgentNoun {
                 host: HostResolution::Local,
             }),
             AgentVerb::Archive => Ok(Resolved::NeedsContext {
-                command: Command { host: None, environment: None, context_repo: None, action: CommandAction::ArchiveSession { session_id: self.subject } },
+                command: Command {
+                    host: None,
+                    environment: None,
+                    context_repo: None,
+                    action: CommandAction::ArchiveSession { session_id: self.subject },
+                },
                 repo: RepoContext::Inferred,
                 host: HostResolution::ProviderHost,
             }),
@@ -143,7 +148,12 @@ mod tests {
     fn agent_archive() {
         let resolved = parse(&["agent", "claude-1", "archive"]).resolve().unwrap();
         assert_eq!(resolved, Resolved::NeedsContext {
-            command: Command { host: None, environment: None, context_repo: None, action: CommandAction::ArchiveSession { session_id: "claude-1".into() } },
+            command: Command {
+                host: None,
+                environment: None,
+                context_repo: None,
+                action: CommandAction::ArchiveSession { session_id: "claude-1".into() }
+            },
             repo: RepoContext::Inferred,
             host: HostResolution::ProviderHost,
         });

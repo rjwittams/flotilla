@@ -384,7 +384,12 @@ impl App {
     }
 
     pub fn repo_command(&self, action: CommandAction) -> Command {
-        Command { host: None, environment: None, context_repo: Some(RepoSelector::Identity(self.model.active_repo_identity().clone())), action }
+        Command {
+            host: None,
+            environment: None,
+            context_repo: Some(RepoSelector::Identity(self.model.active_repo_identity().clone())),
+            action,
+        }
     }
 
     pub fn repo_command_for_identity(&self, repo_identity: RepoIdentity, action: CommandAction) -> Command {
