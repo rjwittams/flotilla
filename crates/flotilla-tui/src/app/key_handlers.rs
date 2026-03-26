@@ -330,7 +330,8 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    // Registry parse failed — log and fall back to old path
+                    // Registry parse failed — clear stale echo and fall back to old path
+                    self.ui.command_echo = None;
                     tracing::warn!(%e, ?intent, "registry parse failed, falling back to intent.resolve");
                 }
             }

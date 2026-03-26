@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn contextual_palette_derives_host_from_source_item() {
         let repo_id = RepoIdentity { authority: "github.com".into(), path: "org/repo".into() };
-        let mut item = WorkItem {
+        let item = WorkItem {
             kind: WorkItemKind::ChangeRequest,
             identity: WorkItemIdentity::ChangeRequest("42".into()),
             host: HostName::new("remote-peer"),
