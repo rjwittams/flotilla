@@ -49,12 +49,6 @@ pub enum StepAction {
         deleted_checkout_paths: Vec<HostPath>,
     },
 
-    // Workspace (existing)
-    CreateWorkspaceForCheckout {
-        label: String,
-        checkout_path: Option<ExecutionEnvironmentPath>,
-    },
-
     // Teleport
     ResolveAttachCommand {
         session_id: String,
@@ -85,6 +79,11 @@ pub enum StepAction {
         attachable_set_id: Option<AttachableSetId>,
         commands: Vec<ResolvedPaneCommand>,
     },
+    PrepareWorkspace {
+        checkout_path: Option<ExecutionEnvironmentPath>,
+        label: String,
+    },
+    AttachWorkspace,
     SelectWorkspace {
         ws_ref: String,
     },
