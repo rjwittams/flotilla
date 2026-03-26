@@ -250,6 +250,15 @@ impl ShpoolTerminalPool {
             return;
         }
 
+        // Ensure the parent directory exists before creating the socket,
+        // log file, or pid file.
+        if let Some(parent) = socket_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(path = %parent.display(), err = %e, "failed to create shpool state dir");
+                return;
+            }
+        }
+
         let socket_str = socket_path.display().to_string();
         let config_str = config_path.display().to_string();
         let log_path = socket_path.with_file_name("daemonized-shpool.log");
