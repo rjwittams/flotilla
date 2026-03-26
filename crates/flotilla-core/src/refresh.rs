@@ -274,7 +274,7 @@ async fn refresh_providers(
 
 fn project_attachable_data(pd: &mut ProviderData, registry: &ProviderRegistry, attachable_store: &SharedAttachableStore) {
     let workspace_provider = registry.workspace_managers.preferred_with_desc().map(|(desc, _)| desc.implementation.clone());
-    let Ok(store) = attachable_store.lock() else {
+    let Ok(mut store) = attachable_store.lock() else {
         tracing::warn!("attachable store lock poisoned while projecting provider data");
         return;
     };
@@ -287,6 +287,41 @@ fn project_attachable_data(pd: &mut ProviderData, registry: &ProviderRegistry, a
             };
             let set_id = flotilla_protocol::AttachableSetId::new(set_id.to_string());
             workspace.attachable_set_id = Some(set_id.clone());
+        }
+    }
+
+    // Prune stale workspace bindings within the provider's declared scope.
+    // Skip when workspace list is empty — it may indicate a list failure,
+    // and pruning would incorrectly delete all bindings.
+    if !pd.workspaces.is_empty() {
+        if let Some((desc, ws_mgr)) = registry.workspace_managers.preferred_with_desc() {
+            let provider_name = &desc.implementation;
+            let scope_prefix = ws_mgr.binding_scope_prefix();
+            let live_ws_refs: std::collections::HashSet<&str> = pd.workspaces.keys().map(|s| s.as_str()).collect();
+
+            let stale_refs: Vec<String> = store
+                .registry()
+                .bindings
+                .iter()
+                .filter(|b| {
+                    b.provider_category == "workspace_manager"
+                        && b.provider_name == *provider_name
+                        && b.object_kind == BindingObjectKind::AttachableSet
+                        && b.external_ref.starts_with(&scope_prefix)
+                        && !live_ws_refs.contains(b.external_ref.as_str())
+                })
+                .map(|b| b.external_ref.clone())
+                .collect();
+
+            for stale_ref in &stale_refs {
+                tracing::info!(external_ref = %stale_ref, provider = %provider_name, "pruning stale workspace binding");
+                store.remove_binding_object("workspace_manager", provider_name, BindingObjectKind::AttachableSet, stale_ref);
+            }
+            if !stale_refs.is_empty() {
+                if let Err(err) = store.save() {
+                    tracing::warn!(err = %err, "failed to save after pruning stale workspace bindings");
+                }
+            }
         }
     }
 

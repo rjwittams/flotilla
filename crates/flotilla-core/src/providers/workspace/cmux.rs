@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 
@@ -55,14 +55,23 @@ impl CmuxWorkspaceManager {
         Ok(workspaces
             .iter()
             .filter_map(|ws| {
-                let ws_ref = ws["ref"].as_str()?.to_string();
+                let ws_ref = ws["id"].as_str()?.to_string();
                 let name = ws["title"].as_str().unwrap_or("").to_string();
-                let directories: Vec<PathBuf> = ws["directories"]
-                    .as_array()
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(PathBuf::from)).collect())
-                    .unwrap_or_default();
 
-                Some((ws_ref, Workspace { name, directories, correlation_keys: vec![], attachable_set_id: None }))
+                Some((ws_ref, Workspace { name, correlation_keys: vec![], attachable_set_id: None }))
+            })
+            .collect())
+    }
+
+    fn parse_workspaces_both(output: &str) -> Result<HashMap<String, String>, String> {
+        let parsed: serde_json::Value = serde_json::from_str(output).map_err(|e| e.to_string())?;
+        let workspaces = parsed["workspaces"].as_array().ok_or("cmux list-workspaces: response missing 'workspaces' array")?;
+        Ok(workspaces
+            .iter()
+            .filter_map(|ws| {
+                let ws_ref = ws["ref"].as_str()?.to_string();
+                let id = ws["id"].as_str()?.to_string();
+                Some((ws_ref, id))
             })
             .collect())
     }
@@ -77,7 +86,7 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
         let mut workspaces = Vec::new();
 
         for window_ref in window_refs {
-            let output = match self.cmux_cmd(&["--json", "list-workspaces", "--window", &window_ref]).await {
+            let output = match self.cmux_cmd(&["--json", "--id-format", "uuids", "list-workspaces", "--window", &window_ref]).await {
                 Ok(output) => output,
                 Err(err) => {
                     warn!(%window_ref, %err, "cmux: failed to list workspaces for window");
@@ -204,9 +213,18 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
             self.cmux_cmd(&["focus-pane", "--pane", pane_ref, "--workspace", &ws_ref]).await?;
         }
 
-        let directories = vec![config.working_directory.clone().into_path_buf()];
-        info!(workspace = %config.name, %ws_ref, "cmux: workspace ready");
-        Ok((ws_ref, Workspace { name: config.name.clone(), directories, correlation_keys: vec![], attachable_set_id: None }))
+        // Resolve the positional ref to a stable UUID
+        let ws_uuid = {
+            let both_output = self.cmux_cmd(&["--json", "--id-format", "both", "list-workspaces", "--workspace", &ws_ref]).await?;
+            let ref_to_uuid = Self::parse_workspaces_both(&both_output)?;
+            ref_to_uuid
+                .get(&ws_ref)
+                .cloned()
+                .ok_or_else(|| format!("cmux: could not resolve UUID for {ws_ref} after workspace creation"))?
+        };
+
+        info!(workspace = %config.name, %ws_uuid, "cmux: workspace ready");
+        Ok((ws_uuid, Workspace { name: config.name.clone(), correlation_keys: vec![], attachable_set_id: None }))
     }
 
     async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {
@@ -214,11 +232,15 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
         self.cmux_cmd(&["select-workspace", "--workspace", ws_ref]).await?;
         Ok(())
     }
+
+    fn binding_scope_prefix(&self) -> String {
+        String::new()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::sync::Arc;
 
     use super::*;
     use crate::{
@@ -241,13 +263,12 @@ mod tests {
 
     #[tokio::test]
     async fn list_workspaces_parses_json_response() {
-        let output = r#"{"workspaces":[{"ref":"workspace:10","title":"Main","directories":["/tmp/repo","/tmp/repo2"]}]}"#;
+        let output = r#"{"workspaces":[{"id":"CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40","title":"Main"}]}"#;
         let workspaces = CmuxWorkspaceManager::parse_workspaces(output).expect("parse workspaces");
         assert_eq!(workspaces.len(), 1);
         let (ws_ref, ws) = &workspaces[0];
-        assert_eq!(ws_ref, "workspace:10");
+        assert_eq!(ws_ref, "CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40");
         assert_eq!(ws.name, "Main");
-        assert_eq!(ws.directories, vec![PathBuf::from("/tmp/repo"), PathBuf::from("/tmp/repo2")]);
         assert!(ws.correlation_keys.is_empty());
     }
 
@@ -255,14 +276,14 @@ mod tests {
     async fn list_workspaces_aggregates_all_windows() {
         let manager = CmuxWorkspaceManager::new(Arc::new(MockRunner::new(vec![
             Ok(r#"[{"id":"W1","index":0},{"id":"W2","index":1}]"#.to_string()),
-            Ok(r#"{"workspaces":[{"ref":"workspace:10","title":"Main","directories":["/tmp/repo-a"]}]}"#.to_string()),
-            Ok(r#"{"workspaces":[{"ref":"workspace:11","title":"Feature","directories":["/tmp/repo-b"]}]}"#.to_string()),
+            Ok(r#"{"workspaces":[{"id":"CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40","title":"Main"}]}"#.to_string()),
+            Ok(r#"{"workspaces":[{"id":"367CC5E4-0C9B-4559-9D97-D6358900ECCA","title":"Feature"}]}"#.to_string()),
         ])));
 
         let workspaces = manager.list_workspaces().await.expect("list workspaces");
         assert_eq!(workspaces.len(), 2);
-        assert_eq!(workspaces[0].0, "workspace:10");
-        assert_eq!(workspaces[1].0, "workspace:11");
+        assert_eq!(workspaces[0].0, "CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40");
+        assert_eq!(workspaces[1].0, "367CC5E4-0C9B-4559-9D97-D6358900ECCA");
         assert!(workspaces[0].1.correlation_keys.is_empty());
         assert!(workspaces[1].1.correlation_keys.is_empty());
     }
@@ -271,13 +292,13 @@ mod tests {
     async fn list_workspaces_skips_failed_window() {
         let manager = CmuxWorkspaceManager::new(Arc::new(MockRunner::new(vec![
             Ok(r#"[{"id":"W1","index":0},{"id":"W2","index":1}]"#.to_string()),
-            Ok(r#"{"workspaces":[{"ref":"workspace:10","title":"Main","directories":["/tmp/repo-a"]}]}"#.to_string()),
+            Ok(r#"{"workspaces":[{"id":"CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40","title":"Main"}]}"#.to_string()),
             Err("window gone".to_string()),
         ])));
 
         let workspaces = manager.list_workspaces().await.expect("list workspaces");
         assert_eq!(workspaces.len(), 1);
-        assert_eq!(workspaces[0].0, "workspace:10");
+        assert_eq!(workspaces[0].0, "CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40");
     }
 
     #[tokio::test]
@@ -292,15 +313,14 @@ mod tests {
     async fn list_workspaces_dedupes_duplicate_workspace_refs() {
         let manager = CmuxWorkspaceManager::new(Arc::new(MockRunner::new(vec![
             Ok(r#"[{"id":"W1","index":0},{"id":"W2","index":1}]"#.to_string()),
-            Ok(r#"{"workspaces":[{"ref":"workspace:10","title":"Main","directories":["/tmp/repo-a"]}]}"#.to_string()),
-            Ok(r#"{"workspaces":[{"ref":"workspace:10","title":"Main Copy","directories":["/tmp/repo-b"]}]}"#.to_string()),
+            Ok(r#"{"workspaces":[{"id":"CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40","title":"Main"}]}"#.to_string()),
+            Ok(r#"{"workspaces":[{"id":"CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40","title":"Main Copy"}]}"#.to_string()),
         ])));
 
         let workspaces = manager.list_workspaces().await.expect("list workspaces");
         assert_eq!(workspaces.len(), 1);
-        assert_eq!(workspaces[0].0, "workspace:10");
+        assert_eq!(workspaces[0].0, "CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40");
         assert_eq!(workspaces[0].1.name, "Main");
-        assert_eq!(workspaces[0].1.directories, vec![PathBuf::from("/tmp/repo-a")]);
     }
 
     #[tokio::test]
@@ -316,5 +336,28 @@ mod tests {
 
         let err = manager.create_workspace(&config).await.expect_err("should fail when ref is missing");
         assert!(err.contains("returned no workspace ref"));
+    }
+
+    #[test]
+    fn parse_workspaces_reads_uuid_from_id_field() {
+        let json = r#"{"workspaces": [
+            {"id": "CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40", "title": "Main", "selected": true, "pinned": false, "index": 0},
+            {"id": "367CC5E4-0C9B-4559-9D97-D6358900ECCA", "title": "Feature", "selected": false, "pinned": false, "index": 1}
+        ]}"#;
+        let workspaces = CmuxWorkspaceManager::parse_workspaces(json).expect("parse workspaces");
+        assert_eq!(workspaces.len(), 2);
+        assert_eq!(workspaces[0].0, "CBC42D5B-AFAE-46BA-A5DB-386D13DA5A40");
+        assert_eq!(workspaces[0].1.name, "Main");
+        assert_eq!(workspaces[1].0, "367CC5E4-0C9B-4559-9D97-D6358900ECCA");
+        assert_eq!(workspaces[1].1.name, "Feature");
+    }
+
+    #[test]
+    fn parse_workspaces_both_maps_ref_to_uuid() {
+        let json = r#"{"workspaces": [
+            {"ref": "workspace:1", "id": "ABC-UUID", "title": "Main", "selected": true, "pinned": false, "index": 0}
+        ]}"#;
+        let map = CmuxWorkspaceManager::parse_workspaces_both(json).expect("parse workspaces both");
+        assert_eq!(map.get("workspace:1"), Some(&"ABC-UUID".to_string()));
     }
 }

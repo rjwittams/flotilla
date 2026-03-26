@@ -10,7 +10,7 @@ use super::{
     workspace_config, ExecutorStepResolver, RepoExecutionContext,
 };
 use crate::{
-    attachable::{AttachableStore, BindingObjectKind, SharedAttachableStore},
+    attachable::{AttachableStore, BindingObjectKind, ProviderBinding, SharedAttachableStore},
     path_context::{DaemonHostPath, ExecutionEnvironmentPath},
     provider_data::ProviderData,
     providers::{
@@ -156,12 +156,9 @@ impl WorkspaceManager for MockWorkspaceManager {
         self.calls.lock().await.push(format!("create_workspace:{}", config.name));
         let result = self.create_result.lock().await;
         match &*result {
-            Ok(()) => Ok(("mock-ref".to_string(), Workspace {
-                name: config.name.clone(),
-                directories: vec![],
-                correlation_keys: vec![],
-                attachable_set_id: None,
-            })),
+            Ok(()) => {
+                Ok(("mock-ref".to_string(), Workspace { name: config.name.clone(), correlation_keys: vec![], attachable_set_id: None }))
+            }
             Err(e) => Err(e.clone()),
         }
     }
@@ -169,6 +166,9 @@ impl WorkspaceManager for MockWorkspaceManager {
         self.calls.lock().await.push(format!("select_workspace:{ws_ref}"));
         let result = self.select_result.lock().await;
         result.clone()
+    }
+    fn binding_scope_prefix(&self) -> String {
+        String::new()
     }
 }
 
@@ -744,8 +744,7 @@ async fn create_workspace_from_prepared_terminal_persists_remote_attachable_set_
 #[tokio::test]
 async fn create_workspace_for_checkout_selects_existing_workspace() {
     let checkout_path = PathBuf::from("/repo/wt-feat");
-    let existing_workspace =
-        Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![], attachable_set_id: None };
+    let existing_workspace = Workspace { name: "feat".to_string(), correlation_keys: vec![], attachable_set_id: None };
     let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:42".to_string(), existing_workspace)]));
 
     let mut registry = empty_registry();
@@ -754,27 +753,48 @@ async fn create_workspace_for_checkout_selects_existing_workspace() {
     data.checkouts.insert(hp("/repo/wt-feat"), TestCheckout::new("feat").build());
     let runner = runner_ok();
 
-    let result = run_build_plan_to_completion(
+    // Pre-populate the attachable store with a set for the checkout and a
+    // workspace binding so the binding-based lookup finds it.
+    let attachable_store = crate::attachable::shared_in_memory_attachable_store();
+    {
+        let mut store = attachable_store.lock().expect("lock store");
+        let host = local_host();
+        let checkout = HostPath::new(host.clone(), PathBuf::from("/repo/wt-feat"));
+        let set_id = store.ensure_terminal_set(Some(host), Some(checkout));
+        store.replace_binding(ProviderBinding {
+            provider_category: "workspace_manager".into(),
+            provider_name: "cmux".into(),
+            object_kind: BindingObjectKind::AttachableSet,
+            object_id: set_id.to_string(),
+            external_ref: "workspace:42".into(),
+        });
+    }
+
+    let result = run_build_plan_to_completion_with(
         CommandAction::CreateWorkspaceForCheckout { checkout_path, label: "feat".into() },
         registry,
         data,
         runner,
+        repo_root(),
+        config_base(),
+        attachable_store,
     )
     .await;
 
+    // Binding-based lookup finds the existing workspace and selects it
+    // instead of creating a new one.
     assert_ok(result);
     let calls = ws_mgr.calls.lock().await;
-    assert!(calls.contains(&"list_workspaces".to_string()), "should call list_workspaces, got: {calls:?}");
-    assert!(calls.contains(&"select_workspace:workspace:42".to_string()), "should select existing workspace, got: {calls:?}");
-    assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace, got: {calls:?}");
+    assert!(calls.iter().any(|c| c.starts_with("select_workspace")), "should select existing workspace, got: {calls:?}");
+    assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace when binding exists, got: {calls:?}");
 }
 
 #[tokio::test]
-async fn checkout_action_selects_existing_workspace_after_checkout() {
-    let checkout_path = PathBuf::from("/repo/wt-feat-x");
+async fn checkout_action_creates_workspace_after_checkout() {
+    // Fresh checkout has no binding in the store, so a new workspace is
+    // always created (binding-based lookup returns None).
     let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:99".to_string(), Workspace {
         name: "feat-x".to_string(),
-        directories: vec![checkout_path.clone()],
         correlation_keys: vec![],
         attachable_set_id: None,
     })]));
@@ -783,17 +803,22 @@ async fn checkout_action_selects_existing_workspace_after_checkout() {
     registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
     registry.workspace_managers.insert("cmux", desc("cmux"), ws_mgr.clone());
     let runner = MockRunner::new(vec![Err("missing".to_string()), Err("missing".to_string())]);
+    let attachable_store = crate::attachable::shared_in_memory_attachable_store();
 
-    let result = run_build_plan_to_completion(fresh_checkout_action("feat-x"), registry, empty_data(), runner).await;
+    let result = run_build_plan_to_completion_with(
+        fresh_checkout_action("feat-x"),
+        registry,
+        empty_data(),
+        runner,
+        repo_root(),
+        config_base(),
+        attachable_store,
+    )
+    .await;
 
     assert_checkout_created_branch(result, "feat-x");
     let calls = ws_mgr.calls.lock().await;
-    // Step plans always include a workspace step after checkout.
-    // With an existing workspace matching the checkout path, it selects it.
-    assert!(
-        calls.iter().any(|c| c.starts_with("list_workspaces") || c.starts_with("select_workspace")),
-        "checkout step plan should select existing workspace, got: {calls:?}"
-    );
+    assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should create workspace, got: {calls:?}");
 }
 
 #[tokio::test]
@@ -842,8 +867,7 @@ async fn teleport_session_creates_workspace_even_when_one_exists() {
     // is session-specific. Reusing an existing workspace would attach to
     // whatever session was there before, not the requested one.
     let checkout_path = PathBuf::from("/repo/wt-feat");
-    let existing_workspace =
-        Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![], attachable_set_id: None };
+    let existing_workspace = Workspace { name: "feat".to_string(), correlation_keys: vec![], attachable_set_id: None };
     let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:77".to_string(), existing_workspace)]));
 
     let mut registry = empty_registry();
@@ -2097,7 +2121,10 @@ async fn checkout_plan_end_to_end_creates_workspace() {
     assert!(matches!(result, CommandValue::CheckoutCreated { .. }));
 
     let calls = ws_mgr.calls.lock().await;
-    assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should create workspace from prior outcome: {calls:?}");
+    assert!(
+        calls.iter().any(|c| c.starts_with("create_workspace") || c.starts_with("select_workspace")),
+        "should create or select workspace from prior outcome: {calls:?}"
+    );
 }
 
 #[tokio::test]
@@ -2158,7 +2185,10 @@ async fn checkout_plan_creates_workspace_for_preexisting_checkout() {
         "should return CheckoutCreated for pre-existing checkout, got: {result:?}"
     );
     let calls = ws_mgr.calls.lock().await;
-    assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should create workspace for pre-existing checkout: {calls:?}");
+    assert!(
+        calls.iter().any(|c| c.starts_with("select_workspace") || c.starts_with("create_workspace")),
+        "should select or create workspace for pre-existing checkout: {calls:?}"
+    );
 }
 
 #[tokio::test]

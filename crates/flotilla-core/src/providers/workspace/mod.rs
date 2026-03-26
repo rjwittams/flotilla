@@ -16,6 +16,11 @@ pub trait WorkspaceManager: Send + Sync {
     async fn list_workspaces(&self) -> Result<Vec<(String, Workspace)>, String>;
     async fn create_workspace(&self, config: &WorkspaceAttachRequest) -> Result<(String, Workspace), String>;
     async fn select_workspace(&self, ws_ref: &str) -> Result<(), String>;
+
+    /// Returns a prefix that all ws_refs from this provider instance will start with.
+    /// Only bindings matching this prefix should be pruned based on the live workspace list.
+    /// Returns empty string if list_workspaces() is exhaustive.
+    fn binding_scope_prefix(&self) -> String;
 }
 
 /// Resolve a `WorkspaceAttachRequest` into a `PaneLayout` for workspace managers.

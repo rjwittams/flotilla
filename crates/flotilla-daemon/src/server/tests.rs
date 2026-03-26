@@ -944,7 +944,7 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
     assert_eq!(created_workspaces.len(), 1, "expected local workspace creation");
     assert_eq!(created_workspaces[0].0, "workspace:1");
     assert_eq!(created_workspaces[0].1.name, "feat-workspace-local@feta");
-    assert_eq!(created_workspaces[0].1.directories, vec![repo.clone()]);
+    assert!(created_workspaces[0].1.correlation_keys.is_empty());
 }
 
 #[tokio::test]

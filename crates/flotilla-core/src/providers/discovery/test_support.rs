@@ -676,12 +676,7 @@ impl WorkspaceManager for FakeWorkspaceManager {
     async fn create_workspace(&self, config: &crate::providers::types::WorkspaceAttachRequest) -> Result<(String, Workspace), String> {
         let mut store = self.workspaces.lock().await;
         let ws_ref = format!("workspace:{}", store.len() + 1);
-        let workspace = Workspace {
-            name: config.name.clone(),
-            directories: vec![config.working_directory.clone().into_path_buf()],
-            correlation_keys: vec![],
-            attachable_set_id: None,
-        };
+        let workspace = Workspace { name: config.name.clone(), correlation_keys: vec![], attachable_set_id: None };
         store.push((ws_ref.clone(), workspace.clone()));
         Ok((ws_ref, workspace))
     }
@@ -689,6 +684,9 @@ impl WorkspaceManager for FakeWorkspaceManager {
     async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {
         self.selected.lock().await.push(ws_ref.to_string());
         Ok(())
+    }
+    fn binding_scope_prefix(&self) -> String {
+        String::new()
     }
 }
 

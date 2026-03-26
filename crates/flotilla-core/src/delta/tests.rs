@@ -60,7 +60,7 @@ fn session(title: &str) -> CloudAgentSession {
 }
 
 fn workspace(name: &str) -> Workspace {
-    Workspace { name: name.into(), directories: vec![], correlation_keys: vec![], attachable_set_id: None }
+    Workspace { name: name.into(), correlation_keys: vec![], attachable_set_id: None }
 }
 
 // --- diff_indexmap tests ---
