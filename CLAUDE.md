@@ -133,7 +133,7 @@ Providers are constructed via **factories** (`discovery/factories/`) that receiv
 - The `EnvironmentBag` provides typed queries: `find_binary()`, `find_env_var()`, `find_socket()`, `find_vcs_checkout()`, `find_remote_host()`.
 - Factories call `env.find_binary("tool")` to check availability, `env.find_env_var("KEY")` for env values, and receive a `ConfigStore` for user preferences.
 
-**Why not `std::env`?** The daemon may run discovery for remote hosts or container environments where the host process's own env vars are wrong. The `EnvVars` trait abstracts this so tests can inject values and environments can provide their own.
+**Why injected collaborators?** The daemon may run discovery for remote hosts or container environments where the host process's own env vars and binaries are wrong. The `EnvVars` trait and `CommandRunner` trait abstract this so tests can inject values and environments can provide their own. Never use `std::env` or `std::process::Command` directly in providers — always go through the injected `EnvVars` and `CommandRunner`.
 
 ### Correlation
 
