@@ -1,7 +1,7 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use flotilla_protocol::{arg, AttachableSetId, EnvironmentId, HostName, HostPath, PreparedWorkspace, ResolvedPaneCommand};
-use tracing::{info, warn};
+use tracing::warn;
 
 use super::{terminals::TerminalPreparationService, workspace_config};
 use crate::{
@@ -149,26 +149,8 @@ impl<'a> WorkspaceOrchestrator<'a> {
         self.registry.workspace_managers.preferred_with_desc().map(|(desc, provider)| (desc.implementation.as_str(), provider))
     }
 
-    async fn select_existing_workspace(&self, ws_mgr: &dyn WorkspaceManager, checkout_path: &Path) -> bool {
-        let existing = match ws_mgr.list_workspaces().await {
-            Ok(workspaces) => workspaces,
-            Err(err) => {
-                warn!(err = %err, "failed to check existing workspaces, will create new");
-                return false;
-            }
-        };
-
-        for (ws_ref, ws) in &existing {
-            if ws.directories.iter().any(|directory| directory == checkout_path) {
-                info!(%ws_ref, path = %checkout_path.display(), "workspace already exists, selecting");
-                if let Err(err) = ws_mgr.select_workspace(ws_ref).await {
-                    warn!(err = %err, %ws_ref, "failed to select existing workspace, will create new");
-                    return false;
-                }
-                return true;
-            }
-        }
-
+    async fn select_existing_workspace(&self, _ws_mgr: &dyn WorkspaceManager, _checkout_path: &Path) -> bool {
+        // Rewritten in Task 7 to use binding-based lookup
         false
     }
 

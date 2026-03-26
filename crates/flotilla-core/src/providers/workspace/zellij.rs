@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -178,15 +178,7 @@ impl super::WorkspaceManager for ZellijWorkspaceManager {
 
         let workspaces = tab_names
             .into_iter()
-            .map(|name| {
-                let mut directories = Vec::new();
-                if let Some(tab) = state.tabs.get(name) {
-                    let path = PathBuf::from(&tab.working_directory);
-                    directories.push(path);
-                }
-
-                (name.to_string(), Workspace { name: name.to_string(), directories, correlation_keys: vec![], attachable_set_id: None })
-            })
+            .map(|name| (name.to_string(), Workspace { name: name.to_string(), correlation_keys: vec![], attachable_set_id: None }))
             .collect();
 
         Ok(workspaces)
@@ -272,9 +264,8 @@ impl super::WorkspaceManager for ZellijWorkspaceManager {
             self.save_state(&session, &state);
         }
 
-        let directories = vec![config.working_directory.clone().into_path_buf()];
         info!(workspace = %config.name, "zellij: workspace ready");
-        Ok((config.name.clone(), Workspace { name: config.name.clone(), directories, correlation_keys: vec![], attachable_set_id: None }))
+        Ok((config.name.clone(), Workspace { name: config.name.clone(), correlation_keys: vec![], attachable_set_id: None }))
     }
 
     async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {
@@ -587,9 +578,8 @@ mod tests {
         assert!(names.contains(&"Tab #1"), "expected 'Tab #1' in {names:?}");
         assert!(names.contains(&"feature-tab"), "expected 'feature-tab' in {names:?}");
 
-        // No state file exists, so directories and correlation_keys should be empty
+        // No state file exists, so correlation_keys should be empty
         for (_key, ws) in &workspaces {
-            assert!(ws.directories.is_empty());
             assert!(ws.correlation_keys.is_empty());
         }
 

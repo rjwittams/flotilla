@@ -66,8 +66,8 @@ fn remote_branch_item(branch: &str) -> CorrelationResult {
     CorrelationResult::Standalone(StandaloneResult::RemoteBranch { branch: branch.to_string() })
 }
 
-fn make_workspace(_ws_ref: &str, name: &str, directories: Vec<PathBuf>, correlation_keys: Vec<CorrelationKey>) -> Workspace {
-    Workspace { name: name.to_string(), directories, correlation_keys, attachable_set_id: None }
+fn make_workspace(_ws_ref: &str, name: &str, correlation_keys: Vec<CorrelationKey>) -> Workspace {
+    Workspace { name: name.to_string(), correlation_keys, attachable_set_id: None }
 }
 
 fn make_attachable_set(id: &str, path: &str) -> flotilla_protocol::AttachableSet {
@@ -671,7 +671,7 @@ fn checkout_association_keys_link_issues() {
 fn correlate_workspace_only_group_is_skipped() {
     // A workspace with no checkout/PR/session should be excluded
     let mut providers = new_providers();
-    providers.workspaces.insert("ws-orphan".to_string(), make_workspace("ws-orphan", "orphan", vec![], vec![]));
+    providers.workspaces.insert("ws-orphan".to_string(), make_workspace("ws-orphan", "orphan", vec![]));
 
     let (items, _) = correlate(&providers);
     assert!(items.is_empty(), "workspace-only group should be skipped");
@@ -682,10 +682,7 @@ fn correlate_workspace_without_attachable_set_is_not_linked_to_checkout() {
     let mut providers = new_providers();
     let co_path = hp("/tmp/feat-ws");
     providers.checkouts.insert(co_path.clone(), TestCheckout::new("feat-ws").at("/tmp/feat-ws").is_main(false).with_branch_key().build());
-    providers.workspaces.insert(
-        "ws-1".to_string(),
-        make_workspace("ws-1", "dev-session", vec![co_path.path.clone()], vec![CorrelationKey::CheckoutPath(co_path)]),
-    );
+    providers.workspaces.insert("ws-1".to_string(), make_workspace("ws-1", "dev-session", vec![CorrelationKey::CheckoutPath(co_path)]));
 
     let (items, _) = correlate(&providers);
     assert_eq!(items.len(), 1);
@@ -1310,7 +1307,6 @@ fn workspace_only_joins_checkout_through_attachable_set() {
     });
     providers.workspaces.insert("ws-1".to_string(), Workspace {
         name: "feat-set@feta".to_string(),
-        directories: vec![PathBuf::from("/Users/robert/dev/project")],
         correlation_keys: vec![CorrelationKey::CheckoutPath(local_checkout.clone())],
         attachable_set_id: Some(set_id.clone()),
     });
@@ -1344,7 +1340,6 @@ fn correlate_checkout_remains_anchor_when_attachable_set_present() {
     providers.attachable_sets.insert(set_id.clone(), make_attachable_set("set-1", "/tmp/feat-set"));
     providers.workspaces.insert("ws-1".to_string(), Workspace {
         name: "feat-set".to_string(),
-        directories: vec![PathBuf::from("/tmp/feat-set")],
         correlation_keys: vec![],
         attachable_set_id: Some(set_id.clone()),
     });

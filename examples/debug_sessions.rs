@@ -91,7 +91,7 @@ async fn main() {
 
     println!("\n  Workspaces: {}", snapshot.providers.workspaces.len());
     for (i, (_ref, ws)) in snapshot.providers.workspaces.iter().enumerate() {
-        println!("    [{i}] name={:?} dirs={:?} keys={:?}", ws.name, ws.directories, ws.correlation_keys);
+        println!("    [{i}] name={:?} keys={:?}", ws.name, ws.correlation_keys);
     }
 
     // Step 3: Show resulting table entries

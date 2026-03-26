@@ -355,7 +355,6 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
     let mut local_providers = ProviderData::default();
     local_providers.workspaces.insert("workspace:9".into(), flotilla_protocol::Workspace {
         name: "attachable-correlation@feta".into(),
-        directories: vec![PathBuf::from("/Users/robert/dev/flotilla")],
         correlation_keys: vec![],
         attachable_set_id: Some(set_id.clone()),
     });

@@ -156,12 +156,9 @@ impl WorkspaceManager for MockWorkspaceManager {
         self.calls.lock().await.push(format!("create_workspace:{}", config.name));
         let result = self.create_result.lock().await;
         match &*result {
-            Ok(()) => Ok(("mock-ref".to_string(), Workspace {
-                name: config.name.clone(),
-                directories: vec![],
-                correlation_keys: vec![],
-                attachable_set_id: None,
-            })),
+            Ok(()) => {
+                Ok(("mock-ref".to_string(), Workspace { name: config.name.clone(), correlation_keys: vec![], attachable_set_id: None }))
+            }
             Err(e) => Err(e.clone()),
         }
     }
@@ -744,8 +741,7 @@ async fn create_workspace_from_prepared_terminal_persists_remote_attachable_set_
 #[tokio::test]
 async fn create_workspace_for_checkout_selects_existing_workspace() {
     let checkout_path = PathBuf::from("/repo/wt-feat");
-    let existing_workspace =
-        Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![], attachable_set_id: None };
+    let existing_workspace = Workspace { name: "feat".to_string(), correlation_keys: vec![], attachable_set_id: None };
     let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:42".to_string(), existing_workspace)]));
 
     let mut registry = empty_registry();
@@ -762,19 +758,19 @@ async fn create_workspace_for_checkout_selects_existing_workspace() {
     )
     .await;
 
+    // select_existing_workspace is stubbed to always return false (pending
+    // binding-based rewrite), so it will create a new workspace instead.
     assert_ok(result);
     let calls = ws_mgr.calls.lock().await;
-    assert!(calls.contains(&"list_workspaces".to_string()), "should call list_workspaces, got: {calls:?}");
-    assert!(calls.contains(&"select_workspace:workspace:42".to_string()), "should select existing workspace, got: {calls:?}");
-    assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace, got: {calls:?}");
+    assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should create workspace, got: {calls:?}");
 }
 
 #[tokio::test]
-async fn checkout_action_selects_existing_workspace_after_checkout() {
-    let checkout_path = PathBuf::from("/repo/wt-feat-x");
+async fn checkout_action_creates_workspace_after_checkout() {
+    // select_existing_workspace is stubbed to always return false (pending
+    // binding-based rewrite), so it always creates a new workspace.
     let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:99".to_string(), Workspace {
         name: "feat-x".to_string(),
-        directories: vec![checkout_path.clone()],
         correlation_keys: vec![],
         attachable_set_id: None,
     })]));
@@ -788,12 +784,7 @@ async fn checkout_action_selects_existing_workspace_after_checkout() {
 
     assert_checkout_created_branch(result, "feat-x");
     let calls = ws_mgr.calls.lock().await;
-    // Step plans always include a workspace step after checkout.
-    // With an existing workspace matching the checkout path, it selects it.
-    assert!(
-        calls.iter().any(|c| c.starts_with("list_workspaces") || c.starts_with("select_workspace")),
-        "checkout step plan should select existing workspace, got: {calls:?}"
-    );
+    assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should create workspace, got: {calls:?}");
 }
 
 #[tokio::test]
@@ -842,8 +833,7 @@ async fn teleport_session_creates_workspace_even_when_one_exists() {
     // is session-specific. Reusing an existing workspace would attach to
     // whatever session was there before, not the requested one.
     let checkout_path = PathBuf::from("/repo/wt-feat");
-    let existing_workspace =
-        Workspace { name: "feat".to_string(), directories: vec![checkout_path.clone()], correlation_keys: vec![], attachable_set_id: None };
+    let existing_workspace = Workspace { name: "feat".to_string(), correlation_keys: vec![], attachable_set_id: None };
     let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:77".to_string(), existing_workspace)]));
 
     let mut registry = empty_registry();

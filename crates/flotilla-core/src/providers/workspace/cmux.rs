@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 
@@ -57,12 +57,8 @@ impl CmuxWorkspaceManager {
             .filter_map(|ws| {
                 let ws_ref = ws["ref"].as_str()?.to_string();
                 let name = ws["title"].as_str().unwrap_or("").to_string();
-                let directories: Vec<PathBuf> = ws["directories"]
-                    .as_array()
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(PathBuf::from)).collect())
-                    .unwrap_or_default();
 
-                Some((ws_ref, Workspace { name, directories, correlation_keys: vec![], attachable_set_id: None }))
+                Some((ws_ref, Workspace { name, correlation_keys: vec![], attachable_set_id: None }))
             })
             .collect())
     }
@@ -204,9 +200,8 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
             self.cmux_cmd(&["focus-pane", "--pane", pane_ref, "--workspace", &ws_ref]).await?;
         }
 
-        let directories = vec![config.working_directory.clone().into_path_buf()];
         info!(workspace = %config.name, %ws_ref, "cmux: workspace ready");
-        Ok((ws_ref, Workspace { name: config.name.clone(), directories, correlation_keys: vec![], attachable_set_id: None }))
+        Ok((ws_ref, Workspace { name: config.name.clone(), correlation_keys: vec![], attachable_set_id: None }))
     }
 
     async fn select_workspace(&self, ws_ref: &str) -> Result<(), String> {
@@ -218,7 +213,7 @@ impl super::WorkspaceManager for CmuxWorkspaceManager {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::sync::Arc;
 
     use super::*;
     use crate::{
@@ -247,7 +242,6 @@ mod tests {
         let (ws_ref, ws) = &workspaces[0];
         assert_eq!(ws_ref, "workspace:10");
         assert_eq!(ws.name, "Main");
-        assert_eq!(ws.directories, vec![PathBuf::from("/tmp/repo"), PathBuf::from("/tmp/repo2")]);
         assert!(ws.correlation_keys.is_empty());
     }
 
@@ -300,7 +294,6 @@ mod tests {
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].0, "workspace:10");
         assert_eq!(workspaces[0].1.name, "Main");
-        assert_eq!(workspaces[0].1.directories, vec![PathBuf::from("/tmp/repo-a")]);
     }
 
     #[tokio::test]

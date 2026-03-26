@@ -257,7 +257,7 @@ fn criteria() -> RepoCriteria {
 }
 
 fn make_workspace(name: &str) -> Workspace {
-    Workspace { name: name.to_string(), directories: vec![], correlation_keys: vec![], attachable_set_id: None }
+    Workspace { name: name.to_string(), correlation_keys: vec![], attachable_set_id: None }
 }
 
 fn test_attachable_store() -> SharedAttachableStore {

@@ -1533,7 +1533,6 @@ async fn in_process_daemon_keeps_remote_attachable_set_anchor_when_local_workspa
     workspace_manager
         .add_workspaces(vec![(workspace_ref.clone(), Workspace {
             name: "attachable-correlation@feta".into(),
-            directories: vec![PathBuf::from("/Users/robert/dev/flotilla")],
             correlation_keys: vec![],
             attachable_set_id: None,
         })])
@@ -1630,7 +1629,6 @@ async fn in_process_daemon_correlates_workspace_into_one_remote_checkout_item() 
     workspace_manager
         .add_workspaces(vec![(workspace_ref.clone(), Workspace {
             name: "issue-356-watch@feta".into(),
-            directories: vec![PathBuf::from("/Users/robert/dev/flotilla")],
             correlation_keys: vec![],
             attachable_set_id: None,
         })])

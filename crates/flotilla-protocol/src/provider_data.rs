@@ -320,7 +320,6 @@ pub struct ManagedTerminal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
     pub name: String,
-    pub directories: Vec<PathBuf>,
     pub correlation_keys: Vec<CorrelationKey>,
     #[serde(default)]
     pub attachable_set_id: Option<AttachableSetId>,
@@ -498,11 +497,10 @@ mod tests {
         let workspace_cases = vec![
             Workspace {
                 name: "dev-session".into(),
-                directories: vec![PathBuf::from("/repos/proj/wt-1"), PathBuf::from("/repos/proj/wt-2")],
                 correlation_keys: vec![CorrelationKey::CheckoutPath(hp("/repos/proj/wt-1"))],
                 attachable_set_id: None,
             },
-            Workspace { name: "n".into(), directories: vec![], correlation_keys: vec![], attachable_set_id: None },
+            Workspace { name: "n".into(), correlation_keys: vec![], attachable_set_id: None },
         ];
         for case in &workspace_cases {
             assert_roundtrip(case);
