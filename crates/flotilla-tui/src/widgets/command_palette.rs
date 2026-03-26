@@ -222,13 +222,15 @@ impl CommandPaletteWidget {
                 }
             }
             Action::OpenFilePicker => {
-                let Some(repo_root) = ctx.model.active_repo_root_opt() else {
-                    ctx.app_actions.push(AppAction::ShowStatus("No active repo".into()));
-                    return Outcome::Finished;
-                };
-                // Build the file picker from the active repo parent
-                let parent_path = repo_root.parent().map(|p| format!("{}/", p.display()));
-                let input = parent_path.map(|s| Input::from(s.as_str())).unwrap_or_default();
+                let start_dir = ctx
+                    .model
+                    .active_repo_root_opt()
+                    .and_then(|r| r.parent())
+                    .map(|p| p.to_path_buf())
+                    .or_else(|| std::env::current_dir().ok())
+                    .or_else(dirs::home_dir)
+                    .unwrap_or_default();
+                let input = Input::from(format!("{}/", start_dir.display()).as_str());
                 let dir_entries = refresh_dir_listing_standalone(input.value(), ctx.model);
                 let widget = super::file_picker::FilePickerWidget::new(input.clone(), dir_entries);
                 Outcome::Swap(Box::new(widget))

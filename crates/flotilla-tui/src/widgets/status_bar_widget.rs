@@ -249,7 +249,7 @@ impl InteractiveWidget for StatusBarWidget {
 
 /// Resolve the active in-flight task description for the current repo.
 pub(crate) fn active_task(model: &TuiModel, in_flight: &HashMap<u64, InFlightCommand>) -> Option<TaskSection> {
-    let active_repo = &model.repo_order[model.active_repo];
+    let active_repo = model.repo_order.get(model.active_repo)?;
     let repo_cmds: Vec<(&u64, &InFlightCommand)> = in_flight.iter().filter(|(_, cmd)| &cmd.repo_identity == active_repo).collect();
 
     // Highest command ID = most recently started (IDs are monotonically increasing AtomicU64).

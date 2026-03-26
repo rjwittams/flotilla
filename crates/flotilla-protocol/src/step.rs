@@ -115,8 +115,7 @@ pub enum StepAction {
         issue_ids: Vec<String>,
     },
 
-    /// Test-only no-op action resolved by test harness resolvers.
-    #[cfg(any(test, feature = "test-support"))]
+    /// No-op action — resolvers return `Completed` without side effects.
     Noop,
 }
 
