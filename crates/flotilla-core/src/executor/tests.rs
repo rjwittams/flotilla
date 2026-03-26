@@ -10,7 +10,7 @@ use super::{
     workspace_config, ExecutorStepResolver, RepoExecutionContext,
 };
 use crate::{
-    attachable::{AttachableStore, BindingObjectKind, SharedAttachableStore},
+    attachable::{AttachableStore, BindingObjectKind, ProviderBinding, SharedAttachableStore},
     path_context::{DaemonHostPath, ExecutionEnvironmentPath},
     provider_data::ProviderData,
     providers::{
@@ -753,25 +753,46 @@ async fn create_workspace_for_checkout_selects_existing_workspace() {
     data.checkouts.insert(hp("/repo/wt-feat"), TestCheckout::new("feat").build());
     let runner = runner_ok();
 
-    let result = run_build_plan_to_completion(
+    // Pre-populate the attachable store with a set for the checkout and a
+    // workspace binding so the binding-based lookup finds it.
+    let attachable_store = crate::attachable::shared_in_memory_attachable_store();
+    {
+        let mut store = attachable_store.lock().expect("lock store");
+        let host = local_host();
+        let checkout = HostPath::new(host.clone(), PathBuf::from("/repo/wt-feat"));
+        let set_id = store.ensure_terminal_set(Some(host), Some(checkout));
+        store.replace_binding(ProviderBinding {
+            provider_category: "workspace_manager".into(),
+            provider_name: "cmux".into(),
+            object_kind: BindingObjectKind::AttachableSet,
+            object_id: set_id.to_string(),
+            external_ref: "workspace:42".into(),
+        });
+    }
+
+    let result = run_build_plan_to_completion_with(
         CommandAction::CreateWorkspaceForCheckout { checkout_path, label: "feat".into() },
         registry,
         data,
         runner,
+        repo_root(),
+        config_base(),
+        attachable_store,
     )
     .await;
 
-    // select_existing_workspace is stubbed to always return false (pending
-    // binding-based rewrite), so it will create a new workspace instead.
+    // Binding-based lookup finds the existing workspace and selects it
+    // instead of creating a new one.
     assert_ok(result);
     let calls = ws_mgr.calls.lock().await;
-    assert!(calls.iter().any(|c| c.starts_with("create_workspace")), "should create workspace, got: {calls:?}");
+    assert!(calls.iter().any(|c| c.starts_with("select_workspace")), "should select existing workspace, got: {calls:?}");
+    assert!(!calls.iter().any(|c| c.starts_with("create_workspace")), "should NOT create workspace when binding exists, got: {calls:?}");
 }
 
 #[tokio::test]
 async fn checkout_action_creates_workspace_after_checkout() {
-    // select_existing_workspace is stubbed to always return false (pending
-    // binding-based rewrite), so it always creates a new workspace.
+    // Fresh checkout has no binding in the store, so a new workspace is
+    // always created (binding-based lookup returns None).
     let ws_mgr = Arc::new(MockWorkspaceManager::with_existing(vec![("workspace:99".to_string(), Workspace {
         name: "feat-x".to_string(),
         correlation_keys: vec![],
@@ -782,8 +803,18 @@ async fn checkout_action_creates_workspace_after_checkout() {
     registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::succeeding("feat-x", "/repo/wt-feat-x")));
     registry.workspace_managers.insert("cmux", desc("cmux"), ws_mgr.clone());
     let runner = MockRunner::new(vec![Err("missing".to_string()), Err("missing".to_string())]);
+    let attachable_store = crate::attachable::shared_in_memory_attachable_store();
 
-    let result = run_build_plan_to_completion(fresh_checkout_action("feat-x"), registry, empty_data(), runner).await;
+    let result = run_build_plan_to_completion_with(
+        fresh_checkout_action("feat-x"),
+        registry,
+        empty_data(),
+        runner,
+        repo_root(),
+        config_base(),
+        attachable_store,
+    )
+    .await;
 
     assert_checkout_created_branch(result, "feat-x");
     let calls = ws_mgr.calls.lock().await;
