@@ -4,7 +4,7 @@
 
 **Goal:** Switch cmux, zellij, and tmux workspace providers to stable identifiers, remove `Workspace.directories`, rewrite `select_existing_workspace` via binding lookups, and add scoped stale-binding pruning.
 
-**Architecture:** The binding system already stores workspace identity as opaque strings. We swap unstable refs (positional/name-based) for stable IDs (UUIDs, tab_ids, window_ids), enforce a 1:1 workspace→set binding invariant, add a reverse lookup, and prune dead bindings during refresh using a provider-declared scope prefix.
+**Architecture:** The binding system already stores workspace identity as opaque strings. We swap unstable refs (positional/name-based) for stable IDs (UUIDs, tab_ids, window_ids), add a reverse lookup (newest binding wins), and prune dead bindings during refresh using a provider-declared scope prefix. The call site filters reverse lookup results by the provider's scope prefix to avoid selecting workspaces from dead sessions/servers.
 
 **Tech Stack:** Rust, async-trait, serde_json (cmux/zellij JSON parsing), tokio
 
@@ -16,7 +16,7 @@
 
 | File | Action | Responsibility |
 |------|--------|----------------|
-| `crates/flotilla-core/src/attachable/store.rs` | Modify | 1:1 invariant in `replace_binding`, add `lookup_workspace_ref_for_set` |
+| `crates/flotilla-core/src/attachable/store.rs` | Modify | Add `lookup_workspace_ref_for_set` (newest-wins reverse lookup) |
 | `crates/flotilla-core/src/attachable/store/tests.rs` | Modify | Contract tests for new store behavior |
 | `crates/flotilla-protocol/src/provider_data.rs` | Modify | Remove `directories` from `Workspace` |
 | `crates/flotilla-core/src/providers/workspace/mod.rs` | Modify | Add `binding_scope_prefix()` to trait |
@@ -28,152 +28,7 @@
 
 ---
 
-### Task 1: Enforce 1:1 binding invariant in `replace_binding`
-
-**Files:**
-- Modify: `crates/flotilla-core/src/attachable/store.rs:234-248`
-- Test: `crates/flotilla-core/src/attachable/store/tests.rs`
-
-- [ ] **Step 1: Write the failing test**
-
-Add to `crates/flotilla-core/src/attachable/store/tests.rs`:
-
-```rust
-fn contract_replace_binding_enforces_one_to_one_for_sets(store: &mut impl AttachableStoreApi) {
-    // First binding: workspace:old -> set-1
-    store.replace_binding(ProviderBinding {
-        provider_category: "workspace_manager".into(),
-        provider_name: "cmux".into(),
-        object_kind: BindingObjectKind::AttachableSet,
-        object_id: "set-1".into(),
-        external_ref: "workspace:old".into(),
-    });
-
-    // Second binding: workspace:new -> set-1 (same set, different ref)
-    store.replace_binding(ProviderBinding {
-        provider_category: "workspace_manager".into(),
-        provider_name: "cmux".into(),
-        object_kind: BindingObjectKind::AttachableSet,
-        object_id: "set-1".into(),
-        external_ref: "workspace:new".into(),
-    });
-
-    // The old binding should be gone — only workspace:new -> set-1 should exist
-    assert!(store.lookup_binding("workspace_manager", "cmux", BindingObjectKind::AttachableSet, "workspace:old").is_none());
-    assert_eq!(
-        store.lookup_binding("workspace_manager", "cmux", BindingObjectKind::AttachableSet, "workspace:new"),
-        Some("set-1")
-    );
-
-    // Bindings for Attachable kind should NOT be affected by 1:1 invariant
-    store.replace_binding(ProviderBinding {
-        provider_category: "terminal_pool".into(),
-        provider_name: "shpool".into(),
-        object_kind: BindingObjectKind::Attachable,
-        object_id: "att-1".into(),
-        external_ref: "flotilla/main/main/0".into(),
-    });
-    store.replace_binding(ProviderBinding {
-        provider_category: "terminal_pool".into(),
-        provider_name: "shpool".into(),
-        object_kind: BindingObjectKind::Attachable,
-        object_id: "att-1".into(),
-        external_ref: "flotilla/main/agents/0".into(),
-    });
-    // Both should survive — 1:1 only applies to AttachableSet
-    assert!(store.lookup_binding("terminal_pool", "shpool", BindingObjectKind::Attachable, "flotilla/main/main/0").is_some());
-    assert!(store.lookup_binding("terminal_pool", "shpool", BindingObjectKind::Attachable, "flotilla/main/agents/0").is_some());
-}
-
-#[test]
-fn file_backed_contract_replace_binding_enforces_one_to_one_for_sets() {
-    contract_replace_binding_enforces_one_to_one_for_sets(&mut AttachableStore::with_base(&temp_base(
-        &tempfile::tempdir().expect("tempdir"),
-    )));
-}
-
-#[test]
-fn in_memory_contract_replace_binding_enforces_one_to_one_for_sets() {
-    contract_replace_binding_enforces_one_to_one_for_sets(&mut InMemoryAttachableStore::new());
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p flotilla-core replace_binding_enforces_one_to_one --locked`
-Expected: FAIL — the old binding `workspace:old` still exists because `replace_binding` only removes by `external_ref`, not by `object_id`.
-
-- [ ] **Step 3: Implement the 1:1 invariant**
-
-In `crates/flotilla-core/src/attachable/store.rs`, replace the `replace_binding` method on `AttachableStoreState` (lines 234-248) with:
-
-```rust
-    fn replace_binding(&mut self, binding: ProviderBinding) -> bool {
-        if self.registry.bindings.iter().any(|existing| existing == &binding) {
-            return false;
-        }
-        let key = Self::binding_key(&binding.provider_category, &binding.provider_name, &binding.object_kind, &binding.external_ref);
-        self.binding_index.insert(key, binding.object_id.clone());
-
-        // Collect stale index keys before mutating the bindings vec.
-        // For AttachableSet bindings, enforce 1:1: remove any existing binding
-        // for the same (category, name, kind, object_id) — ensures one workspace per set.
-        let stale_keys: Vec<(String, String, BindingObjectKind, String)> = self
-            .registry
-            .bindings
-            .iter()
-            .filter(|existing| {
-                existing.provider_category == binding.provider_category
-                    && existing.provider_name == binding.provider_name
-                    && existing.object_kind == binding.object_kind
-                    && (existing.external_ref == binding.external_ref
-                        || (binding.object_kind == BindingObjectKind::AttachableSet && existing.object_id == binding.object_id))
-            })
-            .map(|existing| {
-                (
-                    existing.provider_category.clone(),
-                    existing.provider_name.clone(),
-                    existing.object_kind.clone(),
-                    existing.external_ref.clone(),
-                )
-            })
-            .collect();
-
-        for (cat, name, kind, ext_ref) in &stale_keys {
-            let old_key = Self::binding_key(cat, name, kind, ext_ref);
-            self.binding_index.remove(&old_key);
-        }
-
-        self.registry.bindings.retain(|existing| {
-            !(existing.provider_category == binding.provider_category
-                && existing.provider_name == binding.provider_name
-                && existing.object_kind == binding.object_kind
-                && (existing.external_ref == binding.external_ref
-                    || (binding.object_kind == BindingObjectKind::AttachableSet && existing.object_id == binding.object_id)))
-        });
-
-        // Re-insert the new key (may have been removed by stale key cleanup above)
-        let key = Self::binding_key(&binding.provider_category, &binding.provider_name, &binding.object_kind, &binding.external_ref);
-        self.binding_index.insert(key, binding.object_id.clone());
-        self.registry.bindings.push(binding);
-        true
-    }
-```
-
-- [ ] **Step 4: Run tests to verify**
-
-Run: `cargo test -p flotilla-core --locked -- replace_binding`
-Expected: All `replace_binding` tests pass, including the new 1:1 test and the existing `contract_replacing_binding_is_deterministic`.
-
-- [ ] **Step 5: Commit**
-
-```
-fix: enforce 1:1 workspace binding invariant in replace_binding
-```
-
----
-
-### Task 2: Add `lookup_workspace_ref_for_set`
+### Task 1: Add `lookup_workspace_ref_for_set`
 
 **Files:**
 - Modify: `crates/flotilla-core/src/attachable/store.rs:35-87` (trait), plus all impls
@@ -222,6 +77,34 @@ fn contract_lookup_workspace_ref_for_set(store: &mut impl AttachableStoreApi) {
     );
 }
 
+fn contract_lookup_workspace_ref_for_set_newest_wins(store: &mut impl AttachableStoreApi) {
+    let set_id = AttachableSetId::new("set-1");
+
+    // Old binding (pushed first, lives at lower index)
+    store.replace_binding(ProviderBinding {
+        provider_category: "workspace_manager".into(),
+        provider_name: "cmux".into(),
+        object_kind: BindingObjectKind::AttachableSet,
+        object_id: "set-1".into(),
+        external_ref: "OLD-UUID".into(),
+    });
+
+    // New binding for the same set (pushed second, lives at higher index)
+    store.replace_binding(ProviderBinding {
+        provider_category: "workspace_manager".into(),
+        provider_name: "cmux".into(),
+        object_kind: BindingObjectKind::AttachableSet,
+        object_id: "set-1".into(),
+        external_ref: "NEW-UUID".into(),
+    });
+
+    // Should return the newest (last-added) binding
+    assert_eq!(
+        store.lookup_workspace_ref_for_set("workspace_manager", "cmux", &set_id),
+        Some("NEW-UUID".to_string())
+    );
+}
+
 #[test]
 fn file_backed_contract_lookup_workspace_ref_for_set() {
     contract_lookup_workspace_ref_for_set(&mut AttachableStore::with_base(&temp_base(
@@ -232,6 +115,18 @@ fn file_backed_contract_lookup_workspace_ref_for_set() {
 #[test]
 fn in_memory_contract_lookup_workspace_ref_for_set() {
     contract_lookup_workspace_ref_for_set(&mut InMemoryAttachableStore::new());
+}
+
+#[test]
+fn file_backed_contract_lookup_workspace_ref_for_set_newest_wins() {
+    contract_lookup_workspace_ref_for_set_newest_wins(&mut AttachableStore::with_base(&temp_base(
+        &tempfile::tempdir().expect("tempdir"),
+    )));
+}
+
+#[test]
+fn in_memory_contract_lookup_workspace_ref_for_set_newest_wins() {
+    contract_lookup_workspace_ref_for_set_newest_wins(&mut InMemoryAttachableStore::new());
 }
 ```
 
@@ -253,7 +148,7 @@ Add to the `AttachableStoreApi` trait in `crates/flotilla-core/src/attachable/st
     ) -> Option<String>;
 ```
 
-Add implementation in `AttachableStoreState`:
+Add implementation in `AttachableStoreState`. Uses `.rfind()` so that when multiple bindings exist for the same set (e.g., stale + current), the newest (last-appended) binding wins:
 
 ```rust
     fn lookup_workspace_ref_for_set(
@@ -265,7 +160,7 @@ Add implementation in `AttachableStoreState`:
         self.registry
             .bindings
             .iter()
-            .find(|b| {
+            .rfind(|b| {
                 b.provider_category == provider_category
                     && b.provider_name == provider_name
                     && b.object_kind == BindingObjectKind::AttachableSet
@@ -303,7 +198,7 @@ feat: add reverse binding lookup for workspace→set mapping
 
 ---
 
-### Task 3: Remove `directories` from `Workspace` and fix compilation
+### Task 2: Remove `directories` from `Workspace` and fix compilation
 
 **Files:**
 - Modify: `crates/flotilla-protocol/src/provider_data.rs:320-327`
@@ -352,7 +247,7 @@ Run `cargo check --workspace --locked 2>&1` and fix each error. The errors will 
 
 ```rust
     async fn select_existing_workspace(&self, _ws_mgr: &dyn WorkspaceManager, _checkout_path: &Path) -> bool {
-        // TODO(Task 7): rewrite to use binding-based lookup
+        // Rewritten in Task 7 to use binding-based lookup
         false
     }
 ```
@@ -376,7 +271,7 @@ binding-based lookup in a follow-up.
 
 ---
 
-### Task 4: Add `binding_scope_prefix` to `WorkspaceManager` trait
+### Task 3: Add `binding_scope_prefix` to `WorkspaceManager` trait
 
 **Files:**
 - Modify: `crates/flotilla-core/src/providers/workspace/mod.rs:14-19`
@@ -434,7 +329,7 @@ feat: add binding_scope_prefix to WorkspaceManager trait
 
 ---
 
-### Task 5: cmux provider — switch to stable UUIDs
+### Task 4: cmux provider — switch to stable UUIDs
 
 **Files:**
 - Modify: `crates/flotilla-core/src/providers/workspace/cmux.rs`
@@ -560,7 +455,7 @@ feat: switch cmux workspace provider to stable UUIDs
 
 ---
 
-### Task 6: zellij provider — switch to session:tab_id, remove state files
+### Task 5: zellij provider — switch to session:tab_id, remove state files
 
 **Files:**
 - Modify: `crates/flotilla-core/src/providers/workspace/zellij.rs`
@@ -658,7 +553,7 @@ needed since directories was removed from Workspace.
 
 ---
 
-### Task 7: tmux provider — switch to start_time:session:@window_id, remove state files
+### Task 6: tmux provider — switch to start_time:session:@window_id, remove state files
 
 **Files:**
 - Modify: `crates/flotilla-core/src/providers/workspace/tmux.rs`
@@ -770,23 +665,31 @@ Remove TOML state files.
 
 ---
 
-### Task 8: Rewrite `select_existing_workspace` via binding lookup
+### Task 7: Rewrite `select_existing_workspace` via binding lookup
 
 **Files:**
 - Modify: `crates/flotilla-core/src/executor/workspace.rs:66-116, 145-166`
 
 - [ ] **Step 1: Rewrite `select_existing_workspace`**
 
-Replace the stubbed method with the binding-based lookup:
+Replace the stubbed method with a binding-based lookup that filters by the provider's scope prefix. This ensures we only find workspaces from the current "universe" (e.g., the active cmux instance, the current zellij session, the live tmux server) — not stale bindings from dead sessions.
 
 ```rust
-    fn find_existing_workspace_ref(&self, provider_name: &str, target_host: &HostName, checkout_path: &Path) -> Option<String> {
+    fn find_existing_workspace_ref(
+        &self,
+        provider_name: &str,
+        scope_prefix: &str,
+        target_host: &HostName,
+        checkout_path: &Path,
+    ) -> Option<String> {
         let store = self.attachable_store.lock().ok()?;
         let checkout = HostPath::new(target_host.clone(), checkout_path.to_path_buf());
         let set_ids = store.sets_for_checkout(&checkout);
         for set_id in set_ids {
             if let Some(ws_ref) = store.lookup_workspace_ref_for_set("workspace_manager", provider_name, &set_id) {
-                return Some(ws_ref);
+                if ws_ref.starts_with(scope_prefix) {
+                    return Some(ws_ref);
+                }
             }
         }
         None
@@ -806,7 +709,8 @@ From:
 
 To:
 ```rust
-        if let Some(ws_ref) = self.find_existing_workspace_ref(provider_name, &prepared.target_host, &prepared.checkout_path) {
+        let scope_prefix = ws_mgr.binding_scope_prefix();
+        if let Some(ws_ref) = self.find_existing_workspace_ref(provider_name, &scope_prefix, &prepared.target_host, &prepared.checkout_path) {
             info!(%ws_ref, "found existing workspace via binding, selecting");
             match ws_mgr.select_workspace(&ws_ref).await {
                 Ok(()) => return Ok(()),
@@ -832,13 +736,14 @@ Expected: PASS
 ```
 feat: rewrite workspace selection to use binding-based lookup
 
-Works for both local and remote workspaces. Falls back to
-creating a new workspace if selection fails.
+Filters by scope prefix to only select workspaces from the current
+provider universe. Works for both local and remote workspaces.
+Falls back to creating a new workspace if selection fails.
 ```
 
 ---
 
-### Task 9: Stale binding pruning in refresh
+### Task 8: Stale binding pruning in refresh
 
 **Files:**
 - Modify: `crates/flotilla-core/src/refresh.rs:275-320`
@@ -959,7 +864,7 @@ bindings the current provider instance is authoritative about.
 
 ---
 
-### Task 10: Re-record replay fixtures
+### Task 9: Re-record replay fixtures
 
 **Files:**
 - Modify: `crates/flotilla-core/src/providers/workspace/fixtures/cmux_*.yaml`
@@ -1015,7 +920,7 @@ test: re-record workspace provider replay fixtures for stable IDs
 
 ---
 
-### Task 11: Final verification
+### Task 10: Final verification
 
 - [ ] **Step 1: Run the full CI gate**
 
