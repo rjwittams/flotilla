@@ -43,7 +43,7 @@ impl PathPolicy {
             };
         }
 
-        let home = get("HOME").map(PathBuf::from).or_else(dirs::home_dir).expect("HOME must be set");
+        let home = get("HOME").map(PathBuf::from).or_else(dirs::home_dir).expect("cannot determine home directory");
 
         let config_dir = get("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("flotilla")).unwrap_or_else(|| home.join(".config/flotilla"));
 
