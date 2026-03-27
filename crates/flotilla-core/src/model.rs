@@ -54,6 +54,7 @@ pub fn provider_names_from_registry(registry: &ProviderRegistry) -> HashMap<Stri
     collect_names(&mut names, &registry.ai_utilities);
     collect_names(&mut names, &registry.workspace_managers);
     collect_names(&mut names, &registry.terminal_pools);
+    collect_names(&mut names, &registry.environment_providers);
     names
 }
 
