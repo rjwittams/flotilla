@@ -1665,6 +1665,10 @@ impl InProcessDaemon {
         allow_remote_host: bool,
     ) -> Result<u64, String> {
         let command_host = command.host.clone().unwrap_or_else(|| self.host_name.clone());
+        debug!(
+            %command_host, local_host = %self.host_name, %allow_remote_host,
+            desc = %command.description(), "execute_impl"
+        );
         if !allow_remote_host && command_host != self.host_name {
             return Err(format!("remote command routing not implemented yet for host {command_host}"));
         }

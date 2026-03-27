@@ -143,18 +143,29 @@ pub async fn build_plan(
             .await
         }
 
-        CommandAction::RemoveCheckout { checkout } => match resolve_checkout_branch(&checkout, &providers_data, &target_host) {
-            Ok(branch) => {
-                let deleted_paths: Vec<HostPath> = providers_data
-                    .checkouts
-                    .iter()
-                    .filter(|(hp, co)| co.branch == branch && hp.host == target_host)
-                    .map(|(hp, _)| hp.clone())
-                    .collect();
-                Ok(build_remove_checkout_plan(branch, deleted_paths, target_host))
+        CommandAction::RemoveCheckout { checkout } => {
+            debug!(
+                ?checkout, %target_host, %local_host,
+                checkout_hosts = ?providers_data.checkouts.keys().map(|hp| (&hp.host, &hp.path)).collect::<Vec<_>>(),
+                "resolving checkout for removal"
+            );
+            match resolve_checkout_branch(&checkout, &providers_data, &target_host) {
+                Ok(branch) => {
+                    let deleted_paths: Vec<HostPath> = providers_data
+                        .checkouts
+                        .iter()
+                        .filter(|(hp, co)| co.branch == branch && hp.host == target_host)
+                        .map(|(hp, _)| hp.clone())
+                        .collect();
+                    info!(%branch, ?deleted_paths, %target_host, "built remove checkout plan");
+                    Ok(build_remove_checkout_plan(branch, deleted_paths, target_host))
+                }
+                Err(message) => {
+                    error!(%message, %target_host, %local_host, "checkout resolution failed");
+                    Err(CommandValue::Error { message })
+                }
             }
-            Err(message) => Err(CommandValue::Error { message }),
-        },
+        }
 
         CommandAction::ArchiveSession { session_id } => Ok(build_archive_session_plan(session_id, local_host)),
 

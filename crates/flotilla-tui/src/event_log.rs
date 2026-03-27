@@ -239,7 +239,7 @@ impl tracing::field::Visit for MessageVisitor {
 pub fn init_with_dir(log_dir: &std::path::Path) {
     let _ = std::fs::create_dir_all(log_dir);
 
-    let file_appender = tracing_appender::rolling::never(log_dir, "flotilla.log");
+    let file_appender = tracing_appender::rolling::never(log_dir, "tui.log");
 
     let file_layer = tracing_subscriber::fmt::layer().with_writer(file_appender).with_ansi(false).with_target(false);
 

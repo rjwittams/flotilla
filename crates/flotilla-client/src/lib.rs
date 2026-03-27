@@ -245,12 +245,13 @@ fn spawn_daemon(config_dir: &Path, config_dir_override: Option<&Path>, socket_ov
             Ok(())
         });
     }
-    // Redirect stdio, log stderr to file for debugging
+    // Redirect stdio. Structured logs go to {state_dir}/daemon.log via tracing;
+    // stderr catches only panics and pre-init errors.
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
-    let log_file = config_dir.join("daemon.log");
+    let panic_log = config_dir.join("daemon-panic.log");
     let _ = std::fs::create_dir_all(config_dir);
-    let stderr = std::fs::File::create(&log_file).map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null());
+    let stderr = std::fs::File::create(&panic_log).map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null());
     cmd.stderr(stderr);
     cmd.spawn().map_err(|e| format!("failed to spawn daemon: {e}"))?;
     Ok(())

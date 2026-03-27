@@ -20,6 +20,7 @@ use flotilla_protocol::{
 };
 use tokio::sync::{oneshot, Mutex, Notify};
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 use crate::peer::{PeerManager, PeerSender};
 
@@ -123,6 +124,9 @@ impl RemoteCommandRouter {
 
     pub(super) async fn dispatch_execute(&self, command: Command) -> Result<u64, String> {
         let target_host = command.host.clone().unwrap_or_else(|| self.daemon.host_name().clone());
+        let local = self.daemon.host_name();
+        let desc = command.description();
+        info!(%target_host, %local, %desc, "dispatch_execute");
         if target_host != *self.daemon.host_name() {
             if command.action.is_query() {
                 let request_id = {
