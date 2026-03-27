@@ -46,21 +46,23 @@ impl FromStr for ProvisioningTarget {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        fn non_blank(component: &str) -> Option<&str> {
+            let trimmed = component.trim();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        }
+
         if let Some(rest) = s.strip_prefix('@') {
             // `@host`
-            if rest.is_empty() {
-                return Err(format!("invalid ProvisioningTarget: host name cannot be empty in '{s}'"));
-            }
-            Ok(Self::Host { host: HostName::new(rest) })
+            let host = non_blank(rest)
+                .ok_or_else(|| format!("invalid ProvisioningTarget: host name cannot be empty in '{s}'"))?;
+            Ok(Self::Host { host: HostName::new(host) })
         } else if let Some(rest) = s.strip_prefix('+') {
             // `+provider@host`
             if let Some((provider, host)) = rest.split_once('@') {
-                if provider.is_empty() {
-                    return Err(format!("invalid ProvisioningTarget: provider cannot be empty in '{s}'"));
-                }
-                if host.is_empty() {
-                    return Err(format!("invalid ProvisioningTarget: host cannot be empty in '{s}'"));
-                }
+                let provider = non_blank(provider)
+                    .ok_or_else(|| format!("invalid ProvisioningTarget: provider cannot be empty in '{s}'"))?;
+                let host = non_blank(host)
+                    .ok_or_else(|| format!("invalid ProvisioningTarget: host cannot be empty in '{s}'"))?;
                 Ok(Self::NewEnvironment { host: HostName::new(host), provider: provider.to_string() })
             } else {
                 Err(format!("invalid ProvisioningTarget: expected '+provider@host', got '{s}'"))
@@ -68,12 +70,10 @@ impl FromStr for ProvisioningTarget {
         } else if let Some(rest) = s.strip_prefix('=') {
             // `=env_id@host`
             if let Some((env_id, host)) = rest.split_once('@') {
-                if env_id.is_empty() {
-                    return Err(format!("invalid ProvisioningTarget: env_id cannot be empty in '{s}'"));
-                }
-                if host.is_empty() {
-                    return Err(format!("invalid ProvisioningTarget: host cannot be empty in '{s}'"));
-                }
+                let env_id = non_blank(env_id)
+                    .ok_or_else(|| format!("invalid ProvisioningTarget: env_id cannot be empty in '{s}'"))?;
+                let host = non_blank(host)
+                    .ok_or_else(|| format!("invalid ProvisioningTarget: host cannot be empty in '{s}'"))?;
                 Ok(Self::ExistingEnvironment { host: HostName::new(host), env_id: EnvironmentId::new(env_id) })
             } else {
                 Err(format!("invalid ProvisioningTarget: expected '=env_id@host', got '{s}'"))
@@ -243,5 +243,28 @@ mod tests {
     fn parse_error_existing_env_empty_host() {
         let result: Result<ProvisioningTarget, _> = "=env-id@".parse();
         assert!(result.is_err());
+    }
+
+    // --- Whitespace rejection ---
+
+    #[test]
+    fn parse_error_whitespace_only_host() {
+        assert!("@ ".parse::<ProvisioningTarget>().is_err());
+        assert!("@  \t".parse::<ProvisioningTarget>().is_err());
+    }
+
+    #[test]
+    fn parse_error_whitespace_only_provider() {
+        assert!("+ @host".parse::<ProvisioningTarget>().is_err());
+    }
+
+    #[test]
+    fn parse_error_whitespace_only_env_id() {
+        assert!("= @host".parse::<ProvisioningTarget>().is_err());
+    }
+
+    #[test]
+    fn parse_error_whitespace_only_host_in_new_env() {
+        assert!("+docker@ ".parse::<ProvisioningTarget>().is_err());
     }
 }
