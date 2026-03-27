@@ -156,7 +156,7 @@ impl CommandRunner for QueuedRunner {
 async fn ensure_image_builds_dockerfile() {
     let runner = Arc::new(RecordingRunner::new_ok(""));
     let provider = DockerEnvironment::new(runner.clone());
-    let spec = EnvironmentSpec { image: ImageSource::Dockerfile("/path/to/Dockerfile".into()), token_requirements: vec![] };
+    let spec = EnvironmentSpec { image: ImageSource::Dockerfile("/path/to/Dockerfile".into()), token_env_vars: vec![] };
 
     let result = provider.ensure_image(&spec).await;
 
@@ -176,7 +176,7 @@ async fn ensure_image_builds_dockerfile() {
 async fn ensure_image_pulls_registry() {
     let runner = Arc::new(RecordingRunner::new_ok(""));
     let provider = DockerEnvironment::new(runner.clone());
-    let spec = EnvironmentSpec { image: ImageSource::Registry("ubuntu:22.04".into()), token_requirements: vec![] };
+    let spec = EnvironmentSpec { image: ImageSource::Registry("ubuntu:22.04".into()), token_env_vars: vec![] };
 
     let result = provider.ensure_image(&spec).await;
 

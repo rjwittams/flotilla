@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Ensure image (using a minimal image with git)
     println!("\n--- Ensuring image ---");
-    let spec = EnvironmentSpec { image: ImageSource::Registry("debian:bookworm-slim".to_string()), token_requirements: vec![] };
+    let spec = EnvironmentSpec { image: ImageSource::Registry("debian:bookworm-slim".to_string()), token_env_vars: vec![] };
     let image = provider.ensure_image(&spec).await?;
     println!("Image:  {image}");
 

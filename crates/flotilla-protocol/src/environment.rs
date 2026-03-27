@@ -27,7 +27,7 @@ impl fmt::Display for EnvironmentId {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentSpec {
     pub image: ImageSource,
-    pub token_requirements: Vec<String>,
+    pub token_env_vars: Vec<String>,
 }
 
 /// Source from which to obtain a container image.

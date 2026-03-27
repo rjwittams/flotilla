@@ -2410,7 +2410,7 @@ async fn build_plan_with_environment_prepends_lifecycle_steps() {
 
     let spec = flotilla_protocol::EnvironmentSpec {
         image: flotilla_protocol::ImageSource::Registry("flotilla-dev-env:latest".to_string()),
-        token_requirements: vec!["github".to_string()],
+        token_env_vars: vec!["github".to_string()],
     };
     let cmd = Command {
         host: Some(HostName::new("feta")),
@@ -2478,7 +2478,7 @@ async fn build_plan_with_environment_local_host_omits_suffix() {
 
     let spec = flotilla_protocol::EnvironmentSpec {
         image: flotilla_protocol::ImageSource::Registry("dev:latest".to_string()),
-        token_requirements: vec![],
+        token_env_vars: vec![],
     };
     let cmd = Command {
         host: Some(HostName::new("laptop")),
@@ -2946,7 +2946,7 @@ async fn executor_step_resolver_ensure_environment_image() {
         environment_registries: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
 
-    let spec = EnvironmentSpec { image: flotilla_protocol::ImageSource::Registry("test:latest".into()), token_requirements: vec![] };
+    let spec = EnvironmentSpec { image: flotilla_protocol::ImageSource::Registry("test:latest".into()), token_env_vars: vec![] };
     let action = StepAction::EnsureEnvironmentImage { spec };
     let context = StepExecutionContext::Host(local_host());
     let outcome = resolver.resolve("ensure image", &context, action, &[]).await;
@@ -2974,7 +2974,7 @@ async fn executor_step_resolver_ensure_environment_image_error_when_no_provider(
         environment_registries: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
 
-    let spec = EnvironmentSpec { image: flotilla_protocol::ImageSource::Registry("test:latest".into()), token_requirements: vec![] };
+    let spec = EnvironmentSpec { image: flotilla_protocol::ImageSource::Registry("test:latest".into()), token_env_vars: vec![] };
     let action = StepAction::EnsureEnvironmentImage { spec };
     let context = StepExecutionContext::Host(local_host());
     let outcome = resolver.resolve("ensure image", &context, action, &[]).await;
