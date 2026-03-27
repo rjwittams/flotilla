@@ -7,6 +7,7 @@ use flotilla_protocol::{CommandValue, DaemonEvent, HostName, RepoIdentity, StepS
 pub use flotilla_protocol::{Step, StepAction, StepExecutionContext, StepOutcome};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, info};
 
 use crate::path_context::ExecutionEnvironmentPath;
 
@@ -119,6 +120,7 @@ pub async fn run_step_plan_with_remote_executor(
     remote_executor: &dyn RemoteStepExecutor,
 ) -> CommandValue {
     let step_count = plan.steps.len();
+    info!(%command_id, %step_count, %local_host, "running step plan");
     let mut outcomes: Vec<StepOutcome> = Vec::new();
     let steps = plan.steps;
     let mut i = 0usize;
@@ -130,6 +132,7 @@ pub async fn run_step_plan_with_remote_executor(
 
         let step = steps[i].clone();
         let step_target = step.host.host_name().clone();
+        debug!(%command_id, %step_target, %local_host, step_index = i, desc = %step.description, "step dispatch");
 
         if step_target == local_host {
             emit_step_update(
@@ -287,6 +290,7 @@ fn emit_step_update(
     description: String,
     status: StepStatus,
 ) {
+    debug!(%command_id, %host, step_index, step_count, %description, ?status, "emit_step_update");
     let _ = event_tx.send(DaemonEvent::CommandStepUpdate {
         command_id,
         host,
@@ -347,6 +351,7 @@ impl EventForwardingProgressSink {
 #[async_trait::async_trait]
 impl RemoteStepProgressSink for EventForwardingProgressSink {
     async fn emit(&self, update: RemoteStepProgressUpdate) {
+        debug!(command_id = self.command_id, %self.host, batch_step_index = update.batch_step_index, ?update.status, %update.description, "remote progress received");
         {
             let mut state = self.state.lock().expect("progress state mutex poisoned");
             state.latest_batch_step_index = update.batch_step_index;

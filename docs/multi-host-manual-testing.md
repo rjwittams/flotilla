@@ -39,11 +39,14 @@ ssh <USER>@<HOST> 'pgrep -xf "target/debug/flotilla daemon" | xargs -r kill'
 # start
 ssh -f <USER>@<HOST> '
   cd ~/dev/flotilla &&
-  nohup target/debug/flotilla daemon >/tmp/flotilla-daemon.log 2>&1 &
+  nohup target/debug/flotilla daemon >/dev/null 2>&1 &
 '
 
 # verify
 ssh <USER>@<HOST> 'pgrep -af "flotilla daemon" | grep -v grep'
+
+# logs (daemon writes to $XDG_STATE_HOME/flotilla/ i.e. ~/.local/state/flotilla/)
+ssh <USER>@<HOST> 'tail -50 ~/.local/state/flotilla/daemon.log'
 ```
 
 If the daemon is managed some other way, restart it using that mechanism

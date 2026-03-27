@@ -3,8 +3,10 @@
 //! Resolution order per category:
 //! 1. `FLOTILLA_ROOT` → `<root>/<category>`
 //! 2. Category-specific XDG env var (`XDG_CONFIG_HOME`, etc.)
-//! 3. `dirs::` fallback (platform default)
-//! 4. Hardcoded fallback only if all else fails
+//! 3. XDG default (`~/.config`, `~/.local/share`, `~/.local/state`, `~/.cache`)
+//!
+//! We always use XDG-style paths, even on macOS, to keep a developer tool's
+//! config in predictable dotfile locations rather than `~/Library/...`.
 
 use std::path::PathBuf;
 
@@ -41,26 +43,17 @@ impl PathPolicy {
             };
         }
 
-        let config_dir = get("XDG_CONFIG_HOME")
-            .map(|p| PathBuf::from(p).join("flotilla"))
-            .or_else(|| dirs::config_dir().map(|p| p.join("flotilla")))
-            // Relative fallback — unreachable on supported platforms (dirs:: always succeeds on macOS/Linux)
-            .unwrap_or_else(|| PathBuf::from(".config/flotilla"));
+        let home = get("HOME").map(PathBuf::from).or_else(dirs::home_dir).expect("cannot determine home directory");
 
-        let data_dir = get("XDG_DATA_HOME")
-            .map(|p| PathBuf::from(p).join("flotilla"))
-            .or_else(|| dirs::data_dir().map(|p| p.join("flotilla")))
-            .unwrap_or_else(|| PathBuf::from(".local/share/flotilla")); // unreachable on supported platforms
+        let config_dir = get("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("flotilla")).unwrap_or_else(|| home.join(".config/flotilla"));
 
-        let state_dir = get("XDG_STATE_HOME")
-            .map(|p| PathBuf::from(p).join("flotilla"))
-            .or_else(|| dirs::state_dir().map(|p| p.join("flotilla")))
-            .unwrap_or_else(|| PathBuf::from(".local/state/flotilla")); // unreachable on supported platforms
+        let data_dir =
+            get("XDG_DATA_HOME").map(|p| PathBuf::from(p).join("flotilla")).unwrap_or_else(|| home.join(".local/share/flotilla"));
 
-        let cache_dir = get("XDG_CACHE_HOME")
-            .map(|p| PathBuf::from(p).join("flotilla"))
-            .or_else(|| dirs::cache_dir().map(|p| p.join("flotilla")))
-            .unwrap_or_else(|| PathBuf::from(".cache/flotilla")); // unreachable on supported platforms
+        let state_dir =
+            get("XDG_STATE_HOME").map(|p| PathBuf::from(p).join("flotilla")).unwrap_or_else(|| home.join(".local/state/flotilla"));
+
+        let cache_dir = get("XDG_CACHE_HOME").map(|p| PathBuf::from(p).join("flotilla")).unwrap_or_else(|| home.join(".cache/flotilla"));
 
         Self {
             config_dir: DaemonHostPath::new(config_dir),
@@ -90,6 +83,7 @@ mod tests {
     #[test]
     fn xdg_vars_override_defaults() {
         let policy = PathPolicy::from_env(|key| match key {
+            "HOME" => Some("/home/test".into()),
             "XDG_CONFIG_HOME" => Some("/xdg/config".into()),
             "XDG_DATA_HOME" => Some("/xdg/data".into()),
             "XDG_STATE_HOME" => Some("/xdg/state".into()),
@@ -100,6 +94,18 @@ mod tests {
         assert_eq!(policy.data_dir.as_path(), std::path::Path::new("/xdg/data/flotilla"));
         assert_eq!(policy.state_dir.as_path(), std::path::Path::new("/xdg/state/flotilla"));
         assert_eq!(policy.cache_dir.as_path(), std::path::Path::new("/xdg/cache/flotilla"));
+    }
+
+    #[test]
+    fn defaults_to_xdg_under_home() {
+        let policy = PathPolicy::from_env(|key| match key {
+            "HOME" => Some("/home/test".into()),
+            _ => None,
+        });
+        assert_eq!(policy.config_dir.as_path(), std::path::Path::new("/home/test/.config/flotilla"));
+        assert_eq!(policy.data_dir.as_path(), std::path::Path::new("/home/test/.local/share/flotilla"));
+        assert_eq!(policy.state_dir.as_path(), std::path::Path::new("/home/test/.local/state/flotilla"));
+        assert_eq!(policy.cache_dir.as_path(), std::path::Path::new("/home/test/.cache/flotilla"));
     }
 
     #[test]

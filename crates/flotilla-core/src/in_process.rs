@@ -571,9 +571,6 @@ impl InProcessDaemon {
             // checkout set after the first broadcast cycle. Before that first
             // broadcast, only the preferred root's own checkouts are present.
             for (host_path, checkout) in &state.preferred_root().model.data.providers.checkouts {
-                if host_path.host != self.host_name {
-                    continue;
-                }
                 let matched = match selector {
                     flotilla_protocol::CheckoutSelector::Path(path) => host_path.path == *path,
                     flotilla_protocol::CheckoutSelector::Query(query) => {
@@ -1665,6 +1662,10 @@ impl InProcessDaemon {
         allow_remote_host: bool,
     ) -> Result<u64, String> {
         let command_host = command.host.clone().unwrap_or_else(|| self.host_name.clone());
+        debug!(
+            %command_host, local_host = %self.host_name, %allow_remote_host,
+            desc = %command.description(), "execute_impl"
+        );
         if !allow_remote_host && command_host != self.host_name {
             return Err(format!("remote command routing not implemented yet for host {command_host}"));
         }
