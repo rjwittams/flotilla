@@ -355,6 +355,7 @@ impl RemoteCommandRouter {
         let progress_sink = {
             let mut pending = self.pending_remote_step_batches.lock().await;
             let Some(entry) = pending.get_mut(&request_id) else {
+                info!(request_id, "emit_remote_step_event: no pending batch found");
                 return;
             };
             if let StepStatus::Failed { message } = &status {
@@ -366,6 +367,7 @@ impl RemoteCommandRouter {
     }
 
     pub(super) async fn complete_remote_step(&self, request_id: u64, _responder_host: HostName, outcomes: Vec<StepOutcome>) {
+        info!(request_id, outcome_count = outcomes.len(), "complete_remote_step");
         let entry = self.pending_remote_step_batches.lock().await.remove(&request_id);
         let Some(entry) = entry else {
             return;
@@ -601,6 +603,10 @@ impl RemoteStepExecutor for RemoteCommandRouter {
             .await
             .insert(request.command_id, ActiveRemoteStepBatch { request_id, target_host: request.target_host.clone() });
 
+        let step_count = request.steps.len();
+        let command_id = request.command_id;
+        let target_host = request.target_host.clone();
+
         let routed = RoutedPeerMessage::RemoteStepRequest {
             request_id,
             requester_host: self.daemon.host_name().clone(),
@@ -612,9 +618,10 @@ impl RemoteStepExecutor for RemoteCommandRouter {
             steps: request.steps,
         };
 
-        if let Err(err) = self.send_routed_to(&request.target_host, routed).await {
+        info!(request_id, command_id, %target_host, step_count, "sending remote step batch");
+        if let Err(err) = self.send_routed_to(&target_host, routed).await {
             self.pending_remote_step_batches.lock().await.remove(&request_id);
-            self.active_remote_step_batches.lock().await.remove(&request.command_id);
+            self.active_remote_step_batches.lock().await.remove(&command_id);
             return Err(err);
         }
 
