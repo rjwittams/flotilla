@@ -4,17 +4,19 @@ use flotilla_core::data::{SectionData, SectionKind};
 use flotilla_protocol::{WorkItem, WorkItemIdentity};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::Style,
+    style::{Color, Style},
     text::{Line, Span},
+    widgets::{Block, Cell, Row, Table},
     Frame,
 };
 
 use super::{
     columns::columns_for_section,
     section_table::{Identifiable, RenderCtx, SectionTable},
+    PROVIDER_CATEGORIES,
 };
 use crate::{
-    app::{ui_state::PendingAction, TuiModel, UiState},
+    app::{ui_state::PendingAction, ProviderStatus, TuiModel, UiState},
     theme::Theme,
 };
 
@@ -236,7 +238,9 @@ impl SplitTable {
         ui.layout.table_area = area;
 
         if show_providers {
-            // Provider rendering will be ported in Task 10.
+            let close_x = area.x + area.width.saturating_sub(5);
+            self.gear_area = Some(Rect::new(close_x, area.y, 3, 1));
+            self.render_providers(model, ui, theme, frame, area);
             return;
         }
 
@@ -323,6 +327,70 @@ impl SplitTable {
             self.section_areas.push(table_area);
         }
     }
+
+    fn render_providers(&self, model: &TuiModel, _ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {
+        let repo_identity = &model.repo_order[model.active_repo];
+        let rm = &model.repos[repo_identity];
+
+        let mut rows: Vec<Row> = Vec::new();
+
+        for &(category, key) in &PROVIDER_CATEGORIES {
+            if let Some(pnames) = rm.provider_names.get(key) {
+                for (i, pname) in pnames.iter().enumerate() {
+                    let label = if i == 0 { category } else { "" };
+                    let status = model.provider_statuses.get(&(repo_identity.clone(), key.to_string(), pname.clone())).copied();
+                    rows.push(provider_row(label, pname, status, theme));
+                }
+            } else {
+                rows.push(provider_empty_row(category, theme));
+            }
+        }
+
+        let table = Table::new(rows, provider_table_widths())
+            .header(provider_table_header(theme))
+            .block(Block::bordered().style(theme.block_style()).title_top(Line::from(" \u{2715} ").right_aligned()));
+        frame.render_widget(table, area);
+    }
+}
+
+// ── Provider table helpers ──────────────────────────────────────────────────
+
+fn provider_status_badge(status: Option<ProviderStatus>, theme: &Theme) -> (&'static str, Color) {
+    match status {
+        Some(ProviderStatus::Ok) => ("\u{2713}", theme.status_ok),
+        Some(ProviderStatus::Error) => ("\u{2717}", theme.error),
+        None => ("", theme.text),
+    }
+}
+
+fn provider_row(label: &str, provider: &str, status: Option<ProviderStatus>, theme: &Theme) -> Row<'static> {
+    let (status_text, status_color) = provider_status_badge(status, theme);
+    Row::new(vec![
+        Cell::from(Span::styled(label.to_string(), Style::default().fg(theme.muted))),
+        Cell::from(Span::styled(provider.to_string(), Style::default().fg(theme.text))),
+        Cell::from(Span::styled(status_text, Style::default().fg(status_color))),
+    ])
+}
+
+fn provider_empty_row(category: &str, theme: &Theme) -> Row<'static> {
+    Row::new(vec![
+        Cell::from(Span::styled(category.to_string(), Style::default().fg(theme.muted))),
+        Cell::from(Span::styled("\u{2014}", Style::default().fg(theme.muted))),
+        Cell::from(""),
+    ])
+}
+
+fn provider_table_header(theme: &Theme) -> Row<'static> {
+    Row::new(vec![
+        Cell::from(Span::styled("Role", Style::default().fg(theme.muted).bold())),
+        Cell::from(Span::styled("Provider", Style::default().fg(theme.muted).bold())),
+        Cell::from(Span::styled("Status", Style::default().fg(theme.muted).bold())),
+    ])
+    .height(1)
+}
+
+fn provider_table_widths() -> [Constraint; 3] {
+    [Constraint::Length(16), Constraint::Length(24), Constraint::Length(6)]
 }
 
 // ===========================================================================
