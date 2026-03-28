@@ -416,10 +416,22 @@ impl SplitTable {
                         prev_source: prev_source.as_deref(),
                     };
 
-                    // Determine row style override (multi-select / pending).
-                    let row_style = row_style_override(item, multi_selected, pending_actions, theme);
+                    let pending = pending_actions.get(&item.identity);
+                    let is_multi_selected = multi_selected.contains(&item.identity);
 
-                    render_data_row(frame, item, &table.columns, &render_ctx, is_selected, row_style, y, area.x, area.width, theme);
+                    render_data_row(
+                        frame,
+                        item,
+                        &table.columns,
+                        &render_ctx,
+                        is_selected,
+                        pending,
+                        is_multi_selected,
+                        y,
+                        area.x,
+                        area.width,
+                        theme,
+                    );
                 }
                 prev_source = item.source.clone();
                 flat_row += 1;
@@ -505,12 +517,60 @@ fn render_data_row(
     columns: &[super::section_table::ColumnDef<WorkItem>],
     ctx: &RenderCtx,
     is_selected: bool,
-    row_style: Option<Style>,
+    pending: Option<&PendingAction>,
+    is_multi_selected: bool,
     y: u16,
     area_x: u16,
     area_width: u16,
     theme: &Theme,
 ) {
+    let is_in_flight = pending.is_some_and(|p| matches!(p.status, PendingStatus::InFlight));
+    let is_failed = pending.is_some_and(|p| matches!(p.status, PendingStatus::Failed(_)));
+
+    // ── In-flight shimmer rendering ────────────────────────────────────
+    if is_in_flight {
+        let total_width: usize = ctx.col_widths.iter().map(|w| *w as usize).sum::<usize>() + columns.len().saturating_sub(1);
+        let shimmer = crate::shimmer::Shimmer::new(total_width, theme);
+        let spinner = ui_helpers::spinner_char();
+
+        let mut spans: Vec<Span> = Vec::new();
+        if is_selected {
+            spans.push(Span::styled(HIGHLIGHT_SYMBOL, Style::default().fg(theme.text).add_modifier(Modifier::BOLD)));
+        } else {
+            spans.push(Span::raw("  "));
+        }
+
+        let mut offset: usize = 0;
+        for (i, col) in columns.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" "));
+                offset += 1;
+            }
+            let span = (col.extract)(item, ctx);
+            let w = ctx.col_widths.get(i).copied().unwrap_or(0) as usize;
+            // Replace icon column with spinner.
+            let text = if i == 0 { format!(" {spinner}") } else { ui_helpers::truncate(&span.content, w) };
+            let padded = format!("{:<width$}", text, width = w);
+            let shimmer_spans = shimmer.spans(&padded, offset);
+            spans.extend(shimmer_spans);
+            offset += w;
+        }
+
+        let line = Line::from(spans);
+        frame.render_widget(line, Rect::new(area_x, y, area_width, 1));
+
+        if is_selected {
+            let buf = frame.buffer_mut();
+            for cx in area_x..area_x + area_width {
+                if let Some(cell) = buf.cell_mut(Position::new(cx, y)) {
+                    cell.set_bg(theme.row_highlight);
+                }
+            }
+        }
+        return;
+    }
+
+    // ── Normal / failed / multi-selected rendering ─────────────────────
     let mut spans: Vec<Span> = Vec::new();
 
     // Highlight symbol.
@@ -529,14 +589,32 @@ fn render_data_row(
         let w = ctx.col_widths.get(i).copied().unwrap_or(0) as usize;
         let truncated = ui_helpers::truncate(&span.content, w);
         let padded = format!("{:<width$}", truncated, width = w);
-        spans.push(Span::styled(padded, span.style));
+        if is_failed {
+            spans.push(Span::styled(padded, Style::default().fg(theme.error).add_modifier(Modifier::DIM)));
+        } else {
+            spans.push(Span::styled(padded, span.style));
+        }
+    }
+
+    // Failed icon override.
+    if is_failed {
+        spans[0] =
+            if is_selected { Span::styled("\u{2717} ", Style::default().fg(theme.error)) } else { Span::styled("  ", Style::default()) };
     }
 
     let line = Line::from(spans);
-    let row_rect = Rect::new(area_x, y, area_width, 1);
-    frame.render_widget(line, row_rect);
+    frame.render_widget(line, Rect::new(area_x, y, area_width, 1));
 
-    // Apply row highlight background for selected row.
+    // Background layers: multi-select first, then row highlight on top for the
+    // active row so it remains visually distinct within the selection.
+    if is_multi_selected {
+        let buf = frame.buffer_mut();
+        for cx in area_x..area_x + area_width {
+            if let Some(cell) = buf.cell_mut(Position::new(cx, y)) {
+                cell.set_bg(theme.multi_select_bg);
+            }
+        }
+    }
     if is_selected {
         let buf = frame.buffer_mut();
         for cx in area_x..area_x + area_width {
@@ -544,44 +622,6 @@ fn render_data_row(
                 cell.set_bg(theme.row_highlight);
             }
         }
-    }
-
-    // Apply row style override (multi-select / pending-action).
-    if let Some(style) = row_style {
-        let buf = frame.buffer_mut();
-        for cx in area_x..area_x + area_width {
-            if let Some(cell) = buf.cell_mut(Position::new(cx, y)) {
-                if let Some(fg) = style.fg {
-                    cell.set_fg(fg);
-                }
-                if let Some(bg) = style.bg {
-                    cell.set_bg(bg);
-                }
-                // Apply modifier (DIM for failed pending).
-                if style.add_modifier.contains(Modifier::DIM) {
-                    cell.modifier.insert(Modifier::DIM);
-                }
-            }
-        }
-    }
-}
-
-/// Determine the row style override for multi-select or pending-action indicators.
-fn row_style_override(
-    item: &WorkItem,
-    multi_selected: &HashSet<WorkItemIdentity>,
-    pending_actions: &HashMap<WorkItemIdentity, PendingAction>,
-    theme: &Theme,
-) -> Option<Style> {
-    if let Some(pending) = pending_actions.get(&item.identity) {
-        match &pending.status {
-            PendingStatus::Failed(_) => Some(Style::default().fg(theme.error).add_modifier(Modifier::DIM)),
-            PendingStatus::InFlight => None,
-        }
-    } else if multi_selected.contains(&item.identity) {
-        Some(Style::default().bg(theme.multi_select_bg))
-    } else {
-        None
     }
 }
 
