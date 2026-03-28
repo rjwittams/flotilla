@@ -51,7 +51,7 @@ impl InteractiveWidget for BranchInputWidget {
                     let repo_identity = ctx.repo_order[ctx.active_repo].clone();
                     let cmd = Command {
                         host: ctx.target_host.cloned(),
-                        environment: None,
+                        provisioning_target: None,
                         context_repo: None,
                         action: CommandAction::Checkout {
                             repo: RepoSelector::Identity(repo_identity),

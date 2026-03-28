@@ -44,7 +44,7 @@ impl InteractiveWidget for IssueSearchWidget {
                     };
                     let cmd = Command {
                         host: None,
-                        environment: None,
+                        provisioning_target: None,
                         context_repo: None,
                         action: CommandAction::SearchIssues { repo: RepoSelector::Identity(repo_identity.clone()), query: query.clone() },
                     };
@@ -61,7 +61,7 @@ impl InteractiveWidget for IssueSearchWidget {
                 };
                 let cmd = Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::ClearIssueSearch { repo: RepoSelector::Identity(repo_identity.clone()) },
                 };

@@ -252,7 +252,12 @@ fn question_mark_in_other_modes_does_not_toggle() {
     let item = make_work_item("a");
     let entries = vec![crate::widgets::action_menu::MenuEntry {
         intent: Intent::OpenChangeRequest,
-        command: Command { host: None, environment: None, context_repo: None, action: CommandAction::OpenChangeRequest { id: "1".into() } },
+        command: Command {
+            host: None,
+            provisioning_target: None,
+            context_repo: None,
+            action: CommandAction::OpenChangeRequest { id: "1".into() },
+        },
     }];
     app.screen.modal_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
     app.handle_key(key(KeyCode::Char('?')));
@@ -423,7 +428,12 @@ fn brackets_do_not_switch_tabs_from_action_menu() {
     let item = make_work_item("a");
     let entries = vec![crate::widgets::action_menu::MenuEntry {
         intent: Intent::OpenChangeRequest,
-        command: Command { host: None, environment: None, context_repo: None, action: CommandAction::OpenChangeRequest { id: "1".into() } },
+        command: Command {
+            host: None,
+            provisioning_target: None,
+            context_repo: None,
+            action: CommandAction::OpenChangeRequest { id: "1".into() },
+        },
     }];
     app.screen.modal_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(entries, item)));
 
@@ -786,7 +796,7 @@ fn push_action_menu_widget(app: &mut App) {
             intent: Intent::CreateWorkspace,
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::CreateWorkspaceForCheckout { checkout_path: "/tmp/a".into(), label: "feat/a".into() },
             },
@@ -795,7 +805,7 @@ fn push_action_menu_widget(app: &mut App) {
             intent: Intent::RemoveCheckout,
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::FetchCheckoutStatus {
                     branch: "feat/a".into(),
@@ -1264,7 +1274,7 @@ fn menu_enter_swaps_to_delete_confirm_widget() {
         intent: Intent::RemoveCheckout,
         command: Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::FetchCheckoutStatus {
                 branch: "feat/a".into(),
@@ -1477,7 +1487,7 @@ fn close_confirm_attaches_pending_context() {
     // Push CloseConfirmWidget onto the widget stack
     let widget = crate::widgets::close_confirm::CloseConfirmWidget::new("PR-1".into(), "test".into(), item.identity.clone(), Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: None,
         action: CommandAction::CloseChangeRequest { id: "PR-1".into() },
     });
@@ -1494,7 +1504,7 @@ fn close_confirm_preserves_resolved_remote_command() {
     let mut app = stub_app();
     let expected = Command {
         host: Some(HostName::new("remote-host")),
-        environment: None,
+        provisioning_target: None,
         context_repo: Some(flotilla_protocol::RepoSelector::Identity(app.model.active_repo_identity().clone())),
         action: CommandAction::CloseChangeRequest { id: "PR-1".into() },
     };

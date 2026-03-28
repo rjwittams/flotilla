@@ -290,7 +290,7 @@ async fn run_tui(cli: Cli) -> Result<()> {
             if let Err(e) = daemon
                 .execute(flotilla_protocol::Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: flotilla_protocol::CommandAction::TrackRepoPath { path: canonical.clone() },
                 })

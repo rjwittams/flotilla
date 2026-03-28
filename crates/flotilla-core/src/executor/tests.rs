@@ -293,11 +293,11 @@ fn repo_selector() -> RepoSelector {
 }
 
 fn local_command(action: CommandAction) -> Command {
-    Command { host: None, environment: None, context_repo: None, action }
+    Command { host: None, provisioning_target: None, context_repo: None, action }
 }
 
 fn command_with_host(host: &str, action: CommandAction) -> Command {
-    Command { host: Some(HostName::new(host)), environment: None, context_repo: None, action }
+    Command { host: Some(HostName::new(host)), provisioning_target: None, context_repo: None, action }
 }
 
 fn local_host() -> HostName {
@@ -2408,13 +2408,12 @@ async fn build_plan_with_environment_prepends_lifecycle_steps() {
     let registry = empty_registry();
     let data = empty_data();
 
-    let spec = flotilla_protocol::EnvironmentSpec {
-        image: flotilla_protocol::ImageSource::Registry("flotilla-dev-env:latest".to_string()),
-        token_env_vars: vec!["github".to_string()],
-    };
     let cmd = Command {
         host: Some(HostName::new("feta")),
-        environment: Some(spec),
+        provisioning_target: Some(flotilla_protocol::ProvisioningTarget::NewEnvironment {
+            host: HostName::new("feta"),
+            provider: "docker".to_string(),
+        }),
         context_repo: Some(repo_selector()),
         action: CommandAction::Checkout {
             repo: repo_selector(),
@@ -2436,38 +2435,41 @@ async fn build_plan_with_environment_prepends_lifecycle_steps() {
     .await
     .expect("build_plan should succeed");
 
-    // Verify 6 steps
-    assert_eq!(plan.steps.len(), 6);
+    // Verify 7 steps (ReadEnvironmentSpec prepended)
+    assert_eq!(plan.steps.len(), 7);
 
     // Verify step actions in order
-    assert!(matches!(plan.steps[0].action, StepAction::EnsureEnvironmentImage { .. }));
-    assert!(matches!(plan.steps[1].action, StepAction::CreateEnvironment { .. }));
-    assert!(matches!(plan.steps[2].action, StepAction::DiscoverEnvironmentProviders { .. }));
-    assert!(matches!(plan.steps[3].action, StepAction::CreateCheckout { .. }));
-    assert!(matches!(plan.steps[4].action, StepAction::PrepareWorkspace { .. }));
-    assert!(matches!(plan.steps[5].action, StepAction::AttachWorkspace));
+    assert!(matches!(plan.steps[0].action, StepAction::ReadEnvironmentSpec));
+    assert!(matches!(plan.steps[1].action, StepAction::EnsureEnvironmentImage));
+    assert!(matches!(plan.steps[2].action, StepAction::CreateEnvironment { .. }));
+    assert!(matches!(plan.steps[3].action, StepAction::DiscoverEnvironmentProviders { .. }));
+    assert!(matches!(plan.steps[4].action, StepAction::CreateCheckout { .. }));
+    assert!(matches!(plan.steps[5].action, StepAction::PrepareWorkspace { .. }));
+    assert!(matches!(plan.steps[6].action, StepAction::AttachWorkspace));
 
-    // Verify host assignments — steps 0-2: Host(feta)
+    // Verify host assignments — steps 0-3: Host(feta)
     assert_eq!(*plan.steps[0].host.host_name(), HostName::new("feta"));
     assert_eq!(*plan.steps[1].host.host_name(), HostName::new("feta"));
     assert_eq!(*plan.steps[2].host.host_name(), HostName::new("feta"));
+    assert_eq!(*plan.steps[3].host.host_name(), HostName::new("feta"));
     assert!(matches!(&plan.steps[0].host, StepExecutionContext::Host(_)));
     assert!(matches!(&plan.steps[1].host, StepExecutionContext::Host(_)));
     assert!(matches!(&plan.steps[2].host, StepExecutionContext::Host(_)));
+    assert!(matches!(&plan.steps[3].host, StepExecutionContext::Host(_)));
 
-    // Steps 3-4: Environment(feta, env_id)
-    assert!(matches!(&plan.steps[3].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
+    // Steps 4-5: Environment(feta, env_id)
     assert!(matches!(&plan.steps[4].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
+    assert!(matches!(&plan.steps[5].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
 
-    // Step 5: Host(laptop) — attach on local
-    assert_eq!(*plan.steps[5].host.host_name(), HostName::new("laptop"));
-    assert!(matches!(&plan.steps[5].host, StepExecutionContext::Host(_)));
+    // Step 6: Host(laptop) — attach on local
+    assert_eq!(*plan.steps[6].host.host_name(), HostName::new("laptop"));
+    assert!(matches!(&plan.steps[6].host, StepExecutionContext::Host(_)));
 
     // Verify workspace label includes remote host suffix
-    if let StepAction::PrepareWorkspace { ref label, .. } = plan.steps[4].action {
+    if let StepAction::PrepareWorkspace { ref label, .. } = plan.steps[5].action {
         assert_eq!(label, "feature-x@feta");
     } else {
-        panic!("step 4 should be PrepareWorkspace");
+        panic!("step 5 should be PrepareWorkspace");
     }
 }
 
@@ -2476,13 +2478,12 @@ async fn build_plan_with_environment_local_host_omits_suffix() {
     let registry = empty_registry();
     let data = empty_data();
 
-    let spec = flotilla_protocol::EnvironmentSpec {
-        image: flotilla_protocol::ImageSource::Registry("dev:latest".to_string()),
-        token_env_vars: vec![],
-    };
     let cmd = Command {
         host: Some(HostName::new("laptop")),
-        environment: Some(spec),
+        provisioning_target: Some(flotilla_protocol::ProvisioningTarget::NewEnvironment {
+            host: HostName::new("laptop"),
+            provider: "docker".to_string(),
+        }),
         context_repo: Some(repo_selector()),
         action: CommandAction::Checkout { repo: repo_selector(), target: CheckoutTarget::Branch("main".to_string()), issue_ids: vec![] },
     };
@@ -2500,22 +2501,22 @@ async fn build_plan_with_environment_local_host_omits_suffix() {
     .await
     .expect("build_plan should succeed");
 
-    assert_eq!(plan.steps.len(), 6);
+    assert_eq!(plan.steps.len(), 7);
 
     // When target_host == local_host, workspace label should be just the branch
-    if let StepAction::PrepareWorkspace { ref label, .. } = plan.steps[4].action {
+    if let StepAction::PrepareWorkspace { ref label, .. } = plan.steps[5].action {
         assert_eq!(label, "main");
     } else {
-        panic!("step 4 should be PrepareWorkspace");
+        panic!("step 5 should be PrepareWorkspace");
     }
 
     // Checkout step should use ExistingBranch intent
-    if let StepAction::CreateCheckout { ref branch, create_branch, intent, .. } = plan.steps[3].action {
+    if let StepAction::CreateCheckout { ref branch, create_branch, intent, .. } = plan.steps[4].action {
         assert_eq!(branch, "main");
         assert!(!create_branch);
         assert_eq!(intent, CheckoutIntent::ExistingBranch);
     } else {
-        panic!("step 3 should be CreateCheckout");
+        panic!("step 4 should be CreateCheckout");
     }
 }
 
@@ -2946,10 +2947,12 @@ async fn executor_step_resolver_ensure_environment_image() {
         environment_registries: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
 
+    // Spec is now read from the prior ReadEnvironmentSpec step outcome
     let spec = EnvironmentSpec { image: flotilla_protocol::ImageSource::Registry("test:latest".into()), token_env_vars: vec![] };
-    let action = StepAction::EnsureEnvironmentImage { spec };
+    let prior = vec![StepOutcome::Produced(CommandValue::EnvironmentSpecRead { spec })];
+    let action = StepAction::EnsureEnvironmentImage;
     let context = StepExecutionContext::Host(local_host());
-    let outcome = resolver.resolve("ensure image", &context, action, &[]).await;
+    let outcome = resolver.resolve("ensure image", &context, action, &prior).await;
     match outcome {
         Ok(StepOutcome::Produced(CommandValue::ImageEnsured { image })) => {
             assert_eq!(image, ImageId::new("flotilla:test-abc123"));
@@ -2974,10 +2977,12 @@ async fn executor_step_resolver_ensure_environment_image_error_when_no_provider(
         environment_registries: std::sync::Mutex::new(std::collections::HashMap::new()),
     };
 
+    // Spec is now read from the prior ReadEnvironmentSpec step outcome
     let spec = EnvironmentSpec { image: flotilla_protocol::ImageSource::Registry("test:latest".into()), token_env_vars: vec![] };
-    let action = StepAction::EnsureEnvironmentImage { spec };
+    let prior = vec![StepOutcome::Produced(CommandValue::EnvironmentSpecRead { spec })];
+    let action = StepAction::EnsureEnvironmentImage;
     let context = StepExecutionContext::Host(local_host());
-    let outcome = resolver.resolve("ensure image", &context, action, &[]).await;
+    let outcome = resolver.resolve("ensure image", &context, action, &prior).await;
     assert!(outcome.is_err(), "should fail when no environment provider available");
     assert!(outcome.unwrap_err().contains("no environment provider available"));
 }

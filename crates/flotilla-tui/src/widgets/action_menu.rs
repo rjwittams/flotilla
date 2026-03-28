@@ -185,7 +185,7 @@ mod tests {
         let item = checkout_item("feat/a", "/tmp/a", false);
         let command = Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::FetchCheckoutStatus {
                 branch: "feat/a".into(),
@@ -201,7 +201,7 @@ mod tests {
         let item = checkout_item("feat/b", "/tmp/b", false);
         let command = Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::CreateWorkspaceForCheckout { checkout_path: "/tmp/b".into(), label: "feat/b".into() },
         };
@@ -224,7 +224,7 @@ mod tests {
                 intent: Intent::CreateWorkspace,
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::CreateWorkspaceForCheckout { checkout_path: "/tmp/a".into(), label: "feat/a".into() },
                 },
@@ -233,7 +233,7 @@ mod tests {
                 intent: Intent::RemoveCheckout,
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::FetchCheckoutStatus {
                         branch: "feat/a".into(),
@@ -259,7 +259,7 @@ mod tests {
             intent: Intent::CreateWorkspace,
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::CreateWorkspaceForCheckout { checkout_path: "/tmp/a".into(), label: "feat/a".into() },
             },
@@ -281,7 +281,7 @@ mod tests {
                 intent: Intent::CreateWorkspace,
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::CreateWorkspaceForCheckout { checkout_path: "/tmp/a".into(), label: "feat/a".into() },
                 },
@@ -290,7 +290,7 @@ mod tests {
                 intent: Intent::RemoveCheckout,
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::FetchCheckoutStatus {
                         branch: "feat/a".into(),
@@ -365,8 +365,12 @@ mod tests {
     #[test]
     fn confirm_close_change_request_swaps_to_close_confirm_widget() {
         let item = pr_item("42");
-        let command =
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: "42".into() } };
+        let command = Command {
+            host: None,
+            provisioning_target: None,
+            context_repo: None,
+            action: CommandAction::CloseChangeRequest { id: "42".into() },
+        };
         let entries = vec![MenuEntry { intent: Intent::CloseChangeRequest, command }];
         let mut widget = ActionMenuWidget::new(entries, item);
         let mut harness = TestWidgetHarness::new();
@@ -384,7 +388,7 @@ mod tests {
         item.issue_keys = vec!["123".into()];
         let command = Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::GenerateBranchName { issue_keys: vec!["123".into()] },
         };
@@ -437,7 +441,7 @@ mod tests {
                 intent: Intent::CreateWorkspace,
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::CreateWorkspaceForCheckout { checkout_path: "/tmp/a".into(), label: "feat/a".into() },
                 },
@@ -446,7 +450,7 @@ mod tests {
                 intent: Intent::RemoveCheckout,
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::FetchCheckoutStatus {
                         branch: "feat/a".into(),
@@ -499,7 +503,7 @@ mod tests {
 
         let command = Command {
             host: Some(remote.clone()),
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::FetchCheckoutStatus {
                 branch: "feat/r".into(),

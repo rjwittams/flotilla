@@ -68,7 +68,7 @@ pub struct Command {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<crate::HostName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<crate::EnvironmentSpec>,
+    pub provisioning_target: Option<crate::ProvisioningTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_repo: Option<RepoSelector>,
     #[serde(flatten)]
@@ -345,19 +345,19 @@ mod tests {
         let cases = vec![
             Command {
                 host: Some(HostName::new("feta")),
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::Refresh { repo: Some(RepoSelector::Query("flotilla".into())) },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::TrackRepoPath { path: PathBuf::from("/repo") },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/repo"))),
                 action: CommandAction::CreateWorkspaceFromPreparedTerminal {
                     target_host: HostName::new("desktop"),
@@ -369,13 +369,13 @@ mod tests {
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::UntrackRepo { repo: RepoSelector::Query("owner/repo".into()) },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::Checkout {
                     repo: RepoSelector::Path(PathBuf::from("/repo")),
@@ -385,19 +385,19 @@ mod tests {
             },
             Command {
                 host: Some(HostName::new("desktop")),
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
                 action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x"), commands: vec![] },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::RemoveCheckout { checkout: CheckoutSelector::Query("feat-x".into()) },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/repo"))),
                 action: CommandAction::FetchCheckoutStatus {
                     branch: "feat-x".into(),
@@ -407,37 +407,37 @@ mod tests {
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
                 action: CommandAction::CreateWorkspaceForCheckout { checkout_path: PathBuf::from("/repo/wt"), label: "feat-x".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::SelectWorkspace { ws_ref: "ws://1".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Query("owner/repo".into())),
                 action: CommandAction::OpenChangeRequest { id: "99".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Query("owner/repo".into())),
                 action: CommandAction::CloseChangeRequest { id: "99".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Query("owner/repo".into())),
                 action: CommandAction::OpenIssue { id: "42".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Query("owner/repo".into())),
                 action: CommandAction::LinkIssuesToChangeRequest {
                     change_request_id: "99".into(),
@@ -446,19 +446,19 @@ mod tests {
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Query("owner/repo".into())),
                 action: CommandAction::ArchiveSession { session_id: "session-1".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Query("owner/repo".into())),
                 action: CommandAction::GenerateBranchName { issue_keys: vec!["ISSUE-1".into(), "ISSUE-2".into()] },
             },
             Command {
                 host: Some(HostName::new("feta")),
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
                 action: CommandAction::TeleportSession {
                     session_id: "session-1".into(),
@@ -468,56 +468,56 @@ mod tests {
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::SetIssueViewport { repo: RepoSelector::Path(PathBuf::from("/repo")), visible_count: 25 },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::FetchMoreIssues { repo: RepoSelector::Path(PathBuf::from("/repo")), desired_count: 50 },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::SearchIssues { repo: RepoSelector::Path(PathBuf::from("/repo")), query: "bug".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::ClearIssueSearch { repo: RepoSelector::Path(PathBuf::from("/repo")) },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryRepoDetail { repo: RepoSelector::Path(PathBuf::from("/repo")) },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryRepoProviders { repo: RepoSelector::Path(PathBuf::from("/repo")) },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryRepoWork { repo: RepoSelector::Path(PathBuf::from("/repo")) },
             },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::QueryHostList {} },
+            Command { host: None, provisioning_target: None, context_repo: None, action: CommandAction::QueryHostList {} },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryHostStatus { target_host: "desktop".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryHostProviders { target_host: "desktop".into() },
             },
@@ -530,8 +530,12 @@ mod tests {
 
     #[test]
     fn command_uses_snake_case_tag() {
-        let cmd =
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::SelectWorkspace { ws_ref: "x".into() } };
+        let cmd = Command {
+            host: None,
+            provisioning_target: None,
+            context_repo: None,
+            action: CommandAction::SelectWorkspace { ws_ref: "x".into() },
+        };
         let json = serde_json::to_value(&cmd).expect("serialize");
         assert_eq!(json.get("action").and_then(|v| v.as_str()), Some("select_workspace"));
     }
@@ -729,19 +733,19 @@ mod tests {
         let cases: Vec<Command> = vec![
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::CreateWorkspaceForCheckout { checkout_path: PathBuf::from("/tmp"), label: "ws".into() },
             },
             Command {
                 host: Some(HostName::new("desktop")),
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
                 action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/remote/repo/feat-x"), commands: vec![] },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Identity(repo_identity())),
                 action: CommandAction::CreateWorkspaceFromPreparedTerminal {
                     target_host: HostName::new("desktop"),
@@ -751,10 +755,15 @@ mod tests {
                     commands: vec![ResolvedPaneCommand { role: "main".into(), args: vec![Arg::Literal("bash".into())] }],
                 },
             },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::SelectWorkspace { ws_ref: "x".into() } },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::SelectWorkspace { ws_ref: "x".into() },
+            },
+            Command {
+                host: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::Checkout {
                     repo: RepoSelector::Query("repo".into()),
@@ -764,123 +773,123 @@ mod tests {
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::RemoveCheckout { checkout: CheckoutSelector::Query("b".into()) },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::FetchCheckoutStatus { branch: "b".into(), checkout_path: None, change_request_id: None },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/tmp"))),
                 action: CommandAction::OpenChangeRequest { id: "1".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/tmp"))),
                 action: CommandAction::CloseChangeRequest { id: "1".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/tmp"))),
                 action: CommandAction::OpenIssue { id: "1".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/tmp"))),
                 action: CommandAction::LinkIssuesToChangeRequest { change_request_id: "1".into(), issue_ids: vec![] },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/tmp"))),
                 action: CommandAction::ArchiveSession { session_id: "s".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/tmp"))),
                 action: CommandAction::GenerateBranchName { issue_keys: vec![] },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Path(PathBuf::from("/tmp"))),
                 action: CommandAction::TeleportSession { session_id: "s".into(), branch: None, checkout_key: None },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::TrackRepoPath { path: PathBuf::from("/tmp") },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::UntrackRepo { repo: RepoSelector::Path(PathBuf::from("/tmp")) },
             },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } },
+            Command { host: None, provisioning_target: None, context_repo: None, action: CommandAction::Refresh { repo: None } },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::SetIssueViewport { repo: RepoSelector::Path(PathBuf::from("/tmp")), visible_count: 10 },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::FetchMoreIssues { repo: RepoSelector::Path(PathBuf::from("/tmp")), desired_count: 10 },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::SearchIssues { repo: RepoSelector::Path(PathBuf::from("/tmp")), query: "q".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::ClearIssueSearch { repo: RepoSelector::Path(PathBuf::from("/tmp")) },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryRepoDetail { repo: RepoSelector::Path(PathBuf::from("/tmp")) },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryRepoProviders { repo: RepoSelector::Path(PathBuf::from("/tmp")) },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryRepoWork { repo: RepoSelector::Path(PathBuf::from("/tmp")) },
             },
-            Command { host: None, environment: None, context_repo: None, action: CommandAction::QueryHostList {} },
+            Command { host: None, provisioning_target: None, context_repo: None, action: CommandAction::QueryHostList {} },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryHostStatus { target_host: "desktop".into() },
             },
             Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryHostProviders { target_host: "desktop".into() },
             },

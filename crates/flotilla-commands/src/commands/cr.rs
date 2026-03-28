@@ -32,7 +32,7 @@ impl CrNoun {
             CrVerb::Open => Ok(Resolved::NeedsContext {
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::OpenChangeRequest { id: self.subject },
                 },
@@ -42,7 +42,7 @@ impl CrNoun {
             CrVerb::Close => Ok(Resolved::NeedsContext {
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::CloseChangeRequest { id: self.subject },
                 },
@@ -52,7 +52,7 @@ impl CrNoun {
             CrVerb::LinkIssues { issue_ids } => Ok(Resolved::NeedsContext {
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::LinkIssuesToChangeRequest { change_request_id: self.subject, issue_ids },
                 },
@@ -102,7 +102,7 @@ mod tests {
         assert_eq!(resolved, Resolved::NeedsContext {
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::OpenChangeRequest { id: "42".into() }
             },
@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(resolved, Resolved::NeedsContext {
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::CloseChangeRequest { id: "42".into() }
             },
@@ -132,7 +132,7 @@ mod tests {
         assert_eq!(resolved, Resolved::NeedsContext {
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::LinkIssuesToChangeRequest {
                     change_request_id: "42".into(),
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(resolved, Resolved::NeedsContext {
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::OpenChangeRequest { id: "42".into() }
             },

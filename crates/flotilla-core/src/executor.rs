@@ -108,18 +108,23 @@ pub async fn build_plan(
     daemon_socket_path: Option<DaemonHostPath>,
     local_host: HostName,
 ) -> Result<StepPlan, CommandValue> {
-    let Command { host, environment, action, .. } = cmd;
+    let Command { host, provisioning_target, action, .. } = cmd;
     let target_host = host.unwrap_or_else(|| local_host.clone());
     let checkout_host = StepExecutionContext::Host(target_host.clone());
 
-    if let Some(spec) = environment {
-        if let CommandAction::Checkout { target, issue_ids, .. } = action {
-            return Ok(build_environment_checkout_plan(spec, target, issue_ids, target_host, local_host));
-        }
-    }
-
     match action {
         CommandAction::Checkout { target, issue_ids, .. } => {
+            match provisioning_target {
+                Some(flotilla_protocol::ProvisioningTarget::NewEnvironment { .. }) => {
+                    return Ok(build_environment_checkout_plan(target, issue_ids, target_host, local_host));
+                }
+                Some(flotilla_protocol::ProvisioningTarget::ExistingEnvironment { env_id, .. }) => {
+                    return Ok(build_existing_environment_checkout_plan(env_id, target, issue_ids, target_host, local_host));
+                }
+                Some(flotilla_protocol::ProvisioningTarget::Host { .. }) | None => {
+                    // Fall through to standard checkout
+                }
+            }
             let (branch, create_branch, intent) = match target {
                 CheckoutTarget::Branch(branch) => (branch, false, CheckoutIntent::ExistingBranch),
                 CheckoutTarget::FreshBranch(branch) => (branch, true, CheckoutIntent::FreshBranch),
@@ -286,17 +291,17 @@ fn build_create_checkout_plan(
     StepPlan::new(steps)
 }
 
-/// Build a step plan for an environment-targeted checkout.
+/// Build a step plan for a new-environment-targeted checkout.
 ///
 /// Steps:
-/// 1. EnsureEnvironmentImage on Host(target_host)
-/// 2. CreateEnvironment on Host(target_host)
-/// 3. DiscoverEnvironmentProviders on Host(target_host)
-/// 4. CreateCheckout on Environment(target_host, env_id)
-/// 5. PrepareWorkspace on Environment(target_host, env_id)
-/// 6. AttachWorkspace on Host(local_host)
+/// 1. ReadEnvironmentSpec on Host(target_host) — reads `.flotilla/environment.yaml`
+/// 2. EnsureEnvironmentImage on Host(target_host) — resolves spec from prior step
+/// 3. CreateEnvironment on Host(target_host)
+/// 4. DiscoverEnvironmentProviders on Host(target_host)
+/// 5. CreateCheckout on Environment(target_host, env_id)
+/// 6. PrepareWorkspace on Environment(target_host, env_id)
+/// 7. AttachWorkspace on Host(local_host)
 fn build_environment_checkout_plan(
-    spec: flotilla_protocol::EnvironmentSpec,
     target: CheckoutTarget,
     issue_ids: Vec<(String, String)>,
     target_host: HostName,
@@ -312,10 +317,11 @@ fn build_environment_checkout_plan(
     let env_context = StepExecutionContext::Environment(target_host.clone(), env_id.clone());
 
     let mut steps = vec![
+        Step { description: "Read environment spec".to_string(), host: host_context.clone(), action: StepAction::ReadEnvironmentSpec },
         Step {
             description: "Ensure environment image".to_string(),
             host: host_context.clone(),
-            action: StepAction::EnsureEnvironmentImage { spec },
+            action: StepAction::EnsureEnvironmentImage,
         },
         Step {
             description: format!("Create environment {env_id}"),
@@ -349,6 +355,52 @@ fn build_environment_checkout_plan(
     });
 
     StepPlan::new(steps)
+}
+
+/// Build a step plan for attaching to an existing running environment.
+///
+/// Steps:
+/// 1. DiscoverEnvironmentProviders on Host(target_host)
+/// 2. CreateCheckout on Environment(target_host, env_id)
+/// 3. PrepareWorkspace on Environment(target_host, env_id)
+/// 4. AttachWorkspace on Host(local_host)
+fn build_existing_environment_checkout_plan(
+    env_id: flotilla_protocol::EnvironmentId,
+    target: CheckoutTarget,
+    issue_ids: Vec<(String, String)>,
+    target_host: HostName,
+    local_host: HostName,
+) -> StepPlan {
+    let (branch, create_branch, intent) = match target {
+        CheckoutTarget::Branch(branch) => (branch, false, CheckoutIntent::ExistingBranch),
+        CheckoutTarget::FreshBranch(branch) => (branch, true, CheckoutIntent::FreshBranch),
+    };
+    let host_context = StepExecutionContext::Host(target_host.clone());
+    let env_context = StepExecutionContext::Environment(target_host.clone(), env_id.clone());
+    let workspace_label = if target_host == local_host { branch.clone() } else { format!("{branch}@{target_host}") };
+
+    StepPlan::new(vec![
+        Step {
+            description: format!("Discover providers in environment {env_id}"),
+            host: host_context,
+            action: StepAction::DiscoverEnvironmentProviders { env_id },
+        },
+        Step {
+            description: format!("Create checkout for branch {branch}"),
+            host: env_context.clone(),
+            action: StepAction::CreateCheckout { branch: branch.clone(), create_branch, intent, issue_ids },
+        },
+        Step {
+            description: format!("Prepare workspace for {workspace_label}"),
+            host: env_context,
+            action: StepAction::PrepareWorkspace { checkout_path: None, label: workspace_label },
+        },
+        Step {
+            description: "Attach workspace".to_string(),
+            host: StepExecutionContext::Host(local_host),
+            action: StepAction::AttachWorkspace,
+        },
+    ])
 }
 
 fn build_create_workspace_plan(
@@ -894,7 +946,23 @@ impl StepResolver for ExecutorStepResolver {
             // -----------------------------------------------------------------
             // Environment lifecycle actions — always use host-side providers
             // -----------------------------------------------------------------
-            StepAction::EnsureEnvironmentImage { spec } => {
+            StepAction::ReadEnvironmentSpec => {
+                let spec_path = self.repo.root.as_path().join(".flotilla/environment.yaml");
+                let yaml = std::fs::read_to_string(&spec_path)
+                    .map_err(|e| format!("failed to read environment spec at {}: {e}", spec_path.display()))?;
+                let spec: flotilla_protocol::EnvironmentSpec =
+                    serde_yaml::from_str(&yaml).map_err(|e| format!("failed to parse environment spec at {}: {e}", spec_path.display()))?;
+                Ok(StepOutcome::Produced(CommandValue::EnvironmentSpecRead { spec }))
+            }
+            StepAction::EnsureEnvironmentImage => {
+                // Extract spec from prior ReadEnvironmentSpec outcome
+                let spec = prior
+                    .iter()
+                    .find_map(|o| match o {
+                        StepOutcome::Produced(CommandValue::EnvironmentSpecRead { spec }) => Some(spec.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| "spec not produced by prior ReadEnvironmentSpec step".to_string())?;
                 let env_provider =
                     self.registry.environment_providers.preferred().ok_or_else(|| "no environment provider available".to_string())?;
                 let image = env_provider.ensure_image(&spec).await?;

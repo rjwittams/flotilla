@@ -129,9 +129,7 @@ pub enum StepAction {
     Noop,
 
     // Environment lifecycle
-    EnsureEnvironmentImage {
-        spec: crate::EnvironmentSpec,
-    },
+    EnsureEnvironmentImage,
     CreateEnvironment {
         env_id: crate::EnvironmentId,
         /// `None` means resolve from prior `EnsureEnvironmentImage` outcome.

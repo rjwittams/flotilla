@@ -37,7 +37,7 @@ impl AgentNoun {
             AgentVerb::Teleport { branch, checkout } => Ok(Resolved::NeedsContext {
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::TeleportSession { session_id: self.subject, branch, checkout_key: checkout },
                 },
@@ -47,7 +47,7 @@ impl AgentNoun {
             AgentVerb::Archive => Ok(Resolved::NeedsContext {
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::ArchiveSession { session_id: self.subject },
                 },
@@ -101,7 +101,7 @@ mod tests {
         assert_eq!(resolved, Resolved::NeedsContext {
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::TeleportSession { session_id: "claude-1".into(), branch: None, checkout_key: None },
             },
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(resolved, Resolved::NeedsContext {
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::TeleportSession { session_id: "claude-1".into(), branch: Some("feat".into()), checkout_key: None },
             },
@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(resolved, Resolved::NeedsContext {
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::TeleportSession {
                     session_id: "claude-1".into(),
@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(resolved, Resolved::NeedsContext {
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::ArchiveSession { session_id: "claude-1".into() }
             },

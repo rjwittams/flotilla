@@ -471,7 +471,7 @@ async fn execute_broadcasts_lifecycle_events() {
     // We only care about the lifecycle events, not the command result.
     let command = Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: Some(RepoSelector::Identity(identity.clone())),
         action: CommandAction::ArchiveSession { session_id: "nonexistent-session".into() },
     };
@@ -525,7 +525,7 @@ async fn fetch_checkout_status_accepts_identity_context_repo() {
 
     let command = Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: Some(RepoSelector::Identity(identity.clone())),
         action: CommandAction::FetchCheckoutStatus { branch: "main".into(), checkout_path: None, change_request_id: None },
     };
@@ -571,7 +571,7 @@ async fn archive_session_can_be_cancelled_while_provider_call_is_in_flight() {
 
     let command = Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: Some(RepoSelector::Path(repo.clone())),
         action: CommandAction::ArchiveSession { session_id: "sess-1".into() },
     };
@@ -622,7 +622,7 @@ async fn generate_branch_name_can_be_cancelled_while_provider_call_is_in_flight(
 
     let command = Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: Some(RepoSelector::Path(repo.clone())),
         action: CommandAction::GenerateBranchName { issue_keys: vec!["42".into()] },
     };
@@ -1230,7 +1230,12 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     let mut rx = daemon.subscribe();
 
     let add_id = daemon
-        .execute(Command { host: None, environment: None, context_repo: None, action: CommandAction::TrackRepoPath { path: repo.clone() } })
+        .execute(Command {
+            host: None,
+            provisioning_target: None,
+            context_repo: None,
+            action: CommandAction::TrackRepoPath { path: repo.clone() },
+        })
         .await
         .expect("add_repo command should return an id");
 
@@ -1268,7 +1273,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     let remove_id = daemon
         .execute(Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::UntrackRepo { repo: RepoSelector::Query("new-repo".into()) },
         })
@@ -1717,7 +1722,7 @@ async fn inline_issue_command_returns_zero_and_skips_lifecycle_events() {
     let command_id = daemon
         .execute(Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::ClearIssueSearch { repo: RepoSelector::Path(repo.clone()) },
         })
@@ -1751,7 +1756,7 @@ async fn execute_on_untracked_repo_returns_error_without_started_event() {
     let err = daemon
         .execute(Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::Refresh { repo: Some(RepoSelector::Path(repo.clone())) },
         })
@@ -1782,7 +1787,7 @@ async fn untrack_missing_repo_returns_error_without_started_event() {
     let err = daemon
         .execute(Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::UntrackRepo { repo: RepoSelector::Path(repo.clone()) },
         })
@@ -1816,7 +1821,7 @@ async fn refresh_all_command_refreshes_every_tracked_repo() {
     let mut rx = daemon.subscribe();
 
     let refresh_id = daemon
-        .execute(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } })
+        .execute(Command { host: None, provisioning_target: None, context_repo: None, action: CommandAction::Refresh { repo: None } })
         .await
         .expect("refresh all should return an id");
 
@@ -1841,7 +1846,7 @@ async fn remove_checkout_command_accepts_selector_queries() {
     let err = daemon
         .execute(Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::RemoveCheckout { checkout: CheckoutSelector::Query("does-not-exist".into()) },
         })
@@ -1861,7 +1866,7 @@ async fn fetch_checkout_status_uses_context_repo_when_checkout_path_is_absent() 
 
     let command = Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: Some(RepoSelector::Path(repo.clone())),
         action: CommandAction::FetchCheckoutStatus { branch: "main".into(), checkout_path: None, change_request_id: None },
     };
@@ -1891,7 +1896,7 @@ async fn checkout_target_branch_and_fresh_branch_are_distinct_errors() {
     let branch_id = daemon
         .execute(Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::Checkout {
                 repo: RepoSelector::Path(repo.clone()),
@@ -1905,7 +1910,7 @@ async fn checkout_target_branch_and_fresh_branch_are_distinct_errors() {
     let fresh_id = daemon
         .execute(Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::Checkout {
                 repo: RepoSelector::Path(repo),
@@ -2320,7 +2325,7 @@ async fn attachable_set_cascade_deletes_on_checkout_removal() {
     // --- Act: remove checkout ---
     let command = Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: None,
         action: CommandAction::RemoveCheckout { checkout: CheckoutSelector::Query("feat-lifecycle".into()) },
     };
@@ -2400,7 +2405,7 @@ async fn issue_refresh_escalation_resets_cache_and_refetches() {
     daemon
         .execute(Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::FetchMoreIssues { repo: RepoSelector::Path(repo.clone()), desired_count: 60 },
         })
@@ -2527,7 +2532,7 @@ async fn two_commands_can_run_concurrently() {
     // --- Act: start first command (blocks inside archive_session) ---
     let archive_cmd = Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: Some(RepoSelector::Path(repo.clone())),
         action: CommandAction::ArchiveSession { session_id: "sess-1".into() },
     };
@@ -2553,7 +2558,7 @@ async fn two_commands_can_run_concurrently() {
     // GenerateBranchName with no AI utility completes immediately with a fallback result.
     let branch_cmd = Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: Some(RepoSelector::Path(repo.clone())),
         action: CommandAction::GenerateBranchName { issue_keys: vec![] },
     };
