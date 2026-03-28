@@ -815,6 +815,128 @@ pub fn group_work_items(
     GroupedWorkItems { table_entries: entries, selectable_indices: selectable }
 }
 
+/// Sort work items into typed sections, each with its own sorted item list.
+///
+/// Unlike `group_work_items()`, which returns a flat interleaved list of headers and items,
+/// this function returns a `Vec<SectionData>` where each section is self-contained.
+/// Empty sections are omitted. Display order: Checkouts, AttachableSets, CloudAgents,
+/// ChangeRequests, RemoteBranches, Issues.
+pub fn group_work_items_split(
+    work_items: &[flotilla_protocol::WorkItem],
+    providers: &ProviderData,
+    labels: &SectionLabels,
+    repo_root: &Path,
+) -> Vec<SectionData> {
+    let mut checkout_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
+    let mut attachable_set_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
+    let mut session_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
+    let mut pr_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
+    let mut remote_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
+    let mut issue_items: Vec<&flotilla_protocol::WorkItem> = Vec::new();
+
+    for item in work_items {
+        match item.kind {
+            WorkItemKind::Checkout => checkout_items.push(item),
+            WorkItemKind::AttachableSet => attachable_set_items.push(item),
+            WorkItemKind::Session => session_items.push(item),
+            WorkItemKind::ChangeRequest => pr_items.push(item),
+            WorkItemKind::RemoteBranch => remote_items.push(item),
+            WorkItemKind::Issue => issue_items.push(item),
+            WorkItemKind::Agent => session_items.push(item),
+        }
+    }
+
+    // Checkouts -- group by host, then main first within host, then proximity, then path
+    checkout_items.sort_by_cached_key(|item| {
+        let host_name = item.host.to_string();
+        let main_tier = u8::from(!item.is_main_checkout);
+        let key = item.checkout_key();
+        let proximity_tier = key.map(|p| checkout_sort_tier(&p.path, repo_root)).unwrap_or(1);
+        let path_key = key.map(|p| p.path.to_path_buf());
+        (host_name, main_tier, proximity_tier, path_key)
+    });
+
+    // AttachableSets -- sorted by description
+    attachable_set_items.sort_by(|a, b| a.description.cmp(&b.description));
+
+    // Sessions/Agents -- grouped by provider, then sorted by updated_at descending
+    session_items.sort_by(|a, b| {
+        let a_ses = a.session_key.as_deref().and_then(|k| providers.sessions.get(k));
+        let b_ses = b.session_key.as_deref().and_then(|k| providers.sessions.get(k));
+        let a_provider = a_ses.map(|s| s.provider_name.as_str()).unwrap_or("");
+        let b_provider = b_ses.map(|s| s.provider_name.as_str()).unwrap_or("");
+        a_provider.cmp(b_provider).then_with(|| {
+            let a_time = a_ses.and_then(|s| s.updated_at.as_deref());
+            let b_time = b_ses.and_then(|s| s.updated_at.as_deref());
+            b_time.cmp(&a_time)
+        })
+    });
+
+    // PRs -- sorted by id descending
+    pr_items.sort_by(|a, b| {
+        let a_num = a.change_request_key.as_deref().and_then(|k| k.parse::<i64>().ok());
+        let b_num = b.change_request_key.as_deref().and_then(|k| k.parse::<i64>().ok());
+        b_num.cmp(&a_num)
+    });
+
+    // Remote branches -- sorted by branch name
+    remote_items.sort_by(|a, b| a.branch.cmp(&b.branch));
+
+    // Issues -- sorted by id descending
+    issue_items.sort_by(|a, b| {
+        let a_num = a.issue_keys.first().and_then(|k| k.parse::<i64>().ok());
+        let b_num = b.issue_keys.first().and_then(|k| k.parse::<i64>().ok());
+        b_num.cmp(&a_num)
+    });
+
+    let mut sections: Vec<SectionData> = Vec::new();
+
+    if !checkout_items.is_empty() {
+        sections.push(SectionData {
+            kind: SectionKind::Checkouts,
+            label: labels.checkouts.clone(),
+            items: checkout_items.into_iter().cloned().collect(),
+        });
+    }
+    if !attachable_set_items.is_empty() {
+        sections.push(SectionData {
+            kind: SectionKind::AttachableSets,
+            label: "Attachable Sets".into(),
+            items: attachable_set_items.into_iter().cloned().collect(),
+        });
+    }
+    if !session_items.is_empty() {
+        sections.push(SectionData {
+            kind: SectionKind::CloudAgents,
+            label: labels.sessions.clone(),
+            items: session_items.into_iter().cloned().collect(),
+        });
+    }
+    if !pr_items.is_empty() {
+        sections.push(SectionData {
+            kind: SectionKind::ChangeRequests,
+            label: labels.change_requests.clone(),
+            items: pr_items.into_iter().cloned().collect(),
+        });
+    }
+    if !remote_items.is_empty() {
+        sections.push(SectionData {
+            kind: SectionKind::RemoteBranches,
+            label: "Remote Branches".into(),
+            items: remote_items.into_iter().cloned().collect(),
+        });
+    }
+    if !issue_items.is_empty() {
+        sections.push(SectionData {
+            kind: SectionKind::Issues,
+            label: labels.issues.clone(),
+            items: issue_items.into_iter().cloned().collect(),
+        });
+    }
+
+    sections
+}
+
 pub async fn fetch_checkout_status(
     branch: &str,
     checkout_path: Option<&Path>,

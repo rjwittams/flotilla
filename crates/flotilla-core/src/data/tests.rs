@@ -1351,3 +1351,171 @@ fn correlate_checkout_remains_anchor_when_attachable_set_present() {
     assert_eq!(items[0].checkout_key(), Some(&co_path));
     assert_eq!(items[0].workspace_refs(), &["ws-1".to_string()]);
 }
+
+// -----------------------------------------------------------------------
+// group_work_items_split() test helpers
+// -----------------------------------------------------------------------
+
+fn test_attachable_set_work_item(id: &str) -> flotilla_protocol::WorkItem {
+    flotilla_protocol::WorkItem {
+        kind: WorkItemKind::AttachableSet,
+        identity: WorkItemIdentity::AttachableSet(flotilla_protocol::AttachableSetId::new(id)),
+        host: flotilla_protocol::HostName::local(),
+        branch: None,
+        description: format!("attachable set {id}"),
+        checkout: None,
+        change_request_key: None,
+        session_key: None,
+        issue_keys: Vec::new(),
+        workspace_refs: Vec::new(),
+        is_main_checkout: false,
+        debug_group: Vec::new(),
+        source: None,
+        terminal_keys: Vec::new(),
+        attachable_set_id: Some(flotilla_protocol::AttachableSetId::new(id)),
+        agent_keys: Vec::new(),
+    }
+}
+
+fn test_agent_work_item(id: &str) -> flotilla_protocol::WorkItem {
+    flotilla_protocol::WorkItem {
+        kind: WorkItemKind::Agent,
+        identity: WorkItemIdentity::Agent(id.into()),
+        host: flotilla_protocol::HostName::local(),
+        branch: None,
+        description: format!("agent {id}"),
+        checkout: None,
+        change_request_key: None,
+        session_key: None,
+        issue_keys: Vec::new(),
+        workspace_refs: Vec::new(),
+        is_main_checkout: false,
+        debug_group: Vec::new(),
+        source: None,
+        terminal_keys: Vec::new(),
+        attachable_set_id: None,
+        agent_keys: vec![id.into()],
+    }
+}
+
+// -----------------------------------------------------------------------
+// group_work_items_split() tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn group_work_items_split_empty_input() {
+    let providers = new_providers();
+    let labels = default_labels();
+    let sections = group_work_items_split(&[], &providers, &labels, Path::new("/tmp"));
+    assert!(sections.is_empty());
+}
+
+#[test]
+fn group_work_items_split_produces_correct_sections() {
+    let providers = new_providers();
+    let labels = default_labels();
+    let items = vec![
+        to_proto(&checkout_item("/tmp/wt", Some("feat"), false)),
+        to_proto(&cr_item("5", "PR five")),
+        to_proto(&issue_item("10", "Bug ten")),
+        to_proto(&session_item("s1", "Session one")),
+        to_proto(&remote_branch_item("origin/dev")),
+    ];
+    let sections = group_work_items_split(&items, &providers, &labels, Path::new("/tmp"));
+
+    // All 5 kinds present → 5 sections
+    assert_eq!(sections.len(), 5);
+
+    // Verify each section contains only its own kind
+    for section in &sections {
+        for item in &section.items {
+            match section.kind {
+                SectionKind::Checkouts => assert_eq!(item.kind, WorkItemKind::Checkout),
+                SectionKind::AttachableSets => assert_eq!(item.kind, WorkItemKind::AttachableSet),
+                SectionKind::CloudAgents => {
+                    assert!(item.kind == WorkItemKind::Session || item.kind == WorkItemKind::Agent)
+                }
+                SectionKind::ChangeRequests => assert_eq!(item.kind, WorkItemKind::ChangeRequest),
+                SectionKind::RemoteBranches => assert_eq!(item.kind, WorkItemKind::RemoteBranch),
+                SectionKind::Issues => assert_eq!(item.kind, WorkItemKind::Issue),
+            }
+        }
+    }
+
+    // Verify display order: Checkouts, CloudAgents, ChangeRequests, RemoteBranches, Issues
+    // (no AttachableSets in this input)
+    let kinds: Vec<SectionKind> = sections.iter().map(|s| s.kind).collect();
+    assert_eq!(kinds, vec![
+        SectionKind::Checkouts,
+        SectionKind::CloudAgents,
+        SectionKind::ChangeRequests,
+        SectionKind::RemoteBranches,
+        SectionKind::Issues,
+    ]);
+}
+
+#[test]
+fn group_work_items_split_empty_sections_omitted() {
+    let providers = new_providers();
+    let labels = default_labels();
+    // Only issues — all other sections should be absent
+    let items = vec![to_proto(&issue_item("1", "Bug"))];
+    let sections = group_work_items_split(&items, &providers, &labels, Path::new("/tmp"));
+
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].kind, SectionKind::Issues);
+    assert_eq!(sections[0].items.len(), 1);
+}
+
+#[test]
+fn group_work_items_split_agents_in_cloud_agents_section() {
+    let providers = new_providers();
+    let labels = default_labels();
+    let items = vec![test_agent_work_item("a1"), test_agent_work_item("a2")];
+    let sections = group_work_items_split(&items, &providers, &labels, Path::new("/tmp"));
+
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].kind, SectionKind::CloudAgents);
+    assert_eq!(sections[0].items.len(), 2);
+    for item in &sections[0].items {
+        assert_eq!(item.kind, WorkItemKind::Agent);
+    }
+}
+
+#[test]
+fn group_work_items_split_sessions_and_agents_share_cloud_agents_section() {
+    let providers = new_providers();
+    let labels = default_labels();
+    let items = vec![test_session_work_item("s1"), test_agent_work_item("a1")];
+    let sections = group_work_items_split(&items, &providers, &labels, Path::new("/tmp"));
+
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].kind, SectionKind::CloudAgents);
+    assert_eq!(sections[0].items.len(), 2);
+}
+
+#[test]
+fn group_work_items_split_section_order_with_all_kinds() {
+    let providers = new_providers();
+    let labels = default_labels();
+    let items = vec![
+        to_proto(&issue_item("1", "Bug")),
+        to_proto(&remote_branch_item("origin/x")),
+        to_proto(&cr_item("2", "PR")),
+        test_session_work_item("s1"),
+        test_attachable_set_work_item("set-1"),
+        to_proto(&checkout_item("/tmp/wt", Some("feat"), false)),
+    ];
+    let sections = group_work_items_split(&items, &providers, &labels, Path::new("/tmp"));
+
+    assert_eq!(sections.len(), 6);
+    let kinds: Vec<SectionKind> = sections.iter().map(|s| s.kind).collect();
+    assert_eq!(kinds, vec![
+        SectionKind::Checkouts,
+        SectionKind::AttachableSets,
+        SectionKind::CloudAgents,
+        SectionKind::ChangeRequests,
+        SectionKind::RemoteBranches,
+        SectionKind::Issues,
+    ]);
+}
