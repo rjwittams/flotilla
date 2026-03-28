@@ -1099,6 +1099,7 @@ dependencies = [
  "async-trait",
  "flotilla-core",
  "flotilla-protocol",
+ "flotilla-transport",
  "libc",
  "serde_json",
  "tempfile",
@@ -1187,6 +1188,7 @@ name = "flotilla-transport"
 version = "0.1.0"
 dependencies = [
  "flotilla-protocol",
+ "serde_json",
  "tokio",
 ]
 
