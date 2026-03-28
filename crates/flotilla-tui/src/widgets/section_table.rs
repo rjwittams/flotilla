@@ -192,9 +192,9 @@ impl<T: Identifiable> SectionTable<T> {
     /// item using each column's extractor. No block/border is added — the
     /// composing widget owns the outer container.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &RenderCtx, highlight_style: Style) {
-        let header = Row::new(self.columns.iter().map(|c| {
-            Cell::from(Span::raw(c.header.clone())).style(Style::default().fg(ctx.theme.muted).bold())
-        }))
+        let header = Row::new(
+            self.columns.iter().map(|c| Cell::from(Span::raw(c.header.clone())).style(Style::default().fg(ctx.theme.muted).bold())),
+        )
         .height(1);
 
         let rows: Vec<Row> = self.items.iter().map(|item| Row::new(self.columns.iter().map(|c| (c.extract)(item, ctx)))).collect();
@@ -232,7 +232,11 @@ impl<T: Identifiable> SectionTable<T> {
         }
         let data_row = relative - 1;
         let idx = self.table_state.offset() + data_row;
-        if idx < self.items.len() { Some(idx) } else { None }
+        if idx < self.items.len() {
+            Some(idx)
+        } else {
+            None
+        }
     }
 }
 
