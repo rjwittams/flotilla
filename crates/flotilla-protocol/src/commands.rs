@@ -628,7 +628,12 @@ mod tests {
                         environment: HostEnvironment::Unknown,
                     },
                     inventory: ToolInventory::default(),
-                    providers: vec![HostProviderStatus { category: "vcs".into(), name: "Git".into(), healthy: true }],
+                    providers: vec![HostProviderStatus {
+                        category: "vcs".into(),
+                        name: "Git".into(),
+                        implementation: "git".into(),
+                        healthy: true,
+                    }],
                     environments: vec![],
                 }),
                 repo_count: 1,

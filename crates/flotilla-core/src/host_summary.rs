@@ -33,11 +33,15 @@ pub fn provider_statuses_from_registries<'a>(registries: impl IntoIterator<Item 
     let mut statuses = Vec::new();
 
     for registry in registries {
-        for (category, names) in provider_names_from_registry(registry) {
-            for name in names {
-                if seen.insert((category.clone(), name.clone())) {
-                    // Static batch: `healthy` means the provider is registered locally at startup.
-                    statuses.push(HostProviderStatus { category: category.clone(), name, healthy: true });
+        for (category, entries) in provider_names_from_registry(registry) {
+            for entry in entries {
+                if seen.insert((category.clone(), entry.implementation.clone())) {
+                    statuses.push(HostProviderStatus {
+                        category: category.clone(),
+                        name: entry.display_name,
+                        implementation: entry.implementation,
+                        healthy: true,
+                    });
                 }
             }
         }

@@ -615,7 +615,7 @@ impl StepResolver for ExecutorStepResolver {
                 Ok(StepOutcome::CompletedWith(result))
             }
             StepAction::LinkIssuesToBranch { branch, issue_ids } => {
-                write_branch_issue_links(self.repo.root.as_path(), &branch, &issue_ids, &*effective_runner).await;
+                write_branch_issue_links(effective_repo_root.as_path(), &branch, &issue_ids, &*effective_runner).await;
                 Ok(StepOutcome::Completed)
             }
             StepAction::RemoveCheckout { branch, deleted_checkout_paths } => {

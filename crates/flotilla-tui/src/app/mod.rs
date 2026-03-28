@@ -608,8 +608,17 @@ impl App {
                     // action as a no-op to avoid breaking any remaining callers.
                 }
                 AppAction::SetTarget(name) => {
-                    // Try parsing as-is first, then fall back to bare hostname (auto-prefix @)
-                    let result = name.parse::<ProvisioningTarget>().or_else(|_| format!("@{name}").parse::<ProvisioningTarget>());
+                    // Try full syntax first. Only fall back to bare hostname (@-prefix)
+                    // for inputs that don't start with a target prefix — otherwise a
+                    // malformed +docker@ would silently become Host { host: "+docker@" }.
+                    let has_target_prefix = name.starts_with('@') || name.starts_with('+') || name.starts_with('=');
+                    let result = name.parse::<ProvisioningTarget>().or_else(|orig_err| {
+                        if has_target_prefix {
+                            Err(orig_err)
+                        } else {
+                            format!("@{name}").parse::<ProvisioningTarget>()
+                        }
+                    });
                     match result {
                         Ok(target) => self.ui.provisioning_target = target,
                         Err(e) => tracing::warn!(%name, %e, "invalid provisioning target"),

@@ -183,7 +183,12 @@ fn host_platform_name(platform: HostPlatform) -> &'static str {
 pub fn provider_health_to_host_statuses(health: &HashMap<(&'static str, String), bool>) -> Vec<HostProviderStatus> {
     let mut statuses: Vec<HostProviderStatus> = health
         .iter()
-        .map(|((category, name), healthy)| HostProviderStatus { category: category.to_string(), name: name.clone(), healthy: *healthy })
+        .map(|((category, name), healthy)| HostProviderStatus {
+            category: category.to_string(),
+            name: name.clone(),
+            implementation: name.to_lowercase(),
+            healthy: *healthy,
+        })
         .collect();
     statuses.sort_by(|a, b| a.category.cmp(&b.category).then_with(|| a.name.cmp(&b.name)));
     statuses
@@ -298,8 +303,18 @@ mod tests {
 
         let statuses = provider_health_to_host_statuses(&health);
 
-        assert!(statuses.contains(&HostProviderStatus { category: "vcs".into(), name: "Git".into(), healthy: true }));
-        assert!(statuses.contains(&HostProviderStatus { category: "cloud_agent".into(), name: "Claude".into(), healthy: false }));
+        assert!(statuses.contains(&HostProviderStatus {
+            category: "vcs".into(),
+            name: "Git".into(),
+            implementation: "git".into(),
+            healthy: true
+        }));
+        assert!(statuses.contains(&HostProviderStatus {
+            category: "cloud_agent".into(),
+            name: "Claude".into(),
+            implementation: "claude".into(),
+            healthy: false
+        }));
     }
 
     fn test_host() -> HostName {

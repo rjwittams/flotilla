@@ -195,7 +195,7 @@ fn sample_remote_host_summary(name: &str) -> HostSummary {
             environment: HostEnvironment::Container,
         },
         inventory: ToolInventory::default(),
-        providers: vec![HostProviderStatus { category: "vcs".into(), name: "Git".into(), healthy: true }],
+        providers: vec![HostProviderStatus { category: "vcs".into(), name: "Git".into(), implementation: "git".into(), healthy: true }],
         environments: vec![],
     }
 }

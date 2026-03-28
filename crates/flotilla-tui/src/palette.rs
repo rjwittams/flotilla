@@ -553,8 +553,7 @@ fn target_completions(partial: &str, model: &TuiModel) -> Vec<PaletteCompletion>
         // +<provider>@<hostname> — new environment via provider
         for provider in &summary.providers {
             if provider.category == "environment" {
-                let provider_name = provider.name.to_lowercase();
-                let value = format!("+{provider_name}@{hostname}");
+                let value = format!("+{}@{hostname}", provider.implementation);
                 if partial.is_empty() || value.starts_with(partial) {
                     let description = format!("new {} environment", provider.name);
                     completions.push(PaletteCompletion { value, description, key_hint: None });
@@ -865,7 +864,12 @@ mod tests {
 
         // Host "feta": has a Docker environment provider and one running environment.
         let mut feta_summary = stub_host_summary("feta");
-        feta_summary.providers.push(HostProviderStatus { category: "environment".to_string(), name: "Docker".to_string(), healthy: true });
+        feta_summary.providers.push(HostProviderStatus {
+            category: "environment".to_string(),
+            name: "Docker".to_string(),
+            implementation: "docker".to_string(),
+            healthy: true,
+        });
         feta_summary.environments.push(EnvironmentInfo {
             id: EnvironmentId::new("env-abc123"),
             image: ImageId::new("image-1"),

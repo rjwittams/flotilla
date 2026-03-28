@@ -257,13 +257,14 @@ fn provider_names_full_registry() {
     let reg = full_registry();
     let names = provider_names_from_registry(&reg);
 
-    assert_eq!(names.get("vcs").unwrap(), &vec!["StubVcs".to_string()]);
-    assert_eq!(names.get("checkout_manager").unwrap(), &vec!["StubCM".to_string()]);
-    assert_eq!(names.get("change_request").unwrap(), &vec!["StubCR".to_string()]);
-    assert_eq!(names.get("issue_tracker").unwrap(), &vec!["StubIT".to_string()]);
-    assert_eq!(names.get("cloud_agent").unwrap(), &vec!["StubCA".to_string()]);
-    assert_eq!(names.get("ai_utility").unwrap(), &vec!["StubAI".to_string()]);
-    assert_eq!(names.get("workspace_manager").unwrap(), &vec!["StubWM".to_string()]);
+    let display_names = |entries: &[ProviderNameEntry]| entries.iter().map(|e| e.display_name.clone()).collect::<Vec<_>>();
+    assert_eq!(display_names(names.get("vcs").unwrap()), vec!["StubVcs"]);
+    assert_eq!(display_names(names.get("checkout_manager").unwrap()), vec!["StubCM"]);
+    assert_eq!(display_names(names.get("change_request").unwrap()), vec!["StubCR"]);
+    assert_eq!(display_names(names.get("issue_tracker").unwrap()), vec!["StubIT"]);
+    assert_eq!(display_names(names.get("cloud_agent").unwrap()), vec!["StubCA"]);
+    assert_eq!(display_names(names.get("ai_utility").unwrap()), vec!["StubAI"]);
+    assert_eq!(display_names(names.get("workspace_manager").unwrap()), vec!["StubWM"]);
     assert_eq!(names.len(), 7);
 }
 
@@ -278,7 +279,10 @@ fn provider_names_partial_registry() {
 
     let names = provider_names_from_registry(&reg);
     assert_eq!(names.len(), 1);
-    assert_eq!(names.get("change_request").unwrap(), &vec!["StubCR".to_string()]);
+    let entries = names.get("change_request").unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].display_name, "StubCR");
+    assert_eq!(entries[0].implementation, "cr");
     assert!(!names.contains_key("vcs"));
 }
 

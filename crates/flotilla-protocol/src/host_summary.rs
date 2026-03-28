@@ -65,7 +65,11 @@ pub struct DiscoveryFact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostProviderStatus {
     pub category: String,
+    /// Display name for the provider (e.g. "Docker").
     pub name: String,
+    /// Implementation key used for provider lookup (e.g. "docker").
+    #[serde(default)]
+    pub implementation: String,
     pub healthy: bool,
 }
 
@@ -97,7 +101,7 @@ mod tests {
                 environment: HostEnvironment::Container,
             },
             inventory: ToolInventory::default(),
-            providers: vec![HostProviderStatus { category: "vcs".into(), name: "Git".into(), healthy: true }],
+            providers: vec![HostProviderStatus { category: "vcs".into(), name: "Git".into(), implementation: "git".into(), healthy: true }],
             environments: vec![],
         };
 
