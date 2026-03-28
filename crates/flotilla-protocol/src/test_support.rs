@@ -8,12 +8,19 @@ use std::path::PathBuf;
 
 use crate::{
     provider_data::{ChangeRequest, ChangeRequestStatus, Checkout, CloudAgentSession, CorrelationKey, Issue, SessionStatus},
-    HostName, HostPath,
+    qualified_path::HostId,
+    HostName, HostPath, QualifiedPath,
 };
 
 /// Build a `HostPath` with a deterministic `"test-host"` hostname.
+/// Kept for downstream crates that still use `HostPath`.
 pub fn hp(path: &str) -> HostPath {
     HostPath::new(HostName::new("test-host"), PathBuf::from(path))
+}
+
+/// Build a `QualifiedPath` with a deterministic `"test-host"` host qualifier.
+pub fn qp(path: &str) -> QualifiedPath {
+    QualifiedPath::host(HostId::new("test-host"), PathBuf::from(path))
 }
 
 // ---------------------------------------------------------------------------
@@ -33,7 +40,7 @@ impl TestCheckout {
 
     /// Set the checkout path. Adds a `CorrelationKey::CheckoutPath`.
     pub fn at(mut self, path: &str) -> Self {
-        self.correlation_keys.push(CorrelationKey::CheckoutPath(hp(path)));
+        self.correlation_keys.push(CorrelationKey::CheckoutPath(qp(path)));
         self
     }
 
