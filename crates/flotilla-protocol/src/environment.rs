@@ -31,11 +31,50 @@ pub struct EnvironmentSpec {
 }
 
 /// Source from which to obtain a container image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// In YAML config, written as a map with one key:
+/// ```yaml
+/// image:
+///   dockerfile: .flotilla/Dockerfile.dev-env
+/// ```
+/// or:
+/// ```yaml
+/// image:
+///   registry: ubuntu:24.04
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageSource {
     Dockerfile(PathBuf),
     Registry(String),
+}
+
+/// Serde helper: serialize ImageSource as `{"dockerfile": "path"}` or `{"registry": "image"}`.
+/// serde_yaml 0.9 uses YAML tags for externally-tagged enums, which is unfriendly for
+/// user-written config files. This manual impl uses a plain map instead.
+impl Serialize for ImageSource {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            ImageSource::Dockerfile(path) => map.serialize_entry("dockerfile", path)?,
+            ImageSource::Registry(image) => map.serialize_entry("registry", image)?,
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageSource {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use std::collections::HashMap;
+        let map: HashMap<String, String> = HashMap::deserialize(deserializer)?;
+        if let Some(path) = map.get("dockerfile") {
+            Ok(ImageSource::Dockerfile(PathBuf::from(path)))
+        } else if let Some(image) = map.get("registry") {
+            Ok(ImageSource::Registry(image.clone()))
+        } else {
+            Err(serde::de::Error::custom("expected 'dockerfile' or 'registry' key in image"))
+        }
+    }
 }
 
 /// Identifier for a built container image.
@@ -75,4 +114,45 @@ pub struct EnvironmentInfo {
     pub id: EnvironmentId,
     pub image: ImageId,
     pub status: EnvironmentStatus,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_environment_yaml_dockerfile() {
+        let yaml = r#"
+image:
+  dockerfile: .flotilla/Dockerfile.dev-env
+token_env_vars:
+  - GITHUB_TOKEN
+"#;
+        let spec: EnvironmentSpec = serde_yaml::from_str(yaml).expect("should parse dockerfile variant");
+        assert_eq!(spec.image, ImageSource::Dockerfile(PathBuf::from(".flotilla/Dockerfile.dev-env")));
+        assert_eq!(spec.token_env_vars, vec!["GITHUB_TOKEN"]);
+    }
+
+    #[test]
+    fn parse_environment_yaml_registry() {
+        let yaml = r#"
+image:
+  registry: ubuntu:24.04
+token_env_vars: []
+"#;
+        let spec: EnvironmentSpec = serde_yaml::from_str(yaml).expect("should parse registry variant");
+        assert_eq!(spec.image, ImageSource::Registry("ubuntu:24.04".into()));
+        assert!(spec.token_env_vars.is_empty());
+    }
+
+    #[test]
+    fn parse_environment_yaml_no_tokens() {
+        let yaml = r#"
+image:
+  dockerfile: Dockerfile
+token_env_vars: []
+"#;
+        let spec: EnvironmentSpec = serde_yaml::from_str(yaml).expect("should parse with empty tokens");
+        assert_eq!(spec.image, ImageSource::Dockerfile(PathBuf::from("Dockerfile")));
+    }
 }

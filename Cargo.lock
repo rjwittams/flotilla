@@ -1179,6 +1179,7 @@ dependencies = [
  "indexmap",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tokio",
  "tracing",
  "url",
