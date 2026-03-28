@@ -77,6 +77,8 @@ pub async fn spawn_in_memory_request_topology(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let client_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let client_notify = Arc::new(Notify::new());
+    // The in-memory request topology only needs the sender side because readiness is polled from
+    // each daemon's topology view below; peer-connected notices are intentionally ignored here.
     let (peer_connected_tx, _peer_connected_rx) = mpsc::unbounded_channel::<PeerConnectedNotice>();
     let leader_for_client = Arc::clone(&leader);
     let leader_peer_manager_for_client = Arc::clone(&leader_peer_manager);
