@@ -1107,13 +1107,21 @@ impl StepResolver for ExecutorStepResolver {
 }
 
 impl ExecutorStepResolver {
+    // TODO: reference repo resolution is provider-specific (Docker needs a host-side
+    // path to bind-mount). This should move into the EnvironmentProvider or CreateOpts
+    // preparation rather than living on the executor.
     async fn resolve_reference_repo(&self) -> Option<DaemonHostPath> {
         let result = self
             .runner
             .run("git", &["rev-parse", "--git-common-dir"], self.repo.root.as_path(), &crate::providers::ChannelLabel::Noop)
             .await;
         match result {
-            Ok(path) => Some(DaemonHostPath::new(path.trim())),
+            Ok(path) => {
+                let git_dir = std::path::Path::new(path.trim());
+                // git returns a relative path (relative to cwd); DaemonHostPath requires absolute.
+                let abs = if git_dir.is_relative() { self.repo.root.as_path().join(git_dir) } else { git_dir.to_path_buf() };
+                Some(DaemonHostPath::new(abs))
+            }
             Err(_) => None,
         }
     }
