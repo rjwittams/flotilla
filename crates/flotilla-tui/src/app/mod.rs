@@ -396,6 +396,27 @@ impl App {
         Command { host: None, provisioning_target: None, context_repo: Some(RepoSelector::Identity(repo_identity)), action }
     }
 
+    /// Check that a provisioning target refers to a known host and (for NewEnvironment)
+    /// an advertised environment provider. Returns `Err(message)` for display if invalid.
+    fn validate_provisioning_target(&self, target: &ProvisioningTarget) -> Result<(), String> {
+        let host = target.host();
+        let is_local = self.model.my_host().is_some_and(|h| h == host);
+        let host_known = is_local || self.model.hosts.contains_key(host);
+        if !host_known {
+            return Err(format!("unknown host: {host}"));
+        }
+        if let ProvisioningTarget::NewEnvironment { provider, .. } = target {
+            let has_provider =
+                self.model.hosts.get(host).is_some_and(|h| {
+                    h.summary.providers.iter().any(|p| p.category == "environment_provider" && p.implementation == *provider)
+                });
+            if !has_provider {
+                return Err(format!("no {provider} environment provider on {host}"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn targeted_command(&self, action: CommandAction) -> Command {
         let target = &self.ui.provisioning_target;
         Command { host: Some(target.host().clone()), provisioning_target: Some(target.clone()), context_repo: None, action }
@@ -620,7 +641,10 @@ impl App {
                         }
                     });
                     match result {
-                        Ok(target) => self.ui.provisioning_target = target,
+                        Ok(target) => match self.validate_provisioning_target(&target) {
+                            Ok(()) => self.ui.provisioning_target = target,
+                            Err(msg) => self.set_status_message(Some(msg)),
+                        },
                         Err(e) => {
                             tracing::warn!(%name, %e, "invalid provisioning target");
                             self.set_status_message(Some(format!("invalid target: {name}")));
