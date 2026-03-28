@@ -20,6 +20,8 @@ pub struct RenderCtx<'a> {
     pub host_repo_roots: &'a HashMap<HostName, std::path::PathBuf>,
     /// The local host's name, if known.
     pub my_host: Option<&'a HostName>,
+    /// Per-host home directories (for remote path shortening).
+    pub host_home_dirs: &'a HashMap<HostName, std::path::PathBuf>,
     /// Previous row's source value — `None` if this is the first data row in
     /// a section or if the previous source was absent. Used for source dedup.
     pub prev_source: Option<&'a str>,

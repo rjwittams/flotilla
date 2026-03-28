@@ -36,7 +36,8 @@ fn checkout_columns() -> Vec<ColumnDef<WorkItem>> {
                     (ctx.repo_root.to_path_buf(), dirs::home_dir())
                 } else {
                     let root = ctx.host_repo_roots.get(&hp.host).cloned().unwrap_or_else(|| hp.path.clone());
-                    (root, None)
+                    let home = ctx.host_home_dirs.get(&hp.host).map(|p| p.to_path_buf());
+                    (root, home)
                 };
                 let path_col_width = ctx.col_widths.get(2).copied().unwrap_or(40) as usize;
                 ui_helpers::shorten_path(&hp.path, &repo_root, path_col_width, home_dir.as_deref())

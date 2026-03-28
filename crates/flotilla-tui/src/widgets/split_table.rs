@@ -367,6 +367,13 @@ impl SplitTable {
             }
         }
 
+        // Build per-host home directories for remote path shortening.
+        let host_home_dirs: HashMap<HostName, std::path::PathBuf> = model
+            .hosts
+            .iter()
+            .filter_map(|(host, state)| state.summary.system.home_dir.as_ref().map(|d| (host.clone(), d.clone())))
+            .collect();
+
         let providers = model.active_opt().map(|r| r.providers.as_ref());
         let default_providers = flotilla_protocol::ProviderData::default();
         let providers = providers.unwrap_or(&default_providers);
@@ -413,6 +420,7 @@ impl SplitTable {
                         repo_root: &local_repo_root,
                         host_repo_roots: &host_repo_roots,
                         my_host,
+                        host_home_dirs: &host_home_dirs,
                         prev_source: prev_source.as_deref(),
                     };
 
