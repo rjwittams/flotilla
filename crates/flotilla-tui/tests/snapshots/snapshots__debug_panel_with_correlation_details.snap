@@ -3,7 +3,7 @@ source: crates/flotilla-tui/tests/snapshots.rs
 expression: output
 ---
  ⚓  flotilla  | my-project | [+]
-── Checkouts ─────────────────────────────────────────────────────────  ┌ Preview ─────────────────────────────────────┐
+── Checkouts ────────────────────────────────────────────────────── ⚙   ┌ Preview ─────────────────────────────────────┐
       Source     Path  Description Bran… WT  WS  PR   SS   Issues Git   │Description: Feature branch checkout          │
 ▸  ○               fe… Feature br… feat… ✓                              │Branch: feat-xyz                              │
                                                                         │                                              │

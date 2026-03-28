@@ -3,7 +3,7 @@ source: crates/flotilla-tui/tests/snapshots.rs
 expression: output
 ---
  ⚓  flotilla  | my-project | [+]
-── Issues ────────────────────────────────────────────────────────────  ┌ Preview ─────────────────────────────────────┐
+── Issues ───────────────────────────────────────────────────────── ⚙   ┌ Preview ─────────────────────────────────────┐
       ID     Title                              Labels            PR    │Description: Fix login timeout bug            │
 ▸  ◇  #25    Fix login timeout bug                                      │Issue #25: Fix login timeout bug []           │
                                                                         │                                              │

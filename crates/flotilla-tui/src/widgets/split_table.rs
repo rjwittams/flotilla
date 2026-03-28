@@ -168,17 +168,35 @@ impl SplitTable {
     }
 
     /// Adjust scroll offset so the selected row is visible.
+    ///
+    /// When scrolling upward, includes the section's divider and column header
+    /// rows so the user always sees which section the selected item belongs to.
     fn ensure_selected_visible(&mut self, viewport_height: usize) {
         if viewport_height == 0 {
             return;
         }
         if let Some(flat) = self.selected_flat_row() {
+            // Find the flat row of the active section's divider header.
+            let section_start = self.section_start_flat(self.active_section);
             if flat < self.scroll_offset {
-                self.scroll_offset = flat;
+                // Scrolling up — show divider + column header too.
+                self.scroll_offset = section_start.min(flat);
             } else if flat >= self.scroll_offset + viewport_height {
                 self.scroll_offset = flat - viewport_height + 1;
             }
         }
+    }
+
+    /// The flat row index where a section's divider header begins.
+    fn section_start_flat(&self, section_idx: usize) -> usize {
+        let mut flat = 0;
+        for (i, (_, t)) in self.sections.iter().enumerate() {
+            if i == section_idx {
+                return flat;
+            }
+            flat += 2 + t.items.len();
+        }
+        flat
     }
 
     // ── Navigation ─────────���───────────────────────────────────────────
@@ -324,11 +342,12 @@ impl SplitTable {
             return;
         }
 
-        // Gear icon in top-right corner.
+        // Gear icon — rendered after all rows so it overlays the top-right corner.
         let gear_x = area.x + area.width.saturating_sub(5);
         self.gear_area = Some(Rect::new(gear_x, area.y, 3, 1));
 
         if self.sections.is_empty() {
+            frame.render_widget(Span::styled(" \u{2699} ", Style::default().fg(theme.muted)), Rect::new(gear_x, area.y, 3, 1));
             return;
         }
 
@@ -406,10 +425,11 @@ impl SplitTable {
                 flat_row += 1;
             }
 
-            // Emit a blank to separate sections visually (only if not section_idx == last).
-            // Actually, the divider of the next section provides separation. No extra row needed.
             let _ = section_idx;
         }
+
+        // Render gear icon last so it overlays the top-right corner.
+        frame.render_widget(Span::styled(" \u{2699} ", Style::default().fg(theme.muted)), Rect::new(gear_x, area.y, 3, 1));
     }
 
     fn render_providers(&self, model: &TuiModel, _ui: &UiState, theme: &Theme, frame: &mut Frame, area: Rect) {

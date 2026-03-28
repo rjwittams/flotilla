@@ -3,7 +3,7 @@ source: crates/flotilla-tui/tests/snapshots.rs
 expression: output
 ---
  ⚓  flotilla  | empty | [+]
-                                                                        ┌ Preview ─────────────────────────────────────┐
+                                                                    ⚙   ┌ Preview ─────────────────────────────────────┐
                                                                         │                                              │
                                                                         │                                              │
                                                                         │                                              │

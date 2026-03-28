@@ -3,7 +3,7 @@ source: crates/flotilla-tui/tests/snapshots.rs
 expression: output
 ---
  ⚓  flotilla  | my-project | [+]
-── Sessions ──────────────────────────────────────────────────────────  ┌ Preview ─────────────────────────────────────┐
+── Sessions ─────────────────────────────────────────────────────── ⚙   ┌ Preview ─────────────────────────────────────┐
       Source     Key         Description            Branch      Status  │Description: Debug API endpoints              │
 ▸  ▶             s5          Debug API endpoints    feat/sessi… ▶       │Branch: feat/session-branch                   │
                                                                         │Session: Debug API endpoints                  │

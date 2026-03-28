@@ -3,7 +3,7 @@ source: crates/flotilla-tui/tests/snapshots.rs
 expression: output
 ---
  ⚓  flotilla  | my-project | [+]
-                                                                        ┌ Preview ─────────────────────────────────────┐
+                                                                    ⚙   ┌ Preview ─────────────────────────────────────┐
                         ┌ Help ↓ ──────────────────────────────────────────────────────────────┐                       │
                         │Item Icons                                                            │                       │
                         │●  Checkout with workspace    ○  Checkout (no workspace)              │                       │
