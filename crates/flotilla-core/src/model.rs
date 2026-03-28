@@ -34,13 +34,22 @@ pub fn labels_from_registry(registry: &ProviderRegistry) -> RepoLabels {
     }
 }
 
-pub fn provider_names_from_registry(registry: &ProviderRegistry) -> HashMap<String, Vec<String>> {
-    let mut names: HashMap<String, Vec<String>> = HashMap::new();
+/// Provider name + implementation key pair for host summary reporting.
+pub struct ProviderNameEntry {
+    pub display_name: String,
+    pub implementation: String,
+}
 
-    fn collect_names<T: ?Sized>(names: &mut HashMap<String, Vec<String>>, set: &ProviderSet<T>) {
+pub fn provider_names_from_registry(registry: &ProviderRegistry) -> HashMap<String, Vec<ProviderNameEntry>> {
+    let mut names: HashMap<String, Vec<ProviderNameEntry>> = HashMap::new();
+
+    fn collect_names<T: ?Sized>(names: &mut HashMap<String, Vec<ProviderNameEntry>>, set: &ProviderSet<T>) {
         if let Some((first_desc, _)) = set.iter().next() {
             let slug = first_desc.category.slug().to_string();
-            let list: Vec<String> = set.display_names().map(|s| s.to_string()).collect();
+            let list: Vec<ProviderNameEntry> = set
+                .iter()
+                .map(|(d, _)| ProviderNameEntry { display_name: d.display_name.clone(), implementation: d.implementation.clone() })
+                .collect();
             if !list.is_empty() {
                 names.insert(slug, list);
             }
@@ -54,6 +63,7 @@ pub fn provider_names_from_registry(registry: &ProviderRegistry) -> HashMap<Stri
     collect_names(&mut names, &registry.ai_utilities);
     collect_names(&mut names, &registry.workspace_managers);
     collect_names(&mut names, &registry.terminal_pools);
+    collect_names(&mut names, &registry.environment_providers);
     names
 }
 

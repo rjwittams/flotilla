@@ -1,5 +1,5 @@
 use crossterm::event::KeyCode;
-use flotilla_protocol::WorkItemIdentity;
+use flotilla_protocol::{ProvisioningTarget, WorkItemIdentity};
 use tempfile::tempdir;
 use test_support::*;
 
@@ -42,10 +42,10 @@ fn insert_peer_host(model: &mut TuiModel, name: &str, status: PeerStatus) {
 #[test]
 fn command_queue_push_and_take_fifo() {
     let mut q = CommandQueue::default();
-    q.push(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } });
+    q.push(Command { host: None, provisioning_target: None, context_repo: None, action: CommandAction::Refresh { repo: None } });
     q.push(Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: Some(RepoSelector::Path(PathBuf::from("/repo"))),
         action: CommandAction::OpenChangeRequest { id: "1".into() },
     });
@@ -574,24 +574,24 @@ fn step_failure_surfaces_error_in_status_message() {
 #[test]
 fn peer_disconnect_clears_selected_target_host() {
     let mut app = stub_app();
-    app.ui.target_host = Some(HostName::new("alpha"));
+    app.ui.provisioning_target = ProvisioningTarget::Host { host: HostName::new("alpha") };
     insert_peer_host(&mut app.model, "alpha", PeerStatus::Connected);
 
     app.handle_daemon_event(DaemonEvent::PeerStatusChanged { host: HostName::new("alpha"), status: PeerConnectionState::Disconnected });
 
-    assert_eq!(app.ui.target_host, None);
+    assert_eq!(app.ui.provisioning_target, ProvisioningTarget::Host { host: HostName::local() });
     assert_eq!(app.model.hosts.get(&HostName::new("alpha")).unwrap().status, PeerStatus::Disconnected);
 }
 
 #[test]
 fn host_removed_event_deletes_host_and_clears_selected_target_host() {
     let mut app = stub_app();
-    app.ui.target_host = Some(HostName::new("alpha"));
+    app.ui.provisioning_target = ProvisioningTarget::Host { host: HostName::new("alpha") };
     insert_peer_host(&mut app.model, "alpha", PeerStatus::Connected);
 
     app.handle_daemon_event(DaemonEvent::HostRemoved { host: HostName::new("alpha"), seq: 2 });
 
-    assert_eq!(app.ui.target_host, None);
+    assert_eq!(app.ui.provisioning_target, ProvisioningTarget::Host { host: HostName::local() });
     assert!(!app.model.hosts.contains_key(&HostName::new("alpha")));
 }
 
@@ -619,7 +619,7 @@ fn push_close_confirm_widget(app: &mut App, id: &str) {
         id.into(),
         "Test PR".into(),
         WorkItemIdentity::Session("test".into()),
-        Command { host: None, environment: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: id.into() } },
+        Command { host: None, provisioning_target: None, context_repo: None, action: CommandAction::CloseChangeRequest { id: id.into() } },
     );
     app.screen.modal_stack.push(Box::new(widget));
 }
@@ -675,7 +675,7 @@ fn command_queue_push_with_context() {
         repo_identity: RepoIdentity { authority: "local".into(), path: "/tmp/test-repo".into() },
     };
     q.push_with_context(
-        Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } },
+        Command { host: None, provisioning_target: None, context_repo: None, action: CommandAction::Refresh { repo: None } },
         Some(ctx),
     );
     let (cmd, ctx) = q.take_next().expect("should have one entry");
@@ -687,7 +687,7 @@ fn command_queue_push_with_context() {
 #[test]
 fn command_queue_push_without_context() {
     let mut q = CommandQueue::default();
-    q.push(Command { host: None, environment: None, context_repo: None, action: CommandAction::Refresh { repo: None } });
+    q.push(Command { host: None, provisioning_target: None, context_repo: None, action: CommandAction::Refresh { repo: None } });
     let (_, ctx) = q.take_next().expect("should have one entry");
     assert!(ctx.is_none());
 }

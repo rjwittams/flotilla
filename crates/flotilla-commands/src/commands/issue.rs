@@ -31,7 +31,12 @@ impl IssueNoun {
     pub fn resolve(self) -> Result<Resolved, String> {
         match (self.subject, self.verb) {
             (Some(subject), Some(IssueVerb::Open)) => Ok(Resolved::NeedsContext {
-                command: Command { host: None, environment: None, context_repo: None, action: CommandAction::OpenIssue { id: subject } },
+                command: Command {
+                    host: None,
+                    provisioning_target: None,
+                    context_repo: None,
+                    action: CommandAction::OpenIssue { id: subject },
+                },
                 repo: RepoContext::Inferred,
                 host: HostResolution::ProviderHost,
             }),
@@ -41,7 +46,7 @@ impl IssueNoun {
                 Ok(Resolved::NeedsContext {
                     command: Command {
                         host: None,
-                        environment: None,
+                        provisioning_target: None,
                         context_repo: None,
                         action: CommandAction::GenerateBranchName { issue_keys },
                     },
@@ -53,7 +58,7 @@ impl IssueNoun {
             (_, Some(IssueVerb::Search { query })) => Ok(Resolved::NeedsContext {
                 command: Command {
                     host: None,
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     // SENTINEL: repo is empty — dispatch must fill it from --repo or FLOTILLA_REPO.
                     action: CommandAction::SearchIssues { repo: RepoSelector::Query("".into()), query: query.join(" ") },
@@ -108,7 +113,12 @@ mod tests {
     fn issue_open() {
         let resolved = parse(&["issue", "1", "open"]).resolve().unwrap();
         assert_eq!(resolved, Resolved::NeedsContext {
-            command: Command { host: None, environment: None, context_repo: None, action: CommandAction::OpenIssue { id: "1".into() } },
+            command: Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::OpenIssue { id: "1".into() }
+            },
             repo: RepoContext::Inferred,
             host: HostResolution::ProviderHost,
         });
@@ -120,7 +130,7 @@ mod tests {
         assert_eq!(resolved, Resolved::NeedsContext {
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::GenerateBranchName { issue_keys: vec!["1".into(), "5".into(), "7".into()] },
             },
@@ -135,7 +145,7 @@ mod tests {
         assert_eq!(resolved, Resolved::NeedsContext {
             command: Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::SearchIssues { repo: RepoSelector::Query("".into()), query: "my query".into() },
             },

@@ -1,6 +1,5 @@
 ---
 source: crates/flotilla-tui/tests/snapshots.rs
-assertion_line: 483
 expression: output
 ---
  ⚓  flotilla  | my-project | [+]
@@ -14,7 +13,7 @@ expression: output
 │AI utility       —                                                    ││                                              │
 │Workspace mgr    —                                                    ││                                              │
 │Terminal pool    —                                                    ││                                              │
-│                                                                      ││                                              │
+│Environment      —                                                    ││                                              │
 │                                                                      ││                                              │
 │                                                                      ││                                              │
 │                                                                      ││                                              │

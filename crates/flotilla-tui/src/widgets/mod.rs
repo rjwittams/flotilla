@@ -19,7 +19,7 @@ use std::{any::Any, collections::HashMap};
 
 use crossterm::event::{KeyEvent, MouseEvent};
 use flotilla_core::config::ConfigStore;
-use flotilla_protocol::{HostName, RepoIdentity};
+use flotilla_protocol::{HostName, ProvisioningTarget, RepoIdentity};
 use ratatui::{layout::Rect, Frame};
 
 use crate::{
@@ -32,7 +32,7 @@ use crate::{
 /// Human-readable label and protocol key for each provider category.
 ///
 /// Shared by widgets that render provider status tables (event log, work-item table).
-pub(crate) const PROVIDER_CATEGORIES: [(&str, &str); 8] = [
+pub(crate) const PROVIDER_CATEGORIES: [(&str, &str); 9] = [
     ("VCS", "vcs"),
     ("Checkout mgr", "checkout_manager"),
     ("Change request", "change_request"),
@@ -41,6 +41,7 @@ pub(crate) const PROVIDER_CATEGORIES: [(&str, &str); 8] = [
     ("AI utility", "ai_utility"),
     ("Workspace mgr", "workspace_manager"),
     ("Terminal pool", "terminal_pool"),
+    ("Environment", "environment_provider"),
 ];
 
 /// App-level effects that widgets can request. Processed by the event
@@ -97,7 +98,7 @@ pub struct WidgetContext<'a> {
     pub keymap: &'a Keymap,
     pub config: &'a ConfigStore,
     pub in_flight: &'a HashMap<u64, InFlightCommand>,
-    pub target_host: Option<&'a HostName>,
+    pub provisioning_target: &'a ProvisioningTarget,
     pub my_host: Option<HostName>,
     pub active_repo: usize,
     pub repo_order: &'a [RepoIdentity],

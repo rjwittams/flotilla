@@ -20,8 +20,8 @@ use flotilla_core::{
     daemon::DaemonHandle,
 };
 use flotilla_protocol::{
-    Command, CommandAction, CommandValue, DaemonEvent, HostName, HostSummary, PeerConnectionState, ProviderData, ProviderError, RepoDelta,
-    RepoIdentity, RepoInfo, RepoLabels, RepoSelector, RepoSnapshot, StepStatus, WorkItem, WorkItemIdentity,
+    Command, CommandAction, CommandValue, DaemonEvent, HostName, HostSummary, PeerConnectionState, ProviderData, ProviderError,
+    ProvisioningTarget, RepoDelta, RepoIdentity, RepoInfo, RepoLabels, RepoSelector, RepoSnapshot, StepStatus, WorkItem, WorkItemIdentity,
 };
 pub use intent::Intent;
 use tokio::sync::mpsc;
@@ -380,43 +380,66 @@ impl App {
     }
 
     pub fn command(&self, action: CommandAction) -> Command {
-        Command { host: None, environment: None, context_repo: None, action }
+        Command { host: None, provisioning_target: None, context_repo: None, action }
     }
 
     pub fn repo_command(&self, action: CommandAction) -> Command {
         Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: Some(RepoSelector::Identity(self.model.active_repo_identity().clone())),
             action,
         }
     }
 
     pub fn repo_command_for_identity(&self, repo_identity: RepoIdentity, action: CommandAction) -> Command {
-        Command { host: None, environment: None, context_repo: Some(RepoSelector::Identity(repo_identity)), action }
+        Command { host: None, provisioning_target: None, context_repo: Some(RepoSelector::Identity(repo_identity)), action }
+    }
+
+    /// Check that a provisioning target refers to a known host and (for NewEnvironment)
+    /// an advertised environment provider. Returns `Err(message)` for display if invalid.
+    fn validate_provisioning_target(&self, target: &ProvisioningTarget) -> Result<(), String> {
+        let host = target.host();
+        let is_local = self.model.my_host().is_some_and(|h| h == host);
+        let host_known = is_local || self.model.hosts.contains_key(host);
+        if !host_known {
+            return Err(format!("unknown host: {host}"));
+        }
+        if let ProvisioningTarget::NewEnvironment { provider, .. } = target {
+            let has_provider =
+                self.model.hosts.get(host).is_some_and(|h| {
+                    h.summary.providers.iter().any(|p| p.category == "environment_provider" && p.implementation == *provider)
+                });
+            if !has_provider {
+                return Err(format!("no {provider} environment provider on {host}"));
+            }
+        }
+        Ok(())
     }
 
     pub fn targeted_command(&self, action: CommandAction) -> Command {
-        Command { host: self.ui.target_host.clone(), environment: None, context_repo: None, action }
+        let target = &self.ui.provisioning_target;
+        Command { host: Some(target.host().clone()), provisioning_target: Some(target.clone()), context_repo: None, action }
     }
 
     pub fn targeted_repo_command(&self, action: CommandAction) -> Command {
+        let target = &self.ui.provisioning_target;
         Command {
-            host: self.ui.target_host.clone(),
-            environment: None,
+            host: Some(target.host().clone()),
+            provisioning_target: Some(target.clone()),
             context_repo: Some(RepoSelector::Identity(self.model.active_repo_identity().clone())),
             action,
         }
     }
 
     pub fn item_host_command(&self, action: CommandAction, item: &WorkItem) -> Command {
-        Command { host: self.item_execution_host(item), environment: None, context_repo: None, action }
+        Command { host: self.item_execution_host(item), provisioning_target: None, context_repo: None, action }
     }
 
     pub fn item_host_repo_command(&self, action: CommandAction, item: &WorkItem) -> Command {
         Command {
             host: self.item_execution_host(item),
-            environment: None,
+            provisioning_target: None,
             context_repo: Some(RepoSelector::Identity(self.model.active_repo_identity().clone())),
             action,
         }
@@ -540,7 +563,7 @@ impl App {
             keymap: &self.keymap,
             config: &self.config,
             in_flight: &self.in_flight,
-            target_host: self.ui.target_host.as_ref(),
+            provisioning_target: &self.ui.provisioning_target,
             my_host,
             active_repo: self.model.active_repo,
             repo_order: &self.model.repo_order,
@@ -601,14 +624,31 @@ impl App {
                     self.persist_layout();
                 }
                 AppAction::CycleHost => {
-                    let peer_hosts = self.model.peer_host_names();
-                    self.ui.cycle_target_host(&peer_hosts);
+                    // CycleHost is no longer the primary way to set targets;
+                    // the `target` command in the command palette is. Keep the
+                    // action as a no-op to avoid breaking any remaining callers.
                 }
                 AppAction::SetTarget(name) => {
-                    if name == "local" {
-                        self.ui.target_host = None;
-                    } else {
-                        self.ui.target_host = Some(HostName::new(&name));
+                    // Try full syntax first. Only fall back to bare hostname (@-prefix)
+                    // for inputs that don't start with a target prefix — otherwise a
+                    // malformed +docker@ would silently become Host { host: "+docker@" }.
+                    let has_target_prefix = name.starts_with('@') || name.starts_with('+') || name.starts_with('=');
+                    let result = name.parse::<ProvisioningTarget>().or_else(|orig_err| {
+                        if has_target_prefix {
+                            Err(orig_err)
+                        } else {
+                            format!("@{name}").parse::<ProvisioningTarget>()
+                        }
+                    });
+                    match result {
+                        Ok(target) => match self.validate_provisioning_target(&target) {
+                            Ok(()) => self.ui.provisioning_target = target,
+                            Err(msg) => self.set_status_message(Some(msg)),
+                        },
+                        Err(e) => {
+                            tracing::warn!(%name, %e, "invalid provisioning target");
+                            self.set_status_message(Some(format!("invalid target: {name}")));
+                        }
                     }
                 }
                 AppAction::ToggleDebug => {
@@ -779,12 +819,12 @@ impl App {
             DaemonEvent::PeerStatusChanged { host, status } => {
                 let peer_status = PeerStatus::from(status);
                 let clear_target =
-                    matches!(peer_status, PeerStatus::Disconnected | PeerStatus::Rejected) && self.ui.target_host.as_ref() == Some(&host);
+                    matches!(peer_status, PeerStatus::Disconnected | PeerStatus::Rejected) && self.ui.provisioning_target.host() == &host;
                 if let Some(entry) = self.model.hosts.get_mut(&host) {
                     entry.status = peer_status;
                 }
                 if clear_target {
-                    self.ui.target_host = None;
+                    self.ui.provisioning_target = ProvisioningTarget::Host { host: HostName::local() };
                 }
             }
             DaemonEvent::HostSnapshot(snap) => {
@@ -797,10 +837,10 @@ impl App {
                 });
             }
             DaemonEvent::HostRemoved { host, .. } => {
-                let clear_target = self.ui.target_host.as_ref() == Some(&host);
+                let clear_target = self.ui.provisioning_target.host() == &host;
                 self.model.hosts.remove(&host);
                 if clear_target {
-                    self.ui.target_host = None;
+                    self.ui.provisioning_target = ProvisioningTarget::Host { host: HostName::local() };
                 }
             }
         }

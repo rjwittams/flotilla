@@ -229,7 +229,7 @@ mod tests {
                 environment: HostEnvironment::Container,
             },
             inventory: ToolInventory::default(),
-            providers: vec![HostProviderStatus { category: "vcs".into(), name: "Git".into(), healthy: true }],
+            providers: vec![HostProviderStatus { category: "vcs".into(), name: "Git".into(), implementation: "git".into(), healthy: true }],
             environments: vec![],
         }
     }
@@ -392,7 +392,7 @@ mod tests {
             remaining_hops: 7,
             command: Box::new(Command {
                 host: Some(HostName::new("feta")),
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::Refresh { repo: Some(RepoSelector::Query("flotilla".into())) },
             }),

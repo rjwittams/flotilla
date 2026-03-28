@@ -130,10 +130,13 @@ pub enum StepAction {
 
     // Environment lifecycle
     EnsureEnvironmentImage {
-        spec: crate::EnvironmentSpec,
+        /// The environment provider to use (e.g. "docker").
+        provider: String,
     },
     CreateEnvironment {
         env_id: crate::EnvironmentId,
+        /// The environment provider to use (e.g. "docker").
+        provider: String,
         /// `None` means resolve from prior `EnsureEnvironmentImage` outcome.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         image: Option<crate::ImageId>,
@@ -144,6 +147,8 @@ pub enum StepAction {
     DestroyEnvironment {
         env_id: crate::EnvironmentId,
     },
+    /// Read `.flotilla/environment.yaml` from the repo root known to the step resolver at runtime.
+    ReadEnvironmentSpec,
 }
 
 /// A single step in a multi-step command.

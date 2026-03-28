@@ -94,7 +94,7 @@ fn action_menu() {
             intent: Intent::CreateWorkspace,
             command: flotilla_protocol::Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: flotilla_protocol::CommandAction::CreateWorkspaceForCheckout {
                     checkout_path: "/test/my-project/feat/a".into(),
@@ -106,7 +106,7 @@ fn action_menu() {
             intent: Intent::OpenChangeRequest,
             command: flotilla_protocol::Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: flotilla_protocol::CommandAction::OpenChangeRequest { id: "1".into() },
             },
@@ -115,7 +115,7 @@ fn action_menu() {
             intent: Intent::RemoveCheckout,
             command: flotilla_protocol::Command {
                 host: None,
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: flotilla_protocol::CommandAction::FetchCheckoutStatus {
                     branch: "feat/a".into(),
@@ -582,7 +582,7 @@ fn action_menu_widget_renders_on_short_terminals_without_overflow() {
         intent: Intent::CreateWorkspace,
         command: flotilla_protocol::Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: flotilla_protocol::CommandAction::CreateWorkspaceForCheckout {
                 checkout_path: "/test/my-project/feat/a".into(),
@@ -607,7 +607,7 @@ fn branch_input_widget_renders_on_short_terminals_without_overflow() {
 fn close_confirm_widget_renders_on_short_terminals_without_overflow() {
     let command = flotilla_protocol::Command {
         host: None,
-        environment: None,
+        provisioning_target: None,
         context_repo: None,
         action: flotilla_protocol::CommandAction::CloseChangeRequest { id: "42".into() },
     };

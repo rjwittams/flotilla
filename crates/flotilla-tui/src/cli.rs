@@ -242,6 +242,7 @@ fn format_command_result(result: &flotilla_protocol::commands::CommandValue) -> 
         CommandValue::HostProviders(providers) => format_host_providers_human(providers),
         CommandValue::ImageEnsured { image } => format!("image ensured: {image}"),
         CommandValue::EnvironmentCreated { env_id } => format!("environment created: {env_id}"),
+        CommandValue::EnvironmentSpecRead { .. } => "environment spec read".to_string(),
     }
 }
 

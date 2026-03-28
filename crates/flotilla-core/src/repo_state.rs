@@ -140,6 +140,9 @@ impl RepoState {
 
     pub(crate) fn provider_names(&self) -> HashMap<String, Vec<String>> {
         provider_names_from_registry(&self.preferred_root().model.registry)
+            .into_iter()
+            .map(|(category, entries)| (category, entries.into_iter().map(|e| e.display_name).collect()))
+            .collect()
     }
 
     pub(crate) fn provider_health(&self) -> &HashMap<(&'static str, String), bool> {

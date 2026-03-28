@@ -1181,7 +1181,10 @@ impl InProcessDaemon {
             path: synthetic_path.clone(),
             name: repo_name(&synthetic_path),
             labels: model.labels.clone(),
-            provider_names: provider_names_from_registry(&model.registry),
+            provider_names: provider_names_from_registry(&model.registry)
+                .into_iter()
+                .map(|(category, entries)| (category, entries.into_iter().map(|e| e.display_name).collect()))
+                .collect(),
             provider_health: HashMap::new(),
             loading: false,
         };
@@ -1406,7 +1409,10 @@ impl InProcessDaemon {
             path: path.clone(),
             name: repo_name(&path),
             labels: root.model.labels.clone(),
-            provider_names: provider_names_from_registry(&root.model.registry),
+            provider_names: provider_names_from_registry(&root.model.registry)
+                .into_iter()
+                .map(|(category, entries)| (category, entries.into_iter().map(|e| e.display_name).collect()))
+                .collect(),
             provider_health: crate::convert::health_to_proto(&root.model.data.provider_health),
             loading: true,
         };

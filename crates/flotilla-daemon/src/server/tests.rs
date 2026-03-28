@@ -489,7 +489,7 @@ async fn dispatch_request_execute_remote_routes_command_through_peer_manager() {
         .dispatch(40, Request::Execute {
             command: Command {
                 host: Some(HostName::new("feta")),
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryHostStatus { target_host: "feta".into() },
             },
@@ -512,7 +512,7 @@ async fn dispatch_request_execute_remote_routes_command_through_peer_manager() {
             assert_eq!(target_host, &HostName::new("feta"));
             assert_eq!(command.as_ref(), &Command {
                 host: Some(HostName::new("feta")),
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryHostStatus { target_host: "feta".into() }
             });
@@ -546,7 +546,7 @@ async fn remote_command_query_requests_still_forward_whole_command() {
         .dispatch(401, Request::Execute {
             command: Command {
                 host: Some(HostName::new("feta")),
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryHostStatus { target_host: "feta".into() },
             },
@@ -569,7 +569,7 @@ async fn remote_command_query_requests_still_forward_whole_command() {
             assert_eq!(target_host, &HostName::new("feta"));
             assert_eq!(command.as_ref(), &Command {
                 host: Some(HostName::new("feta")),
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::QueryHostStatus { target_host: "feta".into() },
             });
@@ -609,7 +609,7 @@ async fn remote_command_mutations_route_remote_step_requests() {
         .dispatch(402, Request::Execute {
             command: Command {
                 host: Some(HostName::new("feta")),
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::Checkout {
                     repo: RepoSelector::Identity(repo_identity.clone()),
@@ -701,7 +701,7 @@ async fn remote_command_remote_step_events_remap_to_presentation_command_id_and_
     let command_id = remote_command_router
         .dispatch_execute(Command {
             host: Some(HostName::new("feta")),
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::Checkout {
                 repo: RepoSelector::Identity(repo_identity.clone()),
@@ -811,7 +811,7 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
     let command_id = remote_command_router
         .dispatch_execute(Command {
             host: Some(HostName::new("feta")),
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::Checkout {
                 repo: RepoSelector::Path(repo.clone()),
@@ -984,7 +984,7 @@ async fn remote_checkout_failure_with_empty_response_still_stops_local_workspace
     let command_id = remote_command_router
         .dispatch_execute(Command {
             host: Some(HostName::new("feta")),
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::Checkout {
                 repo: RepoSelector::Path(repo.clone()),
@@ -1091,7 +1091,7 @@ async fn dispatch_request_execute_remote_does_not_hold_peer_manager_lock_across_
             .dispatch(140, Request::Execute {
                 command: Command {
                     host: Some(HostName::new("feta")),
-                    environment: None,
+                    provisioning_target: None,
                     context_repo: None,
                     action: CommandAction::QueryHostStatus { target_host: "feta".into() },
                 },
@@ -1221,7 +1221,7 @@ async fn cancel_active_remote_segment_routes_remote_step_cancel_and_finishes_com
     let command_id = remote_command_router
         .dispatch_execute(Command {
             host: Some(HostName::new("feta")),
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::Checkout {
                 repo: RepoSelector::Identity(repo_identity.clone()),
@@ -1374,7 +1374,7 @@ async fn cancel_disconnect_of_active_remote_segment_finishes_pending_command() {
     let command_id = remote_command_router
         .dispatch_execute(Command {
             host: Some(HostName::new("feta")),
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::Checkout {
                 repo: RepoSelector::Identity(repo_identity.clone()),
@@ -1448,7 +1448,7 @@ async fn handle_inbound_command_request_does_not_hold_peer_manager_lock_across_s
                         remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
                         command: Box::new(Command {
                             host: Some(HostName::new("relay")),
-                            environment: None,
+                            provisioning_target: None,
                             context_repo: None,
                             action: CommandAction::Refresh { repo: None },
                         }),
@@ -1477,7 +1477,7 @@ fn extract_command_repo_identity_uses_context_repo_for_prepare_terminal() {
     let identity = RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() };
     let command = Command {
         host: Some(HostName::new("remote")),
-        environment: None,
+        provisioning_target: None,
         context_repo: Some(RepoSelector::Identity(identity.clone())),
         action: CommandAction::PrepareTerminalForCheckout { checkout_path: PathBuf::from("/tmp/repo.checkout"), commands: vec![] },
     };
@@ -1567,7 +1567,7 @@ async fn execute_forwarded_command_proxies_lifecycle_and_response() {
             HostName::new("relay"),
             Command {
                 host: Some(daemon.host_name().clone()),
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::Refresh { repo: None },
             },
@@ -1636,7 +1636,7 @@ async fn execute_forwarded_prepare_terminal_returns_terminal_prepared() {
     let checkout_id = daemon
         .execute(Command {
             host: None,
-            environment: None,
+            provisioning_target: None,
             context_repo: None,
             action: CommandAction::Checkout {
                 repo: RepoSelector::Identity(repo_identity.clone()),
@@ -1691,7 +1691,7 @@ async fn execute_forwarded_prepare_terminal_returns_terminal_prepared() {
             HostName::new("relay"),
             Command {
                 host: Some(daemon.host_name().clone()),
-                environment: None,
+                provisioning_target: None,
                 context_repo: Some(RepoSelector::Identity(repo_identity.clone())),
                 action: CommandAction::PrepareTerminalForCheckout { checkout_path: checkout_path.clone(), commands: vec![] },
             },
@@ -1815,7 +1815,7 @@ async fn execute_forwarded_checkout_resolves_repo_identity_across_different_root
             HostName::new("relay"),
             Command {
                 host: Some(daemon.host_name().clone()),
-                environment: None,
+                provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::Checkout {
                     repo: RepoSelector::Identity(repo_identity.clone()),
