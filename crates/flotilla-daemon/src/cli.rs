@@ -1,4 +1,4 @@
-use std::{io::IsTerminal, path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use flotilla_core::{config::ConfigStore, path_context::DaemonHostPath, providers::discovery::DiscoveryRuntime};
 use tracing::info;
@@ -14,12 +14,9 @@ pub async fn run(socket_path: &Path, config_dir: &Path, state_dir: &Path, timeou
             .from_env_lossy(),
         |f, d| f.add_directive(d.parse().expect("valid directive")),
     );
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal())
-        .with_env_filter(filter)
-        .try_init()
-        .ok();
+    let _ = std::fs::create_dir_all(state_dir);
+    let file_appender = tracing_appender::rolling::never(state_dir, "daemon.log");
+    tracing_subscriber::fmt().with_writer(file_appender).with_ansi(false).with_env_filter(filter).try_init().ok();
 
     let timeout = if timeout_secs == 0 { Duration::from_secs(u64::MAX) } else { Duration::from_secs(timeout_secs) };
 

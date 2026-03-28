@@ -564,16 +564,22 @@ impl InProcessDaemon {
     }
 
     async fn resolve_checkout_selector(&self, selector: &flotilla_protocol::CheckoutSelector) -> Result<(PathBuf, String), String> {
+        let peer_providers = self.peer_providers.read().await;
         let repos = self.repos.read().await;
         let mut matches = Vec::new();
         for state in repos.values() {
-            // The preferred root's provider view is the merged per-identity
-            // checkout set after the first broadcast cycle. Before that first
-            // broadcast, only the preferred root's own checkouts are present.
-            for (host_path, checkout) in &state.preferred_root().model.data.providers.checkouts {
-                if host_path.host != self.host_name {
-                    continue;
-                }
+            let snapshot_owned;
+            let providers = if let Some(snapshot) = state.cached_snapshot() {
+                &snapshot.providers
+            } else {
+                snapshot_owned = build_repo_snapshot_with_peers(
+                    state.snapshot_context(&self.host_name),
+                    state.seq(),
+                    peer_providers.get(state.identity()).map(|peers| peers.as_slice()),
+                );
+                &snapshot_owned.providers
+            };
+            for (host_path, checkout) in &providers.checkouts {
                 let matched = match selector {
                     flotilla_protocol::CheckoutSelector::Path(path) => host_path.path == *path,
                     flotilla_protocol::CheckoutSelector::Query(query) => {
@@ -1636,10 +1642,10 @@ impl InProcessDaemon {
             .preferred_local_path_for_identity(&request.repo_identity)
             .await
             .ok_or_else(|| format!("repo not tracked locally: {}", request.repo_identity))?;
-        let (registry, providers_data) = {
+        let (registry, providers_data, refresh_trigger) = {
             let repos = self.repos.read().await;
             let state = repos.get(&request.repo_identity).ok_or_else(|| format!("repo not tracked locally: {}", request.repo_identity))?;
-            (state.registry(), state.providers())
+            (state.registry(), state.providers(), state.refresh_trigger())
         };
 
         let config_base = DaemonHostPath::new(self.config.base_path().as_path());
@@ -1661,7 +1667,9 @@ impl InProcessDaemon {
             environment_registries: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
-        execute_local_remote_step_batch(self.host_name.clone(), request, progress_sink, cancel, &resolver).await
+        let result = execute_local_remote_step_batch(self.host_name.clone(), request, progress_sink, cancel, &resolver).await;
+        refresh_trigger.notify_one();
+        result
     }
 
     async fn execute_impl(
@@ -1671,6 +1679,10 @@ impl InProcessDaemon {
         allow_remote_host: bool,
     ) -> Result<u64, String> {
         let command_host = command.host.clone().unwrap_or_else(|| self.host_name.clone());
+        debug!(
+            %command_host, local_host = %self.host_name, %allow_remote_host,
+            desc = %command.description(), "execute_impl"
+        );
         if !allow_remote_host && command_host != self.host_name {
             return Err(format!("remote command routing not implemented yet for host {command_host}"));
         }
@@ -1888,12 +1900,25 @@ impl InProcessDaemon {
         let repo = self.resolve_repo_for_command(&command).await?;
         let runner = Arc::clone(&self.discovery.runner);
         let event_tx = self.event_tx.clone();
+        let peer_overlay = self.peer_providers.read().await.clone();
         let (repo_identity, registry, providers_data, refresh_trigger) = {
             let repos = self.repos.read().await;
             let identity =
                 self.tracked_repo_identity_for_path(&repo).await.ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
             let state = repos.get(&identity).ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
-            (state.identity().clone(), state.registry(), state.providers(), state.refresh_trigger())
+            let providers_data = if let Some(snapshot) = state.cached_snapshot() {
+                Arc::new(snapshot.providers.clone())
+            } else {
+                Arc::new(
+                    build_repo_snapshot_with_peers(
+                        state.snapshot_context(&self.host_name),
+                        state.seq(),
+                        peer_overlay.get(&identity).map(|peers| peers.as_slice()),
+                    )
+                    .providers,
+                )
+            };
+            (state.identity().clone(), state.registry(), providers_data, state.refresh_trigger())
         };
 
         let description = command.description().to_string();
