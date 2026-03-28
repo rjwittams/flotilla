@@ -414,7 +414,6 @@ fn toggle_archived_flips_show_archived() {
 }
 
 #[test]
-#[ignore] // Archived filtering will be re-enabled in Task 9
 fn toggle_archived_rebuilds_table_immediately() {
     let mut page = RepoPage::new(test_repo_identity(), repo_data_with_archived_session(), RepoViewLayout::Auto);
     page.reconcile_if_changed();
@@ -442,7 +441,6 @@ fn toggle_archived_rebuilds_table_immediately() {
 }
 
 #[test]
-#[ignore] // Archived filtering will be re-enabled in Task 9
 fn dismiss_rebuilds_table_when_clearing_archived() {
     let mut page = RepoPage::new(test_repo_identity(), repo_data_with_archived_session(), RepoViewLayout::Auto);
     page.reconcile_if_changed();

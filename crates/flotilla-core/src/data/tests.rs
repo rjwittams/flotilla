@@ -1519,3 +1519,64 @@ fn group_work_items_split_section_order_with_all_kinds() {
         SectionKind::Issues,
     ]);
 }
+
+// -----------------------------------------------------------------------
+// filter_archived_sections() tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn filter_archived_sessions_from_section_data() {
+    use flotilla_protocol::SessionStatus;
+
+    let mut providers = new_providers();
+    providers.sessions.insert("s-active".into(), test_cloud_agent_session(SessionStatus::Running));
+    providers.sessions.insert("s-archived".into(), test_cloud_agent_session(SessionStatus::Archived));
+
+    let items = vec![test_session_work_item("s-active"), test_session_work_item("s-archived"), to_proto(&issue_item("1", "Bug"))];
+    let labels = default_labels();
+    let sections = group_work_items_split(&items, &providers, &labels, Path::new("/tmp"));
+
+    let filtered = filter_archived_sections(sections, &providers);
+
+    // Issues section should be untouched; CloudAgents should have only the active session
+    let cloud_section = filtered.iter().find(|s| s.kind == SectionKind::CloudAgents).expect("CloudAgents section should exist");
+    assert_eq!(cloud_section.items.len(), 1);
+    assert_eq!(cloud_section.items[0].session_key.as_deref(), Some("s-active"));
+
+    let issue_section = filtered.iter().find(|s| s.kind == SectionKind::Issues).expect("Issues section should exist");
+    assert_eq!(issue_section.items.len(), 1);
+}
+
+#[test]
+fn filter_archived_removes_empty_section() {
+    use flotilla_protocol::SessionStatus;
+
+    let mut providers = new_providers();
+    providers.sessions.insert("s1".into(), test_cloud_agent_session(SessionStatus::Archived));
+    providers.sessions.insert("s2".into(), test_cloud_agent_session(SessionStatus::Expired));
+
+    let items = vec![test_session_work_item("s1"), test_session_work_item("s2")];
+    let labels = default_labels();
+    let sections = group_work_items_split(&items, &providers, &labels, Path::new("/tmp"));
+    assert_eq!(sections.len(), 1, "should have one section before filtering");
+
+    let filtered = filter_archived_sections(sections, &providers);
+    assert!(filtered.is_empty(), "section should be dropped when all sessions are archived");
+}
+
+#[test]
+fn filter_archived_keeps_agents() {
+    let providers = new_providers();
+    // No session entries → agent items have no session_key and are never filtered
+
+    let items = vec![test_agent_work_item("a1"), test_agent_work_item("a2")];
+    let labels = default_labels();
+    let sections = group_work_items_split(&items, &providers, &labels, Path::new("/tmp"));
+
+    let filtered = filter_archived_sections(sections, &providers);
+
+    assert_eq!(filtered.len(), 1);
+    let cloud_section = &filtered[0];
+    assert_eq!(cloud_section.kind, SectionKind::CloudAgents);
+    assert_eq!(cloud_section.items.len(), 2, "agent items should never be filtered");
+}

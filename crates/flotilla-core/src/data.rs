@@ -937,6 +937,34 @@ pub fn group_work_items_split(
     sections
 }
 
+/// Filter archived/expired sessions from structured section data.
+/// Removes sessions with archived or expired status from the CloudAgents section.
+/// Agent items are never filtered. Drops sections that become empty.
+pub fn filter_archived_sections(sections: Vec<SectionData>, providers: &ProviderData) -> Vec<SectionData> {
+    use flotilla_protocol::SessionStatus;
+
+    sections
+        .into_iter()
+        .filter_map(|mut section| {
+            if section.kind == SectionKind::CloudAgents {
+                section.items.retain(|item| {
+                    if item.kind == WorkItemKind::Session {
+                        let is_archived = item
+                            .session_key
+                            .as_deref()
+                            .and_then(|k| providers.sessions.get(k))
+                            .is_some_and(|s| matches!(s.status, SessionStatus::Archived | SessionStatus::Expired));
+                        !is_archived
+                    } else {
+                        true // keep agents
+                    }
+                });
+            }
+            if section.items.is_empty() { None } else { Some(section) }
+        })
+        .collect()
+}
+
 pub async fn fetch_checkout_status(
     branch: &str,
     checkout_path: Option<&Path>,
