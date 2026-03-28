@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use flotilla_core::{
     config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::test_support::fake_discovery,
@@ -8,7 +8,7 @@ use flotilla_protocol::{Command, CommandAction, CommandValue, HostName};
 
 async fn empty_daemon_named(host_name: &str) -> Arc<InProcessDaemon> {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let config = Arc::new(ConfigStore::with_base(PathBuf::from(tmp.keep())));
+    let config = Arc::new(ConfigStore::with_base(tmp.keep()));
     InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::new(host_name)).await
 }
 

@@ -1,8 +1,9 @@
-mod support;
+#[path = "support/high_fidelity.rs"]
+mod high_fidelity;
 
 use std::time::Duration;
 
-use support::high_fidelity::HighFidelityHarness;
+use high_fidelity::HighFidelityHarness;
 
 #[tokio::test]
 async fn remote_checkout_removal_surfaces_progress_before_completion() {

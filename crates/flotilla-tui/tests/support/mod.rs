@@ -1,5 +1,3 @@
-pub mod high_fidelity;
-
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use flotilla_protocol::{

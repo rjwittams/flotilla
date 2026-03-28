@@ -94,13 +94,6 @@ async fn read_request(session: &MessageSession) -> (u64, Request) {
     }
 }
 
-async fn read_session_request(session: &MessageSession) -> (u64, Request) {
-    match session.read().await.expect("read session request") {
-        Some(Message::Request { id, request }) => (id, request),
-        other => panic!("expected request, got {other:?}"),
-    }
-}
-
 #[tokio::test]
 async fn session_backed_daemon_sends_requests_and_receives_responses() {
     let harness = session_harness();
@@ -108,7 +101,7 @@ async fn session_backed_daemon_sends_requests_and_receives_responses() {
     let daemon = Arc::clone(&harness.daemon);
     let request_task = tokio::spawn(async move { daemon.get_topology().await });
 
-    let (id, request) = read_session_request(&harness.session).await;
+    let (id, request) = read_request(&harness.session).await;
     assert_eq!(request, Request::GetTopology);
 
     harness

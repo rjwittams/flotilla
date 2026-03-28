@@ -655,7 +655,7 @@ impl SteppedCheckoutManager {
 
     fn release_remove(&self) {
         self.remove_released.store(true, Ordering::SeqCst);
-        self.remove_released_notify.notify_waiters();
+        self.remove_released_notify.notify_one();
     }
 }
 

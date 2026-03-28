@@ -26,6 +26,8 @@ impl MessageSession {
         match &self.inner {
             MessageSessionInner::Memory(session) => session.reader.recv().await,
             MessageSessionInner::Unix { reader, .. } => match reader.lock().await.next_line().await {
+                // Parse failures are treated as fatal protocol errors so higher layers can
+                // tear down the session instead of continuing on a desynchronized stream.
                 Ok(Some(line)) => serde_json::from_str(&line).map(Some).map_err(|e| format!("failed to parse message: {e}")),
                 Ok(None) => Ok(None),
                 Err(e) => Err(format!("failed to read message: {e}")),
