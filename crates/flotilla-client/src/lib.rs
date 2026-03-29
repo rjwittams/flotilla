@@ -11,8 +11,8 @@ use std::{
 use async_trait::async_trait;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_protocol::{
-    Command, DaemonEvent, Message, ReplayCursor, RepoIdentity, RepoInfo, RepoSnapshot, Request, Response, ResponseResult, StatusResponse,
-    StreamKey, TopologyResponse,
+    Command, ConnectionRole, DaemonEvent, HostName, Message, ReplayCursor, RepoIdentity, RepoInfo, RepoSnapshot, Request, Response,
+    ResponseResult, StatusResponse, StreamKey, TopologyResponse, PROTOCOL_VERSION,
 };
 use flotilla_transport::message::{connect_unix_message_session, MessageSession};
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -69,6 +69,35 @@ impl SocketDaemon {
     /// reader/pending-request machinery on top of it.
     pub async fn connect(socket_path: &Path) -> Result<Arc<Self>, String> {
         let session = connect_unix_message_session(socket_path).await?;
+        Self::from_session(session)
+    }
+
+    /// Connect to a running daemon with a stateful Hello handshake.
+    ///
+    /// Sends a `Hello` with `ConnectionRole::Client` and a fresh `session_id`,
+    /// waits for the server's Hello reply, then builds the normal client session.
+    /// The `session_id` enables cursor ownership for directed query responses.
+    pub async fn connect_stateful(socket_path: &Path) -> Result<Arc<Self>, String> {
+        let session = connect_unix_message_session(socket_path).await?;
+
+        let session_id = uuid::Uuid::new_v4();
+        session
+            .write(Message::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                host_name: HostName::new("client"),
+                session_id,
+                connection_role: Some(ConnectionRole::Client),
+                environment_id: None,
+            })
+            .await
+            .map_err(|e| format!("failed to send Hello: {e}"))?;
+
+        match session.read().await.map_err(|e| format!("failed to read Hello reply: {e}"))? {
+            Some(Message::Hello { .. }) => {}
+            Some(other) => return Err(format!("expected Hello reply, got: {other:?}")),
+            None => return Err("connection closed before Hello reply".into()),
+        }
+
         Self::from_session(session)
     }
 
