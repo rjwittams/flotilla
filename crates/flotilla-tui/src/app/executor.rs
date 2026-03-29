@@ -143,6 +143,10 @@ pub fn handle_result(result: CommandValue, app: &mut App) {
         CommandValue::ImageEnsured { .. } | CommandValue::EnvironmentCreated { .. } | CommandValue::EnvironmentSpecRead { .. } => {
             tracing::warn!("unexpected environment lifecycle result reached UI handler");
         }
+        CommandValue::IssueQueryOpened { .. }
+        | CommandValue::IssuePage(_)
+        | CommandValue::IssueQueryClosed
+        | CommandValue::IssuesByIds { .. } => {}
     }
 }
 

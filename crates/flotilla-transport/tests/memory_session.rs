@@ -34,6 +34,7 @@ async fn message_session_pair_transfers_protocol_messages() {
             protocol_version: 4,
             host_name: HostName::new("remote"),
             session_id: Default::default(),
+            connection_role: None,
             environment_id: None,
         })
         .await

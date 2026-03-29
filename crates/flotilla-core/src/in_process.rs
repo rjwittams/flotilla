@@ -1764,6 +1764,13 @@ impl InProcessDaemon {
                         Err(message) => flotilla_protocol::CommandValue::Error { message },
                     }
                 }
+                flotilla_protocol::CommandAction::QueryIssueOpen { .. }
+                | flotilla_protocol::CommandAction::QueryIssueFetchPage { .. }
+                | flotilla_protocol::CommandAction::QueryIssueClose { .. }
+                | flotilla_protocol::CommandAction::QueryIssueFetchByIds { .. }
+                | flotilla_protocol::CommandAction::QueryIssueOpenInBrowser { .. } => {
+                    flotilla_protocol::CommandValue::Error { message: "issue query commands should use execute_query".into() }
+                }
                 _ => unreachable!("is_query() returned true for non-query action"),
             };
 

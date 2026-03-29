@@ -54,6 +54,7 @@ impl PeerConnection {
                 protocol_version: PROTOCOL_VERSION,
                 host_name: self.daemon.host_name().clone(),
                 session_id: self.daemon.session_id(),
+                connection_role: None,
                 environment_id: None,
             })
             .await

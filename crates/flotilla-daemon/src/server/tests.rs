@@ -1944,6 +1944,7 @@ async fn handle_client_forwards_peer_data_and_registers_peer() {
         protocol_version: PROTOCOL_VERSION,
         host_name: HostName::new("remote-host"),
         session_id: uuid::Uuid::nil(),
+        connection_role: None,
         environment_id: None,
     };
     flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");
@@ -2065,6 +2066,7 @@ async fn handle_client_does_not_advance_host_cursor_for_duplicate_host_summary()
         protocol_version: PROTOCOL_VERSION,
         host_name: remote_host.clone(),
         session_id: uuid::Uuid::nil(),
+        connection_role: None,
         environment_id: None,
     };
     flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");
@@ -2628,6 +2630,7 @@ async fn handle_client_relays_outbound_peer_messages() {
         protocol_version: PROTOCOL_VERSION,
         host_name: HostName::new("relay-target"),
         session_id: uuid::Uuid::nil(),
+        connection_role: None,
         environment_id: None,
     };
     flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");
@@ -2740,6 +2743,7 @@ async fn duplicate_inbound_peer_receives_goodbye_on_rejection() {
             protocol_version: PROTOCOL_VERSION,
             host_name: HostName::new("peer"),
             session_id: uuid::Uuid::nil(),
+            connection_role: None,
             environment_id: None,
         };
         flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");

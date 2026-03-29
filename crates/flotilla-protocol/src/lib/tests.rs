@@ -378,6 +378,7 @@ fn message_hello_roundtrip() {
         protocol_version: PROTOCOL_VERSION,
         host_name: HostName::new("desktop"),
         session_id: uuid::Uuid::nil(),
+        connection_role: None,
         environment_id: None,
     };
 

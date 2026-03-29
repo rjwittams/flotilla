@@ -206,6 +206,7 @@ impl SshTransport {
             protocol_version: PROTOCOL_VERSION,
             host_name: self.local_host.clone(),
             session_id: self.local_session_id,
+            connection_role: None,
             environment_id: None,
         })
         .await?;
@@ -516,6 +517,7 @@ mod tests {
             protocol_version: flotilla_protocol::PROTOCOL_VERSION,
             host_name: HostName::new("remote"),
             session_id: uuid::Uuid::nil(),
+            connection_role: None,
             environment_id: None,
         };
 
@@ -528,6 +530,7 @@ mod tests {
             protocol_version: flotilla_protocol::PROTOCOL_VERSION + 1,
             host_name: HostName::new("remote"),
             session_id: uuid::Uuid::nil(),
+            connection_role: None,
             environment_id: None,
         };
 
@@ -542,6 +545,7 @@ mod tests {
             protocol_version: flotilla_protocol::PROTOCOL_VERSION,
             host_name: HostName::new("someone-else"),
             session_id: uuid::Uuid::nil(),
+            connection_role: None,
             environment_id: None,
         };
 
@@ -626,6 +630,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 host_name: HostName::new("remote"),
                 session_id: uuid::Uuid::nil(),
+                connection_role: None,
                 environment_id: None,
             })
             .expect("serialize hello");

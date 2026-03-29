@@ -449,7 +449,7 @@ async fn handle_client_session(
                 .run(Arc::clone(&session), id, request)
                 .await;
         }
-        Message::Hello { protocol_version, host_name, session_id, environment_id } => {
+        Message::Hello { protocol_version, host_name, session_id, environment_id, .. } => {
             // Verify environment identity when connected on a per-environment socket.
             if let Some(expected) = &environment_context {
                 if let Some(claimed) = &environment_id {

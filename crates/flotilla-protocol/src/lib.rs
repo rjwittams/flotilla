@@ -63,6 +63,12 @@ pub use query::{
     UnmetRequirementInfo,
 };
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectionRole {
+    Client,
+    Peer,
+}
 pub use snapshot::{
     CategoryLabels, CheckoutRef, ProviderError, RepoInfo, RepoLabels, RepoSnapshot, WorkItem, WorkItemIdentity, WorkItemKind,
 };
@@ -125,6 +131,7 @@ pub enum Response {
     GetStatus(StatusResponse),
     GetTopology(TopologyResponse),
     AgentHook,
+    QueryResult { command_id: u64, value: commands::CommandValue },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +157,8 @@ pub enum Message {
         host_name: HostName,
         #[serde(default = "uuid::Uuid::nil")]
         session_id: uuid::Uuid,
+        #[serde(default)]
+        connection_role: Option<ConnectionRole>,
         #[serde(default)]
         environment_id: Option<EnvironmentId>,
     },

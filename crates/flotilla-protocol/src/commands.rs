@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     arg::Arg,
+    issue_query::{CursorId, IssueQuery, IssueResultPage},
     query::{HostListResponse, HostProvidersResponse, HostStatusResponse, RepoDetailResponse, RepoProvidersResponse, RepoWorkResponse},
     AttachableSetId, RepoIdentity,
 };
@@ -164,6 +165,25 @@ pub enum CommandAction {
     ClearIssueSearch {
         repo: RepoSelector,
     },
+    QueryIssueOpen {
+        repo: RepoSelector,
+        params: IssueQuery,
+    },
+    QueryIssueFetchPage {
+        cursor: CursorId,
+        count: usize,
+    },
+    QueryIssueClose {
+        cursor: CursorId,
+    },
+    QueryIssueFetchByIds {
+        repo: RepoSelector,
+        ids: Vec<String>,
+    },
+    QueryIssueOpenInBrowser {
+        repo: RepoSelector,
+        id: String,
+    },
     // Query commands — read-only operations dispatched through execute()
     QueryRepoDetail {
         repo: RepoSelector,
@@ -194,6 +214,11 @@ impl CommandAction {
                 | CommandAction::QueryHostList {}
                 | CommandAction::QueryHostStatus { .. }
                 | CommandAction::QueryHostProviders { .. }
+                | CommandAction::QueryIssueOpen { .. }
+                | CommandAction::QueryIssueFetchPage { .. }
+                | CommandAction::QueryIssueClose { .. }
+                | CommandAction::QueryIssueFetchByIds { .. }
+                | CommandAction::QueryIssueOpenInBrowser { .. }
         )
     }
 }
@@ -225,6 +250,11 @@ impl Command {
             CommandAction::FetchMoreIssues { .. } => "Fetching issues...",
             CommandAction::SearchIssues { .. } => "Searching issues...",
             CommandAction::ClearIssueSearch { .. } => "Clearing search...",
+            CommandAction::QueryIssueOpen { .. } => "query issue open",
+            CommandAction::QueryIssueFetchPage { .. } => "query issue fetch page",
+            CommandAction::QueryIssueClose { .. } => "query issue close",
+            CommandAction::QueryIssueFetchByIds { .. } => "query issue fetch by ids",
+            CommandAction::QueryIssueOpenInBrowser { .. } => "Opening issue in browser...",
             CommandAction::QueryRepoDetail { .. } => "query repo detail",
             CommandAction::QueryRepoProviders { .. } => "query repo providers",
             CommandAction::QueryRepoWork { .. } => "query repo work",
@@ -297,6 +327,14 @@ pub enum CommandValue {
     },
     EnvironmentSpecRead {
         spec: crate::EnvironmentSpec,
+    },
+    IssueQueryOpened {
+        cursor: CursorId,
+    },
+    IssuePage(IssueResultPage),
+    IssueQueryClosed,
+    IssuesByIds {
+        items: Vec<(String, crate::provider_data::Issue)>,
     },
 }
 
@@ -521,6 +559,42 @@ mod tests {
                 context_repo: None,
                 action: CommandAction::QueryHostProviders { target_host: "desktop".into() },
             },
+            Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueOpen {
+                    repo: RepoSelector::Query("test".into()),
+                    params: crate::issue_query::IssueQuery::default(),
+                },
+            },
+            Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueFetchPage { cursor: crate::issue_query::CursorId::new("c1"), count: 50 },
+            },
+            Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueClose { cursor: crate::issue_query::CursorId::new("c1") },
+            },
+            Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueFetchByIds {
+                    repo: RepoSelector::Path(PathBuf::from("/repo")),
+                    ids: vec!["1".into(), "2".into()],
+                },
+            },
+            Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueOpenInBrowser { repo: RepoSelector::Path(PathBuf::from("/repo")), id: "42".into() },
+            },
         ];
 
         for cmd in cases {
@@ -660,6 +734,10 @@ mod tests {
                     token_env_vars: vec!["GITHUB_TOKEN".into()],
                 },
             },
+            CommandValue::IssueQueryOpened { cursor: crate::issue_query::CursorId::new("c1") },
+            CommandValue::IssuePage(crate::issue_query::IssueResultPage { items: vec![], total: Some(10), has_more: true }),
+            CommandValue::IssueQueryClosed,
+            CommandValue::IssuesByIds { items: vec![] },
         ];
 
         for result in cases {
@@ -898,10 +976,68 @@ mod tests {
                 context_repo: None,
                 action: CommandAction::QueryHostProviders { target_host: "desktop".into() },
             },
+            Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueOpen {
+                    repo: RepoSelector::Query("test".into()),
+                    params: crate::issue_query::IssueQuery::default(),
+                },
+            },
+            Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueFetchPage { cursor: crate::issue_query::CursorId::new("c1"), count: 50 },
+            },
+            Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueClose { cursor: crate::issue_query::CursorId::new("c1") },
+            },
+            Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueFetchByIds { repo: RepoSelector::Path(PathBuf::from("/repo")), ids: vec!["1".into()] },
+            },
+            Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueOpenInBrowser { repo: RepoSelector::Path(PathBuf::from("/repo")), id: "42".into() },
+            },
         ];
         for cmd in cases {
             let desc = cmd.description();
             assert!(!desc.is_empty(), "empty description for {:?}", cmd);
         }
+    }
+
+    #[test]
+    fn query_issue_open_roundtrip() {
+        let cmd =
+            CommandAction::QueryIssueOpen { repo: RepoSelector::Query("test".into()), params: crate::issue_query::IssueQuery::default() };
+        assert_json_roundtrip(&cmd);
+    }
+
+    #[test]
+    fn query_issue_fetch_page_roundtrip() {
+        let cmd = CommandAction::QueryIssueFetchPage { cursor: crate::issue_query::CursorId::new("c1"), count: 50 };
+        assert_json_roundtrip(&cmd);
+    }
+
+    #[test]
+    fn issue_query_opened_value_roundtrip() {
+        let val = CommandValue::IssueQueryOpened { cursor: crate::issue_query::CursorId::new("c1") };
+        assert_json_roundtrip(&val);
+    }
+
+    #[test]
+    fn issue_page_value_roundtrip() {
+        let val = CommandValue::IssuePage(crate::issue_query::IssueResultPage { items: vec![], total: Some(10), has_more: true });
+        assert_json_roundtrip(&val);
     }
 }
