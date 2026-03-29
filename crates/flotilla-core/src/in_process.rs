@@ -16,7 +16,7 @@ use std::{
 use async_trait::async_trait;
 use flotilla_protocol::{
     AssociationKey, Command, CorrelationKey, DaemonEvent, DeltaEntry, HostListResponse, HostName, HostPath, HostProvidersResponse,
-    HostStatusResponse, HostSummary, Issue, PeerConnectionState, ProviderData, ProviderInfo, RepoDelta, RepoDetailResponse, RepoInfo,
+    HostStatusResponse, HostSummary, PeerConnectionState, ProviderData, ProviderInfo, RepoDelta, RepoDetailResponse, RepoInfo,
     RepoProvidersResponse, RepoSnapshot, RepoSummary, RepoWorkResponse, StatusResponse, StreamKey, TopologyResponse, TopologyRoute,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
@@ -29,7 +29,6 @@ use crate::{
     daemon::DaemonHandle,
     executor,
     host_registry::HostCounts,
-    issue_cache::IssueCache,
     model::{provider_names_from_registry, repo_name, RepoModel},
     path_context::{DaemonHostPath, ExecutionEnvironmentPath},
     providers::discovery::{discover_providers, DiscoveryResult, DiscoveryRuntime, EnvironmentBag},
@@ -131,10 +130,6 @@ fn merge_provider_errors(merged: &mut Vec<crate::data::RefreshError>, next: &[cr
     }
 }
 
-/// Returned by `execute()` for commands that run inline without lifecycle events.
-/// Callers must not treat this as a real command ID for in-flight tracking.
-const INLINE_COMMAND_ID: u64 = 0;
-
 /// Extract issue IDs referenced by association keys on change requests and checkouts.
 fn collect_linked_issue_ids(providers: &ProviderData) -> Vec<String> {
     let mut ids = HashSet::new();
@@ -153,43 +148,14 @@ fn collect_linked_issue_ids(providers: &ProviderData) -> Vec<String> {
     ids.into_iter().collect()
 }
 
-/// Clone base providers and replace the issues field with cached issues or search results.
-fn inject_issues(base_providers: &ProviderData, cache: &IssueCache, search_results: &Option<Vec<(String, Issue)>>) -> ProviderData {
-    let mut providers = base_providers.clone();
-    if let Some(ref results) = search_results {
-        providers.issues = results.iter().map(|(id, i)| (id.clone(), i.clone())).collect();
-    } else if !cache.is_empty() {
-        providers.issues = (*cache.to_index_map()).clone();
-    } else {
-        providers.issues.clear();
-    }
-    providers
-}
-
-fn inject_issues_from_entries(
-    base_providers: &ProviderData,
-    issue_entries: &Arc<indexmap::IndexMap<String, Issue>>,
-    search_results: &Option<Vec<(String, Issue)>>,
-) -> ProviderData {
-    let mut providers = base_providers.clone();
-    if let Some(ref results) = search_results {
-        providers.issues = results.iter().map(|(id, i)| (id.clone(), i.clone())).collect();
-    } else if !issue_entries.is_empty() {
-        providers.issues = (**issue_entries).clone();
-    } else {
-        providers.issues.clear();
-    }
-    providers
-}
-
 /// Build a proto RepoSnapshot, optionally merging peer provider data before correlation.
 fn build_repo_snapshot_with_peers(
     ctx: SnapshotBuildContext<'_>,
     seq: u64,
     peer_overlay: Option<&[(HostName, ProviderData)]>,
 ) -> RepoSnapshot {
-    let SnapshotBuildContext { repo_identity, path, local_providers, errors, provider_health, cache, search_results, host_name } = ctx;
-    let local_providers = normalize_local_provider_hosts(inject_issues(local_providers, cache, search_results), host_name);
+    let SnapshotBuildContext { repo_identity, path, local_providers, errors, provider_health, host_name } = ctx;
+    let local_providers = normalize_local_provider_hosts(local_providers.clone(), host_name);
 
     // Merge peer provider data if any
     let providers = if let Some(peers) = peer_overlay {
@@ -202,11 +168,7 @@ fn build_repo_snapshot_with_peers(
     let (work_items, correlation_groups) = crate::data::correlate(&providers);
     let re_snapshot =
         RefreshSnapshot { providers, work_items, correlation_groups, errors: errors.to_vec(), provider_health: provider_health.clone() };
-    let mut snapshot = snapshot_to_proto(repo_identity, path, seq, &re_snapshot, host_name);
-    snapshot.issue_total = cache.total_count;
-    snapshot.issue_has_more = cache.has_more;
-    snapshot.issue_search_results = search_results.clone();
-    snapshot
+    snapshot_to_proto(repo_identity, path, seq, &re_snapshot, host_name)
 }
 
 /// Choose whether to broadcast a full snapshot or a delta.
@@ -230,9 +192,6 @@ fn choose_event(snapshot: RepoSnapshot, delta: DeltaEntry) -> DaemonEvent {
         repo: snapshot.repo.clone(),
         changes: delta.changes,
         work_items: snapshot.work_items.clone(),
-        issue_total: snapshot.issue_total,
-        issue_has_more: snapshot.issue_has_more,
-        issue_search_results: snapshot.issue_search_results.clone(),
     };
 
     // Compare serialized sizes — if delta is larger, send full
@@ -292,6 +251,9 @@ pub struct InProcessDaemon {
     /// Socket path for the daemon server — set by the daemon after startup.
     /// Used to inject FLOTILLA_DAEMON_SOCKET into managed terminal sessions.
     daemon_socket_path: RwLock<Option<PathBuf>>,
+    /// Maps active issue query cursor IDs to the repo identity that owns them,
+    /// so `execute_query` can look up the correct `IssueQueryService`.
+    cursor_repo_map: RwLock<HashMap<crate::providers::issue_query::CursorId, flotilla_protocol::RepoIdentity>>,
 }
 
 impl InProcessDaemon {
@@ -376,6 +338,7 @@ impl InProcessDaemon {
             session_id: uuid::Uuid::new_v4(),
             agent_state_store,
             daemon_socket_path: RwLock::new(None),
+            cursor_repo_map: RwLock::new(HashMap::new()),
         });
 
         // Spawn self-driving poll loop with a Weak reference.
@@ -638,13 +601,9 @@ impl InProcessDaemon {
         if !state.preferred_root().is_local {
             return None;
         }
-        // last_local_providers excludes peer overlay data; normalize after
-        // injecting cached issues so outbound replication only sends this
-        // host's authoritative state.
-        let providers = normalize_local_provider_hosts(
-            inject_issues(&state.last_local_providers, &state.issue_cache, &state.search_results),
-            &self.host_name,
-        );
+        // last_local_providers excludes peer overlay data; normalize so
+        // outbound replication only sends this host's authoritative state.
+        let providers = normalize_local_provider_hosts(state.last_local_providers.clone(), &self.host_name);
         Some((providers, state.local_data_version()))
     }
 
@@ -704,6 +663,21 @@ impl InProcessDaemon {
         self.refresh_issues_incremental().await;
     }
 
+    /// Test accessor: directly populate the issue cache for a repo.
+    #[cfg(feature = "test-support")]
+    pub async fn ensure_issues_cached_for_test(&self, repo: &Path, desired_count: usize) {
+        self.ensure_issues_cached(repo, desired_count).await;
+    }
+
+    /// Test accessor: return the number of issues in the cache for a repo.
+    #[cfg(feature = "test-support")]
+    pub async fn issue_cache_len_for_test(&self, repo: &Path) -> usize {
+        let identity = self.tracked_repo_identity_for_path(repo).await.expect("issue_cache_len_for_test: repo not tracked");
+        let repos = self.repos.read().await;
+        let state = repos.get(&identity).expect("issue_cache_len_for_test: repo state not found");
+        state.issue_cache.len()
+    }
+
     /// Poll all repos for new refresh snapshots.
     ///
     /// For each repo whose background refresh has produced a new snapshot,
@@ -732,14 +706,7 @@ impl InProcessDaemon {
                     if !any_changed {
                         return None;
                     }
-                    Some((
-                        identity.clone(),
-                        snapshots,
-                        state.issue_cache.to_index_map(),
-                        state.issue_cache.total_count,
-                        state.issue_cache.has_more,
-                        state.search_results.clone(),
-                    ))
+                    Some((identity.clone(), snapshots))
                 })
                 .collect()
         };
@@ -754,17 +721,14 @@ impl InProcessDaemon {
 
         // Correlate and build proto snapshots outside any lock
         let mut updates = Vec::new();
-        for (identity, snapshots, issue_entries, issue_total, issue_has_more, search_results) in changed {
+        for (identity, snapshots) in changed {
             let mut local_providers = ProviderData::default();
             let mut provider_health = HashMap::new();
             let mut errors = Vec::new();
             let mut initialized = false;
 
             for snapshot in &snapshots {
-                let providers = normalize_local_provider_hosts(
-                    inject_issues_from_entries(&snapshot.providers, &issue_entries, &search_results),
-                    &self.host_name,
-                );
+                let providers = normalize_local_provider_hosts((*snapshot.providers).clone(), &self.host_name);
                 if !initialized {
                     local_providers = providers;
                     initialized = true;
@@ -786,12 +750,12 @@ impl InProcessDaemon {
             let (work_items, correlation_groups) = crate::data::correlate(&providers);
 
             let re_snapshot = RefreshSnapshot { providers, work_items, correlation_groups, errors, provider_health };
-            updates.push((identity, last_local_providers, re_snapshot, issue_total, issue_has_more, search_results));
+            updates.push((identity, last_local_providers, re_snapshot));
         }
 
         // Apply updates under write lock and broadcast
         let mut repos = self.repos.write().await;
-        for (identity, last_local_providers, re_snapshot, issue_total, issue_has_more, search_results) in updates {
+        for (identity, last_local_providers, re_snapshot) in updates {
             let Some(state) = repos.get_mut(&identity) else {
                 continue;
             };
@@ -804,9 +768,6 @@ impl InProcessDaemon {
             let mut proto_snapshot =
                 snapshot_to_proto(state.identity().clone(), state.preferred_path(), state.seq() + 1, &re_snapshot, &self.host_name);
             proto_snapshot.provider_health = crate::convert::health_to_proto(&state.preferred_root().model.data.provider_health);
-            proto_snapshot.issue_total = issue_total;
-            proto_snapshot.issue_has_more = issue_has_more;
-            proto_snapshot.issue_search_results = search_results;
 
             // Compute and log delta (also advances seq)
             let delta_entry = state.record_delta(
@@ -912,40 +873,6 @@ impl InProcessDaemon {
                     }
                     break;
                 }
-            }
-        }
-    }
-
-    /// Run a search query against the issue tracker and store the results.
-    async fn search_issues(&self, repo: &Path, query: &str) {
-        let Some(identity) = self.tracked_repo_identity_for_path(repo).await else {
-            return;
-        };
-        let registry = {
-            let repos = self.repos.read().await;
-            let Some(state) = repos.get(&identity) else {
-                return;
-            };
-            state.registry()
-        };
-
-        let result = {
-            let Some(tracker) = registry.issue_trackers.preferred() else {
-                return;
-            };
-            tracker.search_issues(repo, query, 50).await
-        };
-
-        match result {
-            Ok(issues) => {
-                info!(count = issues.len(), "search returned issues for query");
-                let mut repos = self.repos.write().await;
-                if let Some(state) = repos.get_mut(&identity) {
-                    state.search_results = Some(issues);
-                }
-            }
-            Err(e) => {
-                tracing::warn!(err = %e, "issue search failed");
             }
         }
     }
@@ -1624,6 +1551,36 @@ impl InProcessDaemon {
         self.host_registry.get_host_providers(host, &remote_counts).await
     }
 
+    async fn get_issue_query_service(&self, repo: &Path) -> Result<Arc<dyn crate::providers::issue_query::IssueQueryService>, String> {
+        let identity = self.tracked_repo_identity_for_path(repo).await.ok_or_else(|| "no tracked repo for path".to_string())?;
+        let repos = self.repos.read().await;
+        let state = repos.get(&identity).ok_or_else(|| "repo not found".to_string())?;
+        state
+            .registry()
+            .issue_query_services
+            .preferred()
+            .cloned()
+            .ok_or_else(|| "no issue query service available on this host".to_string())
+    }
+
+    async fn get_issue_query_service_for_cursor(
+        &self,
+        cursor: &crate::providers::issue_query::CursorId,
+    ) -> Result<Arc<dyn crate::providers::issue_query::IssueQueryService>, String> {
+        let identity = {
+            let map = self.cursor_repo_map.read().await;
+            map.get(cursor).cloned().ok_or_else(|| format!("unknown cursor: {}", cursor.0))?
+        };
+        let repos = self.repos.read().await;
+        let state = repos.get(&identity).ok_or_else(|| "repo no longer tracked".to_string())?;
+        state
+            .registry()
+            .issue_query_services
+            .preferred()
+            .cloned()
+            .ok_or_else(|| "no issue query service available on this host".to_string())
+    }
+
     pub async fn execute_with_remote_executor(
         &self,
         command: Command,
@@ -1685,43 +1642,6 @@ impl InProcessDaemon {
         );
         if !allow_remote_host && command_host != self.host_name {
             return Err(format!("remote command routing not implemented yet for host {command_host}"));
-        }
-
-        // Issue commands: execute inline, no lifecycle events.
-        // These are synchronous cache operations that return immediately.
-        match &command.action {
-            flotilla_protocol::CommandAction::SetIssueViewport { repo, visible_count } => {
-                let repo_path = self.resolve_repo_selector(repo).await?;
-                self.ensure_issues_cached(&repo_path, *visible_count * 2).await;
-                self.broadcast_snapshot(&repo_path).await;
-                return Ok(INLINE_COMMAND_ID);
-            }
-            flotilla_protocol::CommandAction::FetchMoreIssues { repo, desired_count } => {
-                let repo_path = self.resolve_repo_selector(repo).await?;
-                self.ensure_issues_cached(&repo_path, *desired_count).await;
-                self.broadcast_snapshot(&repo_path).await;
-                return Ok(INLINE_COMMAND_ID);
-            }
-            flotilla_protocol::CommandAction::SearchIssues { repo, query } => {
-                let repo_path = self.resolve_repo_selector(repo).await?;
-                self.search_issues(&repo_path, query).await;
-                self.broadcast_snapshot(&repo_path).await;
-                return Ok(INLINE_COMMAND_ID);
-            }
-            flotilla_protocol::CommandAction::ClearIssueSearch { repo } => {
-                let repo_path = self.resolve_repo_selector(repo).await?;
-                let identity = self.tracked_repo_identity_for_path(&repo_path).await;
-                let mut repos = self.repos.write().await;
-                if let Some(identity) = identity.as_ref() {
-                    if let Some(state) = repos.get_mut(identity) {
-                        state.search_results = None;
-                    }
-                }
-                drop(repos);
-                self.broadcast_snapshot(&repo_path).await;
-                return Ok(INLINE_COMMAND_ID);
-            }
-            _ => {}
         }
 
         let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
@@ -2139,6 +2059,45 @@ impl DaemonHandle for InProcessDaemon {
         self.execute_impl(command, Arc::new(crate::step::UnsupportedRemoteStepExecutor), false).await
     }
 
+    async fn execute_query(&self, command: Command) -> Result<flotilla_protocol::CommandValue, String> {
+        use flotilla_protocol::CommandAction;
+        match &command.action {
+            CommandAction::QueryIssueOpen { repo, params } => {
+                let repo_path = self.resolve_repo_selector(repo).await?;
+                let identity =
+                    self.tracked_repo_identity_for_path(&repo_path).await.ok_or_else(|| "no tracked repo for path".to_string())?;
+                let service = self.get_issue_query_service(&repo_path).await?;
+                let cursor = service.open_query(&repo_path, params.clone()).await?;
+                self.cursor_repo_map.write().await.insert(cursor.clone(), identity);
+                Ok(flotilla_protocol::CommandValue::IssueQueryOpened { cursor })
+            }
+            CommandAction::QueryIssueFetchPage { cursor, count } => {
+                let service = self.get_issue_query_service_for_cursor(cursor).await?;
+                let page = service.fetch_page(cursor, *count).await?;
+                Ok(flotilla_protocol::CommandValue::IssuePage(page))
+            }
+            CommandAction::QueryIssueClose { cursor } => {
+                let service = self.get_issue_query_service_for_cursor(cursor).await?;
+                service.close_query(cursor).await;
+                self.cursor_repo_map.write().await.remove(cursor);
+                Ok(flotilla_protocol::CommandValue::IssueQueryClosed)
+            }
+            CommandAction::QueryIssueFetchByIds { repo, ids } => {
+                let repo_path = self.resolve_repo_selector(repo).await?;
+                let service = self.get_issue_query_service(&repo_path).await?;
+                let items = service.fetch_by_ids(&repo_path, ids).await?;
+                Ok(flotilla_protocol::CommandValue::IssuesByIds { items })
+            }
+            CommandAction::QueryIssueOpenInBrowser { repo, id } => {
+                let repo_path = self.resolve_repo_selector(repo).await?;
+                let service = self.get_issue_query_service(&repo_path).await?;
+                service.open_in_browser(&repo_path, id).await?;
+                Ok(flotilla_protocol::CommandValue::Ok)
+            }
+            other => Err(format!("execute_query not implemented for this command type: {:?}", std::mem::discriminant(other))),
+        }
+    }
+
     async fn cancel(&self, command_id: u64) -> Result<(), String> {
         let guard = self.active_commands.lock().await;
         match guard.get(&command_id) {
@@ -2176,9 +2135,6 @@ impl DaemonHandle for InProcessDaemon {
                                 repo: state.preferred_path().to_path_buf(),
                                 changes: entry.changes.clone(),
                                 work_items: entry.work_items.clone(),
-                                issue_total: snapshot.issue_total,
-                                issue_has_more: snapshot.issue_has_more,
-                                issue_search_results: snapshot.issue_search_results.clone(),
                             })));
                         }
                     }

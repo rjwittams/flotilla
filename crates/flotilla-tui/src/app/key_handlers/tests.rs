@@ -48,14 +48,6 @@ fn active_search_query(app: &App) -> Option<&str> {
     app.screen.repo_pages.get(identity).and_then(|p| p.active_search_query.as_deref())
 }
 
-/// Set the active RepoPage's selection by flat index.
-fn set_active_selection(app: &mut App, si: usize) {
-    let identity = app.model.repo_order[app.model.active_repo].clone();
-    if let Some(page) = app.screen.repo_pages.get_mut(&identity) {
-        page.table.select_flat_index(si);
-    }
-}
-
 fn insert_peer_host(model: &mut crate::app::TuiModel, name: &str) {
     let host_name = HostName::new(name);
     model.hosts.insert(host_name.clone(), TuiHostState {
@@ -157,10 +149,10 @@ fn dispatch_action_confirm_submits_issue_search() {
     assert_eq!(active_search_query(&app), Some("bug fix"));
     let (cmd, _) = app.proto_commands.take_next().expect("expected search command");
     match cmd {
-        Command { action: CommandAction::SearchIssues { query, .. }, .. } => {
-            assert_eq!(query, "bug fix");
+        Command { action: CommandAction::QueryIssueOpen { params, .. }, .. } => {
+            assert_eq!(params.search.as_deref(), Some("bug fix"));
         }
-        other => panic!("expected SearchIssues, got {:?}", other),
+        other => panic!("expected QueryIssueOpen, got {:?}", other),
     }
 }
 
@@ -273,32 +265,6 @@ fn handle_key_preserves_status_message_until_dismissed() {
     app.model.status_message = Some("old status".into());
     app.handle_key(key(KeyCode::Char('r')));
     assert_eq!(app.model.status_message.as_deref(), Some("old status"));
-}
-
-#[test]
-fn unrelated_key_near_bottom_does_not_trigger_fetch_more_issues() {
-    let mut app = stub_app();
-    setup_table(&mut app, vec![
-        make_work_item("a"),
-        make_work_item("b"),
-        make_work_item("c"),
-        make_work_item("d"),
-        make_work_item("e"),
-        make_work_item("f"),
-    ]);
-    set_active_selection(&mut app, 1);
-
-    let repo = app.model.repo_order[0].clone();
-    if let Some(rm) = app.model.repos.get_mut(&repo) {
-        rm.issue_has_more = true;
-        rm.issue_fetch_pending = false;
-    }
-
-    app.handle_key(key(KeyCode::Char('c')));
-
-    assert!(active_show_providers(&app));
-    assert!(app.proto_commands.take_next().is_none(), "did not expect FetchMoreIssues command");
-    assert!(!app.model.repos[&repo].issue_fetch_pending, "did not expect issue_fetch_pending to flip");
 }
 
 #[test]
@@ -957,8 +923,8 @@ fn issue_search_esc_clears_and_returns() {
     push_issue_search_widget_with_text(&mut app, "some query");
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
-    let (cmd, _) = app.proto_commands.take_next().unwrap();
-    assert!(matches!(cmd, Command { action: CommandAction::ClearIssueSearch { .. }, .. }));
+    // Dismiss no longer sends a command — only a ClearSearchQuery app action
+    assert!(app.proto_commands.take_next().is_none());
 }
 
 #[test]
@@ -969,10 +935,10 @@ fn issue_search_enter_submits_query() {
     assert_eq!(app.screen.modal_stack.len(), 0, "expected no modals on stack");
     let (cmd, _) = app.proto_commands.take_next().unwrap();
     match cmd {
-        Command { action: CommandAction::SearchIssues { query, .. }, .. } => {
-            assert_eq!(query, "bug fix");
+        Command { action: CommandAction::QueryIssueOpen { params, .. }, .. } => {
+            assert_eq!(params.search.as_deref(), Some("bug fix"));
         }
-        other => panic!("expected SearchIssues, got {:?}", other),
+        other => panic!("expected QueryIssueOpen, got {:?}", other),
     }
 }
 

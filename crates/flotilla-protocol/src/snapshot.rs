@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     host::{HostName, HostPath, RepoIdentity},
-    provider_data::{AttachableSetId, Issue, ProviderData},
+    provider_data::{AttachableSetId, ProviderData},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,12 +66,6 @@ pub struct RepoSnapshot {
     pub providers: ProviderData,
     pub provider_health: HashMap<String, HashMap<String, bool>>,
     pub errors: Vec<ProviderError>,
-    #[serde(default)]
-    pub issue_total: Option<u32>,
-    #[serde(default)]
-    pub issue_has_more: bool,
-    #[serde(default)]
-    pub issue_search_results: Option<Vec<(String, Issue)>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,9 +207,6 @@ mod tests {
             providers: ProviderData::default(),
             provider_health: HashMap::new(),
             errors: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
         };
         let json = serde_json::to_string(&empty).expect("serialize");
         let decoded_empty: RepoSnapshot = serde_json::from_str(&json).expect("deserialize");
@@ -269,9 +260,6 @@ mod tests {
             providers: ProviderData::default(),
             provider_health: HashMap::from([("vcs".to_string(), HashMap::from([("Git".to_string(), true)]))]),
             errors: vec![ProviderError { category: "github".into(), provider: String::new(), message: "not found".into() }],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
         };
         let json = serde_json::to_string(&populated).expect("serialize");
         let decoded_populated: RepoSnapshot = serde_json::from_str(&json).expect("deserialize");

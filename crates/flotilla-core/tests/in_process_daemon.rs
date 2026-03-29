@@ -1714,41 +1714,6 @@ async fn in_process_daemon_correlates_workspace_into_one_remote_checkout_item() 
 }
 
 #[tokio::test]
-async fn inline_issue_command_returns_zero_and_skips_lifecycle_events() {
-    let (_temp, repo, daemon) = daemon_for_cwd().await;
-    let mut rx = daemon.subscribe();
-
-    // Wait for initial snapshot event before issuing command.
-    let _ = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
-
-    let command_id = daemon
-        .execute(Command {
-            host: None,
-            provisioning_target: None,
-            context_repo: None,
-            action: CommandAction::ClearIssueSearch { repo: RepoSelector::Path(repo.clone()) },
-        })
-        .await
-        .expect("inline command should succeed");
-    assert_eq!(command_id, 0, "inline issue commands should return id=0");
-
-    // Inline commands should not emit CommandStarted/Finished lifecycle events.
-    let no_lifecycle = tokio::time::timeout(std::time::Duration::from_millis(300), async {
-        loop {
-            match rx.recv().await {
-                Ok(DaemonEvent::CommandStarted { .. }) | Ok(DaemonEvent::CommandFinished { .. }) => {
-                    return false;
-                }
-                Ok(_) => {}
-                Err(_) => return true,
-            }
-        }
-    })
-    .await;
-    assert!(no_lifecycle.is_err() || no_lifecycle.unwrap(), "inline command unexpectedly emitted lifecycle event");
-}
-
-#[tokio::test]
 async fn execute_on_untracked_repo_returns_error_without_started_event() {
     let config = Arc::new(ConfigStore::with_base(tempfile::tempdir().expect("tempdir").path()));
     let daemon = InProcessDaemon::new(vec![], config, fake_discovery(false), HostName::local()).await;
@@ -2218,49 +2183,30 @@ async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
     daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh should succeed");
 
     // --- Assert ---
-    // Collect snapshot events until we see one containing issue "42".
-    // The daemon may send a RepoSnapshot or a RepoDelta depending on
-    // whether the delta is smaller than the full snapshot. We accept either.
-    let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    // Wait for at least one snapshot/delta event after the refresh.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             match rx.recv().await {
-                Ok(DaemonEvent::RepoSnapshot(snap)) if snap.repo == repo => {
-                    if snap.providers.issues.contains_key("42") {
-                        return *snap;
-                    }
-                }
-                Ok(DaemonEvent::RepoDelta(ref delta)) if delta.repo == repo => {
-                    // Check if the delta contains an Issue change for "42"
-                    let has_issue_42 = delta.changes.iter().any(|c| matches!(c, Change::Issue { key, .. } if key == "42"));
-                    if has_issue_42 {
-                        // Use replay_since to get the full snapshot with the issue
-                        let events = daemon.replay_since(&HashMap::new()).await.expect("replay_since");
-                        for event in events {
-                            if let DaemonEvent::RepoSnapshot(snap) = event {
-                                if snap.repo == repo && snap.providers.issues.contains_key("42") {
-                                    return *snap;
-                                }
-                            }
-                        }
-                    }
-                }
+                Ok(DaemonEvent::RepoSnapshot(_) | DaemonEvent::RepoDelta(_)) => return,
                 Ok(_) => {}
                 Err(e) => panic!("unexpected recv error: {e:?}"),
             }
         }
     })
     .await
-    .expect("timed out waiting for snapshot with pinned issue");
+    .expect("timed out waiting for snapshot after refresh");
 
-    // Verify the issue is present and correct
-    let issue = found.providers.issues.get("42").expect("issue 42 should be in snapshot");
-    assert_eq!(issue.title, "Fix the widget");
-    assert_eq!(issue.labels, vec!["bug".to_string()]);
+    // Allow a brief window for the background linked-issue fetch to complete.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Verify fetch_issues_by_id was actually called (not just paginated)
     let fetched: Vec<Vec<String>> = issue_tracker.fetched_by_id.lock().await.clone();
     assert!(!fetched.is_empty(), "fetch_issues_by_id should have been called");
     assert!(fetched.iter().any(|ids| ids.contains(&"42".to_string())), "fetch_issues_by_id should have been called with id '42'");
+
+    // Verify the issue is in the cache (it's no longer injected into the snapshot)
+    let cached = daemon.issue_cache_len_for_test(&repo).await;
+    assert!(cached > 0, "issue cache should contain the pinned issue");
 }
 
 #[tokio::test]
@@ -2403,20 +2349,11 @@ async fn issue_refresh_escalation_resets_cache_and_refetches() {
     let mut rx = daemon.subscribe();
 
     // Trigger initial refresh to populate issue cache with all 55 issues.
-    // Use FetchMoreIssues with desired_count=60 so it fetches both pages.
-    daemon
-        .execute(Command {
-            host: None,
-            provisioning_target: None,
-            context_repo: None,
-            action: CommandAction::FetchMoreIssues { repo: RepoSelector::Path(repo.clone()), desired_count: 60 },
-        })
-        .await
-        .expect("initial FetchMoreIssues should succeed");
+    daemon.ensure_issues_cached_for_test(&repo, 60).await;
 
     // Verify initial state: all 55 issues should be cached.
-    let initial_snapshot = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("get initial state");
-    assert_eq!(initial_snapshot.providers.issues.len(), 55, "should have 55 issues initially cached");
+    let cached_count = daemon.issue_cache_len_for_test(&repo).await;
+    assert_eq!(cached_count, 55, "should have 55 issues initially cached");
 
     // --- Act ---
     // Add 5 new issues (simulating upstream changes) and enable forced
@@ -2462,50 +2399,24 @@ async fn issue_refresh_escalation_resets_cache_and_refetches() {
     assert!(pages.contains(&1), "escalation should fetch page 1");
     assert!(pages.contains(&2), "ensure_issues_cached should continue to page 2");
 
-    // Wait for the broadcast snapshot containing the new issues.
-    let found = tokio::time::timeout(Duration::from_secs(5), async {
+    // Wait for the broadcast event after escalation (cache is updated but
+    // issues are no longer injected into snapshot providers).
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match rx.recv().await {
-                Ok(DaemonEvent::RepoSnapshot(snap)) if snap.repo == repo => {
-                    if snap.providers.issues.contains_key("56") {
-                        return *snap;
-                    }
-                }
-                Ok(DaemonEvent::RepoDelta(ref delta)) if delta.repo == repo => {
-                    let has_new_issue = delta.changes.iter().any(|c| matches!(c, Change::Issue { key, .. } if key == "56"));
-                    if has_new_issue {
-                        let events = daemon.replay_since(&HashMap::new()).await.expect("replay_since");
-                        for event in events {
-                            if let DaemonEvent::RepoSnapshot(snap) = event {
-                                if snap.repo == repo && snap.providers.issues.contains_key("56") {
-                                    return *snap;
-                                }
-                            }
-                        }
-                    }
-                }
+                Ok(DaemonEvent::RepoSnapshot(_) | DaemonEvent::RepoDelta(_)) => return,
                 Ok(_) => {}
                 Err(e) => panic!("unexpected recv error: {e:?}"),
             }
         }
     })
     .await
-    .expect("timed out waiting for snapshot with escalated issues");
+    .expect("timed out waiting for snapshot after escalation");
 
-    // The snapshot should contain all 60 issues from both pages after the
+    // The cache should contain all 60 issues from both pages after the
     // full re-fetch with multi-page continuation.
-    assert_eq!(found.providers.issues.len(), 60, "escalation should re-fetch all 60 issues across two pages");
-
-    // Spot-check issues from page 1 (IDs 1-50) and page 2 (IDs 51-60).
-    assert!(found.providers.issues.contains_key("1"), "first issue on page 1 present");
-    assert!(found.providers.issues.contains_key("50"), "last issue on page 1 present");
-    assert!(found.providers.issues.contains_key("51"), "first issue on page 2 present");
-    assert!(found.providers.issues.contains_key("60"), "last issue on page 2 present");
-
-    // Verify the new issues added after initial fetch have expected content.
-    let issue_56 = found.providers.issues.get("56").expect("issue 56 in snapshot");
-    assert_eq!(issue_56.title, "Issue 56");
-    assert_eq!(issue_56.labels, vec!["new".to_string()]);
+    let cached = daemon.issue_cache_len_for_test(&repo).await;
+    assert_eq!(cached, 60, "escalation should re-fetch all 60 issues across two pages");
 }
 
 #[tokio::test]

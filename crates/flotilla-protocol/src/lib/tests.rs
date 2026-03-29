@@ -134,9 +134,6 @@ fn message_event_snapshot_roundtrip() {
             ("change_request".to_string(), HashMap::from([("GitHub".to_string(), false)])),
         ]),
         errors: vec![ProviderError { category: "github".to_string(), provider: String::new(), message: "rate limited".to_string() }],
-        issue_total: None,
-        issue_has_more: false,
-        issue_search_results: None,
     };
     let msg = Message::Event { event: Box::new(DaemonEvent::RepoSnapshot(Box::new(snapshot))) };
     let json = serde_json::to_string(&msg).expect("serialize");
@@ -174,9 +171,6 @@ fn snapshot_delta_event_roundtrip() {
             Change::Issue { key: "42".into(), op: EntryOp::Removed },
         ],
         work_items: vec![],
-        issue_total: Some(100),
-        issue_has_more: true,
-        issue_search_results: None,
     };
     let msg = Message::Event { event: Box::new(DaemonEvent::RepoDelta(Box::new(delta))) };
     let json = serde_json::to_string(&msg).expect("serialize");
@@ -189,9 +183,6 @@ fn snapshot_delta_event_roundtrip() {
                 assert_eq!(d.repo_identity, RepoIdentity { authority: "github.com".into(), path: "owner/my-repo".into() });
                 assert_eq!(d.repo, PathBuf::from("/tmp/my-repo"));
                 assert_eq!(d.changes.len(), 2);
-                assert_eq!(d.issue_total, Some(100));
-                assert!(d.issue_has_more);
-                assert!(d.issue_search_results.is_none());
             }
             other => panic!("expected RepoDelta, got {:?}", other),
         },
@@ -308,9 +299,6 @@ fn snapshot_delta_roundtrip_preserves_repo_identity() {
         repo: PathBuf::from("/tmp/repo"),
         changes: vec![],
         work_items: vec![],
-        issue_total: Some(12),
-        issue_has_more: true,
-        issue_search_results: None,
     };
 
     let json = serde_json::to_string(&delta).expect("serialize");

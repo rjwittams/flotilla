@@ -84,9 +84,6 @@ pub struct RepoData {
     pub provider_names: HashMap<String, Vec<String>>,
     pub provider_health: HashMap<String, HashMap<String, bool>>,
     pub work_items: Vec<WorkItem>,
-    pub issue_has_more: bool,
-    pub issue_total: Option<usize>,
-    pub issue_search_active: bool,
     pub loading: bool,
 }
 
@@ -232,16 +229,7 @@ impl RepoPage {
         }
 
         if self.active_search_query.is_some() {
-            let data = self.repo_data.read();
-            let repo_path = data.path.clone();
-            drop(data);
             let repo_identity = ctx.repo_order[ctx.active_repo].clone();
-            ctx.commands.push(flotilla_protocol::Command {
-                host: None,
-                provisioning_target: None,
-                context_repo: None,
-                action: flotilla_protocol::CommandAction::ClearIssueSearch { repo: flotilla_protocol::RepoSelector::Path(repo_path) },
-            });
             self.active_search_query = None;
             ctx.app_actions.push(AppAction::ClearSearchQuery { repo: repo_identity });
         } else if self.show_providers {

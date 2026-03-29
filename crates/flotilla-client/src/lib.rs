@@ -607,6 +607,14 @@ impl DaemonHandle for SocketDaemon {
         }
     }
 
+    async fn execute_query(&self, command: Command) -> Result<flotilla_protocol::commands::CommandValue, String> {
+        match into_success_response(self.request(Request::Execute { command }).await?)? {
+            Response::QueryResult { value, .. } => Ok(value),
+            Response::Execute { command_id } => Err(format!("expected QueryResult, got Execute response for command {command_id}")),
+            other => Err(format!("unexpected response for query: {other:?}")),
+        }
+    }
+
     async fn cancel(&self, command_id: u64) -> Result<(), String> {
         match into_success_response(self.request(Request::Cancel { command_id }).await?)? {
             Response::Cancel => Ok(()),

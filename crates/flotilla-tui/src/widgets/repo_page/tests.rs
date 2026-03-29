@@ -15,9 +15,6 @@ fn test_repo_data(items: Vec<WorkItem>) -> Shared<RepoData> {
         provider_names: HashMap::new(),
         provider_health: HashMap::new(),
         work_items: items,
-        issue_has_more: false,
-        issue_total: None,
-        issue_search_active: false,
         loading: false,
     })
 }
@@ -49,9 +46,6 @@ fn repo_data_with_archived_session() -> Shared<RepoData> {
         provider_names: HashMap::new(),
         provider_health: HashMap::new(),
         work_items: vec![session_item("s1"), issue_item("i1")],
-        issue_has_more: false,
-        issue_total: None,
-        issue_search_active: false,
         loading: false,
     })
 }

@@ -45,39 +45,6 @@ fn collect_linked_issue_ids_deduplicates_across_sources() {
 }
 
 #[test]
-fn inject_issues_prefers_search_results_then_cache_then_empty() {
-    let base = ProviderData::default();
-
-    let mut cache = IssueCache::new();
-    cache.add_pinned(vec![("1".into(), Issue {
-        title: "cached".into(),
-        labels: vec![],
-        association_keys: vec![],
-        provider_name: String::new(),
-        provider_display_name: String::new(),
-    })]);
-
-    let search_results = Some(vec![("2".into(), Issue {
-        title: "search".into(),
-        labels: vec![],
-        association_keys: vec![],
-        provider_name: String::new(),
-        provider_display_name: String::new(),
-    })]);
-
-    let from_search = inject_issues(&base, &cache, &search_results);
-    assert_eq!(from_search.issues.len(), 1);
-    assert!(from_search.issues.contains_key("2"));
-
-    let from_cache = inject_issues(&base, &cache, &None);
-    assert!(from_cache.issues.contains_key("1"));
-
-    let empty_cache = IssueCache::new();
-    let empty = inject_issues(&base, &empty_cache, &None);
-    assert!(empty.issues.is_empty());
-}
-
-#[test]
 fn choose_event_uses_delta_for_non_initial_changes() {
     let repo = PathBuf::from("/tmp/repo");
     let snapshot = RepoSnapshot {
@@ -89,9 +56,6 @@ fn choose_event_uses_delta_for_non_initial_changes() {
         providers: ProviderData::default(),
         provider_health: HashMap::new(),
         errors: vec![],
-        issue_total: None,
-        issue_has_more: false,
-        issue_search_results: None,
     };
 
     let initial = DeltaEntry { seq: 1, prev_seq: 0, changes: vec![], work_items: vec![] };
@@ -117,9 +81,6 @@ fn choose_event_falls_back_to_full_when_delta_is_larger() {
         providers: ProviderData::default(),
         provider_health: HashMap::new(),
         errors: vec![],
-        issue_total: None,
-        issue_has_more: false,
-        issue_search_results: None,
     };
 
     let delta = DeltaEntry {
@@ -133,18 +94,7 @@ fn choose_event_falls_back_to_full_when_delta_is_larger() {
 }
 
 #[test]
-fn build_repo_snapshot_sets_issue_metadata() {
-    let mut cache = IssueCache::new();
-    cache.total_count = Some(5);
-    cache.has_more = true;
-    cache.add_pinned(vec![("9".into(), Issue {
-        title: "cached issue".into(),
-        labels: vec![],
-        association_keys: vec![],
-        provider_name: String::new(),
-        provider_display_name: String::new(),
-    })]);
-
+fn build_repo_snapshot_basic() {
     let default_snap = RefreshSnapshot::default();
     let snap = build_repo_snapshot_with_peers(
         SnapshotBuildContext {
@@ -153,17 +103,12 @@ fn build_repo_snapshot_sets_issue_metadata() {
             local_providers: &default_snap.providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
-            cache: &cache,
-            search_results: &None,
             host_name: &HostName::local(),
         },
         7,
         None,
     );
     assert_eq!(snap.seq, 7);
-    assert_eq!(snap.issue_total, Some(5));
-    assert!(snap.issue_has_more);
-    assert!(snap.providers.issues.contains_key("9"));
 }
 
 // --- now_iso8601 ---
@@ -190,9 +135,6 @@ fn choose_event_sends_full_when_delta_has_empty_changes() {
         providers: ProviderData::default(),
         provider_health: HashMap::new(),
         errors: vec![],
-        issue_total: None,
-        issue_has_more: false,
-        issue_search_results: None,
     };
 
     // prev_seq > 0 but changes is empty — should still send full
@@ -204,7 +146,6 @@ fn choose_event_sends_full_when_delta_has_empty_changes() {
 
 #[test]
 fn build_repo_snapshot_with_peers_merges_peer_data() {
-    let cache = IssueCache::new();
     let host_a = HostName::new("host-a");
     let host_b = HostName::new("host-b");
 
@@ -231,8 +172,6 @@ fn build_repo_snapshot_with_peers_merges_peer_data() {
             local_providers: &default_snap.providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
-            cache: &cache,
-            search_results: &None,
             host_name: &host_a,
         },
         1,
@@ -250,7 +189,6 @@ fn build_repo_snapshot_with_peers_merges_peer_data() {
 /// to the local host via `normalize_local_provider_hosts`.
 #[test]
 fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
-    let cache = IssueCache::new();
     let local_host = HostName::new("feta");
     let peer_host = HostName::new("kiwi");
 
@@ -293,8 +231,6 @@ fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
             local_providers: &local_providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
-            cache: &cache,
-            search_results: &None,
             host_name: &local_host,
         },
         1,
@@ -316,8 +252,6 @@ fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
             local_providers: &local_providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
-            cache: &cache,
-            search_results: &None,
             host_name: &local_host,
         },
         2,
@@ -346,7 +280,6 @@ fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
 
 #[test]
 fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_workspace_binding() {
-    let cache = IssueCache::new();
     let local_host = HostName::new("kiwi");
     let remote_host = HostName::new("feta");
     let remote_checkout = HostPath::new(remote_host.clone(), PathBuf::from("/home/robert/dev/flotilla.terminal-stuff"));
@@ -392,8 +325,6 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
             local_providers: &local_providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
-            cache: &cache,
-            search_results: &None,
             host_name: &local_host,
         },
         1,

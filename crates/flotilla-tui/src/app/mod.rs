@@ -24,7 +24,6 @@ use flotilla_protocol::{
     ProvisioningTarget, RepoDelta, RepoIdentity, RepoInfo, RepoLabels, RepoSelector, RepoSnapshot, StepStatus, WorkItem, WorkItemIdentity,
 };
 pub use intent::Intent;
-use tokio::sync::mpsc;
 use tui_input::Input;
 use ui_state::PendingStatus;
 pub use ui_state::{BranchInputKind, DirEntry, RepoViewLayout, TabId, UiState};
@@ -103,12 +102,6 @@ pub struct TuiRepoModel {
     pub provider_names: HashMap<String, Vec<String>>,
     pub provider_health: HashMap<String, HashMap<String, bool>>,
     pub loading: bool,
-    pub issue_has_more: bool,
-    pub issue_total: Option<u32>,
-    pub issue_search_active: bool,
-    pub issue_fetch_pending: bool,
-    /// Whether the initial issue fetch has been requested for this repo.
-    pub issue_initial_requested: bool,
     /// Whether this inactive tab has received data updates since last viewed.
     pub has_unseen_changes: bool,
 }
@@ -143,11 +136,6 @@ impl TuiModel {
                 provider_names: info.provider_names,
                 provider_health: info.provider_health,
                 loading: info.loading,
-                issue_has_more: false,
-                issue_total: None,
-                issue_search_active: false,
-                issue_fetch_pending: false,
-                issue_initial_requested: false,
                 has_unseen_changes: false,
             });
         }
@@ -206,10 +194,6 @@ pub struct InFlightCommand {
     pub repo_identity: RepoIdentity,
     pub repo: PathBuf,
     pub description: String,
-}
-
-enum BackgroundUpdate {
-    IssueCommandFailed { action: CommandAction, error: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,8 +272,6 @@ pub struct App {
     /// Per-repo shared data handles. Written by `apply_snapshot()`/`apply_delta()`,
     /// read by `RepoPage` widgets during reconciliation and rendering.
     pub repo_data: HashMap<RepoIdentity, Shared<RepoData>>,
-    background_updates_tx: mpsc::UnboundedSender<BackgroundUpdate>,
-    background_updates_rx: mpsc::UnboundedReceiver<BackgroundUpdate>,
 }
 
 impl App {
@@ -316,16 +298,12 @@ impl App {
                 provider_names: rm.provider_names.clone(),
                 provider_health: rm.provider_health.clone(),
                 work_items: Vec::new(),
-                issue_has_more: false,
-                issue_total: None,
-                issue_search_active: false,
                 loading: rm.loading,
             });
             let page = RepoPage::new(identity.clone(), shared.clone(), ui.view_layout);
             repo_data_map.insert(identity.clone(), shared);
             screen.repo_pages.insert(identity.clone(), page);
         }
-        let (background_updates_tx, background_updates_rx) = mpsc::unbounded_channel();
 
         Self {
             daemon,
@@ -340,8 +318,6 @@ impl App {
             should_quit: false,
             screen,
             repo_data: repo_data_map,
-            background_updates_tx,
-            background_updates_rx,
         }
     }
 
@@ -500,45 +476,8 @@ impl App {
     }
 
     pub(crate) fn drain_background_updates(&mut self) {
-        while let Ok(update) = self.background_updates_rx.try_recv() {
-            match update {
-                BackgroundUpdate::IssueCommandFailed { action, error } => {
-                    match action {
-                        CommandAction::FetchMoreIssues { repo, .. } => {
-                            if let Some(repo_identity) = self.repo_identity_for_selector(&repo) {
-                                if let Some(repo_model) = self.model.repos.get_mut(&repo_identity) {
-                                    repo_model.issue_fetch_pending = false;
-                                }
-                            }
-                        }
-                        CommandAction::SetIssueViewport { repo, .. } => {
-                            if let Some(repo_identity) = self.repo_identity_for_selector(&repo) {
-                                if let Some(repo_model) = self.model.repos.get_mut(&repo_identity) {
-                                    repo_model.issue_initial_requested = false;
-                                }
-                            }
-                        }
-                        // These commands do not set per-repo pending flags, so
-                        // there is nothing to unwind beyond surfacing the error.
-                        CommandAction::SearchIssues { .. } | CommandAction::ClearIssueSearch { .. } => {}
-                        other => {
-                            tracing::warn!(action = ?other, "unexpected background issue command failure");
-                        }
-                    }
-                    self.set_status_message(Some(error));
-                }
-            }
-        }
-    }
-
-    fn repo_identity_for_selector(&self, repo: &RepoSelector) -> Option<RepoIdentity> {
-        match repo {
-            RepoSelector::Identity(identity) => Some(identity.clone()),
-            RepoSelector::Path(path) => {
-                self.model.repos.values().find(|repo_model| &repo_model.path == path).map(|repo_model| repo_model.identity.clone())
-            }
-            RepoSelector::Query(_) => None,
-        }
+        // No-op: background issue commands have been removed.
+        // Retained as a no-op so callers don't need to change yet.
     }
 
     // ── Widget stack helpers ──
@@ -852,10 +791,6 @@ impl App {
         let old_providers = std::mem::replace(&mut rm.providers, Arc::new(snap.providers));
         rm.provider_health = snap.provider_health.clone();
         rm.loading = false;
-        rm.issue_has_more = snap.issue_has_more;
-        rm.issue_total = snap.issue_total;
-        rm.issue_search_active = snap.issue_search_results.is_some();
-        rm.issue_fetch_pending = false;
 
         // Provider health -> model-level statuses (now 1:1)
         for (category, providers) in &rm.provider_health {
@@ -892,26 +827,12 @@ impl App {
                 d.provider_names = rm.provider_names.clone();
                 d.provider_health = rm.provider_health.clone();
                 d.work_items = snap.work_items;
-                d.issue_has_more = rm.issue_has_more;
-                d.issue_total = rm.issue_total.map(|v| v as usize);
-                d.issue_search_active = rm.issue_search_active;
                 d.loading = false;
             });
         }
 
         // Log and display errors (clears status when errors resolve)
         self.set_status_message(format_error_status(&snap.errors, &path));
-
-        // Request initial issue fetch once per repo (on first snapshot received)
-        let rm = self.model.repos.get_mut(&repo_identity).unwrap();
-        if !rm.issue_initial_requested {
-            rm.issue_initial_requested = true;
-            let visible = self.ui.layout.table_area.height.saturating_sub(2) as usize;
-            self.proto_commands.push(self.command(CommandAction::SetIssueViewport {
-                repo: flotilla_protocol::RepoSelector::Path(path),
-                visible_count: visible.max(20),
-            }));
-        }
     }
 
     fn apply_delta(&mut self, delta: RepoDelta) {
@@ -928,12 +849,6 @@ impl App {
         let mut providers = (*rm.providers).clone();
         flotilla_core::delta::apply_changes(&mut providers, delta.changes.clone());
         rm.providers = Arc::new(providers);
-
-        // Update issue metadata
-        rm.issue_has_more = delta.issue_has_more;
-        rm.issue_total = delta.issue_total;
-        rm.issue_search_active = delta.issue_search_results.is_some();
-        rm.issue_fetch_pending = false;
 
         // Apply provider health and error changes from the delta
         for change in &delta.changes {
@@ -1001,9 +916,6 @@ impl App {
                 d.provider_names = rm.provider_names.clone();
                 d.provider_health = rm.provider_health.clone();
                 d.work_items = delta.work_items;
-                d.issue_has_more = rm.issue_has_more;
-                d.issue_total = rm.issue_total.map(|v| v as usize);
-                d.issue_search_active = rm.issue_search_active;
                 d.loading = false;
             });
         }
@@ -1027,9 +939,6 @@ impl App {
             provider_names: info.provider_names.clone(),
             provider_health: info.provider_health.clone(),
             work_items: Vec::new(),
-            issue_has_more: false,
-            issue_total: None,
-            issue_search_active: false,
             loading: info.loading,
         });
         let page = RepoPage::new(identity.clone(), shared.clone(), self.ui.view_layout);
@@ -1044,11 +953,6 @@ impl App {
             provider_names: info.provider_names,
             provider_health: info.provider_health,
             loading: info.loading,
-            issue_has_more: false,
-            issue_total: None,
-            issue_search_active: false,
-            issue_fetch_pending: false,
-            issue_initial_requested: false,
             has_unseen_changes: false,
         });
         self.model.repo_order.push(identity);

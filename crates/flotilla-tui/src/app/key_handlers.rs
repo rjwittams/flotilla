@@ -168,29 +168,8 @@ impl App {
     /// `model.repos` (to set `issue_fetch_pending`). This post-dispatch check
     /// runs after every key event to trigger infinite scroll when needed.
     fn check_infinite_scroll(&mut self) {
-        if self.model.repo_order.is_empty() {
-            return;
-        }
-        let identity = &self.model.repo_order[self.model.active_repo];
-        let Some(page) = self.screen.repo_pages.get(identity) else {
-            return;
-        };
-        let Some(next) = page.table.selected_flat_index() else {
-            return;
-        };
-        let total = page.table.total_item_count();
-        if next + 5 >= total && self.model.active().issue_has_more && !self.model.active().issue_fetch_pending {
-            let repo = self.model.active_repo_root().clone();
-            let issue_count = self.model.active().providers.issues.len();
-            let desired = issue_count + 50;
-            let repo_identity = self.model.active_repo_identity().clone();
-            if let Some(rm) = self.model.repos.get_mut(&repo_identity) {
-                rm.issue_fetch_pending = true;
-            }
-            self.proto_commands.push(
-                self.command(CommandAction::FetchMoreIssues { repo: flotilla_protocol::RepoSelector::Path(repo), desired_count: desired }),
-            );
-        }
+        // No-op: issue infinite scroll has been removed.
+        // Will be re-added via IssueViewState in a future task.
     }
 
     pub(super) fn action_enter(&mut self) {

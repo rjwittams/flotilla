@@ -201,41 +201,6 @@ fn select_next_noop_on_empty_table() {
     assert_eq!(active_page_selection(&app), None);
 }
 
-#[test]
-fn select_next_triggers_fetch_when_near_bottom() {
-    let mut app = stub_app_with_repos(1);
-    // 6 items: positions 0-5. After two select_next calls we're at
-    // position 1, and 1+5 = 6 >= 6 triggers the fetch.
-    set_active_table_items(&mut app, (0..6).map(|i| issue_item(i.to_string())).collect());
-
-    let repo = app.model.repo_order[0].clone();
-    if let Some(rm) = app.model.repos.get_mut(&repo) {
-        rm.issue_has_more = true;
-        rm.issue_fetch_pending = false;
-    }
-
-    // Navigate to position 1 (next=1, 1+5=6 >= 6 triggers fetch)
-    app.select_next(); // None -> 0
-    app.select_next(); // 0 -> 1
-
-    // At this point next=1, 1+5=6 >= 6, so it should trigger
-    let entry = app.proto_commands.take_next();
-    assert!(entry.is_some(), "expected FetchMoreIssues command");
-    match entry.unwrap().0 {
-        flotilla_protocol::Command {
-            action: flotilla_protocol::CommandAction::FetchMoreIssues { repo: cmd_repo, desired_count }, ..
-        } => {
-            assert_eq!(cmd_repo, flotilla_protocol::RepoSelector::Path(app.model.repos[&repo].path.clone()));
-            // providers.issues is empty (default), so desired = 0 + 50
-            assert_eq!(desired_count, 50);
-        }
-        other => panic!("expected FetchMoreIssues, got {other:?}"),
-    }
-
-    // issue_fetch_pending should now be true
-    assert!(app.model.repos[&repo].issue_fetch_pending);
-}
-
 // ── select_prev tests ────────────────────────────────────────────
 
 #[test]

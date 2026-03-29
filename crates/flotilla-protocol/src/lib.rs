@@ -246,10 +246,6 @@ pub struct RepoDelta {
     pub changes: Vec<Change>,
     /// Pre-correlated work items from the daemon (avoids re-correlation on TUI side).
     pub work_items: Vec<snapshot::WorkItem>,
-    /// Issue metadata (not part of delta log, but needed by TUI).
-    pub issue_total: Option<u32>,
-    pub issue_has_more: bool,
-    pub issue_search_results: Option<Vec<(String, Issue)>>,
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use flotilla_protocol::{Command, DaemonEvent, RepoInfo, RepoSelector, RepoSnapshot, StatusResponse, StreamKey, TopologyResponse};
+use flotilla_protocol::{
+    commands::CommandValue, Command, DaemonEvent, RepoInfo, RepoSelector, RepoSnapshot, StatusResponse, StreamKey, TopologyResponse,
+};
 use tokio::sync::broadcast;
 
 /// The boundary between daemon and client.
@@ -37,6 +39,10 @@ pub trait DaemonHandle: Send + Sync {
     ///
     /// Repos not in `last_seen` get a `RepoSnapshot`.
     async fn replay_since(&self, last_seen: &HashMap<StreamKey, u64>) -> Result<Vec<DaemonEvent>, String>;
+
+    /// Execute a query command synchronously. Returns the result directly
+    /// without broadcasting. Only valid for commands where `action.is_query()`.
+    async fn execute_query(&self, command: Command) -> Result<CommandValue, String>;
 
     /// High-level status: repos, health, counts.
     async fn get_status(&self) -> Result<StatusResponse, String>;

@@ -247,10 +247,6 @@ pub async fn build_plan(
         CommandAction::TrackRepoPath { .. }
         | CommandAction::UntrackRepo { .. }
         | CommandAction::Refresh { .. }
-        | CommandAction::SetIssueViewport { .. }
-        | CommandAction::FetchMoreIssues { .. }
-        | CommandAction::SearchIssues { .. }
-        | CommandAction::ClearIssueSearch { .. }
         | CommandAction::QueryRepoDetail { .. }
         | CommandAction::QueryRepoProviders { .. }
         | CommandAction::QueryRepoWork { .. }

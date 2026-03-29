@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 
-use flotilla_protocol::{DeltaEntry, HostName, Issue, ProviderData, ProviderError, RepoSnapshot};
+use flotilla_protocol::{DeltaEntry, HostName, ProviderData, ProviderError, RepoSnapshot};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -37,8 +37,6 @@ pub(crate) struct SnapshotBuildContext<'a> {
     pub(crate) local_providers: &'a ProviderData,
     pub(crate) errors: &'a [crate::data::RefreshError],
     pub(crate) provider_health: &'a HashMap<(&'static str, String), bool>,
-    pub(crate) cache: &'a IssueCache,
-    pub(crate) search_results: &'a Option<Vec<(String, Issue)>>,
     pub(crate) host_name: &'a HostName,
 }
 
@@ -58,7 +56,6 @@ pub(crate) struct RepoState {
     pub(crate) last_local_providers: ProviderData,
     pub(crate) last_snapshot: Arc<RefreshSnapshot>,
     pub(crate) issue_cache: IssueCache,
-    pub(crate) search_results: Option<Vec<(String, Issue)>>,
     /// Serializes issue fetch operations for this repo to prevent concurrent page skips.
     issue_fetch_mutex: Arc<Mutex<()>>,
     /// Last broadcast provider data (with injected issues), used for delta computation.
@@ -87,7 +84,6 @@ impl RepoState {
             last_local_providers: ProviderData::default(),
             last_snapshot: Arc::new(RefreshSnapshot::default()),
             issue_cache: IssueCache::new(),
-            search_results: None,
             issue_fetch_mutex: Arc::new(Mutex::new(())),
             last_broadcast_providers: ProviderData::default(),
             last_broadcast_health: HashMap::new(),
@@ -234,8 +230,6 @@ impl RepoState {
             local_providers: &self.last_local_providers,
             errors: &self.last_snapshot.errors,
             provider_health: &self.last_snapshot.provider_health,
-            cache: &self.issue_cache,
-            search_results: &self.search_results,
             host_name,
         }
     }

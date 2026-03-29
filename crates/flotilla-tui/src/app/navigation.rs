@@ -44,21 +44,6 @@ impl App {
                 return;
             }
             page.table.select_next();
-            // Infinite scroll: fetch more issues when near the bottom
-            if let Some(si) = page.table.selected_flat_index() {
-                if si + 5 >= total && self.model.repos[&identity].issue_has_more && !self.model.repos[&identity].issue_fetch_pending {
-                    let repo_path = self.model.repos[&identity].path.clone();
-                    let issue_count = self.model.repos[&identity].providers.issues.len();
-                    let desired = issue_count + 50;
-                    if let Some(rm) = self.model.repos.get_mut(&identity) {
-                        rm.issue_fetch_pending = true;
-                    }
-                    self.proto_commands.push(self.command(flotilla_protocol::CommandAction::FetchMoreIssues {
-                        repo: flotilla_protocol::RepoSelector::Path(repo_path),
-                        desired_count: desired,
-                    }));
-                }
-            }
         }
     }
 

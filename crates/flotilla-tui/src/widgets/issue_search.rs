@@ -1,7 +1,7 @@
 use std::any::Any;
 
 use crossterm::event::KeyEvent;
-use flotilla_protocol::{Command, CommandAction, RepoSelector};
+use flotilla_protocol::{issue_query::IssueQuery, Command, CommandAction, RepoSelector};
 use ratatui::{layout::Rect, Frame};
 use tui_input::{backend::crossterm::EventHandler as InputEventHandler, Input};
 
@@ -46,7 +46,10 @@ impl InteractiveWidget for IssueSearchWidget {
                         host: None,
                         provisioning_target: None,
                         context_repo: None,
-                        action: CommandAction::SearchIssues { repo: RepoSelector::Identity(repo_identity.clone()), query: query.clone() },
+                        action: CommandAction::QueryIssueOpen {
+                            repo: RepoSelector::Identity(repo_identity.clone()),
+                            params: IssueQuery { search: Some(query.clone()) },
+                        },
                     };
                     ctx.commands.push(cmd);
                     ctx.app_actions.push(AppAction::SetSearchQuery { repo: repo_identity, query });
@@ -59,13 +62,6 @@ impl InteractiveWidget for IssueSearchWidget {
                     ctx.app_actions.push(AppAction::ShowStatus("No active repo".into()));
                     return Outcome::Finished;
                 };
-                let cmd = Command {
-                    host: None,
-                    provisioning_target: None,
-                    context_repo: None,
-                    action: CommandAction::ClearIssueSearch { repo: RepoSelector::Identity(repo_identity.clone()) },
-                };
-                ctx.commands.push(cmd);
                 ctx.app_actions.push(AppAction::ClearSearchQuery { repo: repo_identity });
                 Outcome::Finished
             }
@@ -137,8 +133,10 @@ mod tests {
         let outcome = widget.handle_action(Action::Dismiss, &mut ctx);
         assert!(matches!(outcome, Outcome::Finished));
 
-        let (cmd, _) = harness.commands.take_next().expect("expected ClearIssueSearch command");
-        assert!(matches!(cmd, Command { action: CommandAction::ClearIssueSearch { .. }, .. }));
+        // No command is sent for dismiss — only a ClearSearchQuery app action
+        assert!(ctx.app_actions.iter().any(|a| matches!(a, AppAction::ClearSearchQuery { .. })));
+        drop(ctx);
+        assert!(harness.commands.take_next().is_none());
     }
 
     #[test]
@@ -151,12 +149,12 @@ mod tests {
         let outcome = widget.handle_action(Action::Confirm, &mut ctx);
         assert!(matches!(outcome, Outcome::Finished));
 
-        let (cmd, _) = harness.commands.take_next().expect("expected SearchIssues command");
+        let (cmd, _) = harness.commands.take_next().expect("expected QueryIssueOpen command");
         match cmd {
-            Command { action: CommandAction::SearchIssues { query, .. }, .. } => {
-                assert_eq!(query, "bug fix");
+            Command { action: CommandAction::QueryIssueOpen { params, .. }, .. } => {
+                assert_eq!(params.search.as_deref(), Some("bug fix"));
             }
-            other => panic!("expected SearchIssues, got {:?}", other),
+            other => panic!("expected QueryIssueOpen, got {:?}", other),
         }
     }
 

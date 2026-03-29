@@ -218,9 +218,6 @@ pub fn snapshot_to_proto(
         providers: (*refresh.providers).clone(),
         provider_health: health_to_proto(&refresh.provider_health),
         errors: refresh.errors.iter().map(error_to_proto).collect(),
-        issue_total: None,
-        issue_has_more: false,
-        issue_search_results: None,
     }
 }
 

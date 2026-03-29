@@ -211,9 +211,6 @@ mod watch_human {
             providers: Default::default(),
             provider_health: HashMap::new(),
             errors: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
         }
     }
 
@@ -236,9 +233,6 @@ mod watch_human {
             repo: PathBuf::from("/tmp/my-repo"),
             changes: vec![],
             work_items: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
         }));
         let line = format_event_human(&event);
         assert!(line.contains("[delta]"), "should have delta tag");

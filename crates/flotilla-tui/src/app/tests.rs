@@ -186,24 +186,6 @@ fn apply_snapshot_updates_provider_data() {
 }
 
 #[test]
-fn apply_snapshot_updates_issue_metadata() {
-    let mut app = stub_app();
-    let repo = app.model.active_repo_identity().clone();
-    let repo_path = active_repo_path(&app);
-
-    let mut snap = snapshot(&repo_path);
-    snap.issue_has_more = true;
-    snap.issue_total = Some(42);
-    snap.issue_search_results = Some(vec![]);
-    app.apply_snapshot(snap);
-
-    let rm = &app.model.repos[&repo];
-    assert!(rm.issue_has_more);
-    assert_eq!(rm.issue_total, Some(42));
-    assert!(rm.issue_search_active);
-}
-
-#[test]
 fn apply_snapshot_maps_provider_health_to_statuses() {
     let mut app = stub_app();
     let repo = app.model.active_repo_identity().clone();
@@ -284,22 +266,6 @@ fn apply_snapshot_unknown_repo_is_noop() {
 }
 
 #[test]
-fn apply_snapshot_requests_initial_issue_fetch() {
-    let mut app = stub_app();
-    let repo_path = active_repo_path(&app);
-
-    let snap = snapshot(&repo_path);
-    app.apply_snapshot(snap);
-
-    let cmd = app.proto_commands.take_next();
-    assert!(matches!(cmd, Some((Command { action: CommandAction::SetIssueViewport { .. }, .. }, _))));
-    // Second snapshot should NOT queue another
-    let snap2 = snapshot(&repo_path);
-    app.apply_snapshot(snap2);
-    assert!(app.proto_commands.take_next().is_none());
-}
-
-#[test]
 fn apply_snapshot_sets_unseen_changes_for_inactive_tab() {
     let mut app = stub_app_with_repos(2);
     let inactive_repo = app.model.repo_order[1].clone();
@@ -335,23 +301,6 @@ fn apply_snapshot_sets_unseen_changes_for_inactive_tab() {
 }
 
 // -- apply_delta --
-
-#[test]
-fn apply_delta_updates_issue_metadata() {
-    let mut app = stub_app();
-    let repo = app.model.active_repo_identity().clone();
-    let repo_path = active_repo_path(&app);
-
-    let mut change = delta(&repo_path, vec![]);
-    change.issue_total = Some(10);
-    change.issue_has_more = true;
-    app.apply_delta(change);
-
-    let rm = &app.model.repos[&repo];
-    assert_eq!(rm.issue_total, Some(10));
-    assert!(rm.issue_has_more);
-    assert!(!rm.issue_fetch_pending);
-}
 
 #[test]
 fn apply_delta_unknown_repo_is_noop() {
