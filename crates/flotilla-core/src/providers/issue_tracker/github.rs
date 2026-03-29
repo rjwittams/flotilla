@@ -23,7 +23,7 @@ impl GitHubIssueTracker {
     }
 }
 
-fn parse_issue(provider_name: &str, v: &serde_json::Value) -> Option<(String, Issue)> {
+pub(crate) fn parse_issue(provider_name: &str, v: &serde_json::Value) -> Option<(String, Issue)> {
     let number = v["number"].as_i64()?;
     let title = v["title"].as_str()?.to_string();
     let labels: Vec<String> = v["labels"]
