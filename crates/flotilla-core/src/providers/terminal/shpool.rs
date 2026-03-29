@@ -42,7 +42,11 @@ impl ShpoolTerminalPool {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_with_env(runner: Arc<dyn CommandRunner>, socket_path: DaemonHostPath, terminal_env_defaults: TerminalEnvVars) -> Self {
+    pub(crate) fn new_with_env(
+        runner: Arc<dyn CommandRunner>,
+        socket_path: DaemonHostPath,
+        terminal_env_defaults: TerminalEnvVars,
+    ) -> Self {
         let config_path = DaemonHostPath::new(socket_path.as_path().parent().unwrap_or(Path::new(".")).join("config.toml"));
         Self { runner, socket_path, config_path, terminal_env_defaults }
     }
