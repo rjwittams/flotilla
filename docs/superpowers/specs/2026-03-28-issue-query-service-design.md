@@ -129,9 +129,15 @@ pub trait IssueQueryService: Send + Sync {
 }
 ```
 
-**Cursor lifecycle.** A cursor tracks query parameters and accumulated results. For GitHub's stateless REST pagination, the cursor holds `(query_params, next_page_number)`. Cursors expire after a timeout (5 minutes of inactivity). The service keeps a small cache of active cursors.
+**Cursor ownership and lifecycle.** Each cursor is owned by the connection that created it. The `CursorId` encodes or maps to a connection/session identifier so the service can track ownership. Cursors are scoped to a single client — no shared server-side cursor state between connections.
 
-**Incremental refresh.** The `changes_since` mechanism (GitHub's `since` parameter on the issues endpoint) keeps the default cursor warm without re-fetching everything. This is an implementation detail of the GitHub service, not part of the trait — other backends may have different refresh strategies or none at all.
+A cursor tracks query parameters and accumulated results. For GitHub's stateless REST pagination, the cursor holds `(query_params, next_page_number, accumulated_items)`. Cursors expire after 5 minutes of inactivity.
+
+**Connection lifecycle.** When a client disconnects, all cursors owned by that connection are closed. The `Message::Hello` handshake already carries a `session_id: Uuid` — this identifies the connection for cursor ownership. The service implementation maps `session_id → Vec<CursorId>` and cleans up on disconnect.
+
+**Multiple clients, same repo.** Each client that opens the issues section gets its own default cursor and its own search cursor. There is no shared "default cursor" — warming (incremental refresh) runs per-cursor. If two TUI clients view the same repo's issues, they each hold independent cursors with independent pagination state.
+
+**Incremental refresh.** The `changes_since` mechanism (GitHub's `since` parameter on the issues endpoint) keeps active cursors warm without re-fetching everything. This is an implementation detail of the GitHub service, not part of the trait — other backends may have different refresh strategies or none at all. Only cursors with active connections are refreshed; expired/disconnected cursors are not warmed.
 
 ### `IssueTracker` rename
 
@@ -155,8 +161,6 @@ Remove `inject_issues()` from `InProcessDaemon`. The issue cache no longer injec
 Today, all command results are broadcast to every connected client via `DaemonEvent::CommandFinished` over `tokio::sync::broadcast`. This is the same cross-client bleed that motivates removing issue data from snapshots.
 
 The fix applies to all query commands, not just issue queries. `CommandAction` already has `is_query()` which identifies read-only query commands (`QueryRepoDetail`, `QueryRepoProviders`, `QueryRepoWork`, `QueryHostList`, `QueryHostStatus`, `QueryHostProviders`). These also broadcast results unnecessarily — it works only because the CLI is a single-shot client.
-
-**Change:** when a command finishes and `action.is_query()` is true, the server sends the result as a directed `Message::Response { id, response }` to the requesting connection instead of broadcasting `DaemonEvent::CommandFinished`. The `Command` routing envelope (`host`, `context_repo`) is preserved, so queries can target specific hosts and repos.
 
 Issue query commands are new `CommandAction` variants that return `true` from `is_query()`:
 
@@ -199,19 +203,64 @@ pub enum CommandValue {
 }
 ```
 
-The server dispatches these through the existing `Request::Execute { command }` path, preserving the `Command` routing envelope. The only change in the server is: after execution, if `is_query()`, send `Message::Response` to the requester instead of broadcasting `CommandFinished`.
-
-The existing `Query*` commands (`QueryRepoDetail`, etc.) also benefit from this change — their results stop being broadcast too.
-
 The old `CommandAction` variants `SearchIssues`, `ClearIssueSearch`, `SetIssueViewport`, and `FetchMoreIssues` are removed.
+
+#### Full protocol chain for directed query responses
+
+The current query flow uses the async command pipeline end-to-end:
+
+1. TUI sends `Request::Execute { command }`, receives `Response::Execute { command_id }`.
+2. `DaemonHandle::execute()` runs the command, broadcasts `DaemonEvent::CommandFinished` to all subscribers.
+3. CLI waits on broadcast `CommandFinished` matching its `command_id` (`cli.rs`).
+4. Remote queries are routed via `PendingRemoteCommandMap`, which synthesises `CommandFinished` from the remote response.
+
+For `is_query()` commands, this changes at every layer:
+
+**Protocol.** `Response` gains a new variant:
+
+```rust
+pub enum Response {
+    // ... existing ...
+    QueryResult { command_id: u64, value: CommandValue },
+}
+```
+
+The server returns `Response::QueryResult` to the requesting connection instead of broadcasting `CommandFinished`. The `command_id` is included so the client can correlate with in-flight tracking. Non-query commands continue to use `CommandFinished` broadcast as before.
+
+**`DaemonHandle` trait.** Add an `execute_query()` method that returns the `CommandValue` directly:
+
+```rust
+async fn execute_query(&self, command: Command) -> Result<CommandValue, String>;
+```
+
+For `InProcessDaemon`, this calls the executor and returns the result without broadcasting. For `SocketDaemon`, this sends `Request::Execute`, then awaits the directed `Response::QueryResult` on the same connection (not the broadcast event stream).
+
+The existing `execute()` method and `CommandFinished` broadcast remain for non-query commands.
+
+**Server dispatch** (`client_connection.rs`). When handling `Request::Execute` where `command.action.is_query()`:
+
+1. Execute the command.
+2. Send `Message::Response { id, Response::QueryResult { command_id, value } }` to the requesting connection.
+3. Do *not* broadcast `CommandFinished`.
+4. Still emit `CommandStarted` if needed for observability (optional — query commands are fast enough that progress tracking adds no value).
+
+**Remote query routing** (`remote_commands.rs`). When a query command targets a remote host, the local daemon forwards it as a remote command. The remote daemon executes and returns `Response::QueryResult` to the forwarding daemon, which relays it back to the originating client connection. The `PendingRemoteCommandMap` entry resolves to a directed response rather than synthesising a broadcast `CommandFinished`.
+
+**CLI** (`cli.rs`). Query commands switch from awaiting broadcast `CommandFinished` to calling `execute_query()` on the `DaemonHandle`, which returns the result directly. The CLI no longer subscribes to the event stream for query results.
+
+**TUI** (`app/executor.rs`). Issue queries call `execute_query()` and handle the returned `CommandValue` inline, updating `IssueViewState` directly. No `in_flight` tracking needed for queries — the response arrives on the same async call.
 
 ### Issue rendering path
 
 Today, issues reach the TUI through the snapshot pipeline: `inject_issues()` → `ProviderData.issues` → correlation → `WorkItem` entries → table rendering. Removing `inject_issues()` breaks this path.
 
-The replacement: the TUI renders queried issues directly from its local `IssueViewState`, not from snapshot work items. The issue section of the work item table reads from `IssueViewState.items` instead of filtering `WorkItem`s with `kind == Issue`. Linked issues that appear in correlation groups (via `AssociationKey`) still render as part of those groups from the snapshot — but the scrollable issue list is TUI-local.
+The replacement builds on the split table work (#198), now landed. The repo page already uses per-section `SectionTable` widgets (`split_table.rs`, `section_table.rs`, `columns.rs`) instead of the old monolithic `WorkItemTable`. The issue section is already a distinct `SectionTable` with its own columns and selection state.
 
-This means the issue section is no longer driven by the correlation engine. Issues in the list are not `WorkItem`s — they are `Issue` structs rendered directly. The table widget needs a rendering path for `Issue` entries alongside `WorkItem` entries, or the issue section becomes a separate widget that reads from `IssueViewState`.
+**Data source change.** The issue `SectionTable` currently reads from snapshot work items (issues that went through correlation). After this work, it reads from `IssueViewState` in the TUI's per-repo `UiState` instead. The section's data source changes from `Vec<WorkItem>` filtered by `kind == Issue` to `Vec<(String, Issue)>` from `IssueViewState.active().items`.
+
+**Row identity and actions.** Issue rows are identified by `(provider_name, issue_id)` — the same key structure used in `IssueViewState.items`. Selection, preview, and actions (open in browser, link to PR, etc.) operate on this key. The existing `WorkItemIdentity::Issue` is no longer used for the standalone issue list.
+
+**Linked issues in correlation groups.** Issue `WorkItem`s that appear within correlation groups (linked to PRs/checkouts via `AssociationKey`) still render inline in the other section tables as part of their groups. They are not removed — they just no longer appear as a standalone issue section.
 
 ### Command migration
 
@@ -233,12 +282,13 @@ Proper service-targeted routing (dispatching commands to the host that has the s
 
 `GitHubIssueQueryService` implements the trait. Internally:
 
-- Maintains a `HashMap<CursorId, CursorState>` behind a mutex.
-- `CursorState` holds the query parameters, accumulated results, next page number, and last-accessed timestamp.
-- `open_query` creates a cursor. It does not fetch eagerly — the caller issues `fetch_page` when ready.
+- Maintains a `HashMap<CursorId, CursorState>` and a `HashMap<Uuid, Vec<CursorId>>` (session → cursors) behind a mutex.
+- `CursorState` holds the owning session ID, query parameters, accumulated results, next page number, and last-accessed timestamp.
+- `open_query` creates a cursor tagged with the requesting session's ID. It does not fetch eagerly — the caller issues `fetch_page` when ready.
 - `fetch_page` calls the GitHub REST API (`repos/{owner}/{repo}/issues` or `search/issues`) with the cursor's page number, appends results, advances the cursor.
 - A background sweep expires cursors inactive for 5 minutes.
-- `changes_since` is a method on the concrete type (not the trait), called by the incremental refresh timer to keep the default cursor warm.
+- On client disconnect, the daemon notifies the service with the disconnecting `session_id`; all cursors owned by that session are closed.
+- `changes_since` is a method on the concrete type (not the trait), called by the incremental refresh timer to keep active cursors warm.
 - `open_in_browser` delegates to `gh issue view {id} --web`.
 
 The factory is `GitHubIssueQueryServiceFactory`, separate from the existing `GitHubIssueProviderFactory` (renamed from `GitHubIssueTrackerFactory`). Both probe the environment independently.
