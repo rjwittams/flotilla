@@ -30,12 +30,14 @@ pub struct DaemonConfig {
 
 ### HostId Resolution
 
-The caller (daemon startup in `main.rs` / server) resolves `HostId` before constructing the daemon:
+`DaemonServer::new()` in `crates/flotilla-daemon/src/server.rs` is the production owner. It already reads `DaemonConfig` and has the config store and runner. Before constructing `InProcessDaemon`, it:
 
-1. Read `DaemonConfig` for `machine_id`.
-2. Call `machine_scoped_state_dir(state_dir, config_machine_id, runner)` (exists in `host_identity.rs`).
-3. Call `resolve_or_create_host_id(scoped_dir)` (exists in `host_identity.rs`).
-4. Inject the resulting `HostId` into `InProcessDaemon::new()`.
+1. Reads `DaemonConfig` for `machine_id`.
+2. Calls `machine_scoped_state_dir(config.state_dir(), config_machine_id, runner)` (exists in `host_identity.rs`).
+3. Calls `resolve_or_create_host_id(scoped_dir)` (exists in `host_identity.rs`).
+4. Injects the resulting `HostId` into `InProcessDaemon::new()`.
+
+Tests inject `HostId` directly — no filesystem resolution needed.
 
 ### InProcessDaemon Constructor
 
@@ -145,9 +147,26 @@ pub struct WtCheckoutManager {
 
 All call sites change from `QualifiedPath::from_host_path(&self.host_name, path)` to `QualifiedPath::host(self.host_id.clone(), path)`.
 
+### normalize_local_provider_hosts()
+
+**Critical:** `normalize_local_provider_hosts()` in `in_process.rs` rewrites every checkout's `QualifiedPath` via `from_host_path(host_name, path)` after discovery. This would overwrite the real UUID-backed `HostId` from providers. It must take `HostId` instead of `HostName` and call `QualifiedPath::host(host_id, path)`. The companion `normalize_correlation_keys()` needs the same change.
+
+### Other from_host_path() Production Callers
+
+`from_host_path()` is used in 29 production call sites beyond the factories and providers. All must switch to `QualifiedPath::host(host_id, path)`:
+
+- `in_process.rs` — `normalize_local_provider_hosts()`, `normalize_correlation_keys()` (take `HostId`)
+- `executor.rs`, `executor/session_actions.rs`, `executor/terminals.rs`, `executor/workspace.rs` — executor paths that construct `QualifiedPath` (thread `HostId` through `ExecutorStepResolver`)
+- `refresh.rs` — refresh path
+- `convert.rs` — core-to-protocol conversion
+- `repo_state.rs` — repo state management
+- `peer/merge.rs` — peer data merge (takes `HostName` for the local host — needs `HostId`)
+
+Each of these currently receives or captures `HostName` and calls `from_host_path()`. They need `HostId` threaded to them instead.
+
 ### from_host_path() Removal
 
-`QualifiedPath::from_host_path()` is removed from production code. If test helpers still need a convenience constructor that maps `HostName` → `HostId`, it moves behind `#[cfg(any(test, feature = "test-support"))]`.
+After all production callers are migrated, `from_host_path()` moves behind `#[cfg(any(test, feature = "test-support"))]`. There are ~100 test call sites that can continue using it as a convenience helper (they don't need real UUIDs).
 
 ### Docker Discovery
 
