@@ -8,7 +8,7 @@ use crate::{
         change_request::ChangeRequestTracker,
         coding_agent::CloudAgentService,
         discovery::{ProviderCategory, ProviderDescriptor},
-        issue_tracker::IssueTracker,
+        issue_tracker::IssueProvider,
         types::{
             AheadBehind, BranchInfo, ChangeRequest, Checkout, CloudAgentSession, CommitInfo, Issue, WorkingTreeStatus, Workspace,
             WorkspaceAttachRequest,
@@ -97,9 +97,9 @@ impl ChangeRequestTracker for StubChangeRequestTracker {
     }
 }
 
-struct StubIssueTracker;
+struct StubIssueProvider;
 #[async_trait]
-impl IssueTracker for StubIssueTracker {
+impl IssueProvider for StubIssueProvider {
     async fn list_issues(&self, _: &Path, _: usize) -> Result<Vec<(String, Issue)>, String> {
         Ok(vec![])
     }
@@ -163,8 +163,8 @@ fn full_registry() -> ProviderRegistry {
     );
     reg.issue_trackers.insert(
         "it",
-        labeled_desc(ProviderCategory::IssueTracker, "it", "StubIT", "#", "GitHub Issues", "issue"),
-        Arc::new(StubIssueTracker),
+        labeled_desc(ProviderCategory::IssueProvider, "it", "StubIT", "#", "GitHub Issues", "issue"),
+        Arc::new(StubIssueProvider),
     );
     reg.cloud_agents.insert(
         "ca",

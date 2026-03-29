@@ -29,7 +29,7 @@ use crate::{
     providers::{
         change_request::ChangeRequestTracker,
         discovery::EnvVars,
-        issue_tracker::IssueTracker,
+        issue_tracker::IssueProvider,
         terminal::TerminalPool,
         types::BranchInfo,
         vcs::{CheckoutManager, Vcs},
@@ -113,7 +113,7 @@ pub fn test_attachable_store(config: &ConfigStore) -> SharedAttachableStore {
 pub struct FakeDiscoveryProviders {
     pub checkout_manager: Option<Arc<dyn CheckoutManager>>,
     pub change_request: Option<Arc<dyn ChangeRequestTracker>>,
-    pub issue_tracker: Option<Arc<dyn IssueTracker>>,
+    pub issue_tracker: Option<Arc<dyn IssueProvider>>,
     pub workspace_manager: Option<Arc<dyn WorkspaceManager>>,
     pub terminal_pool: Option<Arc<dyn TerminalPool>>,
     pub attachable_store: Option<SharedAttachableStore>,
@@ -134,7 +134,7 @@ impl FakeDiscoveryProviders {
         self
     }
 
-    pub fn with_issue_tracker(mut self, provider: Arc<dyn IssueTracker>) -> Self {
+    pub fn with_issue_tracker(mut self, provider: Arc<dyn IssueProvider>) -> Self {
         self.issue_tracker = Some(provider);
         self
     }
@@ -257,9 +257,9 @@ fn minimal_discovery_runtime(follower: bool, runner: std::sync::Arc<dyn CommandR
 /// A configurable fake issue tracker for integration and E2E tests.
 ///
 /// Pre-seed issues via `add_issues()`, then pass to a `DiscoveryRuntime`
-/// via `FakeIssueTrackerFactory`. All methods operate on the shared store,
+/// via `FakeIssueProviderFactory`. All methods operate on the shared store,
 /// so issues added after construction are visible to subsequent calls.
-pub struct FakeIssueTracker {
+pub struct FakeIssueProvider {
     /// Shared issue store: Vec<(id, Issue)> preserving insertion order.
     pub issues: Arc<TokioMutex<Vec<(String, Issue)>>>,
     /// IDs that were requested via `fetch_issues_by_id`, for test assertions.
@@ -271,13 +271,13 @@ pub struct FakeIssueTracker {
     pub force_escalation: Arc<AtomicBool>,
 }
 
-impl Default for FakeIssueTracker {
+impl Default for FakeIssueProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl FakeIssueTracker {
+impl FakeIssueProvider {
     pub fn new() -> Self {
         Self {
             issues: Arc::new(TokioMutex::new(Vec::new())),
@@ -301,7 +301,7 @@ impl FakeIssueTracker {
 }
 
 #[async_trait::async_trait]
-impl IssueTracker for FakeIssueTracker {
+impl IssueProvider for FakeIssueProvider {
     async fn list_issues(&self, _repo_root: &Path, limit: usize) -> Result<Vec<(String, Issue)>, String> {
         let store = self.issues.lock().await;
         Ok(store.iter().take(limit).cloned().collect())
@@ -805,16 +805,16 @@ impl ChangeRequestTracker for FakeChangeRequest {
 // Factory wrappers
 // ---------------------------------------------------------------------------
 
-/// Factory that always returns a pre-constructed IssueTracker.
-pub struct FakeIssueTrackerFactory(pub Arc<dyn IssueTracker>);
+/// Factory that always returns a pre-constructed IssueProvider.
+pub struct FakeIssueProviderFactory(pub Arc<dyn IssueProvider>);
 
 #[async_trait::async_trait]
-impl Factory for FakeIssueTrackerFactory {
+impl Factory for FakeIssueProviderFactory {
     type Descriptor = ProviderDescriptor;
-    type Output = dyn IssueTracker;
+    type Output = dyn IssueProvider;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled_simple(ProviderCategory::IssueTracker, "fake-issues", "Fake Issues", "#", "Issues", "issue")
+        ProviderDescriptor::labeled_simple(ProviderCategory::IssueProvider, "fake-issues", "Fake Issues", "#", "Issues", "issue")
     }
 
     async fn probe(
@@ -823,7 +823,7 @@ impl Factory for FakeIssueTrackerFactory {
         _config: &ConfigStore,
         _repo_root: &ExecutionEnvironmentPath,
         _runner: Arc<dyn CommandRunner>,
-    ) -> Result<Arc<dyn IssueTracker>, Vec<UnmetRequirement>> {
+    ) -> Result<Arc<dyn IssueProvider>, Vec<UnmetRequirement>> {
         Ok(Arc::clone(&self.0))
     }
 }
@@ -1011,7 +1011,7 @@ impl Factory for FakeTerminalPoolFactory {
 pub fn fake_discovery_with_providers(
     checkout_manager: Option<Arc<dyn CheckoutManager>>,
     change_request: Option<Arc<dyn ChangeRequestTracker>>,
-    issue_tracker: Option<Arc<dyn IssueTracker>>,
+    issue_tracker: Option<Arc<dyn IssueProvider>>,
 ) -> DiscoveryRuntime {
     fake_discovery_with_provider_set(
         FakeDiscoveryProviders::new()
@@ -1032,7 +1032,7 @@ impl FakeDiscoveryProviders {
         self
     }
 
-    fn with_issue_tracker_opt(mut self, provider: Option<Arc<dyn IssueTracker>>) -> Self {
+    fn with_issue_tracker_opt(mut self, provider: Option<Arc<dyn IssueProvider>>) -> Self {
         self.issue_tracker = provider;
         self
     }
@@ -1084,9 +1084,9 @@ pub fn fake_discovery_with_provider_set(providers: FakeDiscoveryProviders) -> Di
         change_request_factories.push(Box::new(FakeChangeRequestFactory(cr)));
     }
 
-    let mut issue_tracker_factories: Vec<Box<super::IssueTrackerFactory>> = Vec::new();
+    let mut issue_tracker_factories: Vec<Box<super::IssueProviderFactory>> = Vec::new();
     if let Some(it) = providers.issue_tracker {
-        issue_tracker_factories.push(Box::new(FakeIssueTrackerFactory(it)));
+        issue_tracker_factories.push(Box::new(FakeIssueProviderFactory(it)));
     }
 
     let mut workspace_manager_factories: Vec<Box<super::WorkspaceManagerFactory>> = Vec::new();

@@ -19,7 +19,7 @@ use flotilla_core::{
         discovery::{
             test_support::{
                 fake_discovery, fake_discovery_with_provider_set, fake_discovery_with_providers, fake_vcs_discovery, git_process_discovery,
-                init_git_repo_with_remote, FakeCheckoutManager, FakeCheckoutManagerFactory, FakeDiscoveryProviders, FakeIssueTracker,
+                init_git_repo_with_remote, FakeCheckoutManager, FakeCheckoutManagerFactory, FakeDiscoveryProviders, FakeIssueProvider,
                 FakeTerminalPool, FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
             },
             DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostPlatform, ProviderCategory, ProviderDescriptor,
@@ -2183,7 +2183,7 @@ async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
         .await;
 
     // Create an issue tracker that has issue #42 available
-    let issue_tracker = Arc::new(FakeIssueTracker::new());
+    let issue_tracker = Arc::new(FakeIssueProvider::new());
     issue_tracker
         .add_issues(vec![("42".into(), Issue {
             title: "Fix the widget".into(),
@@ -2197,7 +2197,7 @@ async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
     let discovery = fake_discovery_with_providers(
         Some(checkout_manager.clone() as Arc<dyn flotilla_core::providers::vcs::CheckoutManager>),
         None,
-        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueTracker>),
+        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueProvider>),
     );
 
     let temp = tempfile::tempdir().expect("create tempdir");
@@ -2371,7 +2371,7 @@ async fn attachable_set_cascade_deletes_on_checkout_removal() {
 #[tokio::test]
 async fn issue_refresh_escalation_resets_cache_and_refetches() {
     // --- Arrange ---
-    // Seed a FakeIssueTracker with 55 initial issues. The `per_page` used by
+    // Seed a FakeIssueProvider with 55 initial issues. The `per_page` used by
     // `ensure_issues_cached` is 50, so 55 issues requires two pages. After
     // escalation, the daemon records `prev_count = 55`, resets the cache,
     // fetches page 1 (50 issues), then `ensure_issues_cached` sees
@@ -2384,14 +2384,14 @@ async fn issue_refresh_escalation_resets_cache_and_refetches() {
         (n.to_string(), issue)
     }
 
-    let issue_tracker = Arc::new(FakeIssueTracker::new());
+    let issue_tracker = Arc::new(FakeIssueProvider::new());
     let initial_issues: Vec<_> = (1..=55).map(make_issue).collect();
     issue_tracker.add_issues(initial_issues).await;
 
     let discovery = fake_discovery_with_providers(
         None,
         None,
-        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueTracker>),
+        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueProvider>),
     );
 
     let temp = tempfile::tempdir().expect("create tempdir");

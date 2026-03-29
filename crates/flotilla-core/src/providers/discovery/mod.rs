@@ -28,7 +28,7 @@ use crate::{
         ai_utility::AiUtility,
         change_request::ChangeRequestTracker,
         coding_agent::CloudAgentService,
-        issue_tracker::IssueTracker,
+        issue_tracker::IssueProvider,
         registry::{ProviderRegistry, ProviderSet},
         terminal::TerminalPool,
         vcs::{CheckoutManager, Vcs},
@@ -252,7 +252,7 @@ pub enum ProviderCategory {
     Vcs,
     CheckoutManager,
     ChangeRequest,
-    IssueTracker,
+    IssueProvider,
     CloudAgent,
     AiUtility,
     WorkspaceManager,
@@ -266,7 +266,7 @@ impl ProviderCategory {
             Self::Vcs => "vcs",
             Self::CheckoutManager => "checkout_manager",
             Self::ChangeRequest => "change_request",
-            Self::IssueTracker => "issue_tracker",
+            Self::IssueProvider => "issue_tracker",
             Self::CloudAgent => "cloud_agent",
             Self::AiUtility => "ai_utility",
             Self::WorkspaceManager => "workspace_manager",
@@ -280,7 +280,7 @@ impl ProviderCategory {
             Self::Vcs => "VCS",
             Self::CheckoutManager => "Checkout Manager",
             Self::ChangeRequest => "Change Requests",
-            Self::IssueTracker => "Issue Tracker",
+            Self::IssueProvider => "Issue Provider",
             Self::CloudAgent => "Cloud Agent",
             Self::AiUtility => "AI Utility",
             Self::WorkspaceManager => "Workspace Manager",
@@ -430,7 +430,7 @@ pub type ServiceFactory<T> = dyn Factory<Descriptor = ServiceDescriptor, Output 
 pub type VcsFactory = ProviderFactory<dyn Vcs>;
 pub type CheckoutManagerFactory = ProviderFactory<dyn CheckoutManager>;
 pub type ChangeRequestFactory = ProviderFactory<dyn ChangeRequestTracker>;
-pub type IssueTrackerFactory = ProviderFactory<dyn IssueTracker>;
+pub type IssueProviderFactory = ProviderFactory<dyn IssueProvider>;
 pub type CloudAgentFactory = ProviderFactory<dyn CloudAgentService>;
 pub type AiUtilityFactory = ProviderFactory<dyn AiUtility>;
 pub type WorkspaceManagerFactory = ProviderFactory<dyn WorkspaceManager>;
@@ -445,7 +445,7 @@ pub struct FactoryRegistry {
     pub vcs: Vec<Box<VcsFactory>>,
     pub checkout_managers: Vec<Box<CheckoutManagerFactory>>,
     pub change_requests: Vec<Box<ChangeRequestFactory>>,
-    pub issue_trackers: Vec<Box<IssueTrackerFactory>>,
+    pub issue_trackers: Vec<Box<IssueProviderFactory>>,
     pub cloud_agents: Vec<Box<CloudAgentFactory>>,
     pub ai_utilities: Vec<Box<AiUtilityFactory>>,
     pub workspace_managers: Vec<Box<WorkspaceManagerFactory>>,
@@ -670,7 +670,7 @@ pub async fn discover_providers(
     );
     apply_backend_pref(
         &mut registry.issue_trackers,
-        ProviderCategory::IssueTracker,
+        ProviderCategory::IssueProvider,
         flotilla_config.issue_tracker.preference.backend.as_deref(),
         &mut unmet,
     );

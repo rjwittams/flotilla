@@ -11,7 +11,7 @@ use crate::{
         change_request::{github::GitHubChangeRequest, ChangeRequestTracker},
         discovery::{EnvironmentBag, Factory, HostPlatform, ProviderCategory, ProviderDescriptor, UnmetRequirement},
         github_api::GhApiClient,
-        issue_tracker::{github::GitHubIssueTracker, IssueTracker},
+        issue_tracker::{github::GitHubIssueTracker, IssueProvider},
         CommandRunner,
     },
 };
@@ -68,18 +68,18 @@ impl Factory for GitHubChangeRequestFactory {
 }
 
 // ---------------------------------------------------------------------------
-// GitHubIssueTrackerFactory
+// GitHubIssueProviderFactory
 // ---------------------------------------------------------------------------
 
-pub struct GitHubIssueTrackerFactory;
+pub struct GitHubIssueProviderFactory;
 
 #[async_trait]
-impl Factory for GitHubIssueTrackerFactory {
+impl Factory for GitHubIssueProviderFactory {
     type Descriptor = ProviderDescriptor;
-    type Output = dyn IssueTracker;
+    type Output = dyn IssueProvider;
 
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor::labeled_simple(ProviderCategory::IssueTracker, "github", "GitHub Issues", "#", "Issues", "issue")
+        ProviderDescriptor::labeled_simple(ProviderCategory::IssueProvider, "github", "GitHub Issues", "#", "Issues", "issue")
     }
 
     async fn probe(
@@ -88,7 +88,7 @@ impl Factory for GitHubIssueTrackerFactory {
         _config: &ConfigStore,
         _repo_root: &ExecutionEnvironmentPath,
         runner: Arc<dyn CommandRunner>,
-    ) -> Result<Arc<dyn IssueTracker>, Vec<UnmetRequirement>> {
+    ) -> Result<Arc<dyn IssueProvider>, Vec<UnmetRequirement>> {
         let repo_slug = github_repo_slug(env)?;
         let api = Arc::new(GhApiClient::new(runner.clone()));
         Ok(Arc::new(GitHubIssueTracker::new("github".into(), repo_slug, api, runner)))
@@ -103,7 +103,7 @@ impl Factory for GitHubIssueTrackerFactory {
 mod tests {
     use std::sync::Arc;
 
-    use super::{GitHubChangeRequestFactory, GitHubIssueTrackerFactory};
+    use super::{GitHubChangeRequestFactory, GitHubIssueProviderFactory};
     use crate::{
         config::ConfigStore,
         path_context::ExecutionEnvironmentPath,
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(desc.item_noun, "pull request");
     }
 
-    // ── GitHubIssueTrackerFactory tests ──
+    // ── GitHubIssueProviderFactory tests ──
 
     #[tokio::test]
     async fn github_issue_tracker_factory_succeeds() {
@@ -197,7 +197,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitHubIssueTrackerFactory.probe(&bag, &config, &ExecutionEnvironmentPath::new("/repo"), runner).await;
+        let result = GitHubIssueProviderFactory.probe(&bag, &config, &ExecutionEnvironmentPath::new("/repo"), runner).await;
         assert!(result.is_ok());
     }
 
@@ -207,7 +207,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitHubIssueTrackerFactory.probe(&bag, &config, &ExecutionEnvironmentPath::new("/repo"), runner).await;
+        let result = GitHubIssueProviderFactory.probe(&bag, &config, &ExecutionEnvironmentPath::new("/repo"), runner).await;
         let unmet = result.err().expect("should fail without gh binary");
         assert!(unmet.contains(&UnmetRequirement::MissingBinary("gh".into())));
         assert!(!unmet.contains(&UnmetRequirement::MissingRemoteHost(HostPlatform::GitHub)));
@@ -219,7 +219,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitHubIssueTrackerFactory.probe(&bag, &config, &ExecutionEnvironmentPath::new("/repo"), runner).await;
+        let result = GitHubIssueProviderFactory.probe(&bag, &config, &ExecutionEnvironmentPath::new("/repo"), runner).await;
         let unmet = result.err().expect("should fail without remote host");
         assert!(unmet.contains(&UnmetRequirement::MissingRemoteHost(HostPlatform::GitHub)));
         assert!(!unmet.contains(&UnmetRequirement::MissingBinary("gh".into())));
@@ -231,7 +231,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let config = ConfigStore::with_base(dir.path());
         let runner = Arc::new(DiscoveryMockRunner::builder().build());
-        let result = GitHubIssueTrackerFactory.probe(&bag, &config, &ExecutionEnvironmentPath::new("/repo"), runner).await;
+        let result = GitHubIssueProviderFactory.probe(&bag, &config, &ExecutionEnvironmentPath::new("/repo"), runner).await;
         let unmet = result.err().expect("should fail with both missing");
         assert!(unmet.contains(&UnmetRequirement::MissingBinary("gh".into())));
         assert!(unmet.contains(&UnmetRequirement::MissingRemoteHost(HostPlatform::GitHub)));
@@ -240,7 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn github_issue_tracker_factory_descriptor() {
-        let desc = GitHubIssueTrackerFactory.descriptor();
+        let desc = GitHubIssueProviderFactory.descriptor();
         assert_eq!(desc.backend, "github");
         assert_eq!(desc.implementation, "github");
         assert_eq!(desc.display_name, "GitHub Issues");
