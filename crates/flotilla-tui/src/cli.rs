@@ -502,14 +502,17 @@ pub async fn run_watch(socket_path: &Path, format: OutputFormat) -> Result<(), S
 }
 
 pub async fn run_command(daemon: &dyn DaemonHandle, command: Command, format: OutputFormat) -> Result<(), String> {
-    let is_query = command.action.is_query();
+    if command.action.is_query() {
+        return run_query_command(daemon, command, format).await;
+    }
+
     let mut rx = daemon.subscribe();
     let command_id = daemon.execute(command).await?;
 
     loop {
         match rx.recv().await {
             Ok(ref event @ DaemonEvent::CommandStarted { command_id: id, .. }) if id == command_id => {
-                if matches!(format, OutputFormat::Human) && !is_query {
+                if matches!(format, OutputFormat::Human) {
                     println!("{}", format_event_human(event));
                 }
             }
@@ -521,11 +524,7 @@ pub async fn run_command(daemon: &dyn DaemonHandle, command: Command, format: Ou
             Ok(ref event @ DaemonEvent::CommandFinished { command_id: id, ref result, .. }) if id == command_id => {
                 match format {
                     OutputFormat::Human => {
-                        if is_query {
-                            print!("{}", format_command_result(result));
-                        } else {
-                            println!("{}", format_event_human(event));
-                        }
+                        println!("{}", format_event_human(event));
                     }
                     OutputFormat::Json => {
                         println!("{}", flotilla_protocol::output::json_pretty(&result));
@@ -548,6 +547,23 @@ pub async fn run_command(daemon: &dyn DaemonHandle, command: Command, format: Ou
                 return Err("daemon disconnected".into());
             }
         }
+    }
+}
+
+async fn run_query_command(daemon: &dyn DaemonHandle, command: Command, format: OutputFormat) -> Result<(), String> {
+    let result = daemon.execute_query(command).await?;
+    match format {
+        OutputFormat::Human => {
+            print!("{}", format_command_result(&result));
+        }
+        OutputFormat::Json => {
+            println!("{}", flotilla_protocol::output::json_pretty(&result));
+        }
+    }
+    match result {
+        CommandValue::Error { message } => Err(message),
+        CommandValue::Cancelled => Err("command cancelled".into()),
+        _ => Ok(()),
     }
 }
 

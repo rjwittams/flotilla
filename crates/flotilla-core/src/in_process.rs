@@ -2062,6 +2062,30 @@ impl DaemonHandle for InProcessDaemon {
     async fn execute_query(&self, command: Command) -> Result<flotilla_protocol::CommandValue, String> {
         use flotilla_protocol::CommandAction;
         match &command.action {
+            CommandAction::QueryRepoDetail { repo } => match self.get_repo_detail_internal(repo).await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::RepoDetail(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryRepoProviders { repo } => match self.get_repo_providers_internal(repo).await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::RepoProviders(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryRepoWork { repo } => match self.get_repo_work_internal(repo).await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::RepoWork(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryHostList {} => match self.list_hosts_internal().await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::HostList(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryHostStatus { target_host } => match self.get_host_status_internal(target_host).await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::HostStatus(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryHostProviders { target_host } => match self.get_host_providers_internal(target_host).await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::HostProviders(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
             CommandAction::QueryIssueOpen { repo, params } => {
                 let repo_path = self.resolve_repo_selector(repo).await?;
                 let identity =

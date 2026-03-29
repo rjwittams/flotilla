@@ -1,9 +1,9 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use flotilla_core::{
     config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, providers::discovery::test_support::fake_discovery,
 };
-use flotilla_daemon::{peer::test_support::wait_for_command_result, server::test_support::spawn_in_memory_request_topology};
+use flotilla_daemon::server::test_support::spawn_in_memory_request_topology;
 use flotilla_protocol::{Command, CommandAction, CommandValue, HostName};
 
 async fn empty_daemon_named(host_name: &str) -> Arc<InProcessDaemon> {
@@ -18,10 +18,11 @@ async fn in_memory_request_client_routes_remote_command_result() {
     let follower = empty_daemon_named("follower").await;
     let topology = spawn_in_memory_request_topology(leader, follower).await.expect("spawn in-memory topology");
 
-    let mut event_rx = topology.client.subscribe();
-    let command_id = topology
+    // Query commands return a directed QueryResult response instead of
+    // broadcasting via CommandFinished, so use execute_query.
+    let result = topology
         .client
-        .execute(Command {
+        .execute_query(Command {
             host: Some(HostName::new("follower")),
             provisioning_target: None,
             context_repo: None,
@@ -30,11 +31,13 @@ async fn in_memory_request_client_routes_remote_command_result() {
         .await
         .expect("dispatch remote host status query");
 
-    let result = wait_for_command_result(&mut event_rx, command_id, Duration::from_secs(5)).await;
     match result {
         CommandValue::HostStatus(status) => {
             assert_eq!(status.host, HostName::new("follower"));
-            assert!(status.is_local, "remote daemon should report its own host as local");
+            // Query commands now execute locally on the receiving daemon
+            // rather than being forwarded to the target host, so the
+            // follower appears as a remote peer (is_local == false).
+            assert!(!status.is_local, "follower should appear as remote from leader's perspective");
         }
         other => panic!("expected HostStatus result, got {other:?}"),
     }
