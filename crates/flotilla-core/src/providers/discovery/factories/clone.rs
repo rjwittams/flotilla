@@ -60,6 +60,8 @@ impl Factory for CloneCheckoutManagerFactory {
             return Err(vec![UnmetRequirement::MissingBinary("git (reference repo at /ref/repo)".into())]);
         }
 
+        // host_name is set on the EnvironmentBag at daemon startup. The fallback covers
+        // test scenarios where factories are probed without a full discovery runtime.
         let host_name = env.host_name().cloned().unwrap_or_else(flotilla_protocol::HostName::local);
         Ok(Arc::new(CloneCheckoutManager::new(runner, ExecutionEnvironmentPath::new("/ref/repo"), host_name)))
     }

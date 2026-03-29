@@ -93,7 +93,8 @@ impl FromStr for QualifiedPath {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Format: "host:id:path" or "env:id:path"
+        // Format: "host:<id>:<path>" or "env:<id>:<path>"
+        // Constraint: <id> must not contain colons (splits on first two colons).
         let (prefix, rest) =
             s.split_once(':').ok_or_else(|| format!("invalid QualifiedPath: expected 'host:id:path' or 'env:id:path', got '{s}'"))?;
         let (id, path) =

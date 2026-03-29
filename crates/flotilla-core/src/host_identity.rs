@@ -1,3 +1,9 @@
+//! Stable host identity with machine-id scoping.
+//!
+//! Pre-wired for the node identity spec (2026-03-28). Will be called from
+//! daemon startup to resolve the local machine's `HostId` once `NodeId`
+//! and the full identity lifecycle are implemented.
+
 use std::{
     fs,
     path::{Path, PathBuf},
