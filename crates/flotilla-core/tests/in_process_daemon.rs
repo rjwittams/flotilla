@@ -2663,12 +2663,6 @@ async fn remove_checkout_with_host_disambiguates_among_peers() {
         })
         .await
         .expect_err("remote host command should fail in test (no remote executor)");
-    assert!(
-        err.contains("remote command routing"),
-        "expected remote routing error (meaning resolution succeeded), got: {err}"
-    );
-    assert!(
-        !err.contains("ambiguous"),
-        "should not be ambiguous when host is specified, got: {err}"
-    );
+    assert!(err.contains("remote command routing"), "expected remote routing error (meaning resolution succeeded), got: {err}");
+    assert!(!err.contains("ambiguous"), "should not be ambiguous when host is specified, got: {err}");
 }
