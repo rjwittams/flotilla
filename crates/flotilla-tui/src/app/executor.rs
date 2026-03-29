@@ -52,10 +52,11 @@ pub async fn dispatch(cmd: Command, app: &mut App, pending_ctx: Option<PendingAc
                     let _ = tx.send(IssueQueryUpdate::QueryFailed {
                         repo: repo_identity,
                         message: format!("unexpected query result: {other:?}"),
+                        is_search,
                     });
                 }
                 Err(e) => {
-                    let _ = tx.send(IssueQueryUpdate::QueryFailed { repo: repo_identity, message: e });
+                    let _ = tx.send(IssueQueryUpdate::QueryFailed { repo: repo_identity, message: e, is_search });
                 }
             }
         });

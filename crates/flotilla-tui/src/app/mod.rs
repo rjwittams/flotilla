@@ -540,9 +540,39 @@ impl App {
                         self.push_issue_items_to_repo_data(&repo);
                     }
                 }
-                IssueQueryUpdate::QueryFailed { repo: _, message } => {
-                    tracing::warn!(%message, "issue query failed");
+                IssueQueryUpdate::QueryFailed { repo, message, is_search } => {
+                    tracing::warn!(%message, %is_search, "issue query failed");
                     self.set_status_message(Some(message));
+                    if is_search {
+                        // Revert to the default listing.
+                        if let Some(view) = self.issue_views.get_mut(&repo) {
+                            view.search = None;
+                            view.search_query = None;
+                        }
+                        self.push_issue_items_to_repo_data(&repo);
+                    } else {
+                        // Remove the entry so `maybe_open_default_issue_cursor`
+                        // can retry on the next snapshot.
+                        self.issue_views.remove(&repo);
+                    }
+                }
+                IssueQueryUpdate::PageFetchFailed { repo, cursor, message } => {
+                    tracing::warn!(%message, "issue page fetch failed");
+                    self.set_status_message(Some(message));
+                    if let Some(view) = self.issue_views.get_mut(&repo) {
+                        // Clear fetch_pending on the matching cursor so the user
+                        // can scroll to trigger a retry.
+                        let target = if view.search.as_ref().is_some_and(|s| s.cursor == cursor) {
+                            view.search.as_mut()
+                        } else if view.default.as_ref().is_some_and(|d| d.cursor == cursor) {
+                            view.default.as_mut()
+                        } else {
+                            None
+                        };
+                        if let Some(cursor_state) = target {
+                            cursor_state.fetch_pending = false;
+                        }
+                    }
                 }
             }
         }
@@ -565,11 +595,14 @@ impl App {
                     let _ = tx.send(issue_view::IssueQueryUpdate::PageFetched { repo, cursor, page });
                 }
                 Ok(other) => {
-                    let _ =
-                        tx.send(issue_view::IssueQueryUpdate::QueryFailed { repo, message: format!("unexpected query result: {other:?}") });
+                    let _ = tx.send(issue_view::IssueQueryUpdate::PageFetchFailed {
+                        repo,
+                        cursor,
+                        message: format!("unexpected query result: {other:?}"),
+                    });
                 }
                 Err(e) => {
-                    let _ = tx.send(issue_view::IssueQueryUpdate::QueryFailed { repo, message: e });
+                    let _ = tx.send(issue_view::IssueQueryUpdate::PageFetchFailed { repo, cursor, message: e });
                 }
             }
         });
@@ -577,7 +610,10 @@ impl App {
 
     /// Open a default issue cursor for a repo if one hasn't been opened yet.
     fn maybe_open_default_issue_cursor(&self, repo_identity: &RepoIdentity) {
-        if self.issue_views.contains_key(repo_identity) {
+        // Only open if there is no valid default cursor yet. Checking the inner
+        // `default` field (rather than the map key) allows retry after a
+        // previous failure removed the cursor state.
+        if self.issue_views.get(repo_identity).and_then(|v| v.default.as_ref()).is_some() {
             return;
         }
         // Guard: only spawn when inside a tokio runtime (unit tests that call
@@ -603,9 +639,17 @@ impl App {
                 Ok(CommandValue::IssueQueryOpened { cursor }) => {
                     let _ = tx.send(issue_view::IssueQueryUpdate::DefaultCursorOpened { repo: repo_id, cursor });
                 }
-                Ok(_) => { /* ignore unexpected result for default cursor */ }
+                Ok(other) => {
+                    tracing::debug!(repo = %repo_id.path, ?other, "default issue cursor open: unexpected result");
+                    let _ = tx.send(issue_view::IssueQueryUpdate::QueryFailed {
+                        repo: repo_id,
+                        message: format!("unexpected query result: {other:?}"),
+                        is_search: false,
+                    });
+                }
                 Err(e) => {
                     tracing::debug!(repo = %repo_id.path, %e, "default issue cursor open failed (expected when no issue provider)");
+                    let _ = tx.send(issue_view::IssueQueryUpdate::QueryFailed { repo: repo_id, message: e, is_search: false });
                 }
             }
         });

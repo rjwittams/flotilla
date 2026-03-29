@@ -97,8 +97,11 @@ pub enum IssueQueryUpdate {
     SearchCursorOpened { repo: flotilla_protocol::RepoIdentity, cursor: CursorId, query: String },
     /// A page of results arrived for a cursor.
     PageFetched { repo: flotilla_protocol::RepoIdentity, cursor: CursorId, page: IssueResultPage },
-    /// A query command failed.
-    QueryFailed { repo: flotilla_protocol::RepoIdentity, message: String },
+    /// A cursor-open query failed.  `is_search` distinguishes default from
+    /// search cursors so the handler can clean up the right state.
+    QueryFailed { repo: flotilla_protocol::RepoIdentity, message: String, is_search: bool },
+    /// A page-fetch request failed for an already-open cursor.
+    PageFetchFailed { repo: flotilla_protocol::RepoIdentity, cursor: CursorId, message: String },
 }
 
 #[cfg(test)]
