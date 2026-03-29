@@ -587,6 +587,11 @@ impl InProcessDaemon {
                 &snapshot_owned.providers
             };
             for (host_path, checkout) in &providers.checkouts {
+                if let Some(host) = target_host {
+                    if host_path.host_id().map(|h| h.as_str()) != Some(host.as_str()) {
+                        continue;
+                    }
+                }
                 let matched = match selector {
                     flotilla_protocol::CheckoutSelector::Path(path) => host_path.path == *path,
                     flotilla_protocol::CheckoutSelector::Query(query) => {
