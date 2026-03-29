@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-fn github_repo_slug(env: &EnvironmentBag) -> Result<String, Vec<UnmetRequirement>> {
+pub(super) fn github_repo_slug(env: &EnvironmentBag) -> Result<String, Vec<UnmetRequirement>> {
     let mut unmet = vec![];
     if env.find_binary("gh").is_none() {
         unmet.push(UnmetRequirement::MissingBinary("gh".into()));

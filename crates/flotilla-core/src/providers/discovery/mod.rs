@@ -436,6 +436,7 @@ pub type AiUtilityFactory = ProviderFactory<dyn AiUtility>;
 pub type WorkspaceManagerFactory = ProviderFactory<dyn WorkspaceManager>;
 pub type TerminalPoolFactory = ProviderFactory<dyn TerminalPool>;
 pub type EnvironmentProviderFactory = ProviderFactory<dyn crate::providers::environment::EnvironmentProvider>;
+pub type IssueQueryServiceFactory = ServiceFactory<dyn crate::providers::issue_query::IssueQueryService>;
 
 // ---------------------------------------------------------------------------
 // Factory registry
@@ -451,6 +452,7 @@ pub struct FactoryRegistry {
     pub workspace_managers: Vec<Box<WorkspaceManagerFactory>>,
     pub terminal_pools: Vec<Box<TerminalPoolFactory>>,
     pub environment_providers: Vec<Box<EnvironmentProviderFactory>>,
+    pub issue_query_services: Vec<Box<IssueQueryServiceFactory>>,
 }
 
 impl FactoryRegistry {
@@ -510,6 +512,14 @@ impl FactoryRegistry {
             registry.environment_providers.insert(desc.implementation.clone(), desc, p);
         }
 
+        // Probe issue query service factories (ServiceDescriptor, not ProviderDescriptor).
+        for factory in &self.issue_query_services {
+            if let Ok(service) = factory.probe(env, config, repo_root, runner.clone()).await {
+                let desc = factory.descriptor();
+                registry.issue_query_services.insert(desc.implementation.clone(), desc, service);
+            }
+        }
+
         registry
     }
 }
@@ -548,6 +558,7 @@ impl DiscoveryRuntime {
             && self.factories.issue_trackers.is_empty()
             && self.factories.cloud_agents.is_empty()
             && self.factories.ai_utilities.is_empty()
+            && self.factories.issue_query_services.is_empty()
     }
 }
 
@@ -645,6 +656,20 @@ pub async fn discover_providers(
         registry.environment_providers.insert(desc.implementation.clone(), desc, provider);
     })
     .await;
+
+    // Probe issue query service factories (ServiceDescriptor, not ProviderDescriptor).
+    for factory in &factories.issue_query_services {
+        match factory.probe(&combined, config, repo_root, runner.clone()).await {
+            Ok(service) => {
+                let desc = factory.descriptor();
+                registry.issue_query_services.insert(desc.implementation.clone(), desc, service);
+            }
+            Err(reqs) => {
+                let desc = factory.descriptor();
+                unmet.extend(reqs.into_iter().map(|r| (desc.implementation.clone(), r)));
+            }
+        }
+    }
 
     // Apply provider preferences from config, tracking unresolved preferences.
     let flotilla_config = config.load_config();
@@ -864,6 +889,7 @@ mod orchestrator_tests {
             workspace_managers: vec![],
             terminal_pools: vec![],
             environment_providers: vec![],
+            issue_query_services: vec![],
         };
 
         let result = discover_providers(&host_bag, &repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
@@ -893,6 +919,7 @@ mod orchestrator_tests {
             workspace_managers: vec![],
             terminal_pools: vec![],
             environment_providers: vec![],
+            issue_query_services: vec![],
         };
 
         let result = discover_providers(&host_bag, &repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
