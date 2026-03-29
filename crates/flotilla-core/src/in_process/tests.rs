@@ -1,48 +1,6 @@
-use flotilla_protocol::{AssociationKey, ChangeRequest, ChangeRequestStatus, Checkout};
+use flotilla_protocol::Checkout;
 
 use super::*;
-
-fn checkout_with_issue(issue_id: &str) -> Checkout {
-    Checkout {
-        branch: "main".into(),
-        is_main: true,
-        trunk_ahead_behind: None,
-        remote_ahead_behind: None,
-        working_tree: None,
-        last_commit: None,
-        correlation_keys: vec![],
-        association_keys: vec![AssociationKey::IssueRef("gh".into(), issue_id.into())],
-        environment_id: None,
-    }
-}
-
-fn cr_with_issue(issue_id: &str) -> ChangeRequest {
-    ChangeRequest {
-        title: "Fix bug".into(),
-        branch: "feature/fix".into(),
-        status: ChangeRequestStatus::Open,
-        body: None,
-        correlation_keys: vec![],
-        association_keys: vec![AssociationKey::IssueRef("gh".into(), issue_id.into())],
-        provider_name: String::new(),
-        provider_display_name: String::new(),
-    }
-}
-
-#[test]
-fn collect_linked_issue_ids_deduplicates_across_sources() {
-    let mut providers = ProviderData::default();
-    providers.checkouts.insert(
-        flotilla_protocol::HostPath::new(flotilla_protocol::HostName::new("test-host"), PathBuf::from("/tmp/repo")),
-        checkout_with_issue("123"),
-    );
-    providers.change_requests.insert("1".into(), cr_with_issue("123"));
-    providers.change_requests.insert("2".into(), cr_with_issue("456"));
-
-    let mut ids = collect_linked_issue_ids(&providers);
-    ids.sort();
-    assert_eq!(ids, vec!["123".to_string(), "456".to_string()]);
-}
 
 #[test]
 fn choose_event_uses_delta_for_non_initial_changes() {
@@ -109,17 +67,6 @@ fn build_repo_snapshot_basic() {
         None,
     );
     assert_eq!(snap.seq, 7);
-}
-
-// --- now_iso8601 ---
-
-#[test]
-fn now_iso8601_returns_parseable_timestamp() {
-    let ts = now_iso8601();
-    assert!(ts.ends_with('Z'), "should be UTC: {ts}");
-    assert!(ts.len() >= 20, "should be a full ISO 8601 timestamp: {ts}");
-    // Verify it parses as a valid RFC 3339 timestamp
-    chrono::DateTime::parse_from_rfc3339(&ts).expect("should parse as RFC 3339");
 }
 
 // --- choose_event edge case: empty changes with prev_seq > 0 ---

@@ -19,8 +19,8 @@ use flotilla_core::{
         discovery::{
             test_support::{
                 fake_discovery, fake_discovery_with_provider_set, fake_discovery_with_providers, fake_vcs_discovery, git_process_discovery,
-                init_git_repo_with_remote, FakeCheckoutManager, FakeCheckoutManagerFactory, FakeDiscoveryProviders, FakeIssueProvider,
-                FakeTerminalPool, FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
+                init_git_repo_with_remote, FakeCheckoutManager, FakeCheckoutManagerFactory, FakeDiscoveryProviders, FakeTerminalPool,
+                FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
             },
             DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostPlatform, ProviderCategory, ProviderDescriptor,
             RepoDetector, UnmetRequirement,
@@ -29,9 +29,9 @@ use flotilla_core::{
     },
 };
 use flotilla_protocol::{
-    AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, CorrelationKey, DaemonEvent,
-    HostEnvironment, HostName, HostPath, HostProviderStatus, HostSummary, Issue, PeerConnectionState, ProviderData, RepoIdentity,
-    RepoSelector, StreamKey, SystemInfo, ToolInventory, TopologyRoute, WorkItemKind,
+    Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, CorrelationKey, DaemonEvent, HostEnvironment,
+    HostName, HostPath, HostProviderStatus, HostSummary, PeerConnectionState, ProviderData, RepoIdentity, RepoSelector, StreamKey,
+    SystemInfo, ToolInventory, TopologyRoute, WorkItemKind,
 };
 use tokio::sync::Notify;
 
@@ -2128,88 +2128,6 @@ async fn cancel_nonexistent_command_returns_error() {
 }
 
 #[tokio::test]
-async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
-    // --- Arrange ---
-
-    // Create a checkout that references issue #42
-    let checkout_manager = Arc::new(FakeCheckoutManager::new());
-    checkout_manager
-        .add_checkouts(vec![(PathBuf::from("/tmp/repo/feat-branch"), Checkout {
-            branch: "feat-branch".into(),
-            is_main: false,
-            trunk_ahead_behind: None,
-            remote_ahead_behind: None,
-            working_tree: None,
-            last_commit: None,
-            correlation_keys: vec![CorrelationKey::Branch("feat-branch".into())],
-            association_keys: vec![AssociationKey::IssueRef("fake-issues".into(), "42".into())],
-            environment_id: None,
-        })])
-        .await;
-
-    // Create an issue tracker that has issue #42 available
-    let issue_tracker = Arc::new(FakeIssueProvider::new());
-    issue_tracker
-        .add_issues(vec![("42".into(), Issue {
-            title: "Fix the widget".into(),
-            labels: vec!["bug".into()],
-            association_keys: vec![AssociationKey::IssueRef("fake-issues".into(), "42".into())],
-            provider_name: "fake-issues".into(),
-            provider_display_name: "Fake Issues".into(),
-        })])
-        .await;
-
-    let discovery = fake_discovery_with_providers(
-        Some(checkout_manager.clone() as Arc<dyn flotilla_core::providers::vcs::CheckoutManager>),
-        None,
-        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueProvider>),
-    );
-
-    let temp = tempfile::tempdir().expect("create tempdir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir_all(&repo).expect("create repo dir");
-    let config = Arc::new(flotilla_core::config::ConfigStore::with_base(temp.path().join("config")));
-    let daemon =
-        flotilla_core::in_process::InProcessDaemon::new(vec![repo.clone()], config, discovery, flotilla_protocol::HostName::local()).await;
-
-    let mut rx = daemon.subscribe();
-
-    // --- Act ---
-    // Trigger a refresh. The refresh loop will:
-    // 1. Call FakeCheckoutManager::list_checkouts → checkout with IssueRef("42")
-    // 2. Broadcast initial snapshot (no issues yet)
-    // 3. Call fetch_missing_linked_issues → finds "42" missing → calls fetch_issues_by_id
-    // 4. Broadcast updated snapshot with pinned issue
-    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh should succeed");
-
-    // --- Assert ---
-    // Wait for at least one snapshot/delta event after the refresh.
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match rx.recv().await {
-                Ok(DaemonEvent::RepoSnapshot(_) | DaemonEvent::RepoDelta(_)) => return,
-                Ok(_) => {}
-                Err(e) => panic!("unexpected recv error: {e:?}"),
-            }
-        }
-    })
-    .await
-    .expect("timed out waiting for snapshot after refresh");
-
-    // Allow a brief window for the background linked-issue fetch to complete.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // Verify fetch_issues_by_id was actually called (not just paginated)
-    let fetched: Vec<Vec<String>> = issue_tracker.fetched_by_id.lock().await.clone();
-    assert!(!fetched.is_empty(), "fetch_issues_by_id should have been called");
-    assert!(fetched.iter().any(|ids| ids.contains(&"42".to_string())), "fetch_issues_by_id should have been called with id '42'");
-
-    // Verify the issue is in the cache (it's no longer injected into the snapshot)
-    let cached = daemon.issue_cache_len_for_test(&repo).await;
-    assert!(cached > 0, "issue cache should contain the pinned issue");
-}
-
-#[tokio::test]
 async fn attachable_set_cascade_deletes_on_checkout_removal() {
     // --- Arrange ---
     // Create a checkout manager with a branch that will be removed.
@@ -2312,111 +2230,6 @@ async fn attachable_set_cascade_deletes_on_checkout_removal() {
         !snapshot_after.providers.attachable_sets.contains_key(&set_id),
         "attachable set should not appear in snapshot after checkout removal"
     );
-}
-
-#[tokio::test]
-async fn issue_refresh_escalation_resets_cache_and_refetches() {
-    // --- Arrange ---
-    // Seed a FakeIssueProvider with 55 initial issues. The `per_page` used by
-    // `ensure_issues_cached` is 50, so 55 issues requires two pages. After
-    // escalation, the daemon records `prev_count = 55`, resets the cache,
-    // fetches page 1 (50 issues), then `ensure_issues_cached` sees
-    // `cache.len() (50) < desired_count (55)` and fetches page 2 — proving
-    // multi-page continuation works.
-    fn make_issue(n: u32) -> (String, Issue) {
-        let mut issue = flotilla_protocol::test_support::TestIssue::new(&format!("Issue {n}")).build();
-        issue.provider_name = "fake-issues".into();
-        issue.provider_display_name = "Fake Issues".into();
-        (n.to_string(), issue)
-    }
-
-    let issue_tracker = Arc::new(FakeIssueProvider::new());
-    let initial_issues: Vec<_> = (1..=55).map(make_issue).collect();
-    issue_tracker.add_issues(initial_issues).await;
-
-    let discovery = fake_discovery_with_providers(
-        None,
-        None,
-        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueProvider>),
-    );
-
-    let temp = tempfile::tempdir().expect("create tempdir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir_all(&repo).expect("create repo dir");
-    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config, discovery, HostName::local()).await;
-
-    let mut rx = daemon.subscribe();
-
-    // Trigger initial refresh to populate issue cache with all 55 issues.
-    daemon.ensure_issues_cached_for_test(&repo, 60).await;
-
-    // Verify initial state: all 55 issues should be cached.
-    let cached_count = daemon.issue_cache_len_for_test(&repo).await;
-    assert_eq!(cached_count, 55, "should have 55 issues initially cached");
-
-    // --- Act ---
-    // Add 5 new issues (simulating upstream changes) and enable forced
-    // escalation. Total is now 60 issues across two pages (50 + 10).
-    let new_issues: Vec<_> = (56..=60)
-        .map(|n| {
-            (n.to_string(), Issue {
-                title: format!("Issue {n}"),
-                labels: vec!["new".into()],
-                association_keys: vec![],
-                provider_name: "fake-issues".into(),
-                provider_display_name: "Fake Issues".into(),
-            })
-        })
-        .collect();
-    issue_tracker.add_issues(new_issues).await;
-    issue_tracker.set_force_escalation(true);
-
-    // Clear pages_fetched so we can observe just the escalation fetches.
-    issue_tracker.pages_fetched.lock().await.clear();
-
-    // Set last_refreshed_at to a timestamp far in the past so the
-    // MIN_INTERVAL_SECS (30s) guard in refresh_issues_incremental passes.
-    daemon.set_issue_cache_refreshed_at_for_test(&repo, "2020-01-01T00:00:00Z").await;
-
-    // Drain any pending events before triggering the escalation.
-    while rx.try_recv().is_ok() {}
-
-    // Directly invoke the incremental issue refresh. Since force_escalation
-    // is enabled, list_issues_changed_since will return has_more: true,
-    // triggering the full re-fetch escalation path.
-    daemon.refresh_issues_incremental_for_test().await;
-
-    // --- Assert ---
-    // The escalation path should have: reset the cache, fetched page 1
-    // (50 issues) via list_issues_page, then ensure_issues_cached should
-    // have fetched page 2 (10 issues) because prev_count (55) > page 1
-    // count (50), and finally broadcast a snapshot.
-
-    // Verify multi-page fetches occurred: page 1 (escalation) + page 2
-    // (ensure_issues_cached continuation).
-    let pages = issue_tracker.pages_fetched.lock().await.clone();
-    assert!(pages.contains(&1), "escalation should fetch page 1");
-    assert!(pages.contains(&2), "ensure_issues_cached should continue to page 2");
-
-    // Wait for the broadcast event after escalation (cache is updated but
-    // issues are no longer injected into snapshot providers).
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match rx.recv().await {
-                Ok(DaemonEvent::RepoSnapshot(_) | DaemonEvent::RepoDelta(_)) => return,
-                Ok(_) => {}
-                Err(e) => panic!("unexpected recv error: {e:?}"),
-            }
-        }
-    })
-    .await
-    .expect("timed out waiting for snapshot after escalation");
-
-    // The cache should contain all 60 issues from both pages after the
-    // full re-fetch with multi-page continuation.
-    let cached = daemon.issue_cache_len_for_test(&repo).await;
-    assert_eq!(cached, 60, "escalation should re-fetch all 60 issues across two pages");
 }
 
 #[tokio::test]

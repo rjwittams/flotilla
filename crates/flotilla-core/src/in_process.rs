@@ -4,7 +4,7 @@
 //! and broadcasts events — all within the same process.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -15,13 +15,13 @@ use std::{
 
 use async_trait::async_trait;
 use flotilla_protocol::{
-    AssociationKey, Command, CorrelationKey, DaemonEvent, DeltaEntry, HostListResponse, HostName, HostPath, HostProvidersResponse,
-    HostStatusResponse, HostSummary, PeerConnectionState, ProviderData, ProviderInfo, RepoDelta, RepoDetailResponse, RepoInfo,
-    RepoProvidersResponse, RepoSnapshot, RepoSummary, RepoWorkResponse, StatusResponse, StreamKey, TopologyResponse, TopologyRoute,
+    Command, CorrelationKey, DaemonEvent, DeltaEntry, HostListResponse, HostName, HostPath, HostProvidersResponse, HostStatusResponse,
+    HostSummary, PeerConnectionState, ProviderData, ProviderInfo, RepoDelta, RepoDetailResponse, RepoInfo, RepoProvidersResponse,
+    RepoSnapshot, RepoSummary, RepoWorkResponse, StatusResponse, StreamKey, TopologyResponse, TopologyRoute,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::{
     config::ConfigStore,
@@ -45,10 +45,6 @@ fn fallback_repo_identity(path: &Path) -> flotilla_protocol::RepoIdentity {
 
 fn repo_identity_from_bag_or_path(path: &Path, bag: &EnvironmentBag) -> flotilla_protocol::RepoIdentity {
     bag.repo_identity().unwrap_or_else(|| fallback_repo_identity(path))
-}
-
-fn now_iso8601() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn normalize_local_provider_hosts(mut providers: ProviderData, host_name: &HostName) -> ProviderData {
@@ -128,24 +124,6 @@ fn merge_provider_errors(merged: &mut Vec<crate::data::RefreshError>, next: &[cr
             merged.push(err.clone());
         }
     }
-}
-
-/// Extract issue IDs referenced by association keys on change requests and checkouts.
-fn collect_linked_issue_ids(providers: &ProviderData) -> Vec<String> {
-    let mut ids = HashSet::new();
-    for cr in providers.change_requests.values() {
-        for key in &cr.association_keys {
-            let AssociationKey::IssueRef(_, issue_id) = key;
-            ids.insert(issue_id.clone());
-        }
-    }
-    for co in providers.checkouts.values() {
-        for key in &co.association_keys {
-            let AssociationKey::IssueRef(_, issue_id) = key;
-            ids.insert(issue_id.clone());
-        }
-    }
-    ids.into_iter().collect()
 }
 
 /// Build a proto RepoSnapshot, optionally merging peer provider data before correlation.
@@ -646,38 +624,6 @@ impl InProcessDaemon {
         self.peer_providers.read().await.get(identity).cloned().unwrap_or_default()
     }
 
-    /// Test accessor: override the issue cache's `last_refreshed_at` timestamp
-    /// for the given repo path. Useful for bypassing the MIN_INTERVAL_SECS
-    /// guard in `refresh_issues_incremental`.
-    #[cfg(feature = "test-support")]
-    pub async fn set_issue_cache_refreshed_at_for_test(&self, repo: &Path, timestamp: &str) {
-        let identity = self.tracked_repo_identity_for_path(repo).await.expect("set_issue_cache_refreshed_at_for_test: repo not tracked");
-        let mut repos = self.repos.write().await;
-        let state = repos.get_mut(&identity).expect("set_issue_cache_refreshed_at_for_test: repo state not found");
-        state.issue_cache.mark_refreshed(timestamp.to_string());
-    }
-
-    /// Test accessor: directly invoke the incremental issue refresh cycle.
-    #[cfg(feature = "test-support")]
-    pub async fn refresh_issues_incremental_for_test(&self) {
-        self.refresh_issues_incremental().await;
-    }
-
-    /// Test accessor: directly populate the issue cache for a repo.
-    #[cfg(feature = "test-support")]
-    pub async fn ensure_issues_cached_for_test(&self, repo: &Path, desired_count: usize) {
-        self.ensure_issues_cached(repo, desired_count).await;
-    }
-
-    /// Test accessor: return the number of issues in the cache for a repo.
-    #[cfg(feature = "test-support")]
-    pub async fn issue_cache_len_for_test(&self, repo: &Path) -> usize {
-        let identity = self.tracked_repo_identity_for_path(repo).await.expect("issue_cache_len_for_test: repo not tracked");
-        let repos = self.repos.read().await;
-        let state = repos.get(&identity).expect("issue_cache_len_for_test: repo state not found");
-        state.issue_cache.len()
-    }
-
     /// Poll all repos for new refresh snapshots.
     ///
     /// For each repo whose background refresh has produced a new snapshot,
@@ -802,273 +748,7 @@ impl InProcessDaemon {
             let _ = self.event_tx.send(event);
         }
 
-        // After broadcasting, check for linked issues that aren't cached yet
-        // and fetch/pin them. This is a separate step so it doesn't block the
-        // main snapshot broadcast path.
         drop(repos);
-        self.fetch_missing_linked_issues().await;
-        self.refresh_issues_incremental().await;
-    }
-
-    /// Fetch issue pages until the cache has at least `desired_count` entries
-    /// (or no more pages are available).
-    async fn ensure_issues_cached(&self, repo: &Path, desired_count: usize) {
-        let Some(identity) = self.tracked_repo_identity_for_path(repo).await else {
-            return;
-        };
-        // Serialize fetches per-repo to prevent concurrent calls from reading the same
-        // next_page and skipping pages.
-        let mutex = {
-            let repos = self.repos.read().await;
-            match repos.get(&identity) {
-                Some(state) => state.issue_fetch_mutex(),
-                None => return,
-            }
-        };
-        let _guard = mutex.lock().await;
-        loop {
-            // Check cache state and grab registry Arc (single read lock)
-            let (page_num, registry) = {
-                let repos = self.repos.read().await;
-                let Some(state) = repos.get(&identity) else {
-                    return;
-                };
-                let need = state.issue_cache.len() < desired_count && state.issue_cache.has_more;
-                if !need {
-                    break;
-                }
-                if state.registry().issue_trackers.is_empty() {
-                    // No tracker — stop claiming more pages are available
-                    drop(repos);
-                    let mut repos = self.repos.write().await;
-                    if let Some(state) = repos.get_mut(&identity) {
-                        state.issue_cache.has_more = false;
-                    }
-                    break;
-                }
-                (state.issue_cache.next_page, state.registry())
-            };
-
-            // Fetch the next page outside any lock
-            let page_result = {
-                let tracker = registry.issue_trackers.preferred().unwrap();
-                tracker.list_issues_page(repo, page_num, 50).await
-            };
-
-            match page_result {
-                Ok(page) => {
-                    let mut repos = self.repos.write().await;
-                    if let Some(state) = repos.get_mut(&identity) {
-                        state.issue_cache.merge_page(page);
-                        if state.issue_cache.last_refreshed_at.is_none() {
-                            state.issue_cache.mark_refreshed(now_iso8601());
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(%page_num, err = %e, "failed to fetch issue page");
-                    let mut repos = self.repos.write().await;
-                    if let Some(state) = repos.get_mut(&identity) {
-                        state.issue_cache.has_more = false;
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Check all repos for linked issue IDs not yet in the cache, fetch and pin them.
-    async fn fetch_missing_linked_issues(&self) {
-        // Phase 1: read lock — find repos with missing linked issues
-        let fetch_tasks: Vec<_> = {
-            let repos = self.repos.read().await;
-            repos
-                .iter()
-                .filter_map(|(identity, state)| {
-                    let linked_ids = collect_linked_issue_ids(&state.providers());
-                    let missing = state.issue_cache.missing_ids(&linked_ids);
-                    if missing.is_empty() {
-                        return None;
-                    }
-                    Some((identity.clone(), missing, state.registry(), state.issue_fetch_mutex()))
-                })
-                .collect()
-        };
-
-        if fetch_tasks.is_empty() {
-            return;
-        }
-
-        // Phase 2: fetch outside locks, then update cache and re-broadcast.
-        // Acquire the per-repo issue_fetch_mutex to avoid redundant API calls
-        // if ensure_issues_cached is running concurrently.
-        for (identity, missing, registry, fetch_mutex) in fetch_tasks {
-            let _guard = fetch_mutex.lock().await;
-
-            // Re-check missing after acquiring mutex — ensure_issues_cached may
-            // have already fetched some of these while we waited.
-            let (missing, path) = {
-                let repos = self.repos.read().await;
-                let Some(state) = repos.get(&identity) else {
-                    continue;
-                };
-                (state.issue_cache.missing_ids(&missing), state.preferred_path().to_path_buf())
-            };
-            if missing.is_empty() {
-                continue;
-            }
-
-            let Some(tracker) = registry.issue_trackers.preferred() else {
-                continue;
-            };
-            match tracker.fetch_issues_by_id(&path, &missing).await {
-                Ok(fetched) if !fetched.is_empty() => {
-                    {
-                        let mut repos = self.repos.write().await;
-                        if let Some(state) = repos.get_mut(&identity) {
-                            state.issue_cache.add_pinned(fetched);
-                        }
-                    }
-                    self.broadcast_snapshot(&path).await;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!("failed to fetch linked issues for {}: {}", path.display(), e);
-                }
-            }
-        }
-    }
-
-    /// Incremental issue refresh: fetch issues changed since last refresh,
-    /// apply changeset to cache, and broadcast if anything changed.
-    async fn refresh_issues_incremental(&self) {
-        // Minimum interval between incremental refreshes (seconds).
-        const MIN_INTERVAL_SECS: i64 = 30;
-
-        let tasks: Vec<_> = {
-            let repos = self.repos.read().await;
-            repos
-                .iter()
-                .filter_map(|(identity, state)| {
-                    let since = state.issue_cache.last_refreshed_at.as_ref()?;
-                    if state.registry().issue_trackers.is_empty() {
-                        return None;
-                    }
-                    // Skip if refreshed too recently
-                    if let Ok(last) = chrono::DateTime::parse_from_rfc3339(since) {
-                        let elapsed = chrono::Utc::now().signed_duration_since(last).num_seconds();
-                        if elapsed < MIN_INTERVAL_SECS {
-                            return None;
-                        }
-                    }
-                    Some((
-                        identity.clone(),
-                        state.preferred_path().to_path_buf(),
-                        since.clone(),
-                        state.registry(),
-                        state.issue_fetch_mutex(),
-                        state.issue_cache.len(),
-                    ))
-                })
-                .collect()
-        };
-
-        for (identity, path, since, registry, fetch_mutex, prev_count) in tasks {
-            let _guard = fetch_mutex.lock().await;
-            let Some(tracker) = registry.issue_trackers.preferred() else {
-                continue;
-            };
-
-            // Record timestamp *before* the API call so the next `since`
-            // window overlaps rather than gaps — avoids missing updates
-            // that land on GitHub during the request.
-            let refresh_ts = now_iso8601();
-
-            debug!("issue incremental: repo={} since={} refresh_ts={} cache_len={}", path.display(), since, refresh_ts, prev_count,);
-
-            match tracker.list_issues_changed_since(&path, &since, 50).await {
-                Ok(changeset) => {
-                    let n_updated = changeset.updated.len();
-                    let n_closed = changeset.closed_ids.len();
-                    let has_more = changeset.has_more;
-
-                    if n_updated > 0 || n_closed > 0 || has_more {
-                        let updated_ids: Vec<&str> = changeset.updated.iter().map(|(id, _)| id.as_str()).collect();
-                        info!(
-                            "issue incremental: repo={} updated={:?} closed={:?} has_more={}",
-                            path.display(),
-                            updated_ids,
-                            changeset.closed_ids,
-                            has_more,
-                        );
-                    }
-
-                    if has_more {
-                        // Too many changes — skip incremental, do a full re-fetch.
-                        // Don't reset until we have data to replace it with,
-                        // so transient API failures don't wipe the UI.
-                        info!("issue incremental: escalating to full re-fetch for {}", path.display(),);
-                        drop(_guard);
-                        let first_page = {
-                            let reg = {
-                                let repos = self.repos.read().await;
-                                repos.get(&identity).map(RepoState::registry)
-                            };
-                            if let Some(reg) = reg {
-                                if let Some(t) = reg.issue_trackers.preferred() {
-                                    t.list_issues_page(&path, 1, 50).await.ok()
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        };
-                        if first_page.is_some() {
-                            // First page succeeded — safe to reset and refill
-                            {
-                                let mut repos = self.repos.write().await;
-                                if let Some(state) = repos.get_mut(&identity) {
-                                    state.issue_cache.reset();
-                                    if let Some(page) = first_page {
-                                        state.issue_cache.merge_page(page);
-                                    }
-                                }
-                            }
-                            // Continue fetching remaining pages
-                            self.ensure_issues_cached(&path, prev_count).await;
-                            {
-                                let mut repos = self.repos.write().await;
-                                if let Some(state) = repos.get_mut(&identity) {
-                                    state.issue_cache.mark_refreshed(refresh_ts.clone());
-                                }
-                            }
-                            self.broadcast_snapshot(&path).await;
-                        } else {
-                            // Fetch failed — keep existing cache and do NOT advance
-                            // the timestamp, so the next incremental call retries
-                            // from the same `since` window.
-                            warn!("issue incremental: escalation fetch failed for {}, keeping cache", path.display(),);
-                        }
-                    } else {
-                        let has_changes = n_updated > 0 || n_closed > 0;
-                        {
-                            let mut repos = self.repos.write().await;
-                            if let Some(state) = repos.get_mut(&identity) {
-                                state.issue_cache.apply_changeset(changeset);
-                                state.issue_cache.mark_refreshed(refresh_ts);
-                            }
-                        }
-                        if has_changes {
-                            self.broadcast_snapshot(&path).await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("incremental issue refresh failed for {}: {}", path.display(), e);
-                }
-            }
-        }
     }
 
     /// Add a virtual repo (no local filesystem path) for a remote-only repo.
@@ -1152,14 +832,6 @@ impl InProcessDaemon {
         Ok(())
     }
 
-    /// Re-build and broadcast a snapshot for the given repo using current cache state.
-    ///
-    /// If peer provider data has been set for this repo via [`set_peer_providers`],
-    /// it is merged into the snapshot before correlation and broadcasting.
-    async fn broadcast_snapshot(&self, repo: &Path) {
-        self.broadcast_snapshot_inner(repo, true).await;
-    }
-
     async fn broadcast_snapshot_inner(&self, repo: &Path, is_local_change: bool) {
         let Some(identity) = self.tracked_repo_identity_for_path(repo).await else {
             return;
@@ -1213,7 +885,7 @@ impl InProcessDaemon {
 impl InProcessDaemon {
     pub async fn refresh(&self, repo: &flotilla_protocol::RepoSelector) -> Result<(), String> {
         let repo = self.resolve_repo_selector(repo).await?;
-        let (prev_count, registry, identity) = {
+        {
             let identity =
                 self.tracked_repo_identity_for_path(&repo).await.ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
             let repos = self.repos.read().await;
@@ -1223,34 +895,7 @@ impl InProcessDaemon {
                     root.model.refresh_handle.trigger_refresh();
                 }
             }
-            (state.issue_cache.len(), state.registry(), identity)
         };
-
-        if prev_count > 0 {
-            // Fetch page 1 before resetting, so failures don't wipe the UI.
-            let first_page =
-                if let Some(t) = registry.issue_trackers.preferred() { t.list_issues_page(&repo, 1, 50).await.ok() } else { None };
-
-            if first_page.is_some() {
-                {
-                    let mut repos = self.repos.write().await;
-                    if let Some(state) = repos.get_mut(&identity) {
-                        state.issue_cache.reset();
-                        if let Some(page) = first_page {
-                            state.issue_cache.merge_page(page);
-                        }
-                    }
-                }
-                self.ensure_issues_cached(&repo, prev_count).await;
-                {
-                    let mut repos = self.repos.write().await;
-                    if let Some(state) = repos.get_mut(&identity) {
-                        state.issue_cache.mark_refreshed(now_iso8601());
-                    }
-                }
-                self.broadcast_snapshot(&repo).await;
-            }
-        }
 
         Ok(())
     }

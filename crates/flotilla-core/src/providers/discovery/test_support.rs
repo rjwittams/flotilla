@@ -8,10 +8,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock, RwLock,
-    },
+    sync::{Arc, Mutex, OnceLock, RwLock},
 };
 
 use async_trait::async_trait;
@@ -264,11 +261,6 @@ pub struct FakeIssueProvider {
     pub issues: Arc<TokioMutex<Vec<(String, Issue)>>>,
     /// IDs that were requested via `fetch_issues_by_id`, for test assertions.
     pub fetched_by_id: Arc<TokioMutex<Vec<Vec<String>>>>,
-    /// Page numbers fetched via `list_issues_page`, for test assertions.
-    pub pages_fetched: Arc<TokioMutex<Vec<u32>>>,
-    /// When true, `list_issues_changed_since` returns `has_more: true` to
-    /// trigger the escalation path in `refresh_issues_incremental`.
-    pub force_escalation: Arc<AtomicBool>,
 }
 
 impl Default for FakeIssueProvider {
@@ -279,24 +271,12 @@ impl Default for FakeIssueProvider {
 
 impl FakeIssueProvider {
     pub fn new() -> Self {
-        Self {
-            issues: Arc::new(TokioMutex::new(Vec::new())),
-            fetched_by_id: Arc::new(TokioMutex::new(Vec::new())),
-            pages_fetched: Arc::new(TokioMutex::new(Vec::new())),
-            force_escalation: Arc::new(AtomicBool::new(false)),
-        }
+        Self { issues: Arc::new(TokioMutex::new(Vec::new())), fetched_by_id: Arc::new(TokioMutex::new(Vec::new())) }
     }
 
     /// Pre-seed the issue store.
     pub async fn add_issues(&self, issues: Vec<(String, Issue)>) {
         self.issues.lock().await.extend(issues);
-    }
-
-    /// Enable forced escalation: `list_issues_changed_since` will return
-    /// `has_more: true`, causing the daemon to abandon the incremental path
-    /// and perform a full re-fetch.
-    pub fn set_force_escalation(&self, enabled: bool) {
-        self.force_escalation.store(enabled, Ordering::SeqCst);
     }
 }
 
@@ -312,7 +292,6 @@ impl IssueProvider for FakeIssueProvider {
     }
 
     async fn list_issues_page(&self, _repo_root: &Path, page: u32, per_page: usize) -> Result<IssuePage, String> {
-        self.pages_fetched.lock().await.push(page);
         let store = self.issues.lock().await;
         let start = (page.saturating_sub(1) as usize) * per_page;
         let issues: Vec<_> = store.iter().skip(start).take(per_page).cloned().collect();
@@ -333,11 +312,6 @@ impl IssueProvider for FakeIssueProvider {
     }
 
     async fn list_issues_changed_since(&self, repo_root: &Path, _since: &str, per_page: usize) -> Result<IssueChangeset, String> {
-        if self.force_escalation.load(Ordering::SeqCst) {
-            // Return has_more: true with an empty changeset to trigger the
-            // escalation path (full re-fetch) in refresh_issues_incremental.
-            return Ok(IssueChangeset { updated: vec![], closed_ids: vec![], has_more: true });
-        }
         let page = self.list_issues_page(repo_root, 1, per_page).await?;
         Ok(IssueChangeset { updated: page.issues, closed_ids: vec![], has_more: page.has_more })
     }
