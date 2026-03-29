@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use flotilla_protocol::{Command, CommandAction, WorkItem};
 
-use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent};
+use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent, OwnedSelectedRow};
 use crate::{
     binding_table::{BindingModeId, KeyBindingMode},
     keymap::Action,
@@ -206,15 +206,24 @@ impl App {
             return;
         }
 
-        let Some(item) = self.selected_work_item().cloned() else {
+        let Some(selected) = self.selected_row_cloned() else {
             return;
         };
 
-        let my_host = self.model.my_host().cloned();
-        for &intent in Intent::enter_priority() {
-            if intent.is_available(&item) && intent.is_allowed_for_host(&item, &my_host) {
-                self.resolve_and_push(intent, &item);
-                return;
+        match selected {
+            OwnedSelectedRow::WorkItem(ref item) => {
+                let my_host = self.model.my_host().cloned();
+                for &intent in Intent::enter_priority() {
+                    if intent.is_available(item) && intent.is_allowed_for_host(item, &my_host) {
+                        self.resolve_and_push(intent, item);
+                        return;
+                    }
+                }
+            }
+            OwnedSelectedRow::IssueRow(row) => {
+                // For issue rows, the primary action is OpenIssue.
+                let cmd = self.provider_repo_command_for_issue(CommandAction::OpenIssue { id: row.id });
+                self.proto_commands.push(cmd);
             }
         }
     }
@@ -235,10 +244,16 @@ impl App {
         }
 
         // Also include current selection if not already in multi_selected
-        if let Some(item) = self.selected_work_item() {
-            if !multi_selected.contains(&item.identity) {
-                all_issue_keys.extend(item.issue_keys.iter().cloned());
+        match self.selected_row_cloned() {
+            Some(OwnedSelectedRow::WorkItem(ref item)) => {
+                if !multi_selected.contains(&item.identity) {
+                    all_issue_keys.extend(item.issue_keys.iter().cloned());
+                }
             }
+            Some(OwnedSelectedRow::IssueRow(row)) => {
+                all_issue_keys.push(row.id);
+            }
+            None => {}
         }
 
         all_issue_keys.sort();
@@ -254,6 +269,7 @@ impl App {
     }
 
     fn dispatch_if_available(&mut self, intent: Intent) {
+        // dispatch only applies to WorkItem rows (intents operate on WorkItem)
         let Some(item) = self.selected_work_item().cloned() else {
             return;
         };
@@ -378,6 +394,8 @@ impl App {
     }
 
     pub(super) fn open_action_menu(&mut self) {
+        // Action menu only applies to WorkItem rows; IssueRows have no
+        // Intent-based actions beyond the built-in Enter behaviour.
         let Some(item) = self.selected_work_item().cloned() else {
             return;
         };

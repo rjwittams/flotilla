@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{InteractiveWidget, Outcome, RenderContext, WidgetContext};
+use super::{split_table::SelectedRow, InteractiveWidget, Outcome, RenderContext, WidgetContext};
 use crate::{
     app::{TuiModel, UiState},
     binding_table::{BindingModeId, KeyBindingMode},
@@ -27,6 +27,28 @@ impl PreviewPanel {
         Self
     }
 
+    /// Render the preview panel using a `SelectedRow` from the heterogeneous table.
+    pub fn render_with_row(
+        &self,
+        model: &TuiModel,
+        ui: &UiState,
+        row: Option<&SelectedRow<'_>>,
+        theme: &Theme,
+        frame: &mut Frame,
+        area: Rect,
+    ) {
+        match row {
+            Some(SelectedRow::WorkItem(item)) => self.render_with_item(model, ui, Some(item), theme, frame, area),
+            Some(SelectedRow::Issue(issue_row)) => {
+                let text = self.issue_row_preview(issue_row);
+                let preview =
+                    Paragraph::new(text).block(Block::bordered().style(theme.block_style()).title(" Preview ")).wrap(Wrap { trim: true });
+                frame.render_widget(preview, area);
+            }
+            None => self.render_with_item(model, ui, None, theme, frame, area),
+        }
+    }
+
     /// Render the preview panel using an explicitly provided selected item.
     /// Called by RepoPage with the item from its own table,
     pub fn render_with_item(&self, model: &TuiModel, ui: &UiState, item: Option<&WorkItem>, theme: &Theme, frame: &mut Frame, area: Rect) {
@@ -40,6 +62,19 @@ impl PreviewPanel {
         } else {
             self.render_content_for(model, item, theme, frame, area);
         }
+    }
+
+    /// Build preview text directly from an `IssueRow` — no provider lookup needed.
+    fn issue_row_preview(&self, row: &super::section_table::IssueRow) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Issue #{}: {}", row.id, row.issue.title));
+        if !row.issue.labels.is_empty() {
+            lines.push(format!("Labels: {}", row.issue.labels.join(", ")));
+        }
+        if !row.issue.provider_display_name.is_empty() {
+            lines.push(format!("Provider: {}", row.issue.provider_display_name));
+        }
+        lines.join("\n")
     }
 
     fn render_content_for(&self, model: &TuiModel, item: Option<&WorkItem>, theme: &Theme, frame: &mut Frame, area: Rect) {

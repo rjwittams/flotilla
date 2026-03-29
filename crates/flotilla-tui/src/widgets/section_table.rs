@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use flotilla_protocol::{HostName, ProviderData};
+use flotilla_protocol::{provider_data::Issue, HostName, ProviderData};
 use ratatui::{layout::Constraint, text::Span};
 
 use crate::theme::Theme;
@@ -53,6 +53,28 @@ pub struct ColumnDef<T> {
 pub trait Identifiable {
     type Id: PartialEq + Clone;
     fn id(&self) -> Self::Id;
+}
+
+// ---------------------------------------------------------------------------
+// IssueRow
+// ---------------------------------------------------------------------------
+
+/// A row in the issue section table, backed by native `Issue` data.
+///
+/// Unlike `WorkItem`-based issue rows (which are synthetic wrappers that lose
+/// label data), `IssueRow` carries the full `Issue` so column extractors can
+/// render labels, provider name, and other fields directly.
+#[derive(Debug, Clone)]
+pub struct IssueRow {
+    pub id: String,
+    pub issue: Issue,
+}
+
+impl Identifiable for IssueRow {
+    type Id = String;
+    fn id(&self) -> String {
+        self.id.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -34,8 +34,17 @@ use crate::{
     keymap::Keymap,
     shared::Shared,
     theme::Theme,
-    widgets::repo_page::{RepoData, RepoPage},
+    widgets::{
+        repo_page::{RepoData, RepoPage},
+        section_table::IssueRow,
+    },
 };
+
+/// Owned version of `SelectedRow` for use when the borrow can't be held.
+pub(super) enum OwnedSelectedRow {
+    WorkItem(Box<WorkItem>),
+    IssueRow(IssueRow),
+}
 
 /// Per-provider auth/health status from last refresh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,7 +318,8 @@ impl App {
                 provider_names: rm.provider_names.clone(),
                 provider_health: rm.provider_health.clone(),
                 work_items: Vec::new(),
-                issue_items: Vec::new(),
+                issue_rows: Vec::new(),
+                issue_section_label: String::new(),
                 loading: rm.loading,
             });
             let page = RepoPage::new(identity.clone(), shared.clone(), ui.view_layout);
@@ -655,15 +665,16 @@ impl App {
         });
     }
 
-    /// Push issue items from `IssueViewState` into the `Shared<RepoData>` for
-    /// a repo so the `SplitTable` can render them.
+    /// Push issue rows from `IssueViewState` into the `Shared<RepoData>` for
+    /// a repo so the `SplitTable` can render them in the native issue section.
     fn push_issue_items_to_repo_data(&self, repo_identity: &RepoIdentity) {
         let Some(view) = self.issue_views.get(repo_identity) else { return };
-        let host_name = self.model.my_host().cloned().unwrap_or_else(HostName::local);
-        let issue_work_items = view.active_work_items(&host_name);
+        let issue_rows = view.active_issue_rows();
+        let label = self.model.repos.get(repo_identity).map(|rm| rm.labels.issues.section.clone()).unwrap_or_else(|| "Issues".to_string());
         if let Some(handle) = self.repo_data.get(repo_identity) {
             handle.mutate(|d| {
-                d.issue_items = issue_work_items;
+                d.issue_rows = issue_rows;
+                d.issue_section_label = label;
             });
         }
     }
@@ -1136,7 +1147,8 @@ impl App {
             provider_names: info.provider_names.clone(),
             provider_health: info.provider_health.clone(),
             work_items: Vec::new(),
-            issue_items: Vec::new(),
+            issue_rows: Vec::new(),
+            issue_section_label: String::new(),
             loading: info.loading,
         });
         let page = RepoPage::new(identity.clone(), shared.clone(), self.ui.view_layout);
@@ -1183,6 +1195,24 @@ impl App {
         }
         let identity = &self.model.repo_order[self.model.active_repo];
         self.screen.repo_pages.get(identity).and_then(|page| page.table.selected_work_item())
+    }
+
+    /// Get the selected row (WorkItem or IssueRow) as an owned enum.
+    pub(super) fn selected_row_cloned(&self) -> Option<OwnedSelectedRow> {
+        if self.model.repo_order.is_empty() {
+            return None;
+        }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        let page = self.screen.repo_pages.get(identity)?;
+        match page.table.selected_row()? {
+            crate::widgets::split_table::SelectedRow::WorkItem(item) => Some(OwnedSelectedRow::WorkItem(Box::new(item.clone()))),
+            crate::widgets::split_table::SelectedRow::Issue(row) => Some(OwnedSelectedRow::IssueRow(row.clone())),
+        }
+    }
+
+    /// Build a repo command for an issue-row action (where no WorkItem context exists).
+    pub(super) fn provider_repo_command_for_issue(&self, action: CommandAction) -> Command {
+        self.repo_command(action)
     }
 
     pub(super) fn open_file_picker_from_active_repo_parent(&mut self) {

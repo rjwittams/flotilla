@@ -7,8 +7,9 @@
 use flotilla_protocol::{
     issue_query::{CursorId, IssueResultPage},
     provider_data::Issue,
-    HostName, WorkItem, WorkItemIdentity, WorkItemKind,
 };
+
+use crate::widgets::section_table::IssueRow;
 
 /// State for a single paginated cursor.
 pub struct IssueCursorState {
@@ -28,30 +29,10 @@ impl IssueCursorState {
         self.items.extend(page.items);
     }
 
-    /// Convert the cursor's issue items into protocol `WorkItem` values
-    /// suitable for the `SplitTable` issue section.
-    pub fn to_work_items(&self, host_name: &HostName) -> Vec<WorkItem> {
-        self.items
-            .iter()
-            .map(|(id, issue)| WorkItem {
-                kind: WorkItemKind::Issue,
-                identity: WorkItemIdentity::Issue(id.clone()),
-                host: host_name.clone(),
-                branch: None,
-                description: issue.title.clone(),
-                checkout: None,
-                change_request_key: None,
-                session_key: None,
-                issue_keys: vec![id.clone()],
-                workspace_refs: Vec::new(),
-                is_main_checkout: false,
-                debug_group: Vec::new(),
-                source: Some(issue.provider_display_name.clone()),
-                terminal_keys: Vec::new(),
-                attachable_set_id: None,
-                agent_keys: Vec::new(),
-            })
-            .collect()
+    /// Convert the cursor's issue items into native `IssueRow` values
+    /// for the `SectionTable<IssueRow>` issue section.
+    pub fn to_issue_rows(&self) -> Vec<IssueRow> {
+        self.items.iter().map(|(id, issue)| IssueRow { id: id.clone(), issue: issue.clone() }).collect()
     }
 }
 
@@ -83,9 +64,9 @@ impl IssueViewState {
         }
     }
 
-    /// Convert the active cursor's items into `WorkItem` values for display.
-    pub fn active_work_items(&self, host_name: &HostName) -> Vec<WorkItem> {
-        self.active().map(|c| c.to_work_items(host_name)).unwrap_or_default()
+    /// Convert the active cursor's items into native `IssueRow` values for display.
+    pub fn active_issue_rows(&self) -> Vec<IssueRow> {
+        self.active().map(|c| c.to_issue_rows()).unwrap_or_default()
     }
 }
 
@@ -106,7 +87,7 @@ pub enum IssueQueryUpdate {
 
 #[cfg(test)]
 mod tests {
-    use flotilla_protocol::{provider_data::Issue, HostName};
+    use flotilla_protocol::provider_data::Issue;
 
     use super::*;
 
@@ -185,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn to_work_items_converts_correctly() {
+    fn to_issue_rows_converts_correctly() {
         let cursor = IssueCursorState {
             cursor: CursorId::new("c1"),
             items: vec![test_issue("42", "Fix login bug"), test_issue("99", "Add dark mode")],
@@ -193,25 +174,22 @@ mod tests {
             has_more: false,
             fetch_pending: false,
         };
-        let host = HostName::local();
-        let work_items = cursor.to_work_items(&host);
-        assert_eq!(work_items.len(), 2);
+        let rows = cursor.to_issue_rows();
+        assert_eq!(rows.len(), 2);
 
-        assert_eq!(work_items[0].kind, WorkItemKind::Issue);
-        assert_eq!(work_items[0].identity, WorkItemIdentity::Issue("42".into()));
-        assert_eq!(work_items[0].description, "Fix login bug");
-        assert_eq!(work_items[0].issue_keys, vec!["42"]);
-        assert_eq!(work_items[0].source.as_deref(), Some("GitHub"));
+        assert_eq!(rows[0].id, "42");
+        assert_eq!(rows[0].issue.title, "Fix login bug");
+        assert_eq!(rows[0].issue.provider_display_name, "GitHub");
 
-        assert_eq!(work_items[1].identity, WorkItemIdentity::Issue("99".into()));
-        assert_eq!(work_items[1].description, "Add dark mode");
+        assert_eq!(rows[1].id, "99");
+        assert_eq!(rows[1].issue.title, "Add dark mode");
     }
 
     #[test]
-    fn active_work_items_returns_empty_when_no_cursor() {
+    fn active_issue_rows_returns_empty_when_no_cursor() {
         let state = IssueViewState::new();
-        let items = state.active_work_items(&HostName::local());
-        assert!(items.is_empty());
+        let rows = state.active_issue_rows();
+        assert!(rows.is_empty());
     }
 
     #[test]

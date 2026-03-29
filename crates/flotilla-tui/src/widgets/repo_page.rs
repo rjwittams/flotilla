@@ -14,7 +14,12 @@ use ratatui::{
     Frame,
 };
 
-use super::{preview_panel::PreviewPanel, split_table::SplitTable, AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext};
+use super::{
+    preview_panel::PreviewPanel,
+    section_table::IssueRow,
+    split_table::{SelectedRow, SplitTable},
+    AppAction, InteractiveWidget, Outcome, RenderContext, WidgetContext,
+};
 use crate::{
     app::{ui_state::PendingAction, RepoViewLayout},
     binding_table::{BindingModeId, KeyBindingMode, StatusContent, StatusFragment},
@@ -84,9 +89,12 @@ pub struct RepoData {
     pub provider_names: HashMap<String, Vec<String>>,
     pub provider_health: HashMap<String, HashMap<String, bool>>,
     pub work_items: Vec<WorkItem>,
-    /// Standalone issue items from `IssueViewState`. These are rendered in the
-    /// Issues section alongside any correlation-linked issues from `work_items`.
-    pub issue_items: Vec<WorkItem>,
+    /// Native issue rows from `IssueViewState`. Rendered in a dedicated
+    /// `SectionTable<IssueRow>` section with columns that read labels and
+    /// provider name directly from the `Issue` data.
+    pub issue_rows: Vec<IssueRow>,
+    /// Label for the issue section header.
+    pub issue_section_label: String,
     pub loading: bool,
 }
 
@@ -166,12 +174,13 @@ impl RepoPage {
             issues: data.labels.issues.section.clone(),
             sessions: data.labels.cloud_agents.section.clone(),
         };
-        // Merge snapshot work_items with query-driven issue_items.
-        let mut combined = data.work_items.clone();
-        combined.extend(data.issue_items.iter().cloned());
-        let sections = flotilla_core::data::group_work_items_split(&combined, &data.providers, &section_labels, &data.path);
+        // Work-item sections from correlation (no longer merges issue_items).
+        let sections = flotilla_core::data::group_work_items_split(&data.work_items, &data.providers, &section_labels, &data.path);
         let sections = if self.show_archived { sections } else { flotilla_core::data::filter_archived_sections(sections, &data.providers) };
         self.table.update_sections(sections);
+
+        // Query-driven issues go into a native IssueRow section.
+        self.table.update_issue_section(data.issue_section_label.clone(), data.issue_rows.clone());
 
         let current_identities: HashSet<WorkItemIdentity> = self.table.all_items().map(|item| item.identity.clone()).collect();
         self.multi_selected.retain(|id| current_identities.contains(id));
@@ -214,8 +223,8 @@ impl RepoPage {
         };
 
         self.render_table(frame, chunks[0], ctx);
-        let selected_item = self.table.selected_work_item();
-        self.preview.render_with_item(ctx.model, ctx.ui, selected_item, ctx.theme, frame, chunks[1]);
+        let selected_row = self.table.selected_row();
+        self.preview.render_with_row(ctx.model, ctx.ui, selected_row.as_ref(), ctx.theme, frame, chunks[1]);
     }
 
     /// Render the table using RepoPage-owned state,
@@ -246,7 +255,7 @@ impl RepoPage {
             self.rebuild_table(&data);
         } else if !self.multi_selected.is_empty() {
             self.multi_selected.clear();
-        } else if self.table.selected_work_item().is_some() {
+        } else if self.table.selected_row().is_some() {
             self.table.clear_selection();
         } else {
             ctx.app_actions.push(AppAction::Quit);
@@ -255,6 +264,7 @@ impl RepoPage {
     }
 
     fn toggle_multi_select(&mut self) {
+        // Multi-select only applies to WorkItem rows (which have identities).
         if let Some(item) = self.table.selected_work_item() {
             let identity = item.identity.clone();
             if !self.multi_selected.remove(&identity) {
@@ -316,13 +326,16 @@ impl InteractiveWidget for RepoPage {
             Action::OpenIssueSearch => Outcome::Push(Box::new(super::issue_search::IssueSearchWidget::new())),
             Action::OpenCommandPalette => Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new())),
             Action::OpenContextualPalette => {
-                let widget = if let Some(item) = self.table.selected_work_item() {
-                    match super::command_palette::palette_prefill(item) {
+                let widget = match self.table.selected_row() {
+                    Some(SelectedRow::WorkItem(item)) => match super::command_palette::palette_prefill(item) {
                         Some(prefill) => super::command_palette::CommandPaletteWidget::with_prefill(prefill, Some(item.clone())),
                         None => super::command_palette::CommandPaletteWidget::new(),
+                    },
+                    Some(SelectedRow::Issue(row)) => {
+                        let prefill = format!("issue {} ", row.id);
+                        super::command_palette::CommandPaletteWidget::with_prefill(prefill, None)
                     }
-                } else {
-                    super::command_palette::CommandPaletteWidget::new()
+                    None => super::command_palette::CommandPaletteWidget::new(),
                 };
                 Outcome::Push(Box::new(widget))
             }
