@@ -261,8 +261,6 @@ pub enum Response {
 
 The server returns `Response::QueryResult` to the requesting connection instead of broadcasting `CommandFinished`. The `command_id` is included so the client can correlate with in-flight tracking. Non-query commands continue to use `CommandFinished` broadcast as before.
 
-Connection setup also changes: peers still require `Message::Hello` first, while clients may either handshake (`Hello { connection_role: Client, ... }`) for stateful features or begin with a bare `Request` for stateless RPC-only use. For handshaken connections, the server routes post-handshake by `connection_role`.
-
 **`DaemonHandle` trait.** Add an `execute_query()` method that returns the `CommandValue` directly:
 
 ```rust
@@ -273,14 +271,7 @@ For `InProcessDaemon`, this calls the executor and returns the result without br
 
 The existing `execute()` method and `CommandFinished` broadcast remain for non-query commands.
 
-**Server dispatch** (`server.rs`, `client_connection.rs`). On accept, the server handles two valid first frames on the main socket:
-
-- `Hello { connection_role: Peer, ... }` or `Hello { connection_role: Client, ... }`: validate, send the server's `Hello`, then dispatch by `connection_role`.
-- `Request { ... }`: treat the connection as a stateless client and enter the normal request/response loop without assigning a durable client identity.
-
-Commands that require per-client identity, such as issue query cursors, must reject stateless clients with a clear error such as `client handshake required for this operation`.
-
-When `ClientConnection` handles `Request::Execute` where `command.action.is_query()`:
+**Server dispatch** (`server.rs`, `client_connection.rs`). Connection setup is described in the client handshake section above. When `ClientConnection` handles `Request::Execute` where `command.action.is_query()`:
 
 1. Execute the command.
 2. Send `Message::Response { id, Response::QueryResult { command_id, value } }` to the requesting connection.
