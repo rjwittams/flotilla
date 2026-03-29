@@ -695,7 +695,7 @@ fn pending_action_in_flight_shows_spinner() {
 
     // Insert an in-flight pending action for the checkout item.
     let identity = WorkItemIdentity::Checkout(QualifiedPath::from_host_path(
-        &HostName::new("test-host"),
+        &HostName::local(),
         PathBuf::from("/test/my-project/feat-login"),
     ));
     let repo = harness.model.repo_order[0].clone();
@@ -742,7 +742,7 @@ fn pending_action_failed_shows_error_icon() {
 
     // Insert a failed pending action.
     let identity = WorkItemIdentity::Checkout(QualifiedPath::from_host_path(
-        &HostName::new("test-host"),
+        &HostName::local(),
         PathBuf::from("/test/my-project/feat-broken"),
     ));
     let repo = harness.model.repo_order[0].clone();
@@ -807,9 +807,9 @@ fn multi_select_with_active_row_highlight() {
 
     // Multi-select items 0 and 1.
     let identity_a =
-        WorkItemIdentity::Checkout(QualifiedPath::from_host_path(&HostName::new("test-host"), PathBuf::from("/test/my-project/feat-a")));
+        WorkItemIdentity::Checkout(QualifiedPath::from_host_path(&HostName::local(), PathBuf::from("/test/my-project/feat-a")));
     let identity_b =
-        WorkItemIdentity::Checkout(QualifiedPath::from_host_path(&HostName::new("test-host"), PathBuf::from("/test/my-project/feat-b")));
+        WorkItemIdentity::Checkout(QualifiedPath::from_host_path(&HostName::local(), PathBuf::from("/test/my-project/feat-b")));
     page.multi_selected.insert(identity_a);
     page.multi_selected.insert(identity_b);
 
