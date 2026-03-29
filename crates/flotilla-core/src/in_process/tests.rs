@@ -1,4 +1,4 @@
-use flotilla_protocol::Checkout;
+use flotilla_protocol::{AssociationKey, ChangeRequest, ChangeRequestStatus, Checkout, Issue};
 
 use super::*;
 
@@ -296,5 +296,154 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
     assert!(
         !snapshot.providers.checkouts.contains_key(&ghost_checkout),
         "remote checkout path must not be duplicated under the local host"
+    );
+}
+
+// --- collect_linked_issue_ids ---
+
+#[test]
+fn collect_linked_issue_ids_from_change_requests() {
+    let mut providers = ProviderData::default();
+    providers.change_requests.insert("PR-1".into(), ChangeRequest {
+        title: "Fix bug".into(),
+        branch: "fix/bug".into(),
+        status: ChangeRequestStatus::Open,
+        body: None,
+        correlation_keys: vec![],
+        association_keys: vec![
+            AssociationKey::IssueRef("github".into(), "42".into()),
+            AssociationKey::IssueRef("github".into(), "99".into()),
+        ],
+        provider_name: "github".into(),
+        provider_display_name: "GitHub".into(),
+    });
+
+    let mut ids = collect_linked_issue_ids(&providers);
+    ids.sort();
+    assert_eq!(ids, vec!["42", "99"]);
+}
+
+#[test]
+fn collect_linked_issue_ids_from_checkouts() {
+    let mut providers = ProviderData::default();
+    providers.checkouts.insert(HostPath::new(HostName::new("host"), PathBuf::from("/tmp/co")), Checkout {
+        branch: "feat".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![AssociationKey::IssueRef("github".into(), "7".into())],
+        environment_id: None,
+    });
+
+    let ids = collect_linked_issue_ids(&providers);
+    assert_eq!(ids, vec!["7"]);
+}
+
+#[test]
+fn collect_linked_issue_ids_deduplicates() {
+    let mut providers = ProviderData::default();
+    // Same issue referenced from both a change request and a checkout
+    providers.change_requests.insert("PR-1".into(), ChangeRequest {
+        title: "Fix".into(),
+        branch: "fix".into(),
+        status: ChangeRequestStatus::Open,
+        body: None,
+        correlation_keys: vec![],
+        association_keys: vec![AssociationKey::IssueRef("github".into(), "42".into())],
+        provider_name: "github".into(),
+        provider_display_name: "GitHub".into(),
+    });
+    providers.checkouts.insert(HostPath::new(HostName::new("host"), PathBuf::from("/tmp/co")), Checkout {
+        branch: "fix".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![AssociationKey::IssueRef("github".into(), "42".into())],
+        environment_id: None,
+    });
+
+    let ids = collect_linked_issue_ids(&providers);
+    assert_eq!(ids.len(), 1, "duplicate issue refs should be deduplicated");
+    assert_eq!(ids[0], "42");
+}
+
+#[test]
+fn collect_linked_issue_ids_empty_when_no_associations() {
+    let providers = ProviderData::default();
+    let ids = collect_linked_issue_ids(&providers);
+    assert!(ids.is_empty());
+}
+
+/// When `ProviderData.issues` is populated (as it would be after
+/// `fetch_missing_linked_issues`), correlation picks up the issue
+/// references and includes them in the snapshot's work items.
+#[test]
+fn snapshot_includes_linked_issues_when_populated() {
+    let host = HostName::new("test-host");
+    let checkout_path = HostPath::new(host.clone(), PathBuf::from("/tmp/repo"));
+
+    let mut providers = ProviderData::default();
+    providers.checkouts.insert(checkout_path.clone(), Checkout {
+        branch: "fix/42".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![CorrelationKey::Branch("fix/42".into()), CorrelationKey::CheckoutPath(checkout_path)],
+        association_keys: vec![AssociationKey::IssueRef("github".into(), "42".into())],
+        environment_id: None,
+    });
+    providers.change_requests.insert("PR-100".into(), ChangeRequest {
+        title: "Fix issue #42".into(),
+        branch: "fix/42".into(),
+        status: ChangeRequestStatus::Open,
+        body: None,
+        correlation_keys: vec![CorrelationKey::Branch("fix/42".into()), CorrelationKey::ChangeRequestRef("github".into(), "100".into())],
+        association_keys: vec![AssociationKey::IssueRef("github".into(), "42".into())],
+        provider_name: "github".into(),
+        provider_display_name: "GitHub".into(),
+    });
+    // Simulate fetch_missing_linked_issues having populated the issue
+    providers.issues.insert("42".into(), Issue {
+        title: "Something is broken".into(),
+        labels: vec!["bug".into()],
+        association_keys: vec![],
+        provider_name: "github".into(),
+        provider_display_name: "GitHub".into(),
+    });
+
+    let default_snap = RefreshSnapshot::default();
+    let snapshot = build_repo_snapshot_with_peers(
+        SnapshotBuildContext {
+            repo_identity: fallback_repo_identity(Path::new("/tmp/repo")),
+            path: Path::new("/tmp/repo"),
+            local_providers: &providers,
+            errors: &default_snap.errors,
+            provider_health: &default_snap.provider_health,
+            host_name: &host,
+        },
+        1,
+        None,
+    );
+
+    // The snapshot should have the issue in its provider data
+    assert!(snapshot.providers.issues.contains_key("42"), "issue 42 should be present in snapshot providers");
+
+    // Find the work item that correlates checkout + change request
+    let work_item =
+        snapshot.work_items.iter().find(|wi| wi.branch.as_deref() == Some("fix/42")).expect("should have a work item for fix/42");
+
+    // The work item should reference issue 42
+    assert!(
+        work_item.issue_keys.contains(&"42".to_string()),
+        "work item should reference linked issue 42, got: {:?}",
+        work_item.issue_keys
     );
 }

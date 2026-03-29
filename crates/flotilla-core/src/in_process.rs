@@ -188,6 +188,30 @@ fn choose_event(snapshot: RepoSnapshot, delta: DeltaEntry) -> DaemonEvent {
     }
 }
 
+/// Scan change requests and checkouts for `AssociationKey::IssueRef` and
+/// collect the unique issue IDs referenced. These are the issues that
+/// correlation needs in `ProviderData.issues` to build linked-issue lists.
+fn collect_linked_issue_ids(providers: &ProviderData) -> Vec<String> {
+    use std::collections::HashSet;
+
+    use flotilla_protocol::AssociationKey;
+
+    let mut ids = HashSet::new();
+    for cr in providers.change_requests.values() {
+        for key in &cr.association_keys {
+            let AssociationKey::IssueRef(_, issue_id) = key;
+            ids.insert(issue_id.clone());
+        }
+    }
+    for co in providers.checkouts.values() {
+        for key in &co.association_keys {
+            let AssociationKey::IssueRef(_, issue_id) = key;
+            ids.insert(issue_id.clone());
+        }
+    }
+    ids.into_iter().collect()
+}
+
 pub struct InProcessDaemon {
     repos: RwLock<HashMap<flotilla_protocol::RepoIdentity, RepoState>>,
     repo_order: RwLock<Vec<flotilla_protocol::RepoIdentity>>,
@@ -749,6 +773,60 @@ impl InProcessDaemon {
         }
 
         drop(repos);
+
+        self.fetch_missing_linked_issues().await;
+    }
+
+    /// For each tracked repo, scan change requests and checkouts for
+    /// `AssociationKey::IssueRef` references, fetch any issues not already
+    /// present in `ProviderData.issues`, and re-broadcast the snapshot so
+    /// correlation can link them.
+    async fn fetch_missing_linked_issues(&self) {
+        let tasks: Vec<_> = {
+            let repos = self.repos.read().await;
+            repos
+                .iter()
+                .filter_map(|(identity, state)| {
+                    let linked_ids = collect_linked_issue_ids(&state.last_local_providers);
+                    if linked_ids.is_empty() {
+                        return None;
+                    }
+                    let missing: Vec<String> =
+                        linked_ids.into_iter().filter(|id| !state.last_local_providers.issues.contains_key(id.as_str())).collect();
+                    if missing.is_empty() {
+                        return None;
+                    }
+                    let registry = state.registry();
+                    if registry.issue_trackers.is_empty() {
+                        return None;
+                    }
+                    Some((identity.clone(), state.preferred_path().to_path_buf(), missing, registry))
+                })
+                .collect()
+        };
+
+        for (identity, path, missing, registry) in tasks {
+            let Some(tracker) = registry.issue_trackers.preferred() else {
+                continue;
+            };
+            match tracker.fetch_issues_by_id(&path, &missing).await {
+                Ok(fetched) if !fetched.is_empty() => {
+                    {
+                        let mut repos = self.repos.write().await;
+                        if let Some(state) = repos.get_mut(&identity) {
+                            for (id, issue) in &fetched {
+                                state.last_local_providers.issues.insert(id.clone(), issue.clone());
+                            }
+                        }
+                    }
+                    self.broadcast_snapshot_inner(&path, false).await;
+                }
+                Ok(_) => {} // no missing issues found
+                Err(e) => {
+                    debug!(err = %e, "failed to fetch linked issues");
+                }
+            }
+        }
     }
 
     /// Add a virtual repo (no local filesystem path) for a remote-only repo.
