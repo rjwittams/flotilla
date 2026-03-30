@@ -42,14 +42,7 @@ fn make_snapshot(repo: &Path, seq: u64) -> RepoSnapshot {
 }
 
 fn make_delta(repo: &Path, prev_seq: u64, seq: u64) -> RepoDelta {
-    RepoDelta {
-        seq,
-        prev_seq,
-        repo_identity: repo_identity(),
-        repo: Some(repo.to_path_buf()),
-        changes: vec![],
-        work_items: vec![],
-    }
+    RepoDelta { seq, prev_seq, repo_identity: repo_identity(), repo: Some(repo.to_path_buf()), changes: vec![], work_items: vec![] }
 }
 
 fn request_harness() -> RequestHarness {

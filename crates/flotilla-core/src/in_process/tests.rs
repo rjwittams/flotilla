@@ -309,7 +309,6 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
     );
 }
 
-
 // --- collect_linked_issue_ids ---
 
 #[test]
