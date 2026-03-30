@@ -23,7 +23,7 @@ RUN rustup toolchain install nightly-2026-03-12 \
 
 # Node.js (for npm-installed agent CLIs)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI
@@ -38,18 +38,20 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 RUN cargo install shpool --locked
 
 # --- Agent CLIs ---
+# Claude and Cursor use curl|bash installers that aren't version-pinned.
+# Neither offers versioned install URLs yet — rebuilds may pick up new versions.
 
 # Claude Code (direct install)
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # OpenAI Codex
-RUN npm install -g @openai/codex
+RUN npm install -g @openai/codex@0.117.0
 
 # Google Gemini CLI
-RUN npm install -g @google/gemini-cli
+RUN npm install -g @google/gemini-cli@0.35.3
 
 # GitHub Copilot CLI
-RUN npm install -g @github/copilot
+RUN npm install -g @github/copilot@1.0.12
 
 # Cursor agent
 RUN curl -fsSL https://cursor.com/install | bash
