@@ -576,10 +576,10 @@ async fn delta_message_returns_needs_resync() {
 async fn follower_mode_has_only_local_providers() {
     let temp = tempfile::tempdir().expect("create tempdir");
     let repo = temp.path().to_path_buf();
-    std::fs::create_dir_all(repo.join(".git")).expect("create .git dir");
+    init_git_repo(&repo);
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo], config, fake_discovery(true), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![repo], config, git_process_discovery(true), HostName::local()).await;
 
     assert!(daemon.is_follower(), "daemon should be in follower mode");
 
@@ -590,6 +590,7 @@ async fn follower_mode_has_only_local_providers() {
 
     // Local providers should be present
     assert!(provider_names.contains_key("vcs"), "follower should have VCS provider");
+    assert!(provider_names.contains_key("checkout_manager"), "follower should have checkout_manager provider");
 
     // External providers should be absent
     assert!(!provider_names.contains_key("change_request"), "follower should NOT have change_request");
