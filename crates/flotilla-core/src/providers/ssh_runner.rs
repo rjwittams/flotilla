@@ -42,6 +42,16 @@ impl SshCommandRunner {
         parts.join(" ")
     }
 
+    fn remote_write_script(&self, path: &Path, content: &str) -> String {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        format!(
+            "mkdir -p {} && printf %s {} > {}",
+            shell_quote(&parent.to_string_lossy()),
+            shell_quote(content),
+            shell_quote(&path.to_string_lossy())
+        )
+    }
+
     async fn execute(&self, cmd: &str, args: &[&str], cwd: &Path, label: &ChannelLabel) -> Result<String, String> {
         let script = self.remote_script(cmd, args, cwd);
         let ssh_args = self.ssh_args(&script);
@@ -61,10 +71,14 @@ impl CommandRunner for SshCommandRunner {
         self.runner.run_output("ssh", &ssh_args, Path::new("/"), label).await
     }
 
-    async fn exists(&self, cmd: &str, _args: &[&str]) -> bool {
-        let script = format!("command -v {} >/dev/null 2>&1", shell_quote(cmd));
+    async fn exists(&self, cmd: &str, args: &[&str]) -> bool {
+        self.execute(cmd, args, Path::new("/"), &ChannelLabel::Noop).await.is_ok()
+    }
+
+    async fn ensure_file(&self, path: &Path, content: &str) -> Result<(), String> {
+        let script = self.remote_write_script(path, content);
         let ssh_args = self.ssh_args(&script);
-        self.runner.run("ssh", &ssh_args, Path::new("/"), &ChannelLabel::Noop).await.is_ok()
+        self.runner.run("ssh", &ssh_args, Path::new("/"), &ChannelLabel::Noop).await.map(|_| ())
     }
 }
 
@@ -182,7 +196,7 @@ mod tests {
         let inner = std::sync::Arc::new(RecordingRunner::with_run_result(Ok(String::new())));
         let runner = SshCommandRunner::new("alice@feta.local", false, inner.clone());
 
-        assert!(runner.exists("cleat", &[]).await);
+        assert!(runner.exists("cleat", &["--version"]).await);
 
         let calls = inner.calls();
         let args = ssh_call_args(&calls);
@@ -192,7 +206,25 @@ mod tests {
         assert_eq!(args[3], "alice@feta.local");
         assert_eq!(args[4], "sh");
         assert_eq!(args[5], "-lc");
-        assert_eq!(args[6], "command -v 'cleat' >/dev/null 2>&1");
+        assert_eq!(args[6], "cd '/' && exec 'cleat' '--version'");
+    }
+
+    #[tokio::test]
+    async fn ensure_file_writes_remote_file() {
+        let inner = std::sync::Arc::new(RecordingRunner::with_run_result(Ok(String::new())));
+        let runner = SshCommandRunner::new("alice@feta.local", false, inner.clone());
+
+        runner.ensure_file(Path::new("/etc/flotilla/config.toml"), "key = true\n").await.expect("ensure_file");
+
+        let calls = inner.calls();
+        let args = ssh_call_args(&calls);
+        assert_eq!(args[0], "-T");
+        assert_eq!(args[1], "-o");
+        assert_eq!(args[2], "BatchMode=yes");
+        assert_eq!(args[3], "alice@feta.local");
+        assert_eq!(args[4], "sh");
+        assert_eq!(args[5], "-lc");
+        assert_eq!(args[6], "mkdir -p '/etc/flotilla' && printf %s 'key = true\n' > '/etc/flotilla/config.toml'");
     }
 
     #[tokio::test]
