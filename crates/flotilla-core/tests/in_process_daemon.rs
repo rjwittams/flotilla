@@ -23,8 +23,8 @@ use flotilla_core::{
                 FakeDiscoveryProviders, FakeIssueTracker, FakeTerminalPool, FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
                 TestEnvVars,
             },
-            DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostPlatform, ProviderCategory, ProviderDescriptor,
-            HostDetector, RepoDetector, UnmetRequirement,
+            DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostDetector, HostPlatform, ProviderCategory,
+            ProviderDescriptor, RepoDetector, UnmetRequirement,
         },
         terminal::TerminalPool,
         types::{ChangeRequest, CloudAgentSession, RepoCriteria, SessionStatus, Workspace},
@@ -86,9 +86,7 @@ impl HostDetector for EnvVarEchoHostDetector {
         _runner: &dyn CommandRunner,
         env: &dyn flotilla_core::providers::discovery::EnvVars,
     ) -> Vec<EnvironmentAssertion> {
-        env.get(self.env_var)
-            .map(|value| vec![EnvironmentAssertion::env_var(self.assertion_key, value)])
-            .unwrap_or_default()
+        env.get(self.env_var).map(|value| vec![EnvironmentAssertion::env_var(self.assertion_key, value)]).unwrap_or_default()
     }
 }
 
@@ -112,7 +110,13 @@ impl CommandRunner for HangingSshRunner {
         Err(format!("unexpected command: {cmd} {}", args.join(" ")))
     }
 
-    async fn run_output(&self, cmd: &str, args: &[&str], cwd: &Path, label: &ChannelLabel) -> Result<flotilla_core::providers::CommandOutput, String> {
+    async fn run_output(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: &Path,
+        label: &ChannelLabel,
+    ) -> Result<flotilla_core::providers::CommandOutput, String> {
         match self.run(cmd, args, cwd, label).await {
             Ok(stdout) => Ok(flotilla_core::providers::CommandOutput { stdout, stderr: String::new(), success: true }),
             Err(stderr) => Ok(flotilla_core::providers::CommandOutput { stdout: String::new(), stderr, success: false }),
@@ -613,8 +617,17 @@ hostname = "buildbox.example"
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", "cd '/' && exec 'true'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
                 ],
                 Ok(String::new()),
             )
@@ -662,16 +675,34 @@ hostname = "buildbox.example"
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", "cd '/' && exec 'true'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
                 ],
                 Ok(String::new()),
             )
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", "cd '/' && exec 'env'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'env'",
                 ],
                 Ok("TERM=xterm-256color\n".into()),
             )
@@ -731,13 +762,7 @@ hostname = "buildbox.example"
 
     let mut discovery = fake_discovery(false);
     discovery.runner = ssh_runner;
-    let daemon = InProcessDaemon::new(
-        vec![],
-        Arc::new(ConfigStore::with_base(config_dir)),
-        discovery,
-        HostName::local(),
-    )
-    .await;
+    let daemon = InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(config_dir)), discovery, HostName::local()).await;
 
     let result = daemon
         .discover_repo_for_environment_for_test(&repo, &EnvironmentId::new("static-ssh-6275696c64626f78"))
@@ -746,9 +771,7 @@ hostname = "buildbox.example"
 
     assert!(result.repo_bag.find_vcs_checkout(flotilla_core::providers::discovery::VcsKind::Git).is_none());
     assert!(
-        result.registry.provider_infos().iter().all(|(category, name)| {
-            !(category == ProviderCategory::Vcs.slug() && name == "Git")
-        }),
+        result.registry.provider_infos().iter().all(|(category, name)| { !(category == ProviderCategory::Vcs.slug() && name == "Git") }),
         "remote discovery should not activate git from the daemon-local checkout path"
     );
 }
@@ -812,32 +835,68 @@ hostname = "builddash.example"
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", "cd '/' && exec 'true'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
                 ],
                 Ok(String::new()),
             )
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
                 ],
                 Ok("box".into()),
             )
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "builddash.example", "sh",
-                    "-lc", "cd '/' && exec 'true'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "builddash.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
                 ],
                 Ok(String::new()),
             )
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "builddash.example", "sh",
-                    "-lc", "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "builddash.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
                 ],
                 Ok("dash".into()),
             )
@@ -2836,16 +2895,34 @@ hostname = "buildbox.example"
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", "cd '/' && exec 'true'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
                 ],
                 Ok(String::new()),
             )
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", "cd '/' && exec 'env'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'env'",
                 ],
                 Ok("TERM=xterm-256color\n".into()),
             )
@@ -2937,8 +3014,17 @@ hostname = "buildbox.example"
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", format!("cd '{}' && exec 'git' 'remote' 'get-url' 'origin'", repo.display()).as_str(),
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'remote' 'get-url' 'origin'", repo.display()).as_str(),
                 ],
                 Ok("git@github.com:owner/remote-repo.git\n".into()),
             )
@@ -2947,13 +3033,7 @@ hostname = "buildbox.example"
 
     let mut discovery = fake_discovery(false);
     discovery.runner = ssh_runner;
-    let daemon = InProcessDaemon::new(
-        vec![],
-        Arc::new(ConfigStore::with_base(config_dir)),
-        discovery,
-        HostName::local(),
-    )
-    .await;
+    let daemon = InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(config_dir)), discovery, HostName::local()).await;
 
     let result = daemon
         .discover_repo_for_environment_for_test(&repo, &EnvironmentId::new("static-ssh-6275696c64626f78"))
@@ -2986,16 +3066,34 @@ hostname = "buildbox.example"
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", "cd '/' && exec 'true'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
                 ],
                 Ok(String::new()),
             )
             .on_run(
                 "ssh",
                 &[
-                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", "cd '/' && exec 'probe-env' 'ENABLE_REMOTE_TERMINALS'",
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'probe-env' 'ENABLE_REMOTE_TERMINALS'",
                 ],
                 Ok("1".into()),
             )
@@ -3003,22 +3101,14 @@ hostname = "buildbox.example"
     );
 
     let terminal_pool: Arc<dyn TerminalPool> = Arc::new(FakeTerminalPool::new());
-    let mut discovery = static_ssh_test_discovery_with_env_and_detectors(
-        ssh_runner,
-        Arc::new(TestEnvVars::default()),
-        vec![Box::new(RunnerEchoHostDetector { probe: "ENABLE_REMOTE_TERMINALS", assertion_key: "ENABLE_REMOTE_TERMINALS" })],
-    );
+    let mut discovery = static_ssh_test_discovery_with_env_and_detectors(ssh_runner, Arc::new(TestEnvVars::default()), vec![Box::new(
+        RunnerEchoHostDetector { probe: "ENABLE_REMOTE_TERMINALS", assertion_key: "ENABLE_REMOTE_TERMINALS" },
+    )]);
     discovery
         .factories
         .terminal_pools
         .push(Box::new(EnvGatedTerminalPoolFactory { required_env_var: "ENABLE_REMOTE_TERMINALS", pool: terminal_pool }));
-    let daemon = InProcessDaemon::new(
-        vec![],
-        Arc::new(ConfigStore::with_base(config_dir)),
-        discovery,
-        HostName::local(),
-    )
-    .await;
+    let daemon = InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(config_dir)), discovery, HostName::local()).await;
 
     let result = daemon
         .discover_repo_for_environment_for_test(&repo, &EnvironmentId::new("static-ssh-6275696c64626f78"))

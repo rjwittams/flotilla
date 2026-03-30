@@ -107,23 +107,17 @@ async fn register_static_ssh_direct_environment(
 ) -> Result<(), String> {
     let env_id = static_ssh_environment_id(config_key);
     let runner = Arc::new(SshCommandRunner::new(environment.hostname.clone(), true, Arc::clone(&discovery.runner)));
-    tokio::time::timeout(
-        STATIC_SSH_REGISTRATION_TIMEOUT,
-        runner.run("true", &[], Path::new("/"), &ChannelLabel::Noop),
-    )
-    .await
-    .map_err(|_| format!("ssh preflight timed out for {}", environment.hostname))?
-    .map_err(|err| format!("ssh preflight failed for {}: {err}", environment.hostname))?;
-    let remote_env_vars = tokio::time::timeout(STATIC_SSH_REGISTRATION_TIMEOUT, load_env_vars(&*runner, Path::new("/")))
+    tokio::time::timeout(STATIC_SSH_REGISTRATION_TIMEOUT, runner.run("true", &[], Path::new("/"), &ChannelLabel::Noop))
         .await
-        .unwrap_or_default();
+        .map_err(|_| format!("ssh preflight timed out for {}", environment.hostname))?
+        .map_err(|err| format!("ssh preflight failed for {}: {err}", environment.hostname))?;
+    let remote_env_vars =
+        tokio::time::timeout(STATIC_SSH_REGISTRATION_TIMEOUT, load_env_vars(&*runner, Path::new("/"))).await.unwrap_or_default();
     let remote_env = StaticEnvVars { vars: remote_env_vars };
-    let env_bag = tokio::time::timeout(
-        STATIC_SSH_REGISTRATION_TIMEOUT,
-        run_host_detectors(&discovery.host_detectors, &*runner, &remote_env),
-    )
-    .await
-    .map_err(|_| format!("host detector execution timed out for {}", environment.hostname))?;
+    let env_bag =
+        tokio::time::timeout(STATIC_SSH_REGISTRATION_TIMEOUT, run_host_detectors(&discovery.host_detectors, &*runner, &remote_env))
+            .await
+            .map_err(|_| format!("host detector execution timed out for {}", environment.hostname))?;
     environment_manager.register_direct_environment(env_id, runner, env_bag)
 }
 
@@ -168,14 +162,12 @@ async fn discover_repo_for_environment(
     environment_id: &EnvironmentId,
     repo_path: &Path,
 ) -> Result<DiscoveryResult, String> {
-    let host_bag =
-        environment_manager.environment_bag(environment_id).ok_or_else(|| format!("environment not found: {environment_id}"))?;
+    let host_bag = environment_manager.environment_bag(environment_id).ok_or_else(|| format!("environment not found: {environment_id}"))?;
     let runner =
         environment_manager.environment_runner(environment_id).ok_or_else(|| format!("environment runner not found: {environment_id}"))?;
     let ee_path = ExecutionEnvironmentPath::new(repo_path);
     let remote_env = StaticEnvVars::from_bag(&host_bag);
-    let env: &dyn crate::providers::discovery::EnvVars =
-        if environment_id == local_environment_id { &*discovery.env } else { &remote_env };
+    let env: &dyn crate::providers::discovery::EnvVars = if environment_id == local_environment_id { &*discovery.env } else { &remote_env };
 
     Ok(discover_providers(&host_bag, &ee_path, &discovery.repo_detectors, &discovery.factories, config, runner, env).await)
 }

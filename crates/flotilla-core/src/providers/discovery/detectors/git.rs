@@ -33,9 +33,9 @@ impl RepoDetector for VcsRepoDetector {
         };
         let _ = inside;
         let git_dir = run!(runner, "git", &["rev-parse", "--path-format=absolute", "--git-dir"], repo_root.as_path()).ok();
-        let git_common_dir =
-            run!(runner, "git", &["rev-parse", "--path-format=absolute", "--git-common-dir"], repo_root.as_path()).ok();
-        let is_main_checkout = matches!((git_dir, git_common_dir), (Some(git_dir), Some(common_dir)) if git_dir.trim() == common_dir.trim());
+        let git_common_dir = run!(runner, "git", &["rev-parse", "--path-format=absolute", "--git-common-dir"], repo_root.as_path()).ok();
+        let is_main_checkout =
+            matches!((git_dir, git_common_dir), (Some(git_dir), Some(common_dir)) if git_dir.trim() == common_dir.trim());
         vec![EnvironmentAssertion::vcs_checkout(repo_root.as_path(), VcsKind::Git, is_main_checkout)]
     }
 }

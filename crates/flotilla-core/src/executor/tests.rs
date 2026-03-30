@@ -1981,7 +1981,7 @@ async fn build_plan_remote_checkout_with_issue_links_suffixes_workspace_label_an
     assert!(matches!(
         plan.steps[2].action,
         StepAction::PrepareWorkspace { ref checkout_path, ref label }
-            if checkout_path == &None && label == "feat-x@feta"
+            if checkout_path.is_none() && label == "feat-x@feta"
     ));
     assert_eq!(plan.steps[2].host, StepExecutionContext::Host(HostName::new("feta")));
     assert_eq!(plan.steps[3].description, "Attach workspace");
