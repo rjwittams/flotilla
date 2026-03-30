@@ -6,12 +6,11 @@ use std::{
     time::Duration,
 };
 
+use flotilla_protocol::EnvironmentId;
 use tokio::{
     sync::{watch, Notify},
     task::JoinHandle,
 };
-
-use flotilla_protocol::EnvironmentId;
 
 use crate::{
     attachable::{BindingObjectKind, SharedAttachableStore},
@@ -74,17 +73,16 @@ impl RepoRefreshHandle {
 
                 // Fetch all provider data
                 let mut provider_data = ProviderData::default();
-                let errors =
-                    refresh_providers(
-                        &mut provider_data,
-                        &repo_root,
-                        &registry,
-                        &criteria,
-                        environment_id.as_ref(),
-                        &attachable_store,
-                        &agent_state_store,
-                    )
-                    .await;
+                let errors = refresh_providers(
+                    &mut provider_data,
+                    &repo_root,
+                    &registry,
+                    &criteria,
+                    environment_id.as_ref(),
+                    &attachable_store,
+                    &agent_state_store,
+                )
+                .await;
                 let provider_health = compute_provider_health(&registry, &errors);
 
                 // Correlate

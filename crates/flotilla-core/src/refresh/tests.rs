@@ -390,8 +390,8 @@ async fn refresh_populates_all_provider_data_and_merged_wins_branch_conflict() {
     );
 
     let mut pd = ProviderData::default();
-    let errors = refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, &test_attachable_store(), &test_agent_state_store())
-        .await;
+    let errors =
+        refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, &test_attachable_store(), &test_agent_state_store()).await;
 
     assert!(errors.is_empty());
     assert_eq!(pd.checkouts.len(), 1);
@@ -465,8 +465,8 @@ async fn refresh_reports_checkout_errors() {
     registry.checkout_managers.insert("wt", desc("wt"), Arc::new(MockCheckoutManager::failing("checkout failed")));
 
     let mut pd = ProviderData::default();
-    let errors = refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, &test_attachable_store(), &test_agent_state_store())
-        .await;
+    let errors =
+        refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, &test_attachable_store(), &test_agent_state_store()).await;
 
     assert!(errors.iter().any(|e| e.category == "checkouts"));
     assert!(pd.checkouts.is_empty());
@@ -486,8 +486,8 @@ async fn refresh_collects_multiple_errors_and_preserves_successful_providers() {
     registry.workspace_managers.insert("cmux", desc("cmux"), Arc::new(MockWorkspaceManager::failing("workspaces fail")));
 
     let mut pd = ProviderData::default();
-    let errors = refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, &test_attachable_store(), &test_agent_state_store())
-        .await;
+    let errors =
+        refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, &test_attachable_store(), &test_agent_state_store()).await;
 
     let categories: HashSet<&str> = errors.iter().map(|e| e.category).collect();
     for expected in ["PRs", "merged", "sessions", "branches", "workspaces"] {

@@ -64,11 +64,7 @@ impl EnvironmentManager {
         let display_name = Self::display_name_for_bag(&env_bag);
         managed.insert(
             local_environment_id.clone(),
-            ManagedEnvironmentKind::Direct(DirectEnvironmentState {
-                runner: Arc::clone(&local_runner),
-                env_bag,
-                display_name,
-            }),
+            ManagedEnvironmentKind::Direct(DirectEnvironmentState { runner: Arc::clone(&local_runner), env_bag, display_name }),
         );
 
         Self { local_environment_id, host_runner: local_runner, managed: Mutex::new(managed) }
@@ -545,10 +541,7 @@ mod tests {
 
         let result = manager.register_provisioned_environment(registration_id.clone(), handle, EnvironmentBag::new(), None);
 
-        assert_eq!(
-            result.unwrap_err(),
-            format!("provisioned environment id mismatch: key={registration_id}, handle={handle_id}")
-        );
+        assert_eq!(result.unwrap_err(), format!("provisioned environment id mismatch: key={registration_id}, handle={handle_id}"));
         assert!(manager.environment_bag(&registration_id).is_none());
         assert!(manager.environment_bag(&handle_id).is_none());
     }
@@ -578,11 +571,8 @@ mod tests {
     async fn visible_environments_includes_direct_and_provisioned_environments_with_display_names() {
         let local_environment_id = EnvironmentId::new("local-env");
         let local_bag = EnvironmentBag::new().with(EnvironmentAssertion::env_var("DISPLAY_NAME", "local-dev"));
-        let manager = EnvironmentManager::from_local_state(
-            local_environment_id.clone(),
-            Arc::new(DiscoveryMockRunner::builder().build()),
-            local_bag,
-        );
+        let manager =
+            EnvironmentManager::from_local_state(local_environment_id.clone(), Arc::new(DiscoveryMockRunner::builder().build()), local_bag);
 
         let ssh_environment_id = EnvironmentId::new("ssh-env");
         manager
@@ -594,11 +584,8 @@ mod tests {
             .expect("register ssh direct environment");
 
         let provisioned_environment_id = EnvironmentId::new("provisioned-env");
-        let (handle, _) = mock_handle(
-            &provisioned_environment_id,
-            HashMap::from([(String::from("DISPLAY_NAME"), String::from("container-dev"))]),
-            None,
-        );
+        let (handle, _) =
+            mock_handle(&provisioned_environment_id, HashMap::from([(String::from("DISPLAY_NAME"), String::from("container-dev"))]), None);
         manager
             .register_provisioned_environment(
                 provisioned_environment_id.clone(),

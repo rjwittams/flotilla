@@ -393,8 +393,9 @@ mod tests {
 
         let first =
             resolve_or_create_remote_environment_id(&runner, &env, EnvironmentId::new("static-ssh-fallback")).await.expect("first resolve");
-        let second =
-            resolve_or_create_remote_environment_id(&runner, &env, EnvironmentId::new("static-ssh-fallback")).await.expect("second resolve");
+        let second = resolve_or_create_remote_environment_id(&runner, &env, EnvironmentId::new("static-ssh-fallback"))
+            .await
+            .expect("second resolve");
 
         assert_eq!(first, second);
         assert_ne!(first.as_str(), "static-ssh-fallback");

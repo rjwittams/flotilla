@@ -196,24 +196,14 @@ impl From<EnvironmentInfoTagged> for EnvironmentInfo {
     fn from(value: EnvironmentInfoTagged) -> Self {
         match value {
             EnvironmentInfoTagged::Direct { id, display_name, status } => Self::Direct { id, display_name, status },
-            EnvironmentInfoTagged::Provisioned { id, display_name, image, status } => Self::Provisioned {
-                id,
-                display_name,
-                image,
-                status,
-            },
+            EnvironmentInfoTagged::Provisioned { id, display_name, image, status } => Self::Provisioned { id, display_name, image, status },
         }
     }
 }
 
 impl From<LegacyProvisionedEnvironmentInfo> for EnvironmentInfo {
     fn from(value: LegacyProvisionedEnvironmentInfo) -> Self {
-        Self::Provisioned {
-            id: value.id,
-            display_name: value.display_name,
-            image: value.image,
-            status: value.status,
-        }
+        Self::Provisioned { id: value.id, display_name: value.display_name, image: value.image, status: value.status }
     }
 }
 
@@ -280,18 +270,14 @@ token_env_vars: []
 
     #[test]
     fn environment_info_defaults_optional_display_metadata_and_image_for_direct_environments() {
-        let info: EnvironmentInfo =
-            serde_json::from_str(r#"{"kind":"direct","id":"env-direct","status":"Running"}"#)
-                .expect("should deserialize direct environment without image");
+        let info: EnvironmentInfo = serde_json::from_str(r#"{"kind":"direct","id":"env-direct","status":"Running"}"#)
+            .expect("should deserialize direct environment without image");
 
-        assert_eq!(
-            info,
-            EnvironmentInfo::Direct {
-                id: EnvironmentId::new("env-direct"),
-                display_name: None,
-                status: EnvironmentStatus::Running,
-            }
-        );
+        assert_eq!(info, EnvironmentInfo::Direct {
+            id: EnvironmentId::new("env-direct"),
+            display_name: None,
+            status: EnvironmentStatus::Running,
+        });
     }
 
     #[test]
@@ -314,27 +300,20 @@ token_env_vars: []
 
     #[test]
     fn environment_info_rejects_images_for_direct_environments() {
-        serde_json::from_str::<EnvironmentInfo>(
-            r#"{"kind":"direct","id":"env-direct","image":"ubuntu:24.04","status":"Running"}"#,
-        )
-        .expect_err("direct environments should not accept an image");
+        serde_json::from_str::<EnvironmentInfo>(r#"{"kind":"direct","id":"env-direct","image":"ubuntu:24.04","status":"Running"}"#)
+            .expect_err("direct environments should not accept an image");
     }
 
     #[test]
     fn environment_info_deserializes_legacy_provisioned_shape_without_kind() {
-        let info: EnvironmentInfo = serde_json::from_str(
-            r#"{"id":"env-provisioned","image":"ubuntu:24.04","status":"Stopped"}"#,
-        )
-        .expect("legacy provisioned environments without kind should still deserialize");
+        let info: EnvironmentInfo = serde_json::from_str(r#"{"id":"env-provisioned","image":"ubuntu:24.04","status":"Stopped"}"#)
+            .expect("legacy provisioned environments without kind should still deserialize");
 
-        assert_eq!(
-            info,
-            EnvironmentInfo::Provisioned {
-                id: EnvironmentId::new("env-provisioned"),
-                display_name: None,
-                image: ImageId::new("ubuntu:24.04"),
-                status: EnvironmentStatus::Stopped,
-            }
-        );
+        assert_eq!(info, EnvironmentInfo::Provisioned {
+            id: EnvironmentId::new("env-provisioned"),
+            display_name: None,
+            image: ImageId::new("ubuntu:24.04"),
+            status: EnvironmentStatus::Stopped,
+        });
     }
 }

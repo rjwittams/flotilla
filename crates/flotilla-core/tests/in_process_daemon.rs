@@ -20,8 +20,9 @@ use flotilla_core::{
         discovery::{
             test_support::{
                 fake_discovery, fake_discovery_with_provider_set, fake_discovery_with_providers, fake_vcs_discovery, git_process_discovery,
-                init_git_repo, init_git_repo_with_remote, DiscoveryMockRunner, FakeCheckoutManager, FakeCheckoutManagerFactory, FakeDiscoveryProviders,
-                FakeIssueTracker, FakeTerminalPool, FakeVcsFactory, FakeVcsState, FakeWorkspaceManager, TestEnvVars,
+                init_git_repo, init_git_repo_with_remote, DiscoveryMockRunner, FakeCheckoutManager, FakeCheckoutManagerFactory,
+                FakeDiscoveryProviders, FakeIssueTracker, FakeTerminalPool, FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
+                TestEnvVars,
             },
             DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostDetector, HostPlatform, ProviderCategory,
             ProviderDescriptor, RepoDetector, UnmetRequirement,
@@ -34,8 +35,9 @@ use flotilla_core::{
 };
 use flotilla_protocol::{
     AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, CorrelationKey, DaemonEvent,
-    EnvironmentId, EnvironmentInfo, EnvironmentStatus, HostEnvironment, HostName, HostPath, HostProviderStatus, HostSummary, ImageId, Issue,
-    PeerConnectionState, ProviderData, RepoIdentity, RepoSelector, StreamKey, SystemInfo, ToolInventory, TopologyRoute, WorkItemKind,
+    EnvironmentId, EnvironmentInfo, EnvironmentStatus, HostEnvironment, HostName, HostPath, HostProviderStatus, HostSummary, ImageId,
+    Issue, PeerConnectionState, ProviderData, RepoIdentity, RepoSelector, StreamKey, SystemInfo, ToolInventory, TopologyRoute,
+    WorkItemKind,
 };
 use tokio::sync::Notify;
 
@@ -675,9 +677,7 @@ display_name = "Build Box"
         .visible_environments
         .iter()
         .find_map(|environment| match environment {
-            EnvironmentInfo::Direct { id, display_name, .. } if id.as_str() == "buildbox-visible-id" => {
-                Some(display_name.clone())
-            }
+            EnvironmentInfo::Direct { id, display_name, .. } if id.as_str() == "buildbox-visible-id" => Some(display_name.clone()),
             _ => None,
         })
         .expect("static ssh direct environment should be visible");
@@ -1233,10 +1233,7 @@ async fn local_host_queries_include_visible_environments_without_changing_summar
 
     let summary = status.summary.expect("local host summary");
     assert!(
-        summary
-            .environments
-            .iter()
-            .all(|environment| matches!(environment, EnvironmentInfo::Provisioned { .. })),
+        summary.environments.iter().all(|environment| matches!(environment, EnvironmentInfo::Provisioned { .. })),
         "host summary environments must remain provisioned-only"
     );
     assert!(summary.environments.iter().any(|environment| match environment {
@@ -1244,13 +1241,10 @@ async fn local_host_queries_include_visible_environments_without_changing_summar
         _ => false,
     }));
     assert!(
-        summary
-            .environments
-            .iter()
-            .all(|environment| match environment {
-                EnvironmentInfo::Direct { id, .. } => id != &direct_environment_id,
-                EnvironmentInfo::Provisioned { .. } => true,
-            }),
+        summary.environments.iter().all(|environment| match environment {
+            EnvironmentInfo::Direct { id, .. } => id != &direct_environment_id,
+            EnvironmentInfo::Provisioned { .. } => true,
+        }),
         "direct environments must not leak into HostSummary.environments"
     );
 }
@@ -1366,11 +1360,8 @@ async fn local_direct_repo_refresh_stamps_discovered_checkout_environment_id() {
             environment_id: None,
         })])
         .await;
-    let discovery = fake_discovery_with_providers(
-        Some(checkout_manager as Arc<dyn flotilla_core::providers::vcs::CheckoutManager>),
-        None,
-        None,
-    );
+    let discovery =
+        fake_discovery_with_providers(Some(checkout_manager as Arc<dyn flotilla_core::providers::vcs::CheckoutManager>), None, None);
 
     let daemon =
         InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(temp.path().join("config"))), discovery, HostName::local()).await;
@@ -1457,10 +1448,8 @@ hostname = "buildbox.example"
 
     let daemon = InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(config_dir)), discovery, HostName::local()).await;
     let environment_id = EnvironmentId::new("static-ssh-6275696c64626f78");
-    let result = daemon
-        .discover_repo_for_environment_for_test(&repo, &environment_id)
-        .await
-        .expect("discover repo for static ssh environment");
+    let result =
+        daemon.discover_repo_for_environment_for_test(&repo, &environment_id).await.expect("discover repo for static ssh environment");
 
     let model = RepoModel::new(
         repo.clone(),
@@ -1504,10 +1493,8 @@ async fn provisioned_repo_refresh_stamps_discovered_checkout_environment_id() {
         .register_provisioned_environment_for_test(environment_id.clone(), handle, EnvironmentBag::new())
         .expect("register provisioned environment");
 
-    let result = daemon
-        .discover_repo_for_environment_for_test(&repo, &environment_id)
-        .await
-        .expect("discover repo for provisioned environment");
+    let result =
+        daemon.discover_repo_for_environment_for_test(&repo, &environment_id).await.expect("discover repo for provisioned environment");
 
     let model = RepoModel::new(
         repo.clone(),

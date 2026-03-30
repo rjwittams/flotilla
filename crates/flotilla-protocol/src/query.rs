@@ -3,9 +3,8 @@ use std::{collections::HashMap, path::PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EnvironmentInfo,
     snapshot::{ProviderError, WorkItem},
-    HostName, HostSummary, PeerConnectionState,
+    EnvironmentInfo, HostName, HostSummary, PeerConnectionState,
 };
 
 /// Provider health across categories. Outer key: category (e.g. "vcs",

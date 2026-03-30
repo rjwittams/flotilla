@@ -18,9 +18,7 @@ pub mod step;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use environment::{
-    EnvironmentId, EnvironmentInfo, EnvironmentKind, EnvironmentSpec, EnvironmentStatus, ImageId, ImageSource,
-};
+pub use environment::{EnvironmentId, EnvironmentInfo, EnvironmentKind, EnvironmentSpec, EnvironmentStatus, ImageId, ImageSource};
 pub use host::{HostName, HostPath, RepoIdentity};
 pub use host_summary::{DiscoveryFact, HostEnvironment, HostProviderStatus, HostSnapshot, HostSummary, SystemInfo, ToolInventory};
 pub use path_context::{DaemonHostPath, ExecutionEnvironmentPath};

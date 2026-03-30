@@ -92,16 +92,15 @@ impl RepoModel {
         let labels = labels_from_registry(&registry);
         let registry = Arc::new(registry);
         let criteria = RepoCriteria { repo_slug };
-        let refresh_handle =
-            RepoRefreshHandle::spawn(
-                repo_root,
-                registry.clone(),
-                criteria,
-                environment_id,
-                attachable_store,
-                agent_state_store,
-                Duration::from_secs(10),
-            );
+        let refresh_handle = RepoRefreshHandle::spawn(
+            repo_root,
+            registry.clone(),
+            criteria,
+            environment_id,
+            attachable_store,
+            agent_state_store,
+            Duration::from_secs(10),
+        );
         Self { registry, data: DataStore::default(), labels, refresh_handle }
     }
 
