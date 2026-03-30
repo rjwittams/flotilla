@@ -48,24 +48,27 @@ use crate::{
 };
 
 fn static_ssh_environment_id(config_key: &str) -> EnvironmentId {
-    let mut slug = String::with_capacity(config_key.len());
-    let mut prev_hyphen = false;
-    for ch in config_key.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
-            slug.push(ch.to_ascii_lowercase());
-            prev_hyphen = false;
-        } else if !prev_hyphen {
-            slug.push('-');
-            prev_hyphen = true;
-        }
+    let mut encoded = String::with_capacity(config_key.len() * 2);
+    for byte in config_key.as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{byte:02x}");
     }
-    let slug = slug.trim_matches('-');
-    let suffix = if slug.is_empty() { "environment" } else { slug };
+    let suffix = if encoded.is_empty() { "empty".to_string() } else { encoded };
     // Remote direct environments do not have a persisted remote identity yet.
-    // Use a deterministic temporary id derived from the daemon.toml entry key
-    // so the same config entry resolves to the same environment within this tranche.
+    // Use a deterministic temporary id encoded directly from the daemon.toml
+    // entry key bytes so distinct legal config keys remain injective in this tranche.
     EnvironmentId::new(format!("static-ssh-{suffix}"))
 }
+
+struct RemoteNeutralEnvVars;
+
+impl crate::providers::discovery::EnvVars for RemoteNeutralEnvVars {
+    fn get(&self, _key: &str) -> Option<String> {
+        None
+    }
+}
+
+const STATIC_SSH_REGISTRATION_TIMEOUT: Duration = Duration::from_millis(100);
 
 async fn register_static_ssh_direct_environment(
     environment_manager: &EnvironmentManager,
@@ -75,11 +78,19 @@ async fn register_static_ssh_direct_environment(
 ) -> Result<(), String> {
     let env_id = static_ssh_environment_id(config_key);
     let runner = Arc::new(SshCommandRunner::new(environment.hostname.clone(), true, Arc::clone(&discovery.runner)));
-    runner
-        .run("true", &[], Path::new("/"), &ChannelLabel::Noop)
-        .await
-        .map_err(|err| format!("ssh preflight failed for {}: {err}", environment.hostname))?;
-    let env_bag = run_host_detectors(&discovery.host_detectors, &*runner, &*discovery.env).await;
+    tokio::time::timeout(
+        STATIC_SSH_REGISTRATION_TIMEOUT,
+        runner.run("true", &[], Path::new("/"), &ChannelLabel::Noop),
+    )
+    .await
+    .map_err(|_| format!("ssh preflight timed out for {}", environment.hostname))?
+    .map_err(|err| format!("ssh preflight failed for {}: {err}", environment.hostname))?;
+    let env_bag = tokio::time::timeout(
+        STATIC_SSH_REGISTRATION_TIMEOUT,
+        run_host_detectors(&discovery.host_detectors, &*runner, &RemoteNeutralEnvVars),
+    )
+    .await
+    .map_err(|_| format!("host detector execution timed out for {}", environment.hostname))?;
     environment_manager.register_direct_environment(env_id, runner, env_bag)
 }
 
