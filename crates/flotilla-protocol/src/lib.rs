@@ -18,7 +18,9 @@ pub mod step;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use environment::{EnvironmentId, EnvironmentInfo, EnvironmentSpec, EnvironmentStatus, ImageId, ImageSource};
+pub use environment::{
+    EnvironmentId, EnvironmentInfo, EnvironmentKind, EnvironmentSpec, EnvironmentStatus, ImageId, ImageSource,
+};
 pub use host::{HostName, HostPath, RepoIdentity};
 pub use host_summary::{DiscoveryFact, HostEnvironment, HostProviderStatus, HostSnapshot, HostSummary, SystemInfo, ToolInventory};
 pub use path_context::{DaemonHostPath, ExecutionEnvironmentPath};
@@ -70,7 +72,7 @@ pub use snapshot::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConfigLabel(pub String);
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Key for identifying an event stream in replay cursors.
 /// Each stream has its own independent sequence counter.
