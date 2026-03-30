@@ -19,20 +19,22 @@ use flotilla_core::{
         discovery::{
             test_support::{
                 fake_discovery, fake_discovery_with_provider_set, fake_discovery_with_providers, fake_vcs_discovery, git_process_discovery,
-                init_git_repo_with_remote, FakeCheckoutManager, FakeCheckoutManagerFactory, FakeDiscoveryProviders, FakeIssueTracker,
-                FakeTerminalPool, FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
+                init_git_repo_with_remote, DiscoveryMockRunner, FakeCheckoutManager, FakeCheckoutManagerFactory,
+                FakeDiscoveryProviders, FakeIssueTracker, FakeTerminalPool, FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
+                TestEnvVars,
             },
             DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostPlatform, ProviderCategory, ProviderDescriptor,
-            RepoDetector, UnmetRequirement,
+            HostDetector, RepoDetector, UnmetRequirement,
         },
         terminal::TerminalPool,
         types::{ChangeRequest, CloudAgentSession, RepoCriteria, SessionStatus, Workspace},
+        ChannelLabel, CommandRunner,
     },
 };
 use flotilla_protocol::{
     AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, CorrelationKey, DaemonEvent,
-    HostEnvironment, HostName, HostPath, HostProviderStatus, HostSummary, Issue, PeerConnectionState, ProviderData, RepoIdentity,
-    RepoSelector, StreamKey, SystemInfo, ToolInventory, TopologyRoute, WorkItemKind,
+    EnvironmentId, HostEnvironment, HostName, HostPath, HostProviderStatus, HostSummary, Issue, PeerConnectionState, ProviderData,
+    RepoIdentity, RepoSelector, StreamKey, SystemInfo, ToolInventory, TopologyRoute, WorkItemKind,
 };
 use tokio::sync::Notify;
 
@@ -50,6 +52,25 @@ impl RepoDetector for FixedRemoteHostDetector {
         _env: &dyn flotilla_core::providers::discovery::EnvVars,
     ) -> Vec<EnvironmentAssertion> {
         vec![EnvironmentAssertion::remote_host(HostPlatform::GitHub, self.owner, self.repo, "origin")]
+    }
+}
+
+struct RunnerEchoHostDetector {
+    probe: &'static str,
+    assertion_key: &'static str,
+}
+
+#[async_trait]
+impl HostDetector for RunnerEchoHostDetector {
+    async fn detect(
+        &self,
+        runner: &dyn CommandRunner,
+        _env: &dyn flotilla_core::providers::discovery::EnvVars,
+    ) -> Vec<EnvironmentAssertion> {
+        match runner.run("probe-env", &[self.probe], Path::new("/"), &ChannelLabel::Noop).await {
+            Ok(value) => vec![EnvironmentAssertion::env_var(self.assertion_key, value.trim())],
+            Err(_) => Vec::new(),
+        }
     }
 }
 
@@ -306,6 +327,19 @@ async fn daemon_for_plain_dir_with_discovery(discovery: DiscoveryRuntime) -> (te
     (temp, repo, daemon)
 }
 
+fn static_ssh_test_discovery(runner: Arc<dyn CommandRunner>) -> DiscoveryRuntime {
+    let mut runtime = fake_discovery(false);
+    runtime.runner = runner;
+    runtime.env = Arc::new(TestEnvVars::default());
+    runtime.host_detectors = vec![Box::new(RunnerEchoHostDetector { probe: "REMOTE_MARKER", assertion_key: "REMOTE_MARKER" })];
+    runtime
+}
+
+fn write_static_environment_config(config_dir: &Path, contents: &str) {
+    std::fs::create_dir_all(config_dir).expect("create config dir");
+    std::fs::write(config_dir.join("daemon.toml"), contents).expect("write daemon config");
+}
+
 async fn daemon_for_plain_dir_with_local_environment_id(local_environment_id: &str) -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>) {
     let temp = tempfile::tempdir().expect("create tempdir");
     let repo = temp.path().join("repo");
@@ -321,6 +355,172 @@ async fn daemon_for_plain_dir_with_local_environment_id(local_environment_id: &s
     let config = Arc::new(ConfigStore::with_base(config_dir));
     let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(false), HostName::local()).await;
     (temp, repo, daemon)
+}
+
+#[tokio::test]
+async fn configured_static_ssh_environments_are_registered_with_environment_scoped_bags() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run("probe-env", &["REMOTE_MARKER"], Ok("local".into()))
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
+                ],
+                Ok("buildbox".into()),
+            )
+            .build(),
+    );
+
+    let daemon = InProcessDaemon::new(
+        vec![repo],
+        Arc::new(ConfigStore::with_base(config_dir)),
+        static_ssh_test_discovery(ssh_runner),
+        HostName::local(),
+    )
+    .await;
+
+    let remote_env_id = EnvironmentId::new("static-ssh-buildbox");
+    let managed_ids = daemon.managed_environment_ids_for_test();
+    assert!(managed_ids.contains(daemon.local_environment_id()));
+    assert!(managed_ids.contains(&remote_env_id));
+
+    let local_bag = daemon.environment_bag_for_test(daemon.local_environment_id()).expect("local bag");
+    assert_eq!(local_bag.find_env_var("REMOTE_MARKER"), Some("local"));
+
+    let remote_bag = daemon.environment_bag_for_test(&remote_env_id).expect("remote bag");
+    assert_eq!(remote_bag.find_env_var("REMOTE_MARKER"), Some("buildbox"));
+}
+
+#[tokio::test]
+async fn broken_static_ssh_environment_does_not_break_local_startup() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+
+[environments.brokenbox]
+hostname = "brokenbox.example"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run("probe-env", &["REMOTE_MARKER"], Ok("local".into()))
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
+                ],
+                Ok("buildbox".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "brokenbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Err("ssh failed".into()),
+            )
+            .build(),
+    );
+
+    let daemon = InProcessDaemon::new(
+        vec![repo.clone()],
+        Arc::new(ConfigStore::with_base(config_dir)),
+        static_ssh_test_discovery(ssh_runner),
+        HostName::local(),
+    )
+    .await;
+
+    assert!(daemon.tracked_repo_identity_for_path(&repo).await.is_some(), "repo should still be tracked");
+
+    let managed_ids = daemon.managed_environment_ids_for_test();
+    assert!(managed_ids.contains(daemon.local_environment_id()));
+    assert!(managed_ids.contains(&EnvironmentId::new("static-ssh-buildbox")));
+    assert!(!managed_ids.contains(&EnvironmentId::new("static-ssh-brokenbox")));
 }
 
 fn init_bare_git_remote(path: &Path) {

@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
-    config::ConfigStore,
+    config::{ConfigStore, StaticEnvironmentConfig},
     convert::snapshot_to_proto,
     daemon::DaemonHandle,
     environment_manager::EnvironmentManager,
@@ -35,13 +35,78 @@ use crate::{
     issue_cache::IssueCache,
     model::{provider_names_from_registry, repo_name, RepoModel},
     path_context::{DaemonHostPath, ExecutionEnvironmentPath},
-    providers::discovery::{discover_providers, DiscoveryResult, DiscoveryRuntime, EnvironmentBag},
+    providers::{
+        discovery::{discover_providers, run_host_detectors, DiscoveryResult, DiscoveryRuntime, EnvironmentBag},
+        ssh_runner::SshCommandRunner,
+        ChannelLabel, CommandRunner,
+    },
     refresh::RefreshSnapshot,
     repo_state::{RepoRootState, RepoState, SnapshotBuildContext},
     step::{
         run_step_plan_with_remote_executor, RemoteStepBatchRequest, RemoteStepExecutor, RemoteStepProgressSink, StepOutcome, StepResolver,
     },
 };
+
+fn static_ssh_environment_id(config_key: &str) -> EnvironmentId {
+    let mut slug = String::with_capacity(config_key.len());
+    let mut prev_hyphen = false;
+    for ch in config_key.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+            slug.push(ch.to_ascii_lowercase());
+            prev_hyphen = false;
+        } else if !prev_hyphen {
+            slug.push('-');
+            prev_hyphen = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let suffix = if slug.is_empty() { "environment" } else { slug };
+    // Remote direct environments do not have a persisted remote identity yet.
+    // Use a deterministic temporary id derived from the daemon.toml entry key
+    // so the same config entry resolves to the same environment within this tranche.
+    EnvironmentId::new(format!("static-ssh-{suffix}"))
+}
+
+async fn register_static_ssh_direct_environment(
+    environment_manager: &EnvironmentManager,
+    discovery: &DiscoveryRuntime,
+    config_key: &str,
+    environment: &StaticEnvironmentConfig,
+) -> Result<(), String> {
+    let env_id = static_ssh_environment_id(config_key);
+    let runner = Arc::new(SshCommandRunner::new(environment.hostname.clone(), true, Arc::clone(&discovery.runner)));
+    runner
+        .run("true", &[], Path::new("/"), &ChannelLabel::Noop)
+        .await
+        .map_err(|err| format!("ssh preflight failed for {}: {err}", environment.hostname))?;
+    let env_bag = run_host_detectors(&discovery.host_detectors, &*runner, &*discovery.env).await;
+    environment_manager.register_direct_environment(env_id, runner, env_bag)
+}
+
+async fn register_static_ssh_direct_environments(
+    config: &ConfigStore,
+    discovery: &DiscoveryRuntime,
+    environment_manager: &EnvironmentManager,
+) {
+    let daemon_config = match config.load_daemon_config() {
+        Ok(config) => config,
+        Err(err) => {
+            warn!(%err, "failed to load daemon config for static SSH environments; continuing with local startup only");
+            return;
+        }
+    };
+
+    for (config_key, environment) in &daemon_config.environments {
+        if let Err(err) = register_static_ssh_direct_environment(environment_manager, discovery, config_key, environment).await {
+            warn!(
+                environment = %config_key,
+                hostname = %environment.hostname,
+                %err,
+                "failed to register static SSH direct environment; continuing startup"
+            );
+        }
+    }
+}
 
 fn fallback_repo_identity(path: &Path) -> flotilla_protocol::RepoIdentity {
     flotilla_protocol::RepoIdentity { authority: "local".into(), path: path.to_string_lossy().into_owned() }
@@ -315,6 +380,7 @@ impl InProcessDaemon {
         let local_environment_id =
             resolve_or_create_environment_id(&local_environment_state_dir).expect("failed to resolve local direct environment id");
         let environment_manager = Arc::new(EnvironmentManager::new_local(&discovery, local_environment_id.clone()).await);
+        register_static_ssh_direct_environments(&config, &discovery, &environment_manager).await;
         let local_environment_bag = environment_manager.local_environment_bag();
         let agent_state_store = crate::agents::shared_file_backed_agent_state_store(config.base_path());
 
@@ -438,6 +504,16 @@ impl InProcessDaemon {
     #[cfg(any(test, feature = "test-support"))]
     pub fn replace_local_environment_bag_for_test(&self, env_bag: EnvironmentBag) -> Result<(), String> {
         self.environment_manager.replace_local_environment_bag_for_test(env_bag)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn managed_environment_ids_for_test(&self) -> Vec<EnvironmentId> {
+        self.environment_manager.managed_environments().into_iter().map(|(env_id, _)| env_id).collect()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn environment_bag_for_test(&self, env_id: &EnvironmentId) -> Option<EnvironmentBag> {
+        self.environment_manager.environment_bag(env_id)
     }
 
     /// Returns the current connection status for a peer host.
