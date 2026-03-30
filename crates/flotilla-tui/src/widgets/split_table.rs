@@ -11,8 +11,8 @@ use ratatui::{
 };
 
 use super::{
-    columns::columns_for_section,
-    section_table::{Identifiable, RenderCtx, SectionTable},
+    columns::{columns_for_section, issue_columns_native},
+    section_table::{ColumnDef, Identifiable, IssueRow, RenderCtx, SectionTable},
     PROVIDER_CATEGORIES,
 };
 use crate::{
@@ -45,11 +45,147 @@ const HIGHLIGHT_WIDTH: u16 = 2;
 const COL_SPACING: u16 = 1;
 
 // ---------------------------------------------------------------------------
+// AnySection — type-erased section for heterogeneous SplitTable
+// ---------------------------------------------------------------------------
+
+/// A section that can contain either `WorkItem` rows or native `IssueRow` rows.
+///
+/// This enum lets `SplitTable` hold both correlation-derived `WorkItem` sections
+/// and query-driven `IssueRow` sections in a single flat list, with uniform
+/// navigation, rendering, and selection.
+pub enum AnySection {
+    WorkItems(SectionTable<WorkItem>),
+    Issues(SectionTable<IssueRow>),
+}
+
+impl AnySection {
+    fn row_count(&self) -> usize {
+        match self {
+            AnySection::WorkItems(t) => t.items.len(),
+            AnySection::Issues(t) => t.items.len(),
+        }
+    }
+
+    fn select_next(&mut self) -> bool {
+        match self {
+            AnySection::WorkItems(t) => t.select_next(),
+            AnySection::Issues(t) => t.select_next(),
+        }
+    }
+
+    fn select_prev(&mut self) -> bool {
+        match self {
+            AnySection::WorkItems(t) => t.select_prev(),
+            AnySection::Issues(t) => t.select_prev(),
+        }
+    }
+
+    fn select_first(&mut self) {
+        match self {
+            AnySection::WorkItems(t) => t.select_first(),
+            AnySection::Issues(t) => t.select_first(),
+        }
+    }
+
+    fn select_last(&mut self) {
+        match self {
+            AnySection::WorkItems(t) => t.select_last(),
+            AnySection::Issues(t) => t.select_last(),
+        }
+    }
+
+    fn select_idx(&mut self, idx: usize) {
+        match self {
+            AnySection::WorkItems(t) => t.select_idx(idx),
+            AnySection::Issues(t) => t.select_idx(idx),
+        }
+    }
+
+    fn clear_selection(&mut self) {
+        match self {
+            AnySection::WorkItems(t) => t.clear_selection(),
+            AnySection::Issues(t) => t.clear_selection(),
+        }
+    }
+
+    fn selected_idx(&self) -> Option<usize> {
+        match self {
+            AnySection::WorkItems(t) => t.selected_idx,
+            AnySection::Issues(t) => t.selected_idx,
+        }
+    }
+
+    fn header_label(&self) -> &str {
+        match self {
+            AnySection::WorkItems(t) => &t.header_label,
+            AnySection::Issues(t) => &t.header_label,
+        }
+    }
+
+    /// The selected row, returning a `SelectedRow` enum.
+    fn selected_row(&self) -> Option<SelectedRow<'_>> {
+        match self {
+            AnySection::WorkItems(t) => t.selected_item().map(SelectedRow::WorkItem),
+            AnySection::Issues(t) => t.selected_item().map(SelectedRow::Issue),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SelectedRow — typed return from heterogeneous selection
+// ---------------------------------------------------------------------------
+
+/// The currently selected row, which can be either a `WorkItem` or an `IssueRow`.
+///
+/// Callers match on this to handle both types. `IssueRow` carries native `Issue`
+/// data (labels, provider name) that `WorkItem` cannot represent.
+#[derive(Debug, Clone)]
+pub enum SelectedRow<'a> {
+    WorkItem(&'a WorkItem),
+    Issue(&'a IssueRow),
+}
+
+impl<'a> SelectedRow<'a> {
+    /// The description/title of the selected row.
+    pub fn description(&self) -> &str {
+        match self {
+            SelectedRow::WorkItem(item) => &item.description,
+            SelectedRow::Issue(row) => &row.issue.title,
+        }
+    }
+
+    /// Issue keys for the selected row.
+    pub fn issue_keys(&self) -> Vec<String> {
+        match self {
+            SelectedRow::WorkItem(item) => item.issue_keys.clone(),
+            SelectedRow::Issue(row) => vec![row.id.clone()],
+        }
+    }
+
+    /// Whether this row is a WorkItem (for callers that need the full type).
+    pub fn as_work_item(&self) -> Option<&'a WorkItem> {
+        match self {
+            SelectedRow::WorkItem(item) => Some(item),
+            SelectedRow::Issue(_) => None,
+        }
+    }
+
+    /// Whether this row is an IssueRow.
+    pub fn as_issue_row(&self) -> Option<&'a IssueRow> {
+        match self {
+            SelectedRow::WorkItem(_) => None,
+            SelectedRow::Issue(row) => Some(row),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SplitTable
 // ---------------------------------------------------------------------------
 
-/// Composes multiple `SectionTable<WorkItem>` instances — one per section kind.
-/// Renders them as a single scrollable surface with one flat cursor.
+/// Composes multiple sections — `SectionTable<WorkItem>` for correlation-derived
+/// sections and `SectionTable<IssueRow>` for query-driven issues — into a single
+/// scrollable surface with one flat cursor.
 ///
 /// Virtual row layout per section:
 ///   1 divider row + 1 column header row + N data rows
@@ -57,7 +193,7 @@ const COL_SPACING: u16 = 1;
 /// Only data rows are selectable.
 pub struct SplitTable {
     /// Ordered sections with their kind. Only non-empty sections present.
-    sections: Vec<(SectionKind, SectionTable<WorkItem>)>,
+    sections: Vec<(SectionKind, AnySection)>,
     /// Which section currently has focus (index into sections).
     active_section: usize,
     /// Scroll offset — the first visible virtual row.
@@ -81,44 +217,94 @@ impl SplitTable {
 
     // ── Data update ─────────���──────────────────────────────────────────
 
-    /// Replace section data.
+    /// Replace work-item section data (correlation-derived sections).
     ///
     /// Builds a HashMap of old sections by `SectionKind` for reuse; for each
     /// `SectionData`, if an existing section of that kind exists, updates its
     /// items (preserving selection); otherwise creates a new `SectionTable`
     /// with columns from `columns_for_section(kind)`. Empty sections are
     /// skipped. Preserves `active_section` by `SectionKind`.
+    ///
+    /// **Does not touch `Issues` sections that are `AnySection::Issues`** — those
+    /// are managed by `update_issue_section`. If correlation-derived issue
+    /// `WorkItem`s appear in `section_data`, they are treated as `WorkItems`
+    /// sections (this is fine — the correlation engine can still produce
+    /// issue-linked `WorkItem`s; only query-driven issues use `IssueRow`).
     pub fn update_sections(&mut self, section_data: Vec<SectionData>) {
         // Remember active kind before rebuild.
         let prev_active_kind = self.sections.get(self.active_section).map(|(k, _)| *k);
 
-        // Drain old sections into a lookup by kind.
-        let mut old_sections: HashMap<SectionKind, SectionTable<WorkItem>> = self.sections.drain(..).collect();
+        // Drain old sections into lookups by kind.
+        let mut old_work_item_sections: HashMap<SectionKind, SectionTable<WorkItem>> = HashMap::new();
+        let mut old_issue_section: Option<SectionTable<IssueRow>> = None;
+
+        for (kind, section) in self.sections.drain(..) {
+            match section {
+                AnySection::WorkItems(table) => {
+                    old_work_item_sections.insert(kind, table);
+                }
+                AnySection::Issues(table) => {
+                    old_issue_section = Some(table);
+                }
+            }
+        }
 
         for sd in section_data {
             if sd.items.is_empty() {
                 continue;
             }
-            if let Some(mut existing) = old_sections.remove(&sd.kind) {
+            if let Some(mut existing) = old_work_item_sections.remove(&sd.kind) {
                 existing.header_label = sd.label.clone();
                 existing.update_items(sd.items);
-                self.sections.push((sd.kind, existing));
+                self.sections.push((sd.kind, AnySection::WorkItems(existing)));
             } else {
                 let columns = columns_for_section(sd.kind);
                 let mut table = SectionTable::new(sd.label.clone(), columns);
                 table.update_items(sd.items);
-                self.sections.push((sd.kind, table));
+                self.sections.push((sd.kind, AnySection::WorkItems(table)));
             }
         }
 
-        // Restore active section by kind.
+        // Re-append the issue section (if it existed) — it always goes last.
+        if let Some(issue_table) = old_issue_section {
+            if !issue_table.is_empty() {
+                self.sections.push((SectionKind::Issues, AnySection::Issues(issue_table)));
+            }
+        }
+
+        self.restore_active_section(prev_active_kind);
+    }
+
+    /// Replace the query-driven issue section with native `IssueRow` data.
+    ///
+    /// If a non-empty `items` vec is provided, creates or updates the
+    /// `AnySection::Issues` section. If empty, removes any existing issue section.
+    /// Any `WorkItems`-typed issue section from correlation is left alone.
+    pub fn update_issue_section(&mut self, label: String, items: Vec<IssueRow>) {
+        let prev_active_kind = self.sections.get(self.active_section).map(|(k, _)| *k);
+
+        // Remove existing AnySection::Issues section (if any).
+        self.sections.retain(|(_, s)| !matches!(s, AnySection::Issues(_)));
+
+        if !items.is_empty() {
+            // Find or create an IssueRow section. It always goes at the end.
+            let columns = issue_columns_native();
+            let mut table = SectionTable::new(label, columns);
+            table.update_items(items);
+            self.sections.push((SectionKind::Issues, AnySection::Issues(table)));
+        }
+
+        self.restore_active_section(prev_active_kind);
+    }
+
+    /// Restore active section by kind after a section rebuild, and clamp.
+    fn restore_active_section(&mut self, prev_active_kind: Option<SectionKind>) {
         if let Some(kind) = prev_active_kind {
             self.active_section = self.sections.iter().position(|(k, _)| *k == kind).unwrap_or(0);
         } else {
             self.active_section = 0;
         }
 
-        // Clamp active section.
         if self.sections.is_empty() {
             self.active_section = 0;
         } else if self.active_section >= self.sections.len() {
@@ -131,20 +317,20 @@ impl SplitTable {
     /// Total number of virtual rows (dividers + headers + data).
     #[cfg(test)]
     fn total_virtual_rows(&self) -> usize {
-        self.sections.iter().map(|(_, t)| 2 + t.items.len()).sum()
+        self.sections.iter().map(|(_, s)| 2 + s.row_count()).sum()
     }
 
     /// Compute the flat virtual row index of the currently selected data row.
     /// Returns `None` when nothing is selected.
     fn selected_flat_row(&self) -> Option<usize> {
-        let (_, table) = self.sections.get(self.active_section)?;
-        let item_idx = table.selected_idx?;
+        let (_, section) = self.sections.get(self.active_section)?;
+        let item_idx = section.selected_idx()?;
         let mut flat = 0;
-        for (i, (_, t)) in self.sections.iter().enumerate() {
+        for (i, (_, s)) in self.sections.iter().enumerate() {
             if i == self.active_section {
                 return Some(flat + 2 + item_idx);
             }
-            flat += 2 + t.items.len();
+            flat += 2 + s.row_count();
         }
         None
     }
@@ -153,8 +339,8 @@ impl SplitTable {
     /// corresponds to. Returns `None` for divider/header rows.
     fn flat_to_section_item(&self, flat: usize) -> Option<(usize, usize)> {
         let mut offset = 0;
-        for (section_idx, (_, table)) in self.sections.iter().enumerate() {
-            let section_rows = 2 + table.items.len();
+        for (section_idx, (_, section)) in self.sections.iter().enumerate() {
+            let section_rows = 2 + section.row_count();
             if flat < offset + section_rows {
                 let relative = flat - offset;
                 if relative < 2 {
@@ -190,11 +376,11 @@ impl SplitTable {
     /// The flat row index where a section's divider header begins.
     fn section_start_flat(&self, section_idx: usize) -> usize {
         let mut flat = 0;
-        for (i, (_, t)) in self.sections.iter().enumerate() {
+        for (i, (_, s)) in self.sections.iter().enumerate() {
             if i == section_idx {
                 return flat;
             }
-            flat += 2 + t.items.len();
+            flat += 2 + s.row_count();
         }
         flat
     }
@@ -231,15 +417,21 @@ impl SplitTable {
         }
     }
 
-    /// The currently selected work item, if any.
+    /// The currently selected row, which may be a `WorkItem` or an `IssueRow`.
+    pub fn selected_row(&self) -> Option<SelectedRow<'_>> {
+        self.sections.get(self.active_section).and_then(|(_, section)| section.selected_row())
+    }
+
+    /// The currently selected work item, if any. Returns `None` if the
+    /// selection is in an `IssueRow` section.
     pub fn selected_work_item(&self) -> Option<&WorkItem> {
-        self.sections.get(self.active_section).and_then(|(_, table)| table.selected_item())
+        self.selected_row().and_then(|r| r.as_work_item())
     }
 
     /// Clear selection in the active section.
     pub fn clear_selection(&mut self) {
-        if let Some((_, table)) = self.sections.get_mut(self.active_section) {
-            table.clear_selection();
+        if let Some((_, section)) = self.sections.get_mut(self.active_section) {
+            section.clear_selection();
         }
     }
 
@@ -262,42 +454,47 @@ impl SplitTable {
         }
         // Clear selection in old active section.
         if self.active_section != section_idx {
-            if let Some((_, table)) = self.sections.get_mut(self.active_section) {
-                table.clear_selection();
+            if let Some((_, section)) = self.sections.get_mut(self.active_section) {
+                section.clear_selection();
             }
         }
         self.active_section = section_idx;
         self.sections[section_idx].1.select_idx(item_idx);
     }
 
-    /// Iterate all items across all sections.
+    /// Iterate all `WorkItem`s across all sections. `IssueRow` sections are skipped.
     pub fn all_items(&self) -> impl Iterator<Item = &WorkItem> {
-        self.sections.iter().flat_map(|(_, table)| table.items.iter())
+        self.sections.iter().flat_map(|(_, section)| match section {
+            AnySection::WorkItems(t) => t.items.iter().collect::<Vec<_>>(),
+            AnySection::Issues(_) => Vec::new(),
+        })
     }
 
-    /// Iterate all items with `(section_idx, &WorkItem, item_idx)` tuples.
+    /// Iterate all `WorkItem`s with `(section_idx, &WorkItem, item_idx)` tuples.
+    /// `IssueRow` sections are skipped.
     pub fn all_items_with_indices(&self) -> impl Iterator<Item = (usize, &WorkItem, usize)> {
-        self.sections
-            .iter()
-            .enumerate()
-            .flat_map(|(section_idx, (_, table))| table.items.iter().enumerate().map(move |(item_idx, item)| (section_idx, item, item_idx)))
+        self.sections.iter().enumerate().flat_map(|(section_idx, (_, section))| match section {
+            AnySection::WorkItems(t) => t.items.iter().enumerate().map(move |(item_idx, item)| (section_idx, item, item_idx)).collect(),
+            AnySection::Issues(_) => Vec::new(),
+        })
     }
 
-    /// Convenience: identity of the currently selected item.
+    /// Convenience: identity of the currently selected item. Returns `None`
+    /// for `IssueRow` selections (they have no `WorkItemIdentity`).
     pub fn selected_identity(&self) -> Option<WorkItemIdentity> {
         self.selected_work_item().map(|item| item.identity.clone())
     }
 
-    /// Total number of items across all sections.
+    /// Total number of items across all sections (both `WorkItem` and `IssueRow`).
     pub fn total_item_count(&self) -> usize {
-        self.sections.iter().map(|(_, table)| table.items.len()).sum()
+        self.sections.iter().map(|(_, s)| s.row_count()).sum()
     }
 
     /// A flat selection index across sections, for change-detection purposes.
     /// Returns `None` when nothing is selected.
     pub fn selected_flat_index(&self) -> Option<usize> {
-        let selected_idx = self.sections.get(self.active_section).and_then(|(_, t)| t.selected_idx)?;
-        let prior_items: usize = self.sections[..self.active_section].iter().map(|(_, t)| t.items.len()).sum();
+        let selected_idx = self.sections.get(self.active_section).and_then(|(_, s)| s.selected_idx())?;
+        let prior_items: usize = self.sections[..self.active_section].iter().map(|(_, s)| s.row_count()).sum();
         Some(prior_items + selected_idx)
     }
 
@@ -305,12 +502,12 @@ impl SplitTable {
     pub fn select_flat_index(&mut self, flat_idx: usize) {
         let mut remaining = flat_idx;
         let mut target_section = None;
-        for (i, (_, table)) in self.sections.iter().enumerate() {
-            if remaining < table.items.len() {
+        for (i, (_, section)) in self.sections.iter().enumerate() {
+            if remaining < section.row_count() {
                 target_section = Some((i, remaining));
                 break;
             }
-            remaining -= table.items.len();
+            remaining -= section.row_count();
         }
         if let Some((section_idx, item_idx)) = target_section {
             self.select_by_mouse(section_idx, item_idx);
@@ -357,11 +554,13 @@ impl SplitTable {
         // Precompute host_repo_roots from main checkouts across all sections.
         let local_repo_root = model.active_repo_root().clone();
         let mut host_repo_roots: HashMap<HostName, std::path::PathBuf> = HashMap::new();
-        for (_, table) in &self.sections {
-            for item in &table.items {
-                if item.is_main_checkout {
-                    if let Some(co) = item.checkout_key() {
-                        host_repo_roots.insert(co.host.clone(), co.path.clone());
+        for (_, section) in &self.sections {
+            if let AnySection::WorkItems(table) = section {
+                for item in &table.items {
+                    if item.is_main_checkout {
+                        if let Some(co) = item.checkout_key() {
+                            host_repo_roots.insert(co.host.clone(), co.path.clone());
+                        }
                     }
                 }
             }
@@ -385,64 +584,103 @@ impl SplitTable {
 
         let mut flat_row = 0usize;
 
-        for (_, table) in &self.sections {
+        for (_, section) in &self.sections {
             // ── Divider row ──
             if flat_row >= self.scroll_offset && flat_row < self.scroll_offset + viewport_height {
                 let y = area.y + (flat_row - self.scroll_offset) as u16;
                 let row_rect = Rect::new(area.x, y, area.width, 1);
-                render_divider(frame, &table.header_label, theme, row_rect);
+                render_divider(frame, section.header_label(), theme, row_rect);
             }
             flat_row += 1;
 
-            // Resolve column widths for this section.
-            let col_widths = table.resolve_widths(col_available, COL_SPACING);
+            match section {
+                AnySection::WorkItems(table) => {
+                    let col_widths = table.resolve_widths(col_available, COL_SPACING);
 
-            // ── Column header row ──
-            if flat_row >= self.scroll_offset && flat_row < self.scroll_offset + viewport_height {
-                let y = area.y + (flat_row - self.scroll_offset) as u16;
-                let row_rect = Rect::new(area.x, y, area.width, 1);
-                render_column_headers(frame, &table.columns, &col_widths, theme, row_rect);
-            }
-            flat_row += 1;
+                    // ── Column header row ──
+                    if flat_row >= self.scroll_offset && flat_row < self.scroll_offset + viewport_height {
+                        let y = area.y + (flat_row - self.scroll_offset) as u16;
+                        let row_rect = Rect::new(area.x, y, area.width, 1);
+                        render_column_headers(frame, &table.columns, &col_widths, theme, row_rect);
+                    }
+                    flat_row += 1;
 
-            // ── Data rows ──
-            let mut prev_source: Option<String> = None;
+                    // ── Data rows ──
+                    let mut prev_source: Option<String> = None;
 
-            for item in &table.items {
-                if flat_row >= self.scroll_offset && flat_row < self.scroll_offset + viewport_height {
-                    let y = area.y + (flat_row - self.scroll_offset) as u16;
-                    let is_selected = selected_flat == Some(flat_row);
+                    for item in &table.items {
+                        if flat_row >= self.scroll_offset && flat_row < self.scroll_offset + viewport_height {
+                            let y = area.y + (flat_row - self.scroll_offset) as u16;
+                            let is_selected = selected_flat == Some(flat_row);
 
-                    let render_ctx = RenderCtx {
-                        theme,
-                        providers,
-                        col_widths: col_widths.clone(),
-                        repo_root: &local_repo_root,
-                        host_repo_roots: &host_repo_roots,
-                        my_host,
-                        host_home_dirs: &host_home_dirs,
-                        prev_source: prev_source.as_deref(),
-                    };
+                            let render_ctx = RenderCtx {
+                                theme,
+                                providers,
+                                col_widths: col_widths.clone(),
+                                repo_root: &local_repo_root,
+                                host_repo_roots: &host_repo_roots,
+                                my_host,
+                                host_home_dirs: &host_home_dirs,
+                                prev_source: prev_source.as_deref(),
+                            };
 
-                    let pending = pending_actions.get(&item.identity);
-                    let is_multi_selected = multi_selected.contains(&item.identity);
+                            let pending = pending_actions.get(&item.identity);
+                            let is_multi_selected = multi_selected.contains(&item.identity);
 
-                    render_data_row(
-                        frame,
-                        item,
-                        &table.columns,
-                        &render_ctx,
-                        is_selected,
-                        pending,
-                        is_multi_selected,
-                        y,
-                        area.x,
-                        area.width,
-                        theme,
-                    );
+                            render_data_row(
+                                frame,
+                                item,
+                                &table.columns,
+                                &render_ctx,
+                                is_selected,
+                                pending,
+                                is_multi_selected,
+                                y,
+                                area.x,
+                                area.width,
+                                theme,
+                            );
+                        }
+                        prev_source = item.source.clone();
+                        flat_row += 1;
+                    }
                 }
-                prev_source = item.source.clone();
-                flat_row += 1;
+                AnySection::Issues(table) => {
+                    let col_widths = table.resolve_widths(col_available, COL_SPACING);
+
+                    // ── Column header row ──
+                    if flat_row >= self.scroll_offset && flat_row < self.scroll_offset + viewport_height {
+                        let y = area.y + (flat_row - self.scroll_offset) as u16;
+                        let row_rect = Rect::new(area.x, y, area.width, 1);
+                        render_column_headers_generic(&table.columns, &col_widths, theme, frame, row_rect);
+                    }
+                    flat_row += 1;
+
+                    // ── Data rows ──
+                    let mut prev_source: Option<String> = None;
+
+                    for item in &table.items {
+                        if flat_row >= self.scroll_offset && flat_row < self.scroll_offset + viewport_height {
+                            let y = area.y + (flat_row - self.scroll_offset) as u16;
+                            let is_selected = selected_flat == Some(flat_row);
+
+                            let render_ctx = RenderCtx {
+                                theme,
+                                providers,
+                                col_widths: col_widths.clone(),
+                                repo_root: &local_repo_root,
+                                host_repo_roots: &host_repo_roots,
+                                my_host,
+                                host_home_dirs: &host_home_dirs,
+                                prev_source: prev_source.as_deref(),
+                            };
+
+                            render_generic_data_row(frame, item, &table.columns, &render_ctx, is_selected, y, area.x, area.width, theme);
+                        }
+                        prev_source = Some(item.issue.provider_display_name.clone());
+                        flat_row += 1;
+                    }
+                }
             }
         }
 
@@ -631,7 +869,71 @@ fn render_data_row(
     }
 }
 
-// ── Provider table helpers ─��────────────────────────────────────────────────
+// ── Generic row rendering helpers (for IssueRow and other future types) ────
+
+/// Render column headers for any `ColumnDef<T>` section.
+fn render_column_headers_generic<T>(columns: &[ColumnDef<T>], col_widths: &[u16], theme: &Theme, frame: &mut Frame, area: Rect) {
+    let mut spans: Vec<Span> = Vec::new();
+    spans.push(Span::raw("  "));
+    for (i, col) in columns.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let w = col_widths.get(i).copied().unwrap_or(0) as usize;
+        let header = &col.header;
+        let padded = format!("{:<width$}", ui_helpers::truncate(header, w), width = w);
+        spans.push(Span::styled(padded, Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)));
+    }
+    let line = Line::from(spans);
+    frame.render_widget(line, area);
+}
+
+/// Render a single data row for any `ColumnDef<T>` section (no pending/multi-select support).
+#[allow(clippy::too_many_arguments)]
+fn render_generic_data_row<T>(
+    frame: &mut Frame,
+    item: &T,
+    columns: &[ColumnDef<T>],
+    ctx: &RenderCtx,
+    is_selected: bool,
+    y: u16,
+    area_x: u16,
+    area_width: u16,
+    theme: &Theme,
+) {
+    let mut spans: Vec<Span> = Vec::new();
+
+    if is_selected {
+        spans.push(Span::styled(HIGHLIGHT_SYMBOL, Style::default().fg(theme.text).add_modifier(Modifier::BOLD)));
+    } else {
+        spans.push(Span::raw("  "));
+    }
+
+    for (i, col) in columns.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let span = (col.extract)(item, ctx);
+        let w = ctx.col_widths.get(i).copied().unwrap_or(0) as usize;
+        let truncated = ui_helpers::truncate(&span.content, w);
+        let padded = format!("{:<width$}", truncated, width = w);
+        spans.push(Span::styled(padded, span.style));
+    }
+
+    let line = Line::from(spans);
+    frame.render_widget(line, Rect::new(area_x, y, area_width, 1));
+
+    if is_selected {
+        let buf = frame.buffer_mut();
+        for cx in area_x..area_x + area_width {
+            if let Some(cell) = buf.cell_mut(Position::new(cx, y)) {
+                cell.set_bg(theme.row_highlight);
+            }
+        }
+    }
+}
+
+// ── Provider table helpers ────────────────────────────────────────────────
 
 fn provider_status_badge(status: Option<ProviderStatus>, theme: &Theme) -> (&'static str, Color) {
     match status {

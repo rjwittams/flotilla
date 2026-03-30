@@ -23,7 +23,7 @@ impl GitHubIssueTracker {
     }
 }
 
-fn parse_issue(provider_name: &str, v: &serde_json::Value) -> Option<(String, Issue)> {
+pub(crate) fn parse_issue(provider_name: &str, v: &serde_json::Value) -> Option<(String, Issue)> {
     let number = v["number"].as_i64()?;
     let title = v["title"].as_str()?.to_string();
     let labels: Vec<String> = v["labels"]
@@ -36,7 +36,7 @@ fn parse_issue(provider_name: &str, v: &serde_json::Value) -> Option<(String, Is
 }
 
 #[async_trait]
-impl super::IssueTracker for GitHubIssueTracker {
+impl super::IssueProvider for GitHubIssueTracker {
     async fn list_issues(&self, repo_root: &Path, limit: usize) -> Result<Vec<(String, Issue)>, String> {
         let page = self.list_issues_page(repo_root, 1, limit).await?;
         Ok(page.issues)
@@ -147,7 +147,7 @@ mod tests {
     use crate::providers::{
         github_api::{GhApi, GhApiResponse},
         github_test_support::{build_api_and_runner, repo_root_for_recording},
-        issue_tracker::IssueTracker,
+        issue_tracker::IssueProvider,
         testing::MockRunner,
         ChannelLabel,
     };

@@ -15,22 +15,26 @@ use flotilla_core::{
     step::{RemoteStepBatchRequest, RemoteStepExecutor, RemoteStepProgressSink, RemoteStepProgressUpdate, StepOutcome},
 };
 use flotilla_protocol::{
-    Command, CommandAction, CommandPeerEvent, CommandValue, DaemonEvent, HostName, PeerWireMessage, RepoIdentity, RepoSelector,
-    RoutedPeerMessage, Step, StepStatus,
+    issue_query::CursorId, Command, CommandAction, CommandPeerEvent, CommandValue, DaemonEvent, HostName, PeerWireMessage, RepoIdentity,
+    RepoSelector, RoutedPeerMessage, Step, StepStatus,
 };
 use tokio::sync::{oneshot, Mutex, Notify};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::peer::{PeerManager, PeerSender};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct PendingRemoteCommand {
     pub(super) command_id: u64,
     pub(super) target_host: HostName,
     pub(super) repo_identity: Option<RepoIdentity>,
     pub(super) repo: Option<PathBuf>,
     pub(super) finished_via_event: bool,
+    /// When set, the originator is waiting for a direct query result rather
+    /// than a broadcast `CommandFinished` event.  `complete_remote_command`
+    /// resolves this instead of broadcasting.
+    pub(super) query_completion: Option<oneshot::Sender<CommandValue>>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +89,16 @@ type PendingRemoteStepCancelMap = Arc<Mutex<HashMap<u64, PendingRemoteStepCancel
 // waiting for normal task completion.
 type ForwardedRemoteStepBatchMap = Arc<Mutex<HashMap<u64, ForwardedRemoteStepBatch>>>;
 
+/// Tracks a cursor opened on a remote daemon via `dispatch_query` so it can
+/// be cleaned up when the client session disconnects.
+#[derive(Clone)]
+struct RemoteCursorEntry {
+    target_host: HostName,
+    session_id: uuid::Uuid,
+}
+
+type RemoteCursorMap = Arc<Mutex<HashMap<CursorId, RemoteCursorEntry>>>;
+
 #[derive(Clone)]
 pub(super) struct RemoteCommandRouter {
     daemon: Arc<InProcessDaemon>,
@@ -97,6 +111,10 @@ pub(super) struct RemoteCommandRouter {
     pending_remote_step_cancels: PendingRemoteStepCancelMap,
     forwarded_remote_step_batches: ForwardedRemoteStepBatchMap,
     next_remote_command_id: Arc<AtomicU64>,
+    /// Cursors opened on remote daemons on behalf of client sessions.
+    /// Populated by `dispatch_query` when it receives `IssueQueryOpened`;
+    /// drained by `disconnect_session_cursors` to forward close commands.
+    remote_cursors: RemoteCursorMap,
 }
 
 impl RemoteCommandRouter {
@@ -119,6 +137,7 @@ impl RemoteCommandRouter {
             pending_remote_step_cancels: Arc::new(Mutex::new(HashMap::new())),
             forwarded_remote_step_batches: Arc::new(Mutex::new(HashMap::new())),
             next_remote_command_id,
+            remote_cursors: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -140,6 +159,7 @@ impl RemoteCommandRouter {
                     repo_identity: extract_command_repo_identity(&command),
                     repo: None,
                     finished_via_event: false,
+                    query_completion: None,
                 });
 
                 let routed = RoutedPeerMessage::CommandRequest {
@@ -148,6 +168,7 @@ impl RemoteCommandRouter {
                     target_host: target_host.clone(),
                     remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
                     command: Box::new(command),
+                    session_id: None,
                 };
                 let send_result = self.send_routed_to(&target_host, routed).await;
 
@@ -164,6 +185,116 @@ impl RemoteCommandRouter {
             }
         } else {
             self.daemon.execute(command).await
+        }
+    }
+
+    /// Dispatch a query command and return the result synchronously.
+    ///
+    /// For local targets this calls `execute_query` directly.  For remote
+    /// targets the command is forwarded via the peer manager and we wait on a
+    /// oneshot for the `CommandResponse` to arrive — no `CommandFinished`
+    /// broadcast is synthesised.
+    pub(super) async fn dispatch_query(&self, command: Command, session_id: uuid::Uuid) -> Result<CommandValue, String> {
+        let target_host = command.host.clone().unwrap_or_else(|| self.daemon.host_name().clone());
+
+        if target_host == *self.daemon.host_name() {
+            return self.daemon.execute_query(command, session_id).await;
+        }
+
+        // Capture the cursor ID for close tracking before the command is moved.
+        let close_cursor = match &command.action {
+            CommandAction::QueryIssueClose { cursor } => Some(cursor.clone()),
+            _ => None,
+        };
+
+        let request_id = {
+            let mut pm = self.peer_manager.lock().await;
+            pm.next_request_id()
+        };
+        let command_id = self.next_remote_command_id.fetch_add(1, Ordering::Relaxed);
+
+        let (tx, rx) = oneshot::channel();
+
+        self.pending_remote_commands.lock().await.insert(request_id, PendingRemoteCommand {
+            command_id,
+            target_host: target_host.clone(),
+            repo_identity: extract_command_repo_identity(&command),
+            repo: None,
+            finished_via_event: false,
+            query_completion: Some(tx),
+        });
+
+        let routed = RoutedPeerMessage::CommandRequest {
+            request_id,
+            requester_host: self.daemon.host_name().clone(),
+            target_host: target_host.clone(),
+            remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
+            command: Box::new(command),
+            session_id: Some(session_id),
+        };
+        if let Err(err) = self.send_routed_to(&target_host, routed).await {
+            self.pending_remote_commands.lock().await.remove(&request_id);
+            return Err(err);
+        }
+
+        const REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+        let result = match tokio::time::timeout(REMOTE_QUERY_TIMEOUT, rx).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(_)) => Err("remote query response channel closed".to_string()),
+            Err(_) => {
+                self.pending_remote_commands.lock().await.remove(&request_id);
+                Err(format!("timed out waiting for remote query result (command_id={command_id})"))
+            }
+        };
+
+        // Track remote cursor lifecycle for disconnect cleanup.
+        if let Ok(ref value) = result {
+            match value {
+                CommandValue::IssueQueryOpened { cursor } => {
+                    self.remote_cursors.lock().await.insert(cursor.clone(), RemoteCursorEntry { target_host, session_id });
+                }
+                CommandValue::IssueQueryClosed => {
+                    if let Some(cursor) = &close_cursor {
+                        self.remote_cursors.lock().await.remove(cursor);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        result
+    }
+
+    /// Close all remote cursors owned by the given client session.
+    ///
+    /// Called during client disconnect. Each close command is spawned as a
+    /// fire-and-forget task — if the peer doesn't respond quickly the
+    /// cursor's expiry timer will clean it up anyway.
+    pub(super) async fn disconnect_session_cursors(&self, session_id: uuid::Uuid) {
+        let cursors_to_close: Vec<(CursorId, HostName)> = {
+            let mut map = self.remote_cursors.lock().await;
+            let matching: Vec<CursorId> =
+                map.iter().filter(|(_, entry)| entry.session_id == session_id).map(|(cid, _)| cid.clone()).collect();
+            matching.iter().map(|cid| (cid.clone(), map.remove(cid).expect("just matched").target_host)).collect()
+        };
+
+        if cursors_to_close.is_empty() {
+            return;
+        }
+
+        debug!(%session_id, count = cursors_to_close.len(), "closing remote cursors for disconnecting client (fire-and-forget)");
+        for (cursor, target_host) in cursors_to_close {
+            let router = self.clone();
+            tokio::spawn(async move {
+                let cmd = Command {
+                    host: Some(target_host),
+                    provisioning_target: None,
+                    context_repo: None,
+                    action: CommandAction::QueryIssueClose { cursor },
+                };
+                // Best-effort close — expiry timer is the fallback.
+                let _ = router.dispatch_query(cmd, session_id).await;
+            });
         }
     }
 
@@ -208,7 +339,14 @@ impl RemoteCommandRouter {
         }
     }
 
-    pub(super) async fn spawn_forwarded_command(&self, request_id: u64, requester_host: HostName, reply_via: HostName, command: Command) {
+    pub(super) async fn spawn_forwarded_command(
+        &self,
+        request_id: u64,
+        requester_host: HostName,
+        reply_via: HostName,
+        command: Command,
+        session_id: Option<uuid::Uuid>,
+    ) {
         let ready = Arc::new(Notify::new());
         self.forwarded_commands
             .lock()
@@ -216,7 +354,7 @@ impl RemoteCommandRouter {
             .insert(request_id, ForwardedCommand { state: ForwardedCommandState::Launching { ready: Arc::clone(&ready) } });
         let router = self.clone();
         tokio::spawn(async move {
-            router.execute_forwarded_command(request_id, requester_host, reply_via, command, ready).await;
+            router.execute_forwarded_command(request_id, requester_host, reply_via, command, session_id, ready).await;
         });
     }
 
@@ -310,6 +448,13 @@ impl RemoteCommandRouter {
         let Some(entry) = pending.remove(&request_id) else {
             return;
         };
+
+        // Query commands: resolve the oneshot directly without broadcasting
+        // a CommandFinished event.
+        if let Some(tx) = entry.query_completion {
+            let _ = tx.send(result);
+            return;
+        }
 
         if entry.finished_via_event {
             return;
@@ -427,10 +572,33 @@ impl RemoteCommandRouter {
         requester_host: HostName,
         reply_via: HostName,
         command: Command,
+        session_id: Option<uuid::Uuid>,
         ready: Arc<Notify>,
     ) {
-        let mut event_rx = self.daemon.subscribe();
         let responder_host = self.daemon.host_name().clone();
+
+        // Query commands: execute synchronously via execute_query, send the
+        // result back directly without subscribing to the event stream.
+        if command.action.is_query() {
+            let query_session = session_id.unwrap_or(uuid::Uuid::nil());
+            let result = match self.daemon.execute_query(command, query_session).await {
+                Ok(value) => value,
+                Err(message) => CommandValue::Error { message },
+            };
+            self.forwarded_commands.lock().await.remove(&request_id);
+            ready.notify_waiters();
+            let response = RoutedPeerMessage::CommandResponse {
+                request_id,
+                requester_host,
+                responder_host,
+                remaining_hops: PeerManager::DEFAULT_ROUTED_HOPS,
+                result: Box::new(result),
+            };
+            let _ = self.send_routed_to(&reply_via, response).await;
+            return;
+        }
+
+        let mut event_rx = self.daemon.subscribe();
         let command_id = match self.daemon.execute(command).await {
             Ok(command_id) => command_id,
             Err(message) => {
@@ -542,7 +710,7 @@ impl RemoteCommandRouter {
         command: Command,
         ready: Arc<Notify>,
     ) {
-        self.execute_forwarded_command(request_id, requester_host, reply_via, command, ready).await;
+        self.execute_forwarded_command(request_id, requester_host, reply_via, command, None, ready).await;
     }
 
     #[cfg(test)]

@@ -6,59 +6,89 @@ use crate::providers::{
     ai_utility::AiUtility,
     change_request::ChangeRequestTracker,
     coding_agent::CloudAgentService,
-    discovery::ProviderDescriptor,
-    issue_tracker::IssueTracker,
+    discovery::{ProviderDescriptor, ServiceDescriptor},
+    issue_query::IssueQueryService,
+    issue_tracker::IssueProvider,
     terminal::TerminalPool,
     vcs::{CheckoutManager, Vcs},
     workspace::WorkspaceManager,
 };
 
-/// An ordered set of providers of the same trait, keyed by name.
+/// Common accessors shared by all descriptor types.
 ///
-/// Insertion order determines priority — the first entry is the "preferred"
-/// provider for that category. All entries remain accessible by name or
-/// by iteration.
-pub struct ProviderSet<T: ?Sized> {
-    inner: IndexMap<String, (ProviderDescriptor, Arc<T>)>,
+/// Both `ProviderDescriptor` and `ServiceDescriptor` carry at least a `backend`
+/// and `display_name`. This trait lets `TypedSet` methods operate generically
+/// over either descriptor kind.
+pub trait DescriptorFields {
+    fn backend(&self) -> &str;
+    fn display_name(&self) -> &str;
 }
 
-impl<T: ?Sized> ProviderSet<T> {
+impl DescriptorFields for ProviderDescriptor {
+    fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    fn display_name(&self) -> &str {
+        &self.display_name
+    }
+}
+
+impl DescriptorFields for ServiceDescriptor {
+    fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    fn display_name(&self) -> &str {
+        &self.display_name
+    }
+}
+
+/// An ordered set of entries keyed by name, each pairing a descriptor with an
+/// `Arc<T>` implementation.
+///
+/// Insertion order determines priority — the first entry is the "preferred"
+/// entry for that category. All entries remain accessible by name or
+/// by iteration.
+pub struct TypedSet<D, T: ?Sized> {
+    inner: IndexMap<String, (D, Arc<T>)>,
+}
+
+pub type ProviderSet<T> = TypedSet<ProviderDescriptor, T>;
+pub type ServiceSet<T> = TypedSet<ServiceDescriptor, T>;
+
+impl<D, T: ?Sized> TypedSet<D, T> {
     pub fn new() -> Self {
         Self { inner: IndexMap::new() }
     }
 
-    /// Insert a provider. If a provider with the same name already exists,
+    /// Insert an entry. If one with the same name already exists,
     /// it is replaced (retaining insertion position).
-    pub fn insert(&mut self, name: impl Into<String>, desc: ProviderDescriptor, provider: Arc<T>) {
+    pub fn insert(&mut self, name: impl Into<String>, desc: D, provider: Arc<T>) {
         self.inner.insert(name.into(), (desc, provider));
     }
 
-    /// The preferred (first-registered) provider, if any.
+    /// The preferred (first-registered) entry, if any.
     pub fn preferred(&self) -> Option<&Arc<T>> {
         self.inner.values().next().map(|(_, p)| p)
     }
 
-    /// The preferred provider with its descriptor.
-    pub fn preferred_with_desc(&self) -> Option<(&ProviderDescriptor, &Arc<T>)> {
+    /// The preferred entry with its descriptor.
+    pub fn preferred_with_desc(&self) -> Option<(&D, &Arc<T>)> {
         self.inner.values().next().map(|(d, p)| (d, p))
     }
 
-    /// Look up a specific provider by name.
-    pub fn get(&self, key: &str) -> Option<(&ProviderDescriptor, &Arc<T>)> {
+    /// Look up a specific entry by name.
+    pub fn get(&self, key: &str) -> Option<(&D, &Arc<T>)> {
         self.inner.get(key).map(|(d, p)| (d, p))
     }
 
-    /// Iterate over all providers in priority order.
-    pub fn iter(&self) -> impl Iterator<Item = (&ProviderDescriptor, &Arc<T>)> {
+    /// Iterate over all entries in priority order.
+    pub fn iter(&self) -> impl Iterator<Item = (&D, &Arc<T>)> {
         self.inner.values().map(|(d, p)| (d, p))
     }
 
-    /// Iterate display names of all providers.
-    pub fn display_names(&self) -> impl Iterator<Item = &str> {
-        self.inner.values().map(|(d, _)| d.display_name.as_str())
-    }
-
-    /// The name (key) of the preferred provider, if any.
+    /// The name (key) of the preferred entry, if any.
     pub fn preferred_name(&self) -> Option<&str> {
         self.inner.keys().next().map(|s| s.as_str())
     }
@@ -79,21 +109,6 @@ impl<T: ?Sized> ProviderSet<T> {
         self.inner.clear();
     }
 
-    /// Reorder so that the first entry whose descriptor.backend matches is first.
-    /// When multiple entries share a backend, the first-registered one is moved
-    /// to front — registration order acts as a tiebreaker within a backend.
-    /// Returns `true` if a match was found, `false` otherwise.
-    pub fn prefer_by_backend(&mut self, backend: &str) -> bool {
-        if let Some(idx) = self.inner.values().position(|(desc, _)| desc.backend == backend) {
-            if idx > 0 {
-                self.inner.move_index(idx, 0);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
     /// Reorder so that the entry with the given implementation key is first.
     /// Returns `true` if a match was found, `false` otherwise.
     pub fn prefer_by_implementation(&mut self, implementation: &str) -> bool {
@@ -108,7 +123,29 @@ impl<T: ?Sized> ProviderSet<T> {
     }
 }
 
-impl<T: ?Sized> Default for ProviderSet<T> {
+impl<D: DescriptorFields, T: ?Sized> TypedSet<D, T> {
+    /// Iterate display names of all entries.
+    pub fn display_names(&self) -> impl Iterator<Item = &str> {
+        self.inner.values().map(|(d, _)| d.display_name())
+    }
+
+    /// Reorder so that the first entry whose descriptor.backend matches is first.
+    /// When multiple entries share a backend, the first-registered one is moved
+    /// to front — registration order acts as a tiebreaker within a backend.
+    /// Returns `true` if a match was found, `false` otherwise.
+    pub fn prefer_by_backend(&mut self, backend: &str) -> bool {
+        if let Some(idx) = self.inner.values().position(|(desc, _)| desc.backend() == backend) {
+            if idx > 0 {
+                self.inner.move_index(idx, 0);
+            }
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl<D, T: ?Sized> Default for TypedSet<D, T> {
     fn default() -> Self {
         Self::new()
     }
@@ -118,12 +155,13 @@ pub struct ProviderRegistry {
     pub vcs: ProviderSet<dyn Vcs>,
     pub checkout_managers: ProviderSet<dyn CheckoutManager>,
     pub change_requests: ProviderSet<dyn ChangeRequestTracker>,
-    pub issue_trackers: ProviderSet<dyn IssueTracker>,
+    pub issue_trackers: ProviderSet<dyn IssueProvider>,
     pub cloud_agents: ProviderSet<dyn CloudAgentService>,
     pub ai_utilities: ProviderSet<dyn AiUtility>,
     pub workspace_managers: ProviderSet<dyn WorkspaceManager>,
     pub terminal_pools: ProviderSet<dyn TerminalPool>,
     pub environment_providers: ProviderSet<dyn crate::providers::environment::EnvironmentProvider>,
+    pub issue_query_services: ServiceSet<dyn IssueQueryService>,
 }
 
 impl ProviderRegistry {
@@ -138,6 +176,7 @@ impl ProviderRegistry {
             workspace_managers: ProviderSet::new(),
             terminal_pools: ProviderSet::new(),
             environment_providers: ProviderSet::new(),
+            issue_query_services: ServiceSet::new(),
         }
     }
 }

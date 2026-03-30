@@ -52,6 +52,10 @@ impl DaemonHandle for StubDaemon {
         Ok(1)
     }
 
+    async fn execute_query(&self, _command: Command, _session_id: uuid::Uuid) -> Result<flotilla_protocol::CommandValue, String> {
+        Err("stub".into())
+    }
+
     async fn cancel(&self, _command_id: u64) -> Result<(), String> {
         Ok(())
     }
@@ -96,9 +100,6 @@ pub(crate) fn snapshot(repo: &Path) -> RepoSnapshot {
         providers: ProviderData::default(),
         provider_health: HashMap::new(),
         errors: vec![],
-        issue_total: None,
-        issue_has_more: false,
-        issue_search_results: None,
     }
 }
 
@@ -109,9 +110,7 @@ pub(crate) fn delta(repo: &Path, changes: Vec<Change>) -> RepoDelta {
         repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: repo.display().to_string() },
         repo: Some(repo.to_path_buf()),
         changes,
-        issue_total: None,
-        issue_has_more: false,
-        issue_search_results: None,
+        work_items: vec![],
     }
 }
 

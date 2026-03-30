@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use flotilla_protocol::{Command, CommandAction, WorkItem};
 
-use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent};
+use super::{ui_state::PendingActionContext, App, BranchInputKind, Intent, OwnedSelectedRow};
 use crate::{
     binding_table::{BindingModeId, KeyBindingMode},
     keymap::Action,
@@ -162,34 +162,39 @@ impl App {
 
     // ── Private helpers ──
 
-    /// Check if the current selection is near the bottom and fetch more issues.
-    ///
-    /// The SplitTable widget handles selection changes but can't mutate
-    /// `model.repos` (to set `issue_fetch_pending`). This post-dispatch check
-    /// runs after every key event to trigger infinite scroll when needed.
+    /// Check if the current selection is near the bottom of the issue section
+    /// and fetch more results if the active cursor has more pages.
     fn check_infinite_scroll(&mut self) {
         if self.model.repo_order.is_empty() {
             return;
         }
-        let identity = &self.model.repo_order[self.model.active_repo];
-        let Some(page) = self.screen.repo_pages.get(identity) else {
+        let repo_identity = self.model.repo_order[self.model.active_repo].clone();
+        let Some(page) = self.screen.repo_pages.get(&repo_identity) else { return };
+
+        // Check if the selection is in the issues section and near the bottom.
+        let Some(view) = self.issue_views.get(&repo_identity) else { return };
+        let Some(active_cursor) = view.active() else { return };
+        if !active_cursor.has_more || active_cursor.fetch_pending {
             return;
-        };
-        let Some(next) = page.table.selected_flat_index() else {
+        }
+
+        // Use the table's proximity detection: if we're within 5 rows of the bottom.
+        let issue_count = active_cursor.items.len();
+        if issue_count == 0 {
             return;
-        };
-        let total = page.table.total_item_count();
-        if next + 5 >= total && self.model.active().issue_has_more && !self.model.active().issue_fetch_pending {
-            let repo = self.model.active_repo_root().clone();
-            let issue_count = self.model.active().providers.issues.len();
-            let desired = issue_count + 50;
-            let repo_identity = self.model.active_repo_identity().clone();
-            if let Some(rm) = self.model.repos.get_mut(&repo_identity) {
-                rm.issue_fetch_pending = true;
+        }
+        let total_items = page.table.total_item_count();
+        let Some(flat_idx) = page.table.selected_flat_index() else { return };
+        // Trigger fetch when within 5 items of the end of the full table
+        // and there are issue items to paginate.
+        if flat_idx + 5 >= total_items {
+            let cursor_id = active_cursor.cursor.clone();
+            if let Some(view) = self.issue_views.get_mut(&repo_identity) {
+                if let Some(c) = view.active_mut() {
+                    c.fetch_pending = true;
+                }
             }
-            self.proto_commands.push(
-                self.command(CommandAction::FetchMoreIssues { repo: flotilla_protocol::RepoSelector::Path(repo), desired_count: desired }),
-            );
+            self.spawn_fetch_page(repo_identity, cursor_id, 50);
         }
     }
 
@@ -201,15 +206,24 @@ impl App {
             return;
         }
 
-        let Some(item) = self.selected_work_item().cloned() else {
+        let Some(selected) = self.selected_row_cloned() else {
             return;
         };
 
-        let my_host = self.model.my_host().cloned();
-        for &intent in Intent::enter_priority() {
-            if intent.is_available(&item) && intent.is_allowed_for_host(&item, &my_host) {
-                self.resolve_and_push(intent, &item);
-                return;
+        match selected {
+            OwnedSelectedRow::WorkItem(ref item) => {
+                let my_host = self.model.my_host().cloned();
+                for &intent in Intent::enter_priority() {
+                    if intent.is_available(item) && intent.is_allowed_for_host(item, &my_host) {
+                        self.resolve_and_push(intent, item);
+                        return;
+                    }
+                }
+            }
+            OwnedSelectedRow::IssueRow(row) => {
+                // For issue rows, the primary action is OpenIssue.
+                let cmd = self.provider_repo_command_for_issue(CommandAction::OpenIssue { id: row.id });
+                self.proto_commands.push(cmd);
             }
         }
     }
@@ -230,10 +244,16 @@ impl App {
         }
 
         // Also include current selection if not already in multi_selected
-        if let Some(item) = self.selected_work_item() {
-            if !multi_selected.contains(&item.identity) {
-                all_issue_keys.extend(item.issue_keys.iter().cloned());
+        match self.selected_row_cloned() {
+            Some(OwnedSelectedRow::WorkItem(ref item)) => {
+                if !multi_selected.contains(&item.identity) {
+                    all_issue_keys.extend(item.issue_keys.iter().cloned());
+                }
             }
+            Some(OwnedSelectedRow::IssueRow(row)) => {
+                all_issue_keys.push(row.id);
+            }
+            None => {}
         }
 
         all_issue_keys.sort();
@@ -249,6 +269,7 @@ impl App {
     }
 
     fn dispatch_if_available(&mut self, intent: Intent) {
+        // dispatch only applies to WorkItem rows (intents operate on WorkItem)
         let Some(item) = self.selected_work_item().cloned() else {
             return;
         };
@@ -373,6 +394,8 @@ impl App {
     }
 
     pub(super) fn open_action_menu(&mut self) {
+        // Action menu only applies to WorkItem rows; IssueRows have no
+        // Intent-based actions beyond the built-in Enter behaviour.
         let Some(item) = self.selected_work_item().cloned() else {
             return;
         };

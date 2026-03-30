@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use crate::providers::types::{Issue, IssueChangeset, IssuePage};
 
 #[async_trait]
-pub trait IssueTracker: Send + Sync {
+pub trait IssueProvider: Send + Sync {
     async fn list_issues(&self, repo_root: &Path, limit: usize) -> Result<Vec<(String, Issue)>, String>;
     async fn open_in_browser(&self, repo_root: &Path, id: &str) -> Result<(), String>;
 

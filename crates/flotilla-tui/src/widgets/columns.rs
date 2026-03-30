@@ -2,7 +2,7 @@ use flotilla_core::data::SectionKind;
 use flotilla_protocol::WorkItem;
 use ratatui::{layout::Constraint, style::Style, text::Span};
 
-use super::section_table::{ColumnDef, RenderCtx};
+use super::section_table::{ColumnDef, IssueRow, RenderCtx};
 use crate::ui_helpers;
 
 // ---------------------------------------------------------------------------
@@ -221,6 +221,38 @@ fn remote_branch_columns() -> Vec<ColumnDef<WorkItem>> {
             styled_span(text, ctx.theme.branch)
         }),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Native issue columns (for IssueRow)
+// ---------------------------------------------------------------------------
+
+/// Column definitions that render directly from `IssueRow` data.
+///
+/// Unlike `issue_columns()` (which operates on synthetic `WorkItem`s and must
+/// look up labels via `ctx.providers.issues`), these extractors read labels,
+/// title, and provider name straight from the `Issue` struct. This eliminates
+/// the lookup failure that caused blank labels for query-driven issues.
+pub fn issue_columns_native() -> Vec<ColumnDef<IssueRow>> {
+    vec![
+        col_issue("", Constraint::Length(3), |_item, ctx| styled_span(" ◆".to_string(), ctx.theme.issue)),
+        col_issue("ID", Constraint::Length(6), |item, ctx| styled_span(format!("#{}", item.id), ctx.theme.issue)),
+        col_issue("Title", Constraint::Fill(2), |item, ctx| styled_span(item.issue.title.clone(), ctx.theme.text)),
+        col_issue("Labels", Constraint::Fill(1), |item, ctx| styled_span(item.issue.labels.join(", "), ctx.theme.muted)),
+        col_issue("Source", Constraint::Length(10), |item, ctx| {
+            let raw = item.issue.provider_display_name.clone();
+            let text = if ctx.prev_source == Some(raw.as_str()) { String::new() } else { raw };
+            styled_span(text, ctx.theme.source)
+        }),
+    ]
+}
+
+/// Build a `ColumnDef<IssueRow>`.
+fn col_issue<F>(header: &str, width: Constraint, extract: F) -> ColumnDef<IssueRow>
+where
+    F: Fn(&IssueRow, &RenderCtx) -> Span<'static> + 'static,
+{
+    ColumnDef { header: header.to_string(), width, extract: Box::new(extract) }
 }
 
 // ---------------------------------------------------------------------------

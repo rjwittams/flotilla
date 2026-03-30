@@ -5,6 +5,7 @@ pub mod environment;
 pub mod framing;
 mod host;
 mod host_summary;
+pub mod issue_query;
 pub mod output;
 pub mod path_context;
 pub mod peer;
@@ -63,6 +64,12 @@ pub use query::{
     UnmetRequirementInfo,
 };
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectionRole {
+    Client,
+    Peer,
+}
 pub use snapshot::{
     CategoryLabels, CheckoutRef, ProviderError, RepoInfo, RepoLabels, RepoSnapshot, WorkItem, WorkItemIdentity, WorkItemKind,
 };
@@ -125,6 +132,7 @@ pub enum Response {
     GetStatus(StatusResponse),
     GetTopology(TopologyResponse),
     AgentHook,
+    QueryResult { command_id: u64, value: commands::CommandValue },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +158,8 @@ pub enum Message {
         host_name: HostName,
         #[serde(default = "uuid::Uuid::nil")]
         session_id: uuid::Uuid,
+        #[serde(default)]
+        connection_role: Option<ConnectionRole>,
         #[serde(default)]
         environment_id: Option<EnvironmentId>,
     },
@@ -249,10 +259,8 @@ pub struct RepoDelta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<std::path::PathBuf>,
     pub changes: Vec<Change>,
-    /// Issue metadata (not part of delta log, but needed by TUI).
-    pub issue_total: Option<u32>,
-    pub issue_has_more: bool,
-    pub issue_search_results: Option<Vec<(String, Issue)>>,
+    /// Pre-correlated work items from the daemon (avoids re-correlation on TUI side).
+    pub work_items: Vec<snapshot::WorkItem>,
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 pub mod executor;
 mod file_picker;
 pub mod intent;
+pub mod issue_view;
 mod key_handlers;
 mod navigation;
 #[doc(hidden)]
@@ -18,7 +19,6 @@ use std::{
 use flotilla_core::{
     config::{ConfigStore, RepoViewLayoutConfig},
     daemon::DaemonHandle,
-    delta::apply_work_item_changes,
 };
 use flotilla_protocol::{
     Command, CommandAction, CommandValue, DaemonEvent, HostName, HostSummary, PeerConnectionState, ProviderData, ProviderError,
@@ -34,8 +34,30 @@ use crate::{
     keymap::Keymap,
     shared::Shared,
     theme::Theme,
-    widgets::repo_page::{RepoData, RepoPage},
+    widgets::{
+        repo_page::{RepoData, RepoPage},
+        section_table::IssueRow,
+    },
 };
+
+/// Owned version of `SelectedRow` for use when the borrow can't be held.
+pub(super) enum OwnedSelectedRow {
+    WorkItem(Box<WorkItem>),
+    IssueRow(IssueRow),
+}
+
+/// Spawn a fire-and-forget `QueryIssueClose` so the server-side cursor is released.
+fn spawn_close_cursor(daemon: &Arc<dyn DaemonHandle>, cursor: &flotilla_protocol::issue_query::CursorId, session_id: uuid::Uuid) {
+    let daemon = daemon.clone();
+    let cursor = cursor.clone();
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let cmd =
+                Command { action: CommandAction::QueryIssueClose { cursor }, host: None, provisioning_target: None, context_repo: None };
+            let _ = daemon.execute_query(cmd, session_id).await;
+        });
+    }
+}
 
 /// Per-provider auth/health status from last refresh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,12 +126,6 @@ pub struct TuiRepoModel {
     pub provider_names: HashMap<String, Vec<String>>,
     pub provider_health: HashMap<String, HashMap<String, bool>>,
     pub loading: bool,
-    pub issue_has_more: bool,
-    pub issue_total: Option<u32>,
-    pub issue_search_active: bool,
-    pub issue_fetch_pending: bool,
-    /// Whether the initial issue fetch has been requested for this repo.
-    pub issue_initial_requested: bool,
     /// Whether this inactive tab has received data updates since last viewed.
     pub has_unseen_changes: bool,
 }
@@ -149,11 +165,6 @@ impl TuiModel {
                 provider_names: info.provider_names,
                 provider_health: info.provider_health,
                 loading: info.loading,
-                issue_has_more: false,
-                issue_total: None,
-                issue_search_active: false,
-                issue_fetch_pending: false,
-                issue_initial_requested: false,
                 has_unseen_changes: false,
             });
         }
@@ -212,10 +223,6 @@ pub struct InFlightCommand {
     pub repo_identity: RepoIdentity,
     pub repo: PathBuf,
     pub description: String,
-}
-
-enum BackgroundUpdate {
-    IssueCommandFailed { action: CommandAction, error: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,8 +301,15 @@ pub struct App {
     /// Per-repo shared data handles. Written by `apply_snapshot()`/`apply_delta()`,
     /// read by `RepoPage` widgets during reconciliation and rendering.
     pub repo_data: HashMap<RepoIdentity, Shared<RepoData>>,
-    background_updates_tx: mpsc::UnboundedSender<BackgroundUpdate>,
-    background_updates_rx: mpsc::UnboundedReceiver<BackgroundUpdate>,
+    /// Per-repo issue cursor state, driven by `IssueQueryService`.
+    pub issue_views: HashMap<RepoIdentity, issue_view::IssueViewState>,
+    /// Sender half for background issue query tasks. Cloned into spawned tasks.
+    pub issue_update_tx: mpsc::UnboundedSender<issue_view::IssueQueryUpdate>,
+    /// Receiver half, drained each event-loop iteration.
+    pub issue_update_rx: mpsc::UnboundedReceiver<issue_view::IssueQueryUpdate>,
+    /// Client session ID for cursor ownership. Passed to `execute_query` so
+    /// the daemon can associate cursors with this session for disconnect cleanup.
+    pub session_id: uuid::Uuid,
 }
 
 impl App {
@@ -322,16 +336,16 @@ impl App {
                 provider_names: rm.provider_names.clone(),
                 provider_health: rm.provider_health.clone(),
                 work_items: Vec::new(),
-                issue_has_more: false,
-                issue_total: None,
-                issue_search_active: false,
+                issue_rows: Vec::new(),
+                issue_section_label: String::new(),
                 loading: rm.loading,
             });
             let page = RepoPage::new(identity.clone(), shared.clone(), ui.view_layout);
             repo_data_map.insert(identity.clone(), shared);
             screen.repo_pages.insert(identity.clone(), page);
         }
-        let (background_updates_tx, background_updates_rx) = mpsc::unbounded_channel();
+
+        let (issue_update_tx, issue_update_rx) = mpsc::unbounded_channel();
 
         Self {
             daemon,
@@ -346,8 +360,10 @@ impl App {
             should_quit: false,
             screen,
             repo_data: repo_data_map,
-            background_updates_tx,
-            background_updates_rx,
+            issue_views: HashMap::new(),
+            issue_update_tx,
+            issue_update_rx,
+            session_id: uuid::Uuid::new_v4(),
         }
     }
 
@@ -506,44 +522,185 @@ impl App {
     }
 
     pub(crate) fn drain_background_updates(&mut self) {
-        while let Ok(update) = self.background_updates_rx.try_recv() {
+        use issue_view::{IssueCursorState, IssueQueryUpdate};
+
+        while let Ok(update) = self.issue_update_rx.try_recv() {
             match update {
-                BackgroundUpdate::IssueCommandFailed { action, error } => {
-                    match action {
-                        CommandAction::FetchMoreIssues { repo, .. } => {
-                            if let Some(repo_identity) = self.repo_identity_for_selector(&repo) {
-                                if let Some(repo_model) = self.model.repos.get_mut(&repo_identity) {
-                                    repo_model.issue_fetch_pending = false;
-                                }
-                            }
+                IssueQueryUpdate::DefaultCursorOpened { repo, cursor } => {
+                    let view = self.issue_views.entry(repo.clone()).or_default();
+                    view.default = Some(IssueCursorState {
+                        cursor: cursor.clone(),
+                        items: Vec::new(),
+                        total: None,
+                        has_more: true,
+                        fetch_pending: true,
+                    });
+                    // Immediately fetch the first page.
+                    self.spawn_fetch_page(repo, cursor, 50);
+                }
+                IssueQueryUpdate::SearchCursorOpened { repo, cursor, query } => {
+                    let view = self.issue_views.entry(repo.clone()).or_default();
+                    // Close the old search cursor before replacing it.
+                    if let Some(old) = &view.search {
+                        spawn_close_cursor(&self.daemon, &old.cursor, self.session_id);
+                    }
+                    view.search = Some(IssueCursorState {
+                        cursor: cursor.clone(),
+                        items: Vec::new(),
+                        total: None,
+                        has_more: true,
+                        fetch_pending: true,
+                    });
+                    view.search_query = Some(query);
+                    // Immediately fetch the first page.
+                    self.spawn_fetch_page(repo, cursor, 50);
+                }
+                IssueQueryUpdate::PageFetched { repo, cursor, page } => {
+                    if let Some(view) = self.issue_views.get_mut(&repo) {
+                        // Match cursor to search or default.
+                        let target = if view.search.as_ref().is_some_and(|s| s.cursor == cursor) {
+                            view.search.as_mut()
+                        } else if view.default.as_ref().is_some_and(|d| d.cursor == cursor) {
+                            view.default.as_mut()
+                        } else {
+                            None
+                        };
+                        if let Some(cursor_state) = target {
+                            cursor_state.append_page(page);
                         }
-                        CommandAction::SetIssueViewport { repo, .. } => {
-                            if let Some(repo_identity) = self.repo_identity_for_selector(&repo) {
-                                if let Some(repo_model) = self.model.repos.get_mut(&repo_identity) {
-                                    repo_model.issue_initial_requested = false;
-                                }
+                        // Push updated issue items into Shared<RepoData>.
+                        self.push_issue_items_to_repo_data(&repo);
+                    }
+                }
+                IssueQueryUpdate::QueryFailed { repo, message, is_search } => {
+                    tracing::warn!(%message, %is_search, "issue query failed");
+                    self.set_status_message(Some(message));
+                    if is_search {
+                        // Close the (possibly partially-opened) search cursor, then revert to the default listing.
+                        if let Some(view) = self.issue_views.get_mut(&repo) {
+                            if let Some(old) = &view.search {
+                                spawn_close_cursor(&self.daemon, &old.cursor, self.session_id);
                             }
+                            view.search = None;
+                            view.search_query = None;
                         }
-                        // These commands do not set per-repo pending flags, so
-                        // there is nothing to unwind beyond surfacing the error.
-                        CommandAction::SearchIssues { .. } | CommandAction::ClearIssueSearch { .. } => {}
-                        other => {
-                            tracing::warn!(action = ?other, "unexpected background issue command failure");
+                        self.push_issue_items_to_repo_data(&repo);
+                    } else {
+                        // Remove the entry so `maybe_open_default_issue_cursor`
+                        // can retry on the next snapshot.
+                        self.issue_views.remove(&repo);
+                    }
+                }
+                IssueQueryUpdate::PageFetchFailed { repo, cursor, message } => {
+                    tracing::warn!(%message, "issue page fetch failed");
+                    self.set_status_message(Some(message));
+                    if let Some(view) = self.issue_views.get_mut(&repo) {
+                        // Clear fetch_pending on the matching cursor so the user
+                        // can scroll to trigger a retry.
+                        let target = if view.search.as_ref().is_some_and(|s| s.cursor == cursor) {
+                            view.search.as_mut()
+                        } else if view.default.as_ref().is_some_and(|d| d.cursor == cursor) {
+                            view.default.as_mut()
+                        } else {
+                            None
+                        };
+                        if let Some(cursor_state) = target {
+                            cursor_state.fetch_pending = false;
                         }
                     }
-                    self.set_status_message(Some(error));
                 }
             }
         }
     }
 
-    fn repo_identity_for_selector(&self, repo: &RepoSelector) -> Option<RepoIdentity> {
-        match repo {
-            RepoSelector::Identity(identity) => Some(identity.clone()),
-            RepoSelector::Path(path) => {
-                self.model.repos.values().find(|repo_model| &repo_model.path == path).map(|repo_model| repo_model.identity.clone())
+    /// Spawn a background task to fetch one page of issue results.
+    fn spawn_fetch_page(&self, repo: RepoIdentity, cursor: flotilla_protocol::issue_query::CursorId, count: usize) {
+        let daemon = self.daemon.clone();
+        let tx = self.issue_update_tx.clone();
+        let session_id = self.session_id;
+        tokio::spawn(async move {
+            let cmd = Command {
+                host: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::QueryIssueFetchPage { cursor: cursor.clone(), count },
+            };
+            match daemon.execute_query(cmd, session_id).await {
+                Ok(CommandValue::IssuePage(page)) => {
+                    let _ = tx.send(issue_view::IssueQueryUpdate::PageFetched { repo, cursor, page });
+                }
+                Ok(other) => {
+                    let _ = tx.send(issue_view::IssueQueryUpdate::PageFetchFailed {
+                        repo,
+                        cursor,
+                        message: format!("unexpected query result: {other:?}"),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(issue_view::IssueQueryUpdate::PageFetchFailed { repo, cursor, message: e });
+                }
             }
-            RepoSelector::Query(_) => None,
+        });
+    }
+
+    /// Open a default issue cursor for a repo if one hasn't been opened yet.
+    fn maybe_open_default_issue_cursor(&self, repo_identity: &RepoIdentity) {
+        // Only open if there is no valid default cursor yet. Checking the inner
+        // `default` field (rather than the map key) allows retry after a
+        // previous failure removed the cursor state.
+        if self.issue_views.get(repo_identity).and_then(|v| v.default.as_ref()).is_some() {
+            return;
+        }
+        // Guard: only spawn when inside a tokio runtime (unit tests that call
+        // apply_snapshot directly may not have one).
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let daemon = self.daemon.clone();
+        let tx = self.issue_update_tx.clone();
+        let repo_id = repo_identity.clone();
+        let session_id = self.session_id;
+        let cmd = Command {
+            host: None,
+            provisioning_target: None,
+            context_repo: None,
+            action: CommandAction::QueryIssueOpen {
+                repo: RepoSelector::Identity(repo_id.clone()),
+                params: flotilla_protocol::issue_query::IssueQuery::default(),
+            },
+        };
+        tokio::spawn(async move {
+            match daemon.execute_query(cmd, session_id).await {
+                Ok(CommandValue::IssueQueryOpened { cursor }) => {
+                    let _ = tx.send(issue_view::IssueQueryUpdate::DefaultCursorOpened { repo: repo_id, cursor });
+                }
+                Ok(other) => {
+                    tracing::debug!(repo = %repo_id.path, ?other, "default issue cursor open: unexpected result");
+                    let _ = tx.send(issue_view::IssueQueryUpdate::QueryFailed {
+                        repo: repo_id,
+                        message: format!("unexpected query result: {other:?}"),
+                        is_search: false,
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!(repo = %repo_id.path, %e, "default issue cursor open failed (expected when no issue provider)");
+                    let _ = tx.send(issue_view::IssueQueryUpdate::QueryFailed { repo: repo_id, message: e, is_search: false });
+                }
+            }
+        });
+    }
+
+    /// Push issue rows from `IssueViewState` into the `Shared<RepoData>` for
+    /// a repo so the `SplitTable` can render them in the native issue section.
+    fn push_issue_items_to_repo_data(&self, repo_identity: &RepoIdentity) {
+        let Some(view) = self.issue_views.get(repo_identity) else { return };
+        let issue_rows = view.active_issue_rows();
+        let label = self.model.repos.get(repo_identity).map(|rm| rm.labels.issues.section.clone()).unwrap_or_else(|| "Issues".to_string());
+        if let Some(handle) = self.repo_data.get(repo_identity) {
+            handle.mutate(|d| {
+                d.issue_rows = issue_rows;
+                d.issue_section_label = label;
+            });
         }
     }
 
@@ -749,6 +906,15 @@ impl App {
                     if let Some(page) = self.screen.repo_pages.get_mut(&repo) {
                         page.active_search_query = None;
                     }
+                    // Close the server-side search cursor and revert to the default listing.
+                    if let Some(view) = self.issue_views.get_mut(&repo) {
+                        if let Some(old) = &view.search {
+                            spawn_close_cursor(&self.daemon, &old.cursor, self.session_id);
+                        }
+                        view.search = None;
+                        view.search_query = None;
+                    }
+                    self.push_issue_items_to_repo_data(&repo);
                 }
             }
         }
@@ -865,10 +1031,6 @@ impl App {
         let old_providers = std::mem::replace(&mut rm.providers, Arc::new(snap.providers));
         rm.provider_health = snap.provider_health.clone();
         rm.loading = false;
-        rm.issue_has_more = snap.issue_has_more;
-        rm.issue_total = snap.issue_total;
-        rm.issue_search_active = snap.issue_search_results.is_some();
-        rm.issue_fetch_pending = false;
 
         // Provider health -> model-level statuses (now 1:1)
         for (category, providers) in &rm.provider_health {
@@ -905,9 +1067,6 @@ impl App {
                 d.provider_names = rm.provider_names.clone();
                 d.provider_health = rm.provider_health.clone();
                 d.work_items = snap.work_items;
-                d.issue_has_more = rm.issue_has_more;
-                d.issue_total = rm.issue_total.map(|v| v as usize);
-                d.issue_search_active = rm.issue_search_active;
                 d.loading = false;
             });
         }
@@ -915,16 +1074,8 @@ impl App {
         // Log and display errors (clears status when errors resolve)
         self.set_status_message(format_error_status(&snap.errors, &path));
 
-        // Request initial issue fetch once per repo (on first snapshot received)
-        let rm = self.model.repos.get_mut(&repo_identity).unwrap();
-        if !rm.issue_initial_requested {
-            rm.issue_initial_requested = true;
-            let visible = self.ui.layout.table_area.height.saturating_sub(2) as usize;
-            self.proto_commands.push(self.command(CommandAction::SetIssueViewport {
-                repo: flotilla_protocol::RepoSelector::Path(path),
-                visible_count: visible.max(20),
-            }));
-        }
+        // On first snapshot for a repo, open a default issue cursor.
+        self.maybe_open_default_issue_cursor(&repo_identity);
     }
 
     fn apply_delta(&mut self, delta: RepoDelta) {
@@ -945,12 +1096,6 @@ impl App {
         let mut providers = (*rm.providers).clone();
         flotilla_core::delta::apply_changes(&mut providers, delta.changes.clone());
         rm.providers = Arc::new(providers);
-
-        // Update issue metadata
-        rm.issue_has_more = delta.issue_has_more;
-        rm.issue_total = delta.issue_total;
-        rm.issue_search_active = delta.issue_search_results.is_some();
-        rm.issue_fetch_pending = false;
 
         // Apply provider health and error changes from the delta
         for change in &delta.changes {
@@ -1017,10 +1162,7 @@ impl App {
                 d.labels = rm.labels.clone();
                 d.provider_names = rm.provider_names.clone();
                 d.provider_health = rm.provider_health.clone();
-                apply_work_item_changes(&mut d.work_items, &delta.changes);
-                d.issue_has_more = rm.issue_has_more;
-                d.issue_total = rm.issue_total.map(|v| v as usize);
-                d.issue_search_active = rm.issue_search_active;
+                d.work_items = delta.work_items;
                 d.loading = false;
             });
         }
@@ -1045,9 +1187,8 @@ impl App {
             provider_names: info.provider_names.clone(),
             provider_health: info.provider_health.clone(),
             work_items: Vec::new(),
-            issue_has_more: false,
-            issue_total: None,
-            issue_search_active: false,
+            issue_rows: Vec::new(),
+            issue_section_label: String::new(),
             loading: info.loading,
         });
         let page = RepoPage::new(identity.clone(), shared.clone(), self.ui.view_layout);
@@ -1062,11 +1203,6 @@ impl App {
             provider_names: info.provider_names,
             provider_health: info.provider_health,
             loading: info.loading,
-            issue_has_more: false,
-            issue_total: None,
-            issue_search_active: false,
-            issue_fetch_pending: false,
-            issue_initial_requested: false,
             has_unseen_changes: false,
         });
         self.model.repo_order.push(identity);
@@ -1076,6 +1212,7 @@ impl App {
         self.model.repos.remove(repo_identity);
         self.model.repo_order.retain(|repo| repo != repo_identity);
         self.repo_data.remove(repo_identity);
+        self.issue_views.remove(repo_identity);
         self.screen.repo_pages.remove(repo_identity);
         if self.model.repo_order.is_empty() {
             self.should_quit = true;
@@ -1098,6 +1235,24 @@ impl App {
         }
         let identity = &self.model.repo_order[self.model.active_repo];
         self.screen.repo_pages.get(identity).and_then(|page| page.table.selected_work_item())
+    }
+
+    /// Get the selected row (WorkItem or IssueRow) as an owned enum.
+    pub(super) fn selected_row_cloned(&self) -> Option<OwnedSelectedRow> {
+        if self.model.repo_order.is_empty() {
+            return None;
+        }
+        let identity = &self.model.repo_order[self.model.active_repo];
+        let page = self.screen.repo_pages.get(identity)?;
+        match page.table.selected_row()? {
+            crate::widgets::split_table::SelectedRow::WorkItem(item) => Some(OwnedSelectedRow::WorkItem(Box::new(item.clone()))),
+            crate::widgets::split_table::SelectedRow::Issue(row) => Some(OwnedSelectedRow::IssueRow(row.clone())),
+        }
+    }
+
+    /// Build a repo command for an issue-row action (where no WorkItem context exists).
+    pub(super) fn provider_repo_command_for_issue(&self, action: CommandAction) -> Command {
+        self.repo_command(action)
     }
 
     pub(super) fn open_file_picker_from_active_repo_parent(&mut self) {

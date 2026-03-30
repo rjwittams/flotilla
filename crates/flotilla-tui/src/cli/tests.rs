@@ -236,9 +236,6 @@ mod watch_human {
             providers: Default::default(),
             provider_health: HashMap::new(),
             errors: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
         }
     }
 
@@ -260,9 +257,7 @@ mod watch_human {
             repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/my-repo".into() },
             repo: Some(PathBuf::from("/tmp/my-repo")),
             changes: vec![],
-            issue_total: None,
-            issue_has_more: false,
-            issue_search_results: None,
+            work_items: vec![],
         }));
         let line = format_event_human(&event);
         assert!(line.contains("[delta]"), "should have delta tag");

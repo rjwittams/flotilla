@@ -2,8 +2,8 @@
 //!
 //! `RepoState` tracks a single logical repository (identified by
 //! `RepoIdentity`), which may have multiple filesystem roots (e.g. a
-//! local checkout and a remote-only synthetic root). It owns the issue
-//! cache, delta log, and broadcast tracking for that repo.
+//! local checkout and a remote-only synthetic root). It owns the
+//! delta log and broadcast tracking for that repo.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -11,12 +11,10 @@ use std::{
     sync::Arc,
 };
 
-use flotilla_protocol::{DeltaEntry, EnvironmentId, HostName, Issue, ProviderData, ProviderError, RepoSnapshot, WorkItem};
-use tokio::sync::Mutex;
+use flotilla_protocol::{DeltaEntry, EnvironmentId, HostName, ProviderData, ProviderError, RepoSnapshot, WorkItem};
 
 use crate::{
     delta,
-    issue_cache::IssueCache,
     model::{provider_names_from_registry, RepoModel},
     providers::discovery::{EnvironmentBag, UnmetRequirement},
     refresh::RefreshSnapshot,
@@ -37,8 +35,6 @@ pub(crate) struct SnapshotBuildContext<'a> {
     pub(crate) local_providers: &'a ProviderData,
     pub(crate) errors: &'a [crate::data::RefreshError],
     pub(crate) provider_health: &'a HashMap<(&'static str, String), bool>,
-    pub(crate) cache: &'a IssueCache,
-    pub(crate) search_results: &'a Option<Vec<(String, Issue)>>,
     pub(crate) host_name: &'a HostName,
 }
 
@@ -57,10 +53,6 @@ pub(crate) struct RepoState {
     seq: u64,
     pub(crate) last_local_providers: ProviderData,
     pub(crate) last_snapshot: Arc<RefreshSnapshot>,
-    pub(crate) issue_cache: IssueCache,
-    pub(crate) search_results: Option<Vec<(String, Issue)>>,
-    /// Serializes issue fetch operations for this repo to prevent concurrent page skips.
-    issue_fetch_mutex: Arc<Mutex<()>>,
     /// Last broadcast provider data (with injected issues), used for delta computation.
     last_broadcast_providers: ProviderData,
     /// Last broadcast provider health, used for delta computation.
@@ -88,9 +80,6 @@ impl RepoState {
             seq: 0,
             last_local_providers: ProviderData::default(),
             last_snapshot: Arc::new(RefreshSnapshot::default()),
-            issue_cache: IssueCache::new(),
-            search_results: None,
-            issue_fetch_mutex: Arc::new(Mutex::new(())),
             last_broadcast_providers: ProviderData::default(),
             last_broadcast_health: HashMap::new(),
             last_broadcast_errors: Vec::new(),
@@ -208,10 +197,6 @@ impl RepoState {
         self.local_data_version += 1;
     }
 
-    pub(crate) fn issue_fetch_mutex(&self) -> Arc<Mutex<()>> {
-        Arc::clone(&self.issue_fetch_mutex)
-    }
-
     pub(crate) fn cached_snapshot(&self) -> Option<&Arc<RepoSnapshot>> {
         self.last_merged_snapshot.as_ref()
     }
@@ -241,8 +226,6 @@ impl RepoState {
             local_providers: &self.last_local_providers,
             errors: &self.last_snapshot.errors,
             provider_health: &self.last_snapshot.provider_health,
-            cache: &self.issue_cache,
-            search_results: &self.search_results,
             host_name,
         }
     }

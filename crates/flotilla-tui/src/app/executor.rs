@@ -2,16 +2,18 @@ use flotilla_protocol::{Command, CommandAction, CommandValue};
 use tracing::info;
 
 use super::{
+    issue_view::IssueQueryUpdate,
     ui_state::{PendingAction, PendingActionContext, PendingStatus},
-    App, BackgroundUpdate,
+    App,
 };
 use crate::widgets::{branch_input::BranchInputWidget, delete_confirm::DeleteConfirmWidget};
 
 /// Dispatch a single protocol command through the daemon.
 ///
-/// Most commands go through the shared `execute(command)` path and return a
-/// command ID immediately. Issue fetch/search commands are spawned in the
-/// background because they may do network I/O inline before returning.
+/// Query commands (where `action.is_query()`) are dispatched via
+/// `execute_query` in a background task so results arrive asynchronously
+/// through the `issue_update_tx` channel. Non-query commands use the
+/// regular `execute` path.
 ///
 /// When `pending_ctx` is provided the successful command ID is recorded as a
 /// [`PendingAction`] on the active repo's UI state so the renderer can show
@@ -19,21 +21,43 @@ use crate::widgets::{branch_input::BranchInputWidget, delete_confirm::DeleteConf
 pub async fn dispatch(cmd: Command, app: &mut App, pending_ctx: Option<PendingActionContext>) {
     app.model.status_message = None;
 
-    let background_issue_command = matches!(
-        cmd.action,
-        CommandAction::SetIssueViewport { .. }
-            | CommandAction::FetchMoreIssues { .. }
-            | CommandAction::SearchIssues { .. }
-            | CommandAction::ClearIssueSearch { .. }
-    );
-
-    if background_issue_command {
+    // Route issue query commands through the background query path.
+    if let CommandAction::QueryIssueOpen { ref repo, ref params } = cmd.action {
+        let repo_identity = match repo {
+            flotilla_protocol::RepoSelector::Identity(id) => id.clone(),
+            _ => {
+                app.model.status_message = Some("issue query requires RepoSelector::Identity".into());
+                return;
+            }
+        };
+        let is_search = params.search.is_some();
+        let search_query = params.search.clone();
         let daemon = app.daemon.clone();
-        let background_updates = app.background_updates_tx.clone();
-        let action = cmd.action.clone();
+        let tx = app.issue_update_tx.clone();
+        let session_id = app.session_id;
         tokio::spawn(async move {
-            if let Err(error) = daemon.execute(cmd).await {
-                let _ = background_updates.send(BackgroundUpdate::IssueCommandFailed { action, error });
+            match daemon.execute_query(cmd, session_id).await {
+                Ok(CommandValue::IssueQueryOpened { cursor }) => {
+                    if is_search {
+                        let _ = tx.send(IssueQueryUpdate::SearchCursorOpened {
+                            repo: repo_identity,
+                            cursor,
+                            query: search_query.unwrap_or_default(),
+                        });
+                    } else {
+                        let _ = tx.send(IssueQueryUpdate::DefaultCursorOpened { repo: repo_identity, cursor });
+                    }
+                }
+                Ok(other) => {
+                    let _ = tx.send(IssueQueryUpdate::QueryFailed {
+                        repo: repo_identity,
+                        message: format!("unexpected query result: {other:?}"),
+                        is_search,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(IssueQueryUpdate::QueryFailed { repo: repo_identity, message: e, is_search });
+                }
             }
         });
         return;
@@ -143,70 +167,21 @@ pub fn handle_result(result: CommandValue, app: &mut App) {
         CommandValue::ImageEnsured { .. } | CommandValue::EnvironmentCreated { .. } | CommandValue::EnvironmentSpecRead { .. } => {
             tracing::warn!("unexpected environment lifecycle result reached UI handler");
         }
+        CommandValue::IssueQueryOpened { .. }
+        | CommandValue::IssuePage(_)
+        | CommandValue::IssueQueryClosed
+        | CommandValue::IssuesByIds { .. } => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf, sync::Arc};
+    use std::path::PathBuf;
 
-    use async_trait::async_trait;
-    use flotilla_core::daemon::DaemonHandle;
-    use flotilla_protocol::{arg::Arg, CheckoutStatus, CommandAction, HostName, RepoIdentity, ResolvedPaneCommand, WorkItemIdentity};
-    use tokio::sync::broadcast;
+    use flotilla_protocol::{arg::Arg, CheckoutStatus, HostName, RepoIdentity, ResolvedPaneCommand, WorkItemIdentity};
 
     use super::*;
     use crate::app::{test_support::stub_app, ui_state::BranchInputKind};
-
-    struct FailingDaemon {
-        tx: broadcast::Sender<flotilla_protocol::DaemonEvent>,
-        error: String,
-    }
-
-    impl FailingDaemon {
-        fn new(error: &str) -> Self {
-            let (tx, _) = broadcast::channel(1);
-            Self { tx, error: error.into() }
-        }
-    }
-
-    #[async_trait]
-    impl DaemonHandle for FailingDaemon {
-        fn subscribe(&self) -> broadcast::Receiver<flotilla_protocol::DaemonEvent> {
-            self.tx.subscribe()
-        }
-
-        async fn get_state(&self, _repo: &flotilla_protocol::RepoSelector) -> Result<flotilla_protocol::RepoSnapshot, String> {
-            Err("stub".into())
-        }
-
-        async fn list_repos(&self) -> Result<Vec<flotilla_protocol::RepoInfo>, String> {
-            Ok(vec![])
-        }
-
-        async fn execute(&self, _command: Command) -> Result<u64, String> {
-            Err(self.error.clone())
-        }
-
-        async fn cancel(&self, _command_id: u64) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn replay_since(
-            &self,
-            _last_seen: &HashMap<flotilla_protocol::StreamKey, u64>,
-        ) -> Result<Vec<flotilla_protocol::DaemonEvent>, String> {
-            Ok(vec![])
-        }
-
-        async fn get_status(&self) -> Result<flotilla_protocol::StatusResponse, String> {
-            Ok(flotilla_protocol::StatusResponse { repos: vec![] })
-        }
-
-        async fn get_topology(&self) -> Result<flotilla_protocol::TopologyResponse, String> {
-            Err("stub".into())
-        }
-    }
 
     #[test]
     fn terminal_prepared_does_not_queue_follow_up_workspace_command() {
@@ -455,51 +430,5 @@ mod tests {
         handle_result(CommandValue::CheckoutPathResolved { path: PathBuf::from("/tmp/wt") }, &mut app);
         assert!(app.model.status_message.is_none());
         assert!(app.proto_commands.take_next().is_none());
-    }
-
-    #[tokio::test]
-    async fn dispatch_background_issue_fetch_failure_clears_pending_and_sets_status_message() {
-        let mut app = stub_app();
-        let repo_identity = app.model.active_repo_identity().clone();
-        app.model.repos.get_mut(&repo_identity).expect("repo exists").issue_fetch_pending = true;
-        app.daemon = Arc::new(FailingDaemon::new("fetch failed"));
-
-        dispatch(
-            app.command(CommandAction::FetchMoreIssues {
-                repo: flotilla_protocol::RepoSelector::Identity(repo_identity.clone()),
-                desired_count: 50,
-            }),
-            &mut app,
-            None,
-        )
-        .await;
-
-        tokio::task::yield_now().await;
-        app.drain_background_updates();
-
-        assert!(!app.model.repos[&repo_identity].issue_fetch_pending);
-        assert_eq!(app.model.status_message.as_deref(), Some("fetch failed"));
-    }
-
-    #[tokio::test]
-    async fn dispatch_background_issue_search_failure_sets_status_message() {
-        let mut app = stub_app();
-        let repo_identity = app.model.active_repo_identity().clone();
-        app.daemon = Arc::new(FailingDaemon::new("search failed"));
-
-        dispatch(
-            app.command(CommandAction::SearchIssues {
-                repo: flotilla_protocol::RepoSelector::Identity(repo_identity),
-                query: "bug".into(),
-            }),
-            &mut app,
-            None,
-        )
-        .await;
-
-        tokio::task::yield_now().await;
-        app.drain_background_updates();
-
-        assert_eq!(app.model.status_message.as_deref(), Some("search failed"));
     }
 }

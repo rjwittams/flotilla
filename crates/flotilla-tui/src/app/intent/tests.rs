@@ -760,11 +760,6 @@ fn remote_only_app() -> App {
         provider_names: old.provider_names,
         provider_health: old.provider_health,
         loading: old.loading,
-        issue_has_more: old.issue_has_more,
-        issue_total: old.issue_total,
-        issue_search_active: old.issue_search_active,
-        issue_fetch_pending: old.issue_fetch_pending,
-        issue_initial_requested: old.issue_initial_requested,
         has_unseen_changes: old.has_unseen_changes,
     };
     app.model.repo_order[0] = remote_identity.clone();

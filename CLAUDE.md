@@ -116,7 +116,7 @@ Each trait lives in `crates/flotilla-core/src/providers/<category>/mod.rs` with 
 
 - **Vcs** + **CheckoutManager** (`vcs/git.rs`, `vcs/wt.rs`)
 - **ChangeRequestTracker** (`change_request/github.rs`)
-- **IssueTracker** (`issue_tracker/github.rs`)
+- **IssueProvider** (`issue_tracker/github.rs`)
 - **CloudAgentService** (`coding_agent/claude.rs`, `coding_agent/codex.rs`, `coding_agent/cursor.rs`)
 - **AiUtility** (`ai_utility/claude.rs`)
 - **WorkspaceManager** (`workspace/cmux.rs`, `workspace/tmux.rs`, `workspace/zellij.rs`)

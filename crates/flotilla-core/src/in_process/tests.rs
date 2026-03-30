@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use flotilla_protocol::{AssociationKey, ChangeRequest, ChangeRequestStatus, Checkout, EnvironmentId, RepoSelector};
+use flotilla_protocol::{AssociationKey, ChangeRequest, ChangeRequestStatus, Checkout, EnvironmentId, Issue, RepoSelector};
 
 use super::*;
 use crate::{
@@ -14,81 +14,6 @@ use crate::{
     },
 };
 
-fn checkout_with_issue(issue_id: &str) -> Checkout {
-    Checkout {
-        branch: "main".into(),
-        is_main: true,
-        trunk_ahead_behind: None,
-        remote_ahead_behind: None,
-        working_tree: None,
-        last_commit: None,
-        correlation_keys: vec![],
-        association_keys: vec![AssociationKey::IssueRef("gh".into(), issue_id.into())],
-        environment_id: None,
-    }
-}
-
-fn cr_with_issue(issue_id: &str) -> ChangeRequest {
-    ChangeRequest {
-        title: "Fix bug".into(),
-        branch: "feature/fix".into(),
-        status: ChangeRequestStatus::Open,
-        body: None,
-        correlation_keys: vec![],
-        association_keys: vec![AssociationKey::IssueRef("gh".into(), issue_id.into())],
-        provider_name: String::new(),
-        provider_display_name: String::new(),
-    }
-}
-
-#[test]
-fn collect_linked_issue_ids_deduplicates_across_sources() {
-    let mut providers = ProviderData::default();
-    providers.checkouts.insert(
-        flotilla_protocol::HostPath::new(flotilla_protocol::HostName::new("test-host"), PathBuf::from("/tmp/repo")),
-        checkout_with_issue("123"),
-    );
-    providers.change_requests.insert("1".into(), cr_with_issue("123"));
-    providers.change_requests.insert("2".into(), cr_with_issue("456"));
-
-    let mut ids = collect_linked_issue_ids(&providers);
-    ids.sort();
-    assert_eq!(ids, vec!["123".to_string(), "456".to_string()]);
-}
-
-#[test]
-fn inject_issues_prefers_search_results_then_cache_then_empty() {
-    let base = ProviderData::default();
-
-    let mut cache = IssueCache::new();
-    cache.add_pinned(vec![("1".into(), Issue {
-        title: "cached".into(),
-        labels: vec![],
-        association_keys: vec![],
-        provider_name: String::new(),
-        provider_display_name: String::new(),
-    })]);
-
-    let search_results = Some(vec![("2".into(), Issue {
-        title: "search".into(),
-        labels: vec![],
-        association_keys: vec![],
-        provider_name: String::new(),
-        provider_display_name: String::new(),
-    })]);
-
-    let from_search = inject_issues(&base, &cache, &search_results);
-    assert_eq!(from_search.issues.len(), 1);
-    assert!(from_search.issues.contains_key("2"));
-
-    let from_cache = inject_issues(&base, &cache, &None);
-    assert!(from_cache.issues.contains_key("1"));
-
-    let empty_cache = IssueCache::new();
-    let empty = inject_issues(&base, &empty_cache, &None);
-    assert!(empty.issues.is_empty());
-}
-
 #[test]
 fn choose_event_uses_delta_for_non_initial_changes() {
     let repo = PathBuf::from("/tmp/repo");
@@ -101,9 +26,6 @@ fn choose_event_uses_delta_for_non_initial_changes() {
         providers: ProviderData::default(),
         provider_health: HashMap::new(),
         errors: vec![],
-        issue_total: None,
-        issue_has_more: false,
-        issue_search_results: None,
     };
 
     let initial = DeltaEntry { seq: 1, prev_seq: 0, changes: vec![] };
@@ -128,9 +50,6 @@ fn choose_event_falls_back_to_full_when_delta_is_larger() {
         providers: ProviderData::default(),
         provider_health: HashMap::new(),
         errors: vec![],
-        issue_total: None,
-        issue_has_more: false,
-        issue_search_results: None,
     };
 
     let delta = DeltaEntry {
@@ -143,18 +62,7 @@ fn choose_event_falls_back_to_full_when_delta_is_larger() {
 }
 
 #[test]
-fn build_repo_snapshot_sets_issue_metadata() {
-    let mut cache = IssueCache::new();
-    cache.total_count = Some(5);
-    cache.has_more = true;
-    cache.add_pinned(vec![("9".into(), Issue {
-        title: "cached issue".into(),
-        labels: vec![],
-        association_keys: vec![],
-        provider_name: String::new(),
-        provider_display_name: String::new(),
-    })]);
-
+fn build_repo_snapshot_basic() {
     let default_snap = RefreshSnapshot::default();
     let snap = build_repo_snapshot_with_peers(
         SnapshotBuildContext {
@@ -163,28 +71,12 @@ fn build_repo_snapshot_sets_issue_metadata() {
             local_providers: &default_snap.providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
-            cache: &cache,
-            search_results: &None,
             host_name: &HostName::local(),
         },
         7,
         None,
     );
     assert_eq!(snap.seq, 7);
-    assert_eq!(snap.issue_total, Some(5));
-    assert!(snap.issue_has_more);
-    assert!(snap.providers.issues.contains_key("9"));
-}
-
-// --- now_iso8601 ---
-
-#[test]
-fn now_iso8601_returns_parseable_timestamp() {
-    let ts = now_iso8601();
-    assert!(ts.ends_with('Z'), "should be UTC: {ts}");
-    assert!(ts.len() >= 20, "should be a full ISO 8601 timestamp: {ts}");
-    // Verify it parses as a valid RFC 3339 timestamp
-    chrono::DateTime::parse_from_rfc3339(&ts).expect("should parse as RFC 3339");
 }
 
 // --- choose_event edge case: empty changes with prev_seq > 0 ---
@@ -200,9 +92,6 @@ fn choose_event_sends_full_when_delta_has_empty_changes() {
         providers: ProviderData::default(),
         provider_health: HashMap::new(),
         errors: vec![],
-        issue_total: None,
-        issue_has_more: false,
-        issue_search_results: None,
     };
 
     // prev_seq > 0 but changes is empty — should still send full
@@ -214,7 +103,6 @@ fn choose_event_sends_full_when_delta_has_empty_changes() {
 
 #[test]
 fn build_repo_snapshot_with_peers_merges_peer_data() {
-    let cache = IssueCache::new();
     let host_a = HostName::new("host-a");
     let host_b = HostName::new("host-b");
 
@@ -241,8 +129,6 @@ fn build_repo_snapshot_with_peers_merges_peer_data() {
             local_providers: &default_snap.providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
-            cache: &cache,
-            search_results: &None,
             host_name: &host_a,
         },
         1,
@@ -260,7 +146,6 @@ fn build_repo_snapshot_with_peers_merges_peer_data() {
 /// to the local host via `normalize_local_provider_hosts`.
 #[test]
 fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
-    let cache = IssueCache::new();
     let local_host = HostName::new("feta");
     let peer_host = HostName::new("kiwi");
 
@@ -303,8 +188,6 @@ fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
             local_providers: &local_providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
-            cache: &cache,
-            search_results: &None,
             host_name: &local_host,
         },
         1,
@@ -326,8 +209,6 @@ fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
             local_providers: &local_providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
-            cache: &cache,
-            search_results: &None,
             host_name: &local_host,
         },
         2,
@@ -356,7 +237,6 @@ fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
 
 #[test]
 fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_workspace_binding() {
-    let cache = IssueCache::new();
     let local_host = HostName::new("kiwi");
     let remote_host = HostName::new("feta");
     let remote_checkout = HostPath::new(remote_host.clone(), PathBuf::from("/home/robert/dev/flotilla.terminal-stuff"));
@@ -402,8 +282,6 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
             local_providers: &local_providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
-            cache: &cache,
-            search_results: &None,
             host_name: &local_host,
         },
         1,
@@ -428,6 +306,155 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
     assert!(
         !snapshot.providers.checkouts.contains_key(&ghost_checkout),
         "remote checkout path must not be duplicated under the local host"
+    );
+}
+
+// --- collect_linked_issue_ids ---
+
+#[test]
+fn collect_linked_issue_ids_from_change_requests() {
+    let mut providers = ProviderData::default();
+    providers.change_requests.insert("PR-1".into(), ChangeRequest {
+        title: "Fix bug".into(),
+        branch: "fix/bug".into(),
+        status: ChangeRequestStatus::Open,
+        body: None,
+        correlation_keys: vec![],
+        association_keys: vec![
+            AssociationKey::IssueRef("github".into(), "42".into()),
+            AssociationKey::IssueRef("github".into(), "99".into()),
+        ],
+        provider_name: "github".into(),
+        provider_display_name: "GitHub".into(),
+    });
+
+    let mut ids = collect_linked_issue_ids(&providers);
+    ids.sort();
+    assert_eq!(ids, vec!["42", "99"]);
+}
+
+#[test]
+fn collect_linked_issue_ids_from_checkouts() {
+    let mut providers = ProviderData::default();
+    providers.checkouts.insert(HostPath::new(HostName::new("host"), PathBuf::from("/tmp/co")), Checkout {
+        branch: "feat".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![AssociationKey::IssueRef("github".into(), "7".into())],
+        environment_id: None,
+    });
+
+    let ids = collect_linked_issue_ids(&providers);
+    assert_eq!(ids, vec!["7"]);
+}
+
+#[test]
+fn collect_linked_issue_ids_deduplicates() {
+    let mut providers = ProviderData::default();
+    // Same issue referenced from both a change request and a checkout
+    providers.change_requests.insert("PR-1".into(), ChangeRequest {
+        title: "Fix".into(),
+        branch: "fix".into(),
+        status: ChangeRequestStatus::Open,
+        body: None,
+        correlation_keys: vec![],
+        association_keys: vec![AssociationKey::IssueRef("github".into(), "42".into())],
+        provider_name: "github".into(),
+        provider_display_name: "GitHub".into(),
+    });
+    providers.checkouts.insert(HostPath::new(HostName::new("host"), PathBuf::from("/tmp/co")), Checkout {
+        branch: "fix".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![AssociationKey::IssueRef("github".into(), "42".into())],
+        environment_id: None,
+    });
+
+    let ids = collect_linked_issue_ids(&providers);
+    assert_eq!(ids.len(), 1, "duplicate issue refs should be deduplicated");
+    assert_eq!(ids[0], "42");
+}
+
+#[test]
+fn collect_linked_issue_ids_empty_when_no_associations() {
+    let providers = ProviderData::default();
+    let ids = collect_linked_issue_ids(&providers);
+    assert!(ids.is_empty());
+}
+
+/// When `ProviderData.issues` is populated (as it would be after
+/// `fetch_missing_linked_issues`), correlation picks up the issue
+/// references and includes them in the snapshot's work items.
+#[test]
+fn snapshot_includes_linked_issues_when_populated() {
+    let host = HostName::new("test-host");
+    let checkout_path = HostPath::new(host.clone(), PathBuf::from("/tmp/repo"));
+
+    let mut providers = ProviderData::default();
+    providers.checkouts.insert(checkout_path.clone(), Checkout {
+        branch: "fix/42".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![CorrelationKey::Branch("fix/42".into()), CorrelationKey::CheckoutPath(checkout_path)],
+        association_keys: vec![AssociationKey::IssueRef("github".into(), "42".into())],
+        environment_id: None,
+    });
+    providers.change_requests.insert("PR-100".into(), ChangeRequest {
+        title: "Fix issue #42".into(),
+        branch: "fix/42".into(),
+        status: ChangeRequestStatus::Open,
+        body: None,
+        correlation_keys: vec![CorrelationKey::Branch("fix/42".into()), CorrelationKey::ChangeRequestRef("github".into(), "100".into())],
+        association_keys: vec![AssociationKey::IssueRef("github".into(), "42".into())],
+        provider_name: "github".into(),
+        provider_display_name: "GitHub".into(),
+    });
+    // Simulate fetch_missing_linked_issues having populated the issue
+    providers.issues.insert("42".into(), Issue {
+        title: "Something is broken".into(),
+        labels: vec!["bug".into()],
+        association_keys: vec![],
+        provider_name: "github".into(),
+        provider_display_name: "GitHub".into(),
+    });
+
+    let default_snap = RefreshSnapshot::default();
+    let snapshot = build_repo_snapshot_with_peers(
+        SnapshotBuildContext {
+            repo_identity: fallback_repo_identity(Path::new("/tmp/repo")),
+            path: Path::new("/tmp/repo"),
+            local_providers: &providers,
+            errors: &default_snap.errors,
+            provider_health: &default_snap.provider_health,
+            host_name: &host,
+        },
+        1,
+        None,
+    );
+
+    // The snapshot should have the issue in its provider data
+    assert!(snapshot.providers.issues.contains_key("42"), "issue 42 should be present in snapshot providers");
+
+    // Find the work item that correlates checkout + change request
+    let work_item =
+        snapshot.work_items.iter().find(|wi| wi.branch.as_deref() == Some("fix/42")).expect("should have a work item for fix/42");
+
+    // The work item should reference issue 42
+    assert!(
+        work_item.issue_keys.contains(&"42".to_string()),
+        "work item should reference linked issue 42, got: {:?}",
+        work_item.issue_keys
     );
 }
 

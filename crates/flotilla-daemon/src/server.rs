@@ -21,7 +21,7 @@ use std::{
 use flotilla_core::{
     agents::SharedAgentStateStore, config::ConfigStore, in_process::InProcessDaemon, providers::discovery::DiscoveryRuntime,
 };
-use flotilla_protocol::{ConfigLabel, EnvironmentId, HostName, Message};
+use flotilla_protocol::{ConfigLabel, ConnectionRole, EnvironmentId, HostName, Message, PROTOCOL_VERSION};
 use flotilla_transport::message::{unix_message_session, MessageSession};
 use tokio::{
     net::UnixListener,
@@ -449,7 +449,7 @@ async fn handle_client_session(
                 .run(Arc::clone(&session), id, request)
                 .await;
         }
-        Message::Hello { protocol_version, host_name, session_id, environment_id } => {
+        Message::Hello { protocol_version, host_name, session_id, connection_role, environment_id } => {
             // Verify environment identity when connected on a per-environment socket.
             if let Some(expected) = &environment_context {
                 if let Some(claimed) = &environment_id {
@@ -471,10 +471,32 @@ async fn handle_client_session(
                     return;
                 }
             }
-            // environment_context is None: main socket, accept whatever the client sends.
-            PeerConnection::new(daemon, shutdown_rx, peer_data_tx, peer_manager, peer_connected_tx, client_count, client_notify)
-                .run(session, protocol_version, host_name, session_id)
-                .await;
+
+            if connection_role == Some(ConnectionRole::Client) {
+                // Stateful client handshake: reply with server Hello, then enter
+                // stateful client loop (session_id used for cursor ownership).
+                if session
+                    .write(Message::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                        host_name: daemon.host_name().clone(),
+                        session_id: daemon.session_id(),
+                        connection_role: Some(ConnectionRole::Client),
+                        environment_id: None,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                ClientConnection::new(daemon, shutdown_rx, remote_command_router, client_count, client_notify, agent_state_store)
+                    .run_stateful(Arc::clone(&session), session_id)
+                    .await;
+            } else {
+                // Peer path (ConnectionRole::Peer or None) — existing behavior.
+                PeerConnection::new(daemon, shutdown_rx, peer_data_tx, peer_manager, peer_connected_tx, client_count, client_notify)
+                    .run(session, protocol_version, host_name, session_id)
+                    .await;
+            }
         }
         other => {
             warn!(msg = ?other, "unexpected first message type from client");

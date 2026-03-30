@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use flotilla_protocol::{Command, CommandAction, RepoSelector};
+use flotilla_protocol::{issue_query::IssueQuery, Command, CommandAction, RepoSelector};
 
 use crate::{
     resolved::{HostResolution, RepoContext},
@@ -61,7 +61,10 @@ impl IssueNoun {
                     provisioning_target: None,
                     context_repo: None,
                     // SENTINEL: repo is empty — dispatch must fill it from --repo or FLOTILLA_REPO.
-                    action: CommandAction::SearchIssues { repo: RepoSelector::Query("".into()), query: query.join(" ") },
+                    action: CommandAction::QueryIssueOpen {
+                        repo: RepoSelector::Query("".into()),
+                        params: IssueQuery { search: Some(query.join(" ")) },
+                    },
                 },
                 repo: RepoContext::Required,
                 host: HostResolution::Local,
@@ -147,7 +150,10 @@ mod tests {
                 host: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::SearchIssues { repo: RepoSelector::Query("".into()), query: "my query".into() },
+                action: CommandAction::QueryIssueOpen {
+                    repo: RepoSelector::Query("".into()),
+                    params: flotilla_protocol::issue_query::IssueQuery { search: Some("my query".into()) },
+                },
             },
             repo: RepoContext::Required,
             host: HostResolution::Local,

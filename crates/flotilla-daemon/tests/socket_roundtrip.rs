@@ -5,17 +5,10 @@ use flotilla_daemon::server::DaemonServer;
 use flotilla_protocol::{Command, CommandAction, CommandValue, DaemonEvent, HostName, RepoSelector, StreamKey};
 use tokio::time::Instant;
 
-/// Execute a query command and wait for the CommandFinished result.
-async fn execute_query(daemon: &dyn DaemonHandle, action: CommandAction) -> CommandValue {
-    let mut rx = daemon.subscribe();
+/// Execute a query command via execute_query and return the result directly.
+async fn run_query(daemon: &dyn DaemonHandle, action: CommandAction) -> CommandValue {
     let command = Command { host: None, provisioning_target: None, context_repo: None, action };
-    let command_id = daemon.execute(command).await.expect("execute query");
-    loop {
-        match rx.recv().await.expect("recv event") {
-            DaemonEvent::CommandFinished { command_id: id, result, .. } if id == command_id => return result,
-            _ => continue,
-        }
-    }
+    daemon.execute_query(command, uuid::Uuid::nil()).await.expect("execute_query")
 }
 
 #[tokio::test]
@@ -213,17 +206,17 @@ async fn query_commands_roundtrip() {
     assert!(!status.repos.is_empty(), "status should list at least one repo");
     assert_eq!(status.repos[0].path, repo);
 
-    // Test repo query commands via execute() + CommandFinished events
+    // Test repo query commands via execute_query() + directed responses
     let repo_name = repo.file_name().expect("repo file_name").to_str().expect("repo name utf8");
 
-    let detail_result = execute_query(&*client, CommandAction::QueryRepoDetail { repo: RepoSelector::Query(repo_name.to_string()) }).await;
+    let detail_result = run_query(&*client, CommandAction::QueryRepoDetail { repo: RepoSelector::Query(repo_name.to_string()) }).await;
     match detail_result {
         CommandValue::RepoDetail(detail) => assert_eq!(detail.path, repo),
         other => panic!("expected RepoDetail, got {other:?}"),
     }
 
     let providers_result =
-        execute_query(&*client, CommandAction::QueryRepoProviders { repo: RepoSelector::Query(repo_name.to_string()) }).await;
+        run_query(&*client, CommandAction::QueryRepoProviders { repo: RepoSelector::Query(repo_name.to_string()) }).await;
     match providers_result {
         CommandValue::RepoProviders(providers) => {
             assert_eq!(providers.path, repo);
@@ -232,14 +225,14 @@ async fn query_commands_roundtrip() {
         other => panic!("expected RepoProviders, got {other:?}"),
     }
 
-    let work_result = execute_query(&*client, CommandAction::QueryRepoWork { repo: RepoSelector::Query(repo_name.to_string()) }).await;
+    let work_result = run_query(&*client, CommandAction::QueryRepoWork { repo: RepoSelector::Query(repo_name.to_string()) }).await;
     match work_result {
         CommandValue::RepoWork(work) => assert_eq!(work.path, repo),
         other => panic!("expected RepoWork, got {other:?}"),
     }
 
-    // Test host query commands via execute()
-    let hosts_result = execute_query(&*client, CommandAction::QueryHostList {}).await;
+    // Test host query commands via execute_query()
+    let hosts_result = run_query(&*client, CommandAction::QueryHostList {}).await;
     match hosts_result {
         CommandValue::HostList(hosts) => {
             assert!(hosts.hosts.iter().any(|entry| entry.host == HostName::local() && entry.is_local));
@@ -248,13 +241,13 @@ async fn query_commands_roundtrip() {
     }
 
     let local_host = HostName::local().to_string();
-    let host_status_result = execute_query(&*client, CommandAction::QueryHostStatus { target_host: local_host.clone() }).await;
+    let host_status_result = run_query(&*client, CommandAction::QueryHostStatus { target_host: local_host.clone() }).await;
     match host_status_result {
         CommandValue::HostStatus(status) => assert!(status.is_local, "local host query should resolve to local host"),
         other => panic!("expected HostStatus, got {other:?}"),
     }
 
-    let host_providers_result = execute_query(&*client, CommandAction::QueryHostProviders { target_host: local_host }).await;
+    let host_providers_result = run_query(&*client, CommandAction::QueryHostProviders { target_host: local_host }).await;
     match host_providers_result {
         CommandValue::HostProviders(providers) => assert_eq!(providers.summary.host_name, HostName::local()),
         other => panic!("expected HostProviders, got {other:?}"),
@@ -264,7 +257,7 @@ async fn query_commands_roundtrip() {
     assert_eq!(topology.local_host, HostName::local());
 
     // Test slug resolution error for nonexistent repo
-    let err_result = execute_query(&*client, CommandAction::QueryRepoDetail { repo: RepoSelector::Query("nonexistent".to_string()) }).await;
+    let err_result = run_query(&*client, CommandAction::QueryRepoDetail { repo: RepoSelector::Query("nonexistent".to_string()) }).await;
     assert!(matches!(err_result, CommandValue::Error { .. }), "nonexistent slug should return error");
 
     // Clean up

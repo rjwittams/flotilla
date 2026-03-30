@@ -14,6 +14,7 @@ pub(super) struct RequestDispatcher<'a> {
     daemon: &'a Arc<InProcessDaemon>,
     remote_command_router: &'a RemoteCommandRouter,
     agent_state_store: &'a SharedAgentStateStore,
+    session_id: uuid::Uuid,
 }
 
 impl<'a> RequestDispatcher<'a> {
@@ -21,8 +22,9 @@ impl<'a> RequestDispatcher<'a> {
         daemon: &'a Arc<InProcessDaemon>,
         remote_command_router: &'a RemoteCommandRouter,
         agent_state_store: &'a SharedAgentStateStore,
+        session_id: uuid::Uuid,
     ) -> Self {
-        Self { daemon, remote_command_router, agent_state_store }
+        Self { daemon, remote_command_router, agent_state_store, session_id }
     }
 
     pub(super) async fn dispatch(&self, id: u64, request: Request) -> Message {
@@ -37,10 +39,22 @@ impl<'a> RequestDispatcher<'a> {
                 Err(e) => Message::error_response(id, e),
             },
 
-            Request::Execute { command } => match self.remote_command_router.dispatch_execute(command).await {
-                Ok(command_id) => Message::ok_response(id, Response::Execute { command_id }),
-                Err(e) => Message::error_response(id, e),
-            },
+            Request::Execute { command } => {
+                if command.action.is_query() {
+                    // Query commands: execute synchronously (local or remote)
+                    // and return the result directly as a QueryResult.
+                    match self.remote_command_router.dispatch_query(command, self.session_id).await {
+                        Ok(value) => Message::ok_response(id, Response::QueryResult { command_id: 0, value }),
+                        Err(e) => Message::error_response(id, e),
+                    }
+                } else {
+                    // Non-query commands: existing dispatch path
+                    match self.remote_command_router.dispatch_execute(command).await {
+                        Ok(command_id) => Message::ok_response(id, Response::Execute { command_id }),
+                        Err(e) => Message::error_response(id, e),
+                    }
+                }
+            }
 
             Request::Cancel { command_id } => match self.remote_command_router.dispatch_cancel(command_id).await {
                 Ok(()) => Message::ok_response(id, Response::Cancel),

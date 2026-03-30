@@ -4,7 +4,7 @@
 //! and broadcasts events — all within the same process.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -15,10 +15,9 @@ use std::{
 
 use async_trait::async_trait;
 use flotilla_protocol::{
-    AssociationKey, Command, CorrelationKey, DaemonEvent, DeltaEntry, EnvironmentId, HostListResponse, HostName, HostPath,
-    HostProvidersResponse, HostStatusResponse, HostSummary, Issue, PeerConnectionState, ProviderData, ProviderInfo, RepoDelta,
-    RepoDetailResponse, RepoInfo, RepoProvidersResponse, RepoSnapshot, RepoSummary, RepoWorkResponse, StatusResponse, StreamKey,
-    TopologyResponse, TopologyRoute,
+    Command, CorrelationKey, DaemonEvent, DeltaEntry, EnvironmentId, HostListResponse, HostName, HostPath, HostProvidersResponse,
+    HostStatusResponse, HostSummary, PeerConnectionState, ProviderData, ProviderInfo, RepoDelta, RepoDetailResponse, RepoInfo,
+    RepoProvidersResponse, RepoSnapshot, RepoSummary, RepoWorkResponse, StatusResponse, StreamKey, TopologyResponse, TopologyRoute,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -32,7 +31,6 @@ use crate::{
     executor,
     host_identity::{resolve_local_environment_state_dir, resolve_or_create_environment_id, resolve_or_create_remote_environment_id},
     host_registry::HostCounts,
-    issue_cache::IssueCache,
     model::{provider_names_from_registry, repo_name, RepoModel},
     path_context::{DaemonHostPath, ExecutionEnvironmentPath},
     providers::{
@@ -176,10 +174,6 @@ async fn discover_repo_for_environment(
     Ok(discover_providers(&host_bag, &ee_path, &discovery.repo_detectors, &discovery.factories, config, runner, env).await)
 }
 
-fn now_iso8601() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-}
-
 fn normalize_local_provider_hosts(mut providers: ProviderData, host_name: &HostName) -> ProviderData {
     providers.checkouts = providers
         .checkouts
@@ -259,65 +253,14 @@ fn merge_provider_errors(merged: &mut Vec<crate::data::RefreshError>, next: &[cr
     }
 }
 
-/// Returned by `execute()` for commands that run inline without lifecycle events.
-/// Callers must not treat this as a real command ID for in-flight tracking.
-const INLINE_COMMAND_ID: u64 = 0;
-
-/// Extract issue IDs referenced by association keys on change requests and checkouts.
-fn collect_linked_issue_ids(providers: &ProviderData) -> Vec<String> {
-    let mut ids = HashSet::new();
-    for cr in providers.change_requests.values() {
-        for key in &cr.association_keys {
-            let AssociationKey::IssueRef(_, issue_id) = key;
-            ids.insert(issue_id.clone());
-        }
-    }
-    for co in providers.checkouts.values() {
-        for key in &co.association_keys {
-            let AssociationKey::IssueRef(_, issue_id) = key;
-            ids.insert(issue_id.clone());
-        }
-    }
-    ids.into_iter().collect()
-}
-
-/// Clone base providers and replace the issues field with cached issues or search results.
-fn inject_issues(base_providers: &ProviderData, cache: &IssueCache, search_results: &Option<Vec<(String, Issue)>>) -> ProviderData {
-    let mut providers = base_providers.clone();
-    if let Some(ref results) = search_results {
-        providers.issues = results.iter().map(|(id, i)| (id.clone(), i.clone())).collect();
-    } else if !cache.is_empty() {
-        providers.issues = (*cache.to_index_map()).clone();
-    } else {
-        providers.issues.clear();
-    }
-    providers
-}
-
-fn inject_issues_from_entries(
-    base_providers: &ProviderData,
-    issue_entries: &Arc<indexmap::IndexMap<String, Issue>>,
-    search_results: &Option<Vec<(String, Issue)>>,
-) -> ProviderData {
-    let mut providers = base_providers.clone();
-    if let Some(ref results) = search_results {
-        providers.issues = results.iter().map(|(id, i)| (id.clone(), i.clone())).collect();
-    } else if !issue_entries.is_empty() {
-        providers.issues = (**issue_entries).clone();
-    } else {
-        providers.issues.clear();
-    }
-    providers
-}
-
 /// Build a proto RepoSnapshot, optionally merging peer provider data before correlation.
 fn build_repo_snapshot_with_peers(
     ctx: SnapshotBuildContext<'_>,
     seq: u64,
     peer_overlay: Option<&[(HostName, ProviderData)]>,
 ) -> RepoSnapshot {
-    let SnapshotBuildContext { repo_identity, path, local_providers, errors, provider_health, cache, search_results, host_name } = ctx;
-    let local_providers = normalize_local_provider_hosts(inject_issues(local_providers, cache, search_results), host_name);
+    let SnapshotBuildContext { repo_identity, path, local_providers, errors, provider_health, host_name } = ctx;
+    let local_providers = normalize_local_provider_hosts(local_providers.clone(), host_name);
 
     // Merge peer provider data if any
     let providers = if let Some(peers) = peer_overlay {
@@ -330,11 +273,7 @@ fn build_repo_snapshot_with_peers(
     let (work_items, correlation_groups) = crate::data::correlate(&providers);
     let re_snapshot =
         RefreshSnapshot { providers, work_items, correlation_groups, errors: errors.to_vec(), provider_health: provider_health.clone() };
-    let mut snapshot = snapshot_to_proto(repo_identity, path, seq, &re_snapshot, host_name);
-    snapshot.issue_total = cache.total_count;
-    snapshot.issue_has_more = cache.has_more;
-    snapshot.issue_search_results = search_results.clone();
-    snapshot
+    snapshot_to_proto(repo_identity, path, seq, &re_snapshot, host_name)
 }
 
 /// Choose whether to broadcast a full snapshot or a delta.
@@ -357,9 +296,7 @@ fn choose_event(snapshot: RepoSnapshot, delta: DeltaEntry) -> DaemonEvent {
         repo_identity: snapshot.repo_identity.clone(),
         repo: snapshot.repo.clone(),
         changes: delta.changes,
-        issue_total: snapshot.issue_total,
-        issue_has_more: snapshot.issue_has_more,
-        issue_search_results: snapshot.issue_search_results.clone(),
+        work_items: snapshot.work_items.clone(),
     };
 
     // Compare serialized sizes — if delta is larger, send full
@@ -376,6 +313,30 @@ fn choose_event(snapshot: RepoSnapshot, delta: DeltaEntry) -> DaemonEvent {
             DaemonEvent::RepoSnapshot(Box::new(snapshot))
         }
     }
+}
+
+/// Scan change requests and checkouts for `AssociationKey::IssueRef` and
+/// collect the unique issue IDs referenced. These are the issues that
+/// correlation needs in `ProviderData.issues` to build linked-issue lists.
+fn collect_linked_issue_ids(providers: &ProviderData) -> Vec<String> {
+    use std::collections::HashSet;
+
+    use flotilla_protocol::AssociationKey;
+
+    let mut ids = HashSet::new();
+    for cr in providers.change_requests.values() {
+        for key in &cr.association_keys {
+            let AssociationKey::IssueRef(_, issue_id) = key;
+            ids.insert(issue_id.clone());
+        }
+    }
+    for co in providers.checkouts.values() {
+        for key in &co.association_keys {
+            let AssociationKey::IssueRef(_, issue_id) = key;
+            ids.insert(issue_id.clone());
+        }
+    }
+    ids.into_iter().collect()
 }
 
 pub struct InProcessDaemon {
@@ -418,6 +379,10 @@ pub struct InProcessDaemon {
     /// Socket path for the daemon server — set by the daemon after startup.
     /// Used to inject FLOTILLA_DAEMON_SOCKET into managed terminal sessions.
     daemon_socket_path: RwLock<Option<PathBuf>>,
+    /// Maps active issue query cursor IDs to the repo identity and owning
+    /// session, so `execute_query` can look up the correct `IssueQueryService`
+    /// and `disconnect_client_session` can close remote cursors.
+    cursor_repo_map: RwLock<HashMap<crate::providers::issue_query::CursorId, (flotilla_protocol::RepoIdentity, uuid::Uuid)>>,
 }
 
 impl InProcessDaemon {
@@ -512,6 +477,7 @@ impl InProcessDaemon {
             session_id: uuid::Uuid::new_v4(),
             agent_state_store,
             daemon_socket_path: RwLock::new(None),
+            cursor_repo_map: RwLock::new(HashMap::new()),
         });
 
         // Spawn self-driving poll loop with a Weak reference.
@@ -845,13 +811,9 @@ impl InProcessDaemon {
         if !state.preferred_root().is_local {
             return None;
         }
-        // last_local_providers excludes peer overlay data; normalize after
-        // injecting cached issues so outbound replication only sends this
-        // host's authoritative state.
-        let providers = normalize_local_provider_hosts(
-            inject_issues(&state.last_local_providers, &state.issue_cache, &state.search_results),
-            &self.host_name,
-        );
+        // last_local_providers excludes peer overlay data; normalize so
+        // outbound replication only sends this host's authoritative state.
+        let providers = normalize_local_provider_hosts(state.last_local_providers.clone(), &self.host_name);
         Some((providers, state.local_data_version()))
     }
 
@@ -894,23 +856,6 @@ impl InProcessDaemon {
         self.peer_providers.read().await.get(identity).cloned().unwrap_or_default()
     }
 
-    /// Test accessor: override the issue cache's `last_refreshed_at` timestamp
-    /// for the given repo path. Useful for bypassing the MIN_INTERVAL_SECS
-    /// guard in `refresh_issues_incremental`.
-    #[cfg(feature = "test-support")]
-    pub async fn set_issue_cache_refreshed_at_for_test(&self, repo: &Path, timestamp: &str) {
-        let identity = self.tracked_repo_identity_for_path(repo).await.expect("set_issue_cache_refreshed_at_for_test: repo not tracked");
-        let mut repos = self.repos.write().await;
-        let state = repos.get_mut(&identity).expect("set_issue_cache_refreshed_at_for_test: repo state not found");
-        state.issue_cache.mark_refreshed(timestamp.to_string());
-    }
-
-    /// Test accessor: directly invoke the incremental issue refresh cycle.
-    #[cfg(feature = "test-support")]
-    pub async fn refresh_issues_incremental_for_test(&self) {
-        self.refresh_issues_incremental().await;
-    }
-
     /// Poll all repos for new refresh snapshots.
     ///
     /// For each repo whose background refresh has produced a new snapshot,
@@ -939,14 +884,7 @@ impl InProcessDaemon {
                     if !any_changed {
                         return None;
                     }
-                    Some((
-                        identity.clone(),
-                        snapshots,
-                        state.issue_cache.to_index_map(),
-                        state.issue_cache.total_count,
-                        state.issue_cache.has_more,
-                        state.search_results.clone(),
-                    ))
+                    Some((identity.clone(), snapshots))
                 })
                 .collect()
         };
@@ -961,17 +899,14 @@ impl InProcessDaemon {
 
         // Correlate and build proto snapshots outside any lock
         let mut updates = Vec::new();
-        for (identity, snapshots, issue_entries, issue_total, issue_has_more, search_results) in changed {
+        for (identity, snapshots) in changed {
             let mut local_providers = ProviderData::default();
             let mut provider_health = HashMap::new();
             let mut errors = Vec::new();
             let mut initialized = false;
 
             for snapshot in &snapshots {
-                let providers = normalize_local_provider_hosts(
-                    inject_issues_from_entries(&snapshot.providers, &issue_entries, &search_results),
-                    &self.host_name,
-                );
+                let providers = normalize_local_provider_hosts((*snapshot.providers).clone(), &self.host_name);
                 if !initialized {
                     local_providers = providers;
                     initialized = true;
@@ -993,12 +928,12 @@ impl InProcessDaemon {
             let (work_items, correlation_groups) = crate::data::correlate(&providers);
 
             let re_snapshot = RefreshSnapshot { providers, work_items, correlation_groups, errors, provider_health };
-            updates.push((identity, last_local_providers, re_snapshot, issue_total, issue_has_more, search_results));
+            updates.push((identity, last_local_providers, re_snapshot));
         }
 
         // Apply updates under write lock and broadcast
         let mut repos = self.repos.write().await;
-        for (identity, last_local_providers, re_snapshot, issue_total, issue_has_more, search_results) in updates {
+        for (identity, last_local_providers, re_snapshot) in updates {
             let Some(state) = repos.get_mut(&identity) else {
                 continue;
             };
@@ -1011,9 +946,6 @@ impl InProcessDaemon {
             let mut proto_snapshot =
                 snapshot_to_proto(state.identity().clone(), state.preferred_path(), state.seq() + 1, &re_snapshot, &self.host_name);
             proto_snapshot.provider_health = crate::convert::health_to_proto(&state.preferred_root().model.data.provider_health);
-            proto_snapshot.issue_total = issue_total;
-            proto_snapshot.issue_has_more = issue_has_more;
-            proto_snapshot.issue_search_results = search_results;
 
             // Compute and log delta (also advances seq)
             let delta_entry = state.record_delta(
@@ -1048,156 +980,40 @@ impl InProcessDaemon {
             let _ = self.event_tx.send(event);
         }
 
-        // After broadcasting, check for linked issues that aren't cached yet
-        // and fetch/pin them. This is a separate step so it doesn't block the
-        // main snapshot broadcast path.
         drop(repos);
+
         self.fetch_missing_linked_issues().await;
-        self.refresh_issues_incremental().await;
     }
 
-    /// Fetch issue pages until the cache has at least `desired_count` entries
-    /// (or no more pages are available).
-    async fn ensure_issues_cached(&self, repo: &Path, desired_count: usize) {
-        let Some(identity) = self.tracked_repo_identity_for_path(repo).await else {
-            return;
-        };
-        // Serialize fetches per-repo to prevent concurrent calls from reading the same
-        // next_page and skipping pages.
-        let mutex = {
-            let repos = self.repos.read().await;
-            match repos.get(&identity) {
-                Some(state) => state.issue_fetch_mutex(),
-                None => return,
-            }
-        };
-        let _guard = mutex.lock().await;
-        loop {
-            // Check cache state and grab registry Arc (single read lock)
-            let (page_num, registry) = {
-                let repos = self.repos.read().await;
-                let Some(state) = repos.get(&identity) else {
-                    return;
-                };
-                let need = state.issue_cache.len() < desired_count && state.issue_cache.has_more;
-                if !need {
-                    break;
-                }
-                if state.registry().issue_trackers.is_empty() {
-                    // No tracker — stop claiming more pages are available
-                    drop(repos);
-                    let mut repos = self.repos.write().await;
-                    if let Some(state) = repos.get_mut(&identity) {
-                        state.issue_cache.has_more = false;
-                    }
-                    break;
-                }
-                (state.issue_cache.next_page, state.registry())
-            };
-
-            // Fetch the next page outside any lock
-            let page_result = {
-                let tracker = registry.issue_trackers.preferred().unwrap();
-                tracker.list_issues_page(repo, page_num, 50).await
-            };
-
-            match page_result {
-                Ok(page) => {
-                    let mut repos = self.repos.write().await;
-                    if let Some(state) = repos.get_mut(&identity) {
-                        state.issue_cache.merge_page(page);
-                        if state.issue_cache.last_refreshed_at.is_none() {
-                            state.issue_cache.mark_refreshed(now_iso8601());
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(%page_num, err = %e, "failed to fetch issue page");
-                    let mut repos = self.repos.write().await;
-                    if let Some(state) = repos.get_mut(&identity) {
-                        state.issue_cache.has_more = false;
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Run a search query against the issue tracker and store the results.
-    async fn search_issues(&self, repo: &Path, query: &str) {
-        let Some(identity) = self.tracked_repo_identity_for_path(repo).await else {
-            return;
-        };
-        let registry = {
-            let repos = self.repos.read().await;
-            let Some(state) = repos.get(&identity) else {
-                return;
-            };
-            state.registry()
-        };
-
-        let result = {
-            let Some(tracker) = registry.issue_trackers.preferred() else {
-                return;
-            };
-            tracker.search_issues(repo, query, 50).await
-        };
-
-        match result {
-            Ok(issues) => {
-                info!(count = issues.len(), "search returned issues for query");
-                let mut repos = self.repos.write().await;
-                if let Some(state) = repos.get_mut(&identity) {
-                    state.search_results = Some(issues);
-                }
-            }
-            Err(e) => {
-                tracing::warn!(err = %e, "issue search failed");
-            }
-        }
-    }
-
-    /// Check all repos for linked issue IDs not yet in the cache, fetch and pin them.
+    /// For each tracked repo, scan change requests and checkouts for
+    /// `AssociationKey::IssueRef` references, fetch any issues not already
+    /// present in `ProviderData.issues`, and re-broadcast the snapshot so
+    /// correlation can link them.
     async fn fetch_missing_linked_issues(&self) {
-        // Phase 1: read lock — find repos with missing linked issues
-        let fetch_tasks: Vec<_> = {
+        let tasks: Vec<_> = {
             let repos = self.repos.read().await;
             repos
                 .iter()
                 .filter_map(|(identity, state)| {
-                    let linked_ids = collect_linked_issue_ids(&state.providers());
-                    let missing = state.issue_cache.missing_ids(&linked_ids);
+                    let linked_ids = collect_linked_issue_ids(&state.last_local_providers);
+                    if linked_ids.is_empty() {
+                        return None;
+                    }
+                    let missing: Vec<String> =
+                        linked_ids.into_iter().filter(|id| !state.last_local_providers.issues.contains_key(id.as_str())).collect();
                     if missing.is_empty() {
                         return None;
                     }
-                    Some((identity.clone(), missing, state.registry(), state.issue_fetch_mutex()))
+                    let registry = state.registry();
+                    if registry.issue_trackers.is_empty() {
+                        return None;
+                    }
+                    Some((identity.clone(), state.preferred_path().to_path_buf(), missing, registry))
                 })
                 .collect()
         };
 
-        if fetch_tasks.is_empty() {
-            return;
-        }
-
-        // Phase 2: fetch outside locks, then update cache and re-broadcast.
-        // Acquire the per-repo issue_fetch_mutex to avoid redundant API calls
-        // if ensure_issues_cached is running concurrently.
-        for (identity, missing, registry, fetch_mutex) in fetch_tasks {
-            let _guard = fetch_mutex.lock().await;
-
-            // Re-check missing after acquiring mutex — ensure_issues_cached may
-            // have already fetched some of these while we waited.
-            let (missing, path) = {
-                let repos = self.repos.read().await;
-                let Some(state) = repos.get(&identity) else {
-                    continue;
-                };
-                (state.issue_cache.missing_ids(&missing), state.preferred_path().to_path_buf())
-            };
-            if missing.is_empty() {
-                continue;
-            }
-
+        for (identity, path, missing, registry) in tasks {
             let Some(tracker) = registry.issue_trackers.preferred() else {
                 continue;
             };
@@ -1206,146 +1022,16 @@ impl InProcessDaemon {
                     {
                         let mut repos = self.repos.write().await;
                         if let Some(state) = repos.get_mut(&identity) {
-                            state.issue_cache.add_pinned(fetched);
+                            for (id, issue) in &fetched {
+                                state.last_local_providers.issues.insert(id.clone(), issue.clone());
+                            }
                         }
                     }
-                    self.broadcast_snapshot(&path).await;
+                    self.broadcast_snapshot_inner(&path, false).await;
                 }
-                Ok(_) => {}
+                Ok(_) => {} // no missing issues found
                 Err(e) => {
-                    tracing::warn!("failed to fetch linked issues for {}: {}", path.display(), e);
-                }
-            }
-        }
-    }
-
-    /// Incremental issue refresh: fetch issues changed since last refresh,
-    /// apply changeset to cache, and broadcast if anything changed.
-    async fn refresh_issues_incremental(&self) {
-        // Minimum interval between incremental refreshes (seconds).
-        const MIN_INTERVAL_SECS: i64 = 30;
-
-        let tasks: Vec<_> = {
-            let repos = self.repos.read().await;
-            repos
-                .iter()
-                .filter_map(|(identity, state)| {
-                    let since = state.issue_cache.last_refreshed_at.as_ref()?;
-                    if state.registry().issue_trackers.is_empty() {
-                        return None;
-                    }
-                    // Skip if refreshed too recently
-                    if let Ok(last) = chrono::DateTime::parse_from_rfc3339(since) {
-                        let elapsed = chrono::Utc::now().signed_duration_since(last).num_seconds();
-                        if elapsed < MIN_INTERVAL_SECS {
-                            return None;
-                        }
-                    }
-                    Some((
-                        identity.clone(),
-                        state.preferred_path().to_path_buf(),
-                        since.clone(),
-                        state.registry(),
-                        state.issue_fetch_mutex(),
-                        state.issue_cache.len(),
-                    ))
-                })
-                .collect()
-        };
-
-        for (identity, path, since, registry, fetch_mutex, prev_count) in tasks {
-            let _guard = fetch_mutex.lock().await;
-            let Some(tracker) = registry.issue_trackers.preferred() else {
-                continue;
-            };
-
-            // Record timestamp *before* the API call so the next `since`
-            // window overlaps rather than gaps — avoids missing updates
-            // that land on GitHub during the request.
-            let refresh_ts = now_iso8601();
-
-            debug!("issue incremental: repo={} since={} refresh_ts={} cache_len={}", path.display(), since, refresh_ts, prev_count,);
-
-            match tracker.list_issues_changed_since(&path, &since, 50).await {
-                Ok(changeset) => {
-                    let n_updated = changeset.updated.len();
-                    let n_closed = changeset.closed_ids.len();
-                    let has_more = changeset.has_more;
-
-                    if n_updated > 0 || n_closed > 0 || has_more {
-                        let updated_ids: Vec<&str> = changeset.updated.iter().map(|(id, _)| id.as_str()).collect();
-                        info!(
-                            "issue incremental: repo={} updated={:?} closed={:?} has_more={}",
-                            path.display(),
-                            updated_ids,
-                            changeset.closed_ids,
-                            has_more,
-                        );
-                    }
-
-                    if has_more {
-                        // Too many changes — skip incremental, do a full re-fetch.
-                        // Don't reset until we have data to replace it with,
-                        // so transient API failures don't wipe the UI.
-                        info!("issue incremental: escalating to full re-fetch for {}", path.display(),);
-                        drop(_guard);
-                        let first_page = {
-                            let reg = {
-                                let repos = self.repos.read().await;
-                                repos.get(&identity).map(RepoState::registry)
-                            };
-                            if let Some(reg) = reg {
-                                if let Some(t) = reg.issue_trackers.preferred() {
-                                    t.list_issues_page(&path, 1, 50).await.ok()
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        };
-                        if first_page.is_some() {
-                            // First page succeeded — safe to reset and refill
-                            {
-                                let mut repos = self.repos.write().await;
-                                if let Some(state) = repos.get_mut(&identity) {
-                                    state.issue_cache.reset();
-                                    if let Some(page) = first_page {
-                                        state.issue_cache.merge_page(page);
-                                    }
-                                }
-                            }
-                            // Continue fetching remaining pages
-                            self.ensure_issues_cached(&path, prev_count).await;
-                            {
-                                let mut repos = self.repos.write().await;
-                                if let Some(state) = repos.get_mut(&identity) {
-                                    state.issue_cache.mark_refreshed(refresh_ts.clone());
-                                }
-                            }
-                            self.broadcast_snapshot(&path).await;
-                        } else {
-                            // Fetch failed — keep existing cache and do NOT advance
-                            // the timestamp, so the next incremental call retries
-                            // from the same `since` window.
-                            warn!("issue incremental: escalation fetch failed for {}, keeping cache", path.display(),);
-                        }
-                    } else {
-                        let has_changes = n_updated > 0 || n_closed > 0;
-                        {
-                            let mut repos = self.repos.write().await;
-                            if let Some(state) = repos.get_mut(&identity) {
-                                state.issue_cache.apply_changeset(changeset);
-                                state.issue_cache.mark_refreshed(refresh_ts);
-                            }
-                        }
-                        if has_changes {
-                            self.broadcast_snapshot(&path).await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("incremental issue refresh failed for {}: {}", path.display(), e);
+                    debug!(err = %e, "failed to fetch linked issues");
                 }
             }
         }
@@ -1432,14 +1118,6 @@ impl InProcessDaemon {
         Ok(())
     }
 
-    /// Re-build and broadcast a snapshot for the given repo using current cache state.
-    ///
-    /// If peer provider data has been set for this repo via [`set_peer_providers`],
-    /// it is merged into the snapshot before correlation and broadcasting.
-    async fn broadcast_snapshot(&self, repo: &Path) {
-        self.broadcast_snapshot_inner(repo, true).await;
-    }
-
     async fn broadcast_snapshot_inner(&self, repo: &Path, is_local_change: bool) {
         let Some(identity) = self.tracked_repo_identity_for_path(repo).await else {
             return;
@@ -1493,7 +1171,7 @@ impl InProcessDaemon {
 impl InProcessDaemon {
     pub async fn refresh(&self, repo: &flotilla_protocol::RepoSelector) -> Result<(), String> {
         let repo = self.resolve_repo_selector(repo).await?;
-        let (prev_count, registry, identity) = {
+        {
             let identity =
                 self.tracked_repo_identity_for_path(&repo).await.ok_or_else(|| format!("repo not tracked: {}", repo.display()))?;
             let repos = self.repos.read().await;
@@ -1503,34 +1181,7 @@ impl InProcessDaemon {
                     root.model.refresh_handle.trigger_refresh();
                 }
             }
-            (state.issue_cache.len(), state.registry(), identity)
         };
-
-        if prev_count > 0 {
-            // Fetch page 1 before resetting, so failures don't wipe the UI.
-            let first_page =
-                if let Some(t) = registry.issue_trackers.preferred() { t.list_issues_page(&repo, 1, 50).await.ok() } else { None };
-
-            if first_page.is_some() {
-                {
-                    let mut repos = self.repos.write().await;
-                    if let Some(state) = repos.get_mut(&identity) {
-                        state.issue_cache.reset();
-                        if let Some(page) = first_page {
-                            state.issue_cache.merge_page(page);
-                        }
-                    }
-                }
-                self.ensure_issues_cached(&repo, prev_count).await;
-                {
-                    let mut repos = self.repos.write().await;
-                    if let Some(state) = repos.get_mut(&identity) {
-                        state.issue_cache.mark_refreshed(now_iso8601());
-                    }
-                }
-                self.broadcast_snapshot(&repo).await;
-            }
-        }
 
         Ok(())
     }
@@ -1859,6 +1510,66 @@ impl InProcessDaemon {
         summary
     }
 
+    async fn get_issue_query_service(&self, repo: &Path) -> Result<Arc<dyn crate::providers::issue_query::IssueQueryService>, String> {
+        let identity = self.tracked_repo_identity_for_path(repo).await.ok_or_else(|| "no tracked repo for path".to_string())?;
+        let repos = self.repos.read().await;
+        let state = repos.get(&identity).ok_or_else(|| "repo not found".to_string())?;
+        state
+            .registry()
+            .issue_query_services
+            .preferred()
+            .cloned()
+            .ok_or_else(|| "no issue query service available on this host".to_string())
+    }
+
+    async fn get_issue_query_service_for_cursor(
+        &self,
+        cursor: &crate::providers::issue_query::CursorId,
+    ) -> Result<Arc<dyn crate::providers::issue_query::IssueQueryService>, String> {
+        let identity = {
+            let map = self.cursor_repo_map.read().await;
+            map.get(cursor).map(|(id, _)| id.clone()).ok_or_else(|| format!("unknown cursor: {}", cursor.as_str()))?
+        };
+        let repos = self.repos.read().await;
+        let state = repos.get(&identity).ok_or_else(|| "repo no longer tracked".to_string())?;
+        state
+            .registry()
+            .issue_query_services
+            .preferred()
+            .cloned()
+            .ok_or_else(|| "no issue query service available on this host".to_string())
+    }
+
+    /// Return all cursor IDs owned by the given client session.
+    ///
+    /// Used by the server layer to close remote cursors before calling
+    /// `disconnect_client_session` for local cleanup.
+    pub async fn cursors_for_session(&self, session_id: uuid::Uuid) -> Vec<crate::providers::issue_query::CursorId> {
+        let map = self.cursor_repo_map.read().await;
+        map.iter().filter(|(_, (_, sid))| *sid == session_id).map(|(cid, _)| cid.clone()).collect()
+    }
+
+    /// Clean up all issue query cursors owned by the given client session.
+    ///
+    /// Called when a socket client disconnects. Iterates all tracked repos
+    /// and delegates to each `IssueQueryService::disconnect_session`.
+    pub async fn disconnect_client_session(&self, session_id: uuid::Uuid) {
+        let repos = self.repos.read().await;
+        let mut removed_cursors = Vec::new();
+        for state in repos.values() {
+            if let Some(service) = state.registry().issue_query_services.preferred() {
+                removed_cursors.extend(service.disconnect_session(session_id).await);
+            }
+        }
+        if !removed_cursors.is_empty() {
+            let mut map = self.cursor_repo_map.write().await;
+            for cursor_id in &removed_cursors {
+                map.remove(cursor_id);
+            }
+            debug!(%session_id, count = removed_cursors.len(), "cleaned up cursors for disconnected client session");
+        }
+    }
+
     pub async fn execute_with_remote_executor(
         &self,
         command: Command,
@@ -1921,46 +1632,11 @@ impl InProcessDaemon {
             return Err(format!("remote command routing not implemented yet for host {command_host}"));
         }
 
-        // Issue commands: execute inline, no lifecycle events.
-        // These are synchronous cache operations that return immediately.
-        match &command.action {
-            flotilla_protocol::CommandAction::SetIssueViewport { repo, visible_count } => {
-                let repo_path = self.resolve_repo_selector(repo).await?;
-                self.ensure_issues_cached(&repo_path, *visible_count * 2).await;
-                self.broadcast_snapshot(&repo_path).await;
-                return Ok(INLINE_COMMAND_ID);
-            }
-            flotilla_protocol::CommandAction::FetchMoreIssues { repo, desired_count } => {
-                let repo_path = self.resolve_repo_selector(repo).await?;
-                self.ensure_issues_cached(&repo_path, *desired_count).await;
-                self.broadcast_snapshot(&repo_path).await;
-                return Ok(INLINE_COMMAND_ID);
-            }
-            flotilla_protocol::CommandAction::SearchIssues { repo, query } => {
-                let repo_path = self.resolve_repo_selector(repo).await?;
-                self.search_issues(&repo_path, query).await;
-                self.broadcast_snapshot(&repo_path).await;
-                return Ok(INLINE_COMMAND_ID);
-            }
-            flotilla_protocol::CommandAction::ClearIssueSearch { repo } => {
-                let repo_path = self.resolve_repo_selector(repo).await?;
-                let identity = self.tracked_repo_identity_for_path(&repo_path).await;
-                let mut repos = self.repos.write().await;
-                if let Some(identity) = identity.as_ref() {
-                    if let Some(state) = repos.get_mut(identity) {
-                        state.search_results = None;
-                    }
-                }
-                drop(repos);
-                self.broadcast_snapshot(&repo_path).await;
-                return Ok(INLINE_COMMAND_ID);
-            }
-            _ => {}
-        }
-
         let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
 
         if command.action.is_query() {
+            // Query commands should be dispatched through `execute_query`,
+            // not through `execute`. Return an error to surface misrouting.
             let empty_identity = flotilla_protocol::RepoIdentity { authority: String::new(), path: String::new() };
             let _ = self.event_tx.send(DaemonEvent::CommandStarted {
                 command_id: id,
@@ -1969,38 +1645,7 @@ impl InProcessDaemon {
                 repo: None,
                 description: command.description().to_string(),
             });
-
-            let result = match &command.action {
-                flotilla_protocol::CommandAction::QueryRepoDetail { repo } => match self.get_repo_detail_internal(repo).await {
-                    Ok(v) => flotilla_protocol::CommandValue::RepoDetail(Box::new(v)),
-                    Err(message) => flotilla_protocol::CommandValue::Error { message },
-                },
-                flotilla_protocol::CommandAction::QueryRepoProviders { repo } => match self.get_repo_providers_internal(repo).await {
-                    Ok(v) => flotilla_protocol::CommandValue::RepoProviders(Box::new(v)),
-                    Err(message) => flotilla_protocol::CommandValue::Error { message },
-                },
-                flotilla_protocol::CommandAction::QueryRepoWork { repo } => match self.get_repo_work_internal(repo).await {
-                    Ok(v) => flotilla_protocol::CommandValue::RepoWork(Box::new(v)),
-                    Err(message) => flotilla_protocol::CommandValue::Error { message },
-                },
-                flotilla_protocol::CommandAction::QueryHostList {} => match self.list_hosts_internal().await {
-                    Ok(v) => flotilla_protocol::CommandValue::HostList(Box::new(v)),
-                    Err(message) => flotilla_protocol::CommandValue::Error { message },
-                },
-                flotilla_protocol::CommandAction::QueryHostStatus { target_host } => match self.get_host_status_internal(target_host).await
-                {
-                    Ok(v) => flotilla_protocol::CommandValue::HostStatus(Box::new(v)),
-                    Err(message) => flotilla_protocol::CommandValue::Error { message },
-                },
-                flotilla_protocol::CommandAction::QueryHostProviders { target_host } => {
-                    match self.get_host_providers_internal(target_host).await {
-                        Ok(v) => flotilla_protocol::CommandValue::HostProviders(Box::new(v)),
-                        Err(message) => flotilla_protocol::CommandValue::Error { message },
-                    }
-                }
-                _ => unreachable!("is_query() returned true for non-query action"),
-            };
-
+            let result = flotilla_protocol::CommandValue::Error { message: "query commands should use execute_query, not execute".into() };
             let _ = self.event_tx.send(DaemonEvent::CommandFinished {
                 command_id: id,
                 host: self.host_name.clone(),
@@ -2366,6 +2011,69 @@ impl DaemonHandle for InProcessDaemon {
         self.execute_impl(command, Arc::new(crate::step::UnsupportedRemoteStepExecutor), false).await
     }
 
+    async fn execute_query(&self, command: Command, session_id: uuid::Uuid) -> Result<flotilla_protocol::CommandValue, String> {
+        use flotilla_protocol::CommandAction;
+        match &command.action {
+            CommandAction::QueryRepoDetail { repo } => match self.get_repo_detail_internal(repo).await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::RepoDetail(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryRepoProviders { repo } => match self.get_repo_providers_internal(repo).await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::RepoProviders(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryRepoWork { repo } => match self.get_repo_work_internal(repo).await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::RepoWork(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryHostList {} => match self.list_hosts_internal().await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::HostList(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryHostStatus { target_host } => match self.get_host_status_internal(target_host).await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::HostStatus(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryHostProviders { target_host } => match self.get_host_providers_internal(target_host).await {
+                Ok(v) => Ok(flotilla_protocol::CommandValue::HostProviders(Box::new(v))),
+                Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
+            },
+            CommandAction::QueryIssueOpen { repo, params } => {
+                let repo_path = self.resolve_repo_selector(repo).await?;
+                let identity =
+                    self.tracked_repo_identity_for_path(&repo_path).await.ok_or_else(|| "no tracked repo for path".to_string())?;
+                let service = self.get_issue_query_service(&repo_path).await?;
+                let cursor = service.open_query(&repo_path, params.clone(), session_id).await?;
+                self.cursor_repo_map.write().await.insert(cursor.clone(), (identity, session_id));
+                Ok(flotilla_protocol::CommandValue::IssueQueryOpened { cursor })
+            }
+            CommandAction::QueryIssueFetchPage { cursor, count } => {
+                let service = self.get_issue_query_service_for_cursor(cursor).await?;
+                let page = service.fetch_page(cursor, *count).await?;
+                Ok(flotilla_protocol::CommandValue::IssuePage(page))
+            }
+            CommandAction::QueryIssueClose { cursor } => {
+                let service = self.get_issue_query_service_for_cursor(cursor).await?;
+                service.close_query(cursor).await;
+                self.cursor_repo_map.write().await.remove(cursor);
+                Ok(flotilla_protocol::CommandValue::IssueQueryClosed)
+            }
+            CommandAction::QueryIssueFetchByIds { repo, ids } => {
+                let repo_path = self.resolve_repo_selector(repo).await?;
+                let service = self.get_issue_query_service(&repo_path).await?;
+                let items = service.fetch_by_ids(&repo_path, ids).await?;
+                Ok(flotilla_protocol::CommandValue::IssuesByIds { items })
+            }
+            CommandAction::QueryIssueOpenInBrowser { repo, id } => {
+                let repo_path = self.resolve_repo_selector(repo).await?;
+                let service = self.get_issue_query_service(&repo_path).await?;
+                service.open_in_browser(&repo_path, id).await?;
+                Ok(flotilla_protocol::CommandValue::Ok)
+            }
+            other => Err(format!("execute_query not implemented for this command type: {:?}", std::mem::discriminant(other))),
+        }
+    }
+
     async fn cancel(&self, command_id: u64) -> Result<(), String> {
         let guard = self.active_commands.lock().await;
         match guard.get(&command_id) {
@@ -2403,9 +2111,7 @@ impl DaemonHandle for InProcessDaemon {
                                 repo_identity: state.identity().clone(),
                                 repo: Some(state.preferred_path().to_path_buf()),
                                 changes: entry.changes.clone(),
-                                issue_total: snapshot.issue_total,
-                                issue_has_more: snapshot.issue_has_more,
-                                issue_search_results: snapshot.issue_search_results.clone(),
+                                work_items: snapshot.work_items.clone(),
                             })));
                         }
                     }

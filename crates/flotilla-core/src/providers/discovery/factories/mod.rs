@@ -7,6 +7,7 @@ pub mod cursor;
 pub mod docker;
 pub mod git;
 pub mod github;
+pub mod github_issue_query;
 pub mod passthrough;
 pub mod shpool;
 pub mod tmux;
@@ -55,7 +56,7 @@ impl FactoryRegistry {
             vcs: vec![Box::new(git::GitVcsFactory)],
             checkout_managers: checkout_manager_factories(),
             change_requests: vec![Box::new(github::GitHubChangeRequestFactory)],
-            issue_trackers: vec![Box::new(github::GitHubIssueTrackerFactory)],
+            issue_trackers: vec![Box::new(github::GitHubIssueProviderFactory)],
             cloud_agents: vec![
                 Box::new(claude::ClaudeCodingAgentFactory),
                 Box::new(cursor::CursorCodingAgentFactory),
@@ -66,6 +67,7 @@ impl FactoryRegistry {
             workspace_managers: workspace_factories(),
             terminal_pools: terminal_pool_factories(),
             environment_providers: vec![Box::new(docker::DockerEnvironmentFactory)],
+            issue_query_services: vec![Box::new(github_issue_query::GitHubIssueQueryServiceFactory)],
         }
     }
 
@@ -80,6 +82,7 @@ impl FactoryRegistry {
             workspace_managers: workspace_factories(),
             terminal_pools: terminal_pool_factories(),
             environment_providers: vec![],
+            issue_query_services: vec![],
         }
     }
 }

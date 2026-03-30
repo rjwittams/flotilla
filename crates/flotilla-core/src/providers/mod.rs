@@ -5,6 +5,7 @@ pub mod correlation;
 pub mod discovery;
 pub mod environment;
 pub mod github_api;
+pub mod issue_query;
 pub mod issue_tracker;
 pub mod registry;
 pub mod ssh_runner;

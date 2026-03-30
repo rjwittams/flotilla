@@ -1105,6 +1105,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1227,6 +1228,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-input",
  "unicode-width",
+ "uuid",
 ]
 
 [[package]]

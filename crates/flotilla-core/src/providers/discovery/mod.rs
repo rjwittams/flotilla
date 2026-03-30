@@ -28,7 +28,7 @@ use crate::{
         ai_utility::AiUtility,
         change_request::ChangeRequestTracker,
         coding_agent::CloudAgentService,
-        issue_tracker::IssueTracker,
+        issue_tracker::IssueProvider,
         registry::{ProviderRegistry, ProviderSet},
         terminal::TerminalPool,
         vcs::{CheckoutManager, Vcs},
@@ -252,7 +252,7 @@ pub enum ProviderCategory {
     Vcs,
     CheckoutManager,
     ChangeRequest,
-    IssueTracker,
+    IssueProvider,
     CloudAgent,
     AiUtility,
     WorkspaceManager,
@@ -266,7 +266,7 @@ impl ProviderCategory {
             Self::Vcs => "vcs",
             Self::CheckoutManager => "checkout_manager",
             Self::ChangeRequest => "change_request",
-            Self::IssueTracker => "issue_tracker",
+            Self::IssueProvider => "issue_tracker",
             Self::CloudAgent => "cloud_agent",
             Self::AiUtility => "ai_utility",
             Self::WorkspaceManager => "workspace_manager",
@@ -280,7 +280,7 @@ impl ProviderCategory {
             Self::Vcs => "VCS",
             Self::CheckoutManager => "Checkout Manager",
             Self::ChangeRequest => "Change Requests",
-            Self::IssueTracker => "Issue Tracker",
+            Self::IssueProvider => "Issue Provider",
             Self::CloudAgent => "Cloud Agent",
             Self::AiUtility => "AI Utility",
             Self::WorkspaceManager => "Workspace Manager",
@@ -358,6 +358,33 @@ impl ProviderDescriptor {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ServiceDescriptor {
+    pub category: ServiceCategory,
+    pub backend: String,
+    pub implementation: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ServiceCategory {
+    IssueQuery,
+}
+
+impl ServiceCategory {
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Self::IssueQuery => "issue_query",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::IssueQuery => "Issue Query",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Detector traits
 // ---------------------------------------------------------------------------
@@ -383,9 +410,10 @@ pub trait RepoDetector: Send + Sync {
 
 #[async_trait]
 pub trait Factory: Send + Sync {
+    type Descriptor;
     type Output: ?Sized + Send + Sync;
 
-    fn descriptor(&self) -> ProviderDescriptor;
+    fn descriptor(&self) -> Self::Descriptor;
 
     async fn probe(
         &self,
@@ -396,15 +424,19 @@ pub trait Factory: Send + Sync {
     ) -> Result<Arc<Self::Output>, Vec<UnmetRequirement>>;
 }
 
-pub type VcsFactory = dyn Factory<Output = dyn Vcs>;
-pub type CheckoutManagerFactory = dyn Factory<Output = dyn CheckoutManager>;
-pub type ChangeRequestFactory = dyn Factory<Output = dyn ChangeRequestTracker>;
-pub type IssueTrackerFactory = dyn Factory<Output = dyn IssueTracker>;
-pub type CloudAgentFactory = dyn Factory<Output = dyn CloudAgentService>;
-pub type AiUtilityFactory = dyn Factory<Output = dyn AiUtility>;
-pub type WorkspaceManagerFactory = dyn Factory<Output = dyn WorkspaceManager>;
-pub type TerminalPoolFactory = dyn Factory<Output = dyn TerminalPool>;
-pub type EnvironmentProviderFactory = dyn Factory<Output = dyn crate::providers::environment::EnvironmentProvider>;
+pub type ProviderFactory<T> = dyn Factory<Descriptor = ProviderDescriptor, Output = T>;
+pub type ServiceFactory<T> = dyn Factory<Descriptor = ServiceDescriptor, Output = T>;
+
+pub type VcsFactory = ProviderFactory<dyn Vcs>;
+pub type CheckoutManagerFactory = ProviderFactory<dyn CheckoutManager>;
+pub type ChangeRequestFactory = ProviderFactory<dyn ChangeRequestTracker>;
+pub type IssueProviderFactory = ProviderFactory<dyn IssueProvider>;
+pub type CloudAgentFactory = ProviderFactory<dyn CloudAgentService>;
+pub type AiUtilityFactory = ProviderFactory<dyn AiUtility>;
+pub type WorkspaceManagerFactory = ProviderFactory<dyn WorkspaceManager>;
+pub type TerminalPoolFactory = ProviderFactory<dyn TerminalPool>;
+pub type EnvironmentProviderFactory = ProviderFactory<dyn crate::providers::environment::EnvironmentProvider>;
+pub type IssueQueryServiceFactory = ServiceFactory<dyn crate::providers::issue_query::IssueQueryService>;
 
 // ---------------------------------------------------------------------------
 // Factory registry
@@ -414,12 +446,13 @@ pub struct FactoryRegistry {
     pub vcs: Vec<Box<VcsFactory>>,
     pub checkout_managers: Vec<Box<CheckoutManagerFactory>>,
     pub change_requests: Vec<Box<ChangeRequestFactory>>,
-    pub issue_trackers: Vec<Box<IssueTrackerFactory>>,
+    pub issue_trackers: Vec<Box<IssueProviderFactory>>,
     pub cloud_agents: Vec<Box<CloudAgentFactory>>,
     pub ai_utilities: Vec<Box<AiUtilityFactory>>,
     pub workspace_managers: Vec<Box<WorkspaceManagerFactory>>,
     pub terminal_pools: Vec<Box<TerminalPoolFactory>>,
     pub environment_providers: Vec<Box<EnvironmentProviderFactory>>,
+    pub issue_query_services: Vec<Box<IssueQueryServiceFactory>>,
 }
 
 impl FactoryRegistry {
@@ -434,7 +467,7 @@ impl FactoryRegistry {
         runner: Arc<dyn CommandRunner>,
     ) -> ProviderRegistry {
         async fn probe_category<T: ?Sized + Send + Sync + 'static>(
-            factories: &[Box<dyn Factory<Output = T>>],
+            factories: &[Box<dyn Factory<Descriptor = ProviderDescriptor, Output = T>>],
             env: &EnvironmentBag,
             config: &ConfigStore,
             repo_root: &ExecutionEnvironmentPath,
@@ -479,6 +512,14 @@ impl FactoryRegistry {
             registry.environment_providers.insert(desc.implementation.clone(), desc, p);
         }
 
+        // Probe issue query service factories (ServiceDescriptor, not ProviderDescriptor).
+        for factory in &self.issue_query_services {
+            if let Ok(service) = factory.probe(env, config, repo_root, runner.clone()).await {
+                let desc = factory.descriptor();
+                registry.issue_query_services.insert(desc.implementation.clone(), desc, service);
+            }
+        }
+
         registry
     }
 }
@@ -517,6 +558,7 @@ impl DiscoveryRuntime {
             && self.factories.issue_trackers.is_empty()
             && self.factories.cloud_agents.is_empty()
             && self.factories.ai_utilities.is_empty()
+            && self.factories.issue_query_services.is_empty()
     }
 }
 
@@ -557,7 +599,7 @@ pub async fn discover_providers(
     let mut unmet = Vec::new();
 
     async fn probe_all<T: ?Sized + Send + Sync + 'static, F>(
-        factories: &[Box<dyn Factory<Output = T>>],
+        factories: &[Box<dyn Factory<Descriptor = ProviderDescriptor, Output = T>>],
         env: &EnvironmentBag,
         config: &ConfigStore,
         repo_root: &ExecutionEnvironmentPath,
@@ -615,6 +657,20 @@ pub async fn discover_providers(
     })
     .await;
 
+    // Probe issue query service factories (ServiceDescriptor, not ProviderDescriptor).
+    for factory in &factories.issue_query_services {
+        match factory.probe(&combined, config, repo_root, runner.clone()).await {
+            Ok(service) => {
+                let desc = factory.descriptor();
+                registry.issue_query_services.insert(desc.implementation.clone(), desc, service);
+            }
+            Err(reqs) => {
+                let desc = factory.descriptor();
+                unmet.extend(reqs.into_iter().map(|r| (desc.implementation.clone(), r)));
+            }
+        }
+    }
+
     // Apply provider preferences from config, tracking unresolved preferences.
     let flotilla_config = config.load_config();
 
@@ -639,7 +695,7 @@ pub async fn discover_providers(
     );
     apply_backend_pref(
         &mut registry.issue_trackers,
-        ProviderCategory::IssueTracker,
+        ProviderCategory::IssueProvider,
         flotilla_config.issue_tracker.preference.backend.as_deref(),
         &mut unmet,
     );
@@ -833,6 +889,7 @@ mod orchestrator_tests {
             workspace_managers: vec![],
             terminal_pools: vec![],
             environment_providers: vec![],
+            issue_query_services: vec![],
         };
 
         let result = discover_providers(&host_bag, &repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;
@@ -862,6 +919,7 @@ mod orchestrator_tests {
             workspace_managers: vec![],
             terminal_pools: vec![],
             environment_providers: vec![],
+            issue_query_services: vec![],
         };
 
         let result = discover_providers(&host_bag, &repo_root, &repo_dets, &fact_reg, &config, runner, &TestEnvVars::default()).await;

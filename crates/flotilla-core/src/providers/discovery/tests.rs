@@ -167,8 +167,8 @@ fn provider_descriptor_named_defaults_labels() {
 
 #[test]
 fn provider_descriptor_labeled_simple() {
-    let desc = ProviderDescriptor::labeled_simple(ProviderCategory::IssueTracker, "github", "GitHub Issues", "#", "Issues", "issue");
-    assert_eq!(desc.category, ProviderCategory::IssueTracker);
+    let desc = ProviderDescriptor::labeled_simple(ProviderCategory::IssueProvider, "github", "GitHub Issues", "#", "Issues", "issue");
+    assert_eq!(desc.category, ProviderCategory::IssueProvider);
     assert_eq!(desc.backend, "github");
     assert_eq!(desc.implementation, "github");
     assert_eq!(desc.display_name, "GitHub Issues");
@@ -180,7 +180,7 @@ fn provider_category_slug_round_trip() {
         (ProviderCategory::Vcs, "vcs"),
         (ProviderCategory::CheckoutManager, "checkout_manager"),
         (ProviderCategory::ChangeRequest, "change_request"),
-        (ProviderCategory::IssueTracker, "issue_tracker"),
+        (ProviderCategory::IssueProvider, "issue_tracker"),
         (ProviderCategory::CloudAgent, "cloud_agent"),
         (ProviderCategory::AiUtility, "ai_utility"),
         (ProviderCategory::WorkspaceManager, "workspace_manager"),
@@ -234,4 +234,21 @@ fn environment_bag_assertions_accessor() {
 fn discovery_runtime_is_follower_checks_factories() {
     assert!(!DiscoveryRuntime::for_process(false).is_follower());
     assert!(DiscoveryRuntime::for_process(true).is_follower());
+}
+
+#[test]
+fn service_descriptor_fields() {
+    let desc = ServiceDescriptor {
+        category: ServiceCategory::IssueQuery,
+        backend: "github".into(),
+        implementation: "github".into(),
+        display_name: "GitHub Issues".into(),
+    };
+    assert_eq!(desc.backend, "github");
+    assert_eq!(desc.display_name, "GitHub Issues");
+}
+
+#[test]
+fn service_category_slug() {
+    assert_eq!(ServiceCategory::IssueQuery.slug(), "issue_query");
 }

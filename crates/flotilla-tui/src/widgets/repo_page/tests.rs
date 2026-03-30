@@ -15,9 +15,8 @@ fn test_repo_data(items: Vec<WorkItem>) -> Shared<RepoData> {
         provider_names: HashMap::new(),
         provider_health: HashMap::new(),
         work_items: items,
-        issue_has_more: false,
-        issue_total: None,
-        issue_search_active: false,
+        issue_rows: Vec::new(),
+        issue_section_label: String::new(),
         loading: false,
     })
 }
@@ -49,9 +48,8 @@ fn repo_data_with_archived_session() -> Shared<RepoData> {
         provider_names: HashMap::new(),
         provider_health: HashMap::new(),
         work_items: vec![session_item("s1"), issue_item("i1")],
-        issue_has_more: false,
-        issue_total: None,
-        issue_search_active: false,
+        issue_rows: Vec::new(),
+        issue_section_label: String::new(),
         loading: false,
     })
 }
@@ -240,7 +238,7 @@ fn dismiss_cascade_clears_multi_select_fourth() {
 fn dismiss_cascade_clears_selection_fifth() {
     let mut page = page_with_items(vec![issue_item("1")]);
     // After page_with_items, the first item is auto-selected.
-    assert!(page.table.selected_work_item().is_some());
+    assert!(page.table.selected_row().is_some());
 
     let mut harness = TestWidgetHarness::new();
     let mut ctx = harness.ctx();
@@ -248,7 +246,7 @@ fn dismiss_cascade_clears_selection_fifth() {
     let outcome = page.handle_action(Action::Dismiss, &mut ctx);
     assert!(matches!(outcome, Outcome::Consumed));
     assert!(!ctx.app_actions.iter().any(|a| matches!(a, AppAction::Quit)));
-    assert!(page.table.selected_work_item().is_none());
+    assert!(page.table.selected_row().is_none());
 }
 
 #[test]

@@ -19,7 +19,7 @@ use crate::{
         change_request::ChangeRequestTracker,
         coding_agent::CloudAgentService,
         discovery::{test_support::fake_discovery, ProviderCategory, ProviderDescriptor},
-        issue_tracker::IssueTracker,
+        issue_tracker::IssueProvider,
         registry::ProviderRegistry,
         terminal::TerminalPool,
         testing::MockRunner,
@@ -202,11 +202,11 @@ impl ChangeRequestTracker for MockChangeRequestTracker {
     }
 }
 
-/// A mock IssueTracker provider.
-struct MockIssueTracker;
+/// A mock IssueProvider provider.
+struct MockIssueProvider;
 
 #[async_trait]
-impl IssueTracker for MockIssueTracker {
+impl IssueProvider for MockIssueProvider {
     async fn list_issues(&self, _repo_root: &Path, _limit: usize) -> Result<Vec<(String, Issue)>, String> {
         Ok(vec![])
     }
@@ -1342,7 +1342,7 @@ async fn open_issue_no_provider() {
 #[tokio::test]
 async fn open_issue_with_provider() {
     let mut registry = empty_registry();
-    registry.issue_trackers.insert("github", desc("github"), Arc::new(MockIssueTracker));
+    registry.issue_trackers.insert("github", desc("github"), Arc::new(MockIssueProvider));
     let runner = runner_ok();
 
     let result = run_build_plan_to_completion(CommandAction::OpenIssue { id: "10".to_string() }, registry, empty_data(), runner).await;
@@ -1495,7 +1495,7 @@ async fn archive_session_agent_fails() {
 async fn generate_branch_name_ai_success() {
     let mut registry = empty_registry();
     registry.ai_utilities.insert("claude", desc("claude"), Arc::new(MockAiUtility::succeeding("feat/add-login")));
-    registry.issue_trackers.insert("github", desc("github"), Arc::new(MockIssueTracker));
+    registry.issue_trackers.insert("github", desc("github"), Arc::new(MockIssueProvider));
     let mut data = empty_data();
     data.issues.insert("42".to_string(), TestIssue::new("Add login feature").build());
     let runner = runner_ok();
@@ -1540,7 +1540,7 @@ async fn generate_branch_name_no_ai_provider_uses_fallback() {
 async fn generate_branch_name_multiple_issues() {
     let mut registry = empty_registry();
     registry.ai_utilities.insert("claude", desc("claude"), Arc::new(MockAiUtility::succeeding("feat/login-and-signup")));
-    registry.issue_trackers.insert("github", desc("github"), Arc::new(MockIssueTracker));
+    registry.issue_trackers.insert("github", desc("github"), Arc::new(MockIssueProvider));
     let mut data = empty_data();
     data.issues.insert("1".to_string(), TestIssue::new("Login feature").build());
     data.issues.insert("2".to_string(), TestIssue::new("Signup feature").build());
@@ -1726,10 +1726,6 @@ async fn daemon_level_commands_return_error() {
         CommandAction::TrackRepoPath { path: PathBuf::from("/repo") },
         CommandAction::UntrackRepo { repo: RepoSelector::Path(PathBuf::from("/repo")) },
         CommandAction::Refresh { repo: None },
-        CommandAction::SetIssueViewport { repo: RepoSelector::Path(PathBuf::from("/repo")), visible_count: 10 },
-        CommandAction::FetchMoreIssues { repo: RepoSelector::Path(PathBuf::from("/repo")), desired_count: 20 },
-        CommandAction::SearchIssues { repo: RepoSelector::Path(PathBuf::from("/repo")), query: "bug".to_string() },
-        CommandAction::ClearIssueSearch { repo: RepoSelector::Path(PathBuf::from("/repo")) },
     ];
 
     for cmd in daemon_commands {
