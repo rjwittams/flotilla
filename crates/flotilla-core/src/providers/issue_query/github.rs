@@ -163,10 +163,10 @@ impl IssueQueryService for GitHubIssueQueryService {
     }
 
     async fn close_query(&self, cursor: &CursorId) {
+        // Lock order: cursors first, then session_cursors (same as open_query/fetch_page).
         let mut cursors = self.cursors.lock().await;
+        let mut session_map = self.session_cursors.lock().await;
         if let Some(state) = cursors.remove(cursor) {
-            drop(cursors);
-            let mut session_map = self.session_cursors.lock().await;
             if let Some(list) = session_map.get_mut(&state.session_id) {
                 list.retain(|c| c != cursor);
                 if list.is_empty() {
@@ -177,15 +177,14 @@ impl IssueQueryService for GitHubIssueQueryService {
     }
 
     async fn disconnect_session(&self, session_id: uuid::Uuid) -> Vec<CursorId> {
-        let cursor_ids = {
-            let mut session_map = self.session_cursors.lock().await;
-            session_map.remove(&session_id).unwrap_or_default()
-        };
+        // Lock order: cursors first, then session_cursors (same as open_query/fetch_page).
+        let mut cursors = self.cursors.lock().await;
+        let mut session_map = self.session_cursors.lock().await;
+        let cursor_ids = session_map.remove(&session_id).unwrap_or_default();
+        for cursor_id in &cursor_ids {
+            cursors.remove(cursor_id);
+        }
         if !cursor_ids.is_empty() {
-            let mut cursors = self.cursors.lock().await;
-            for cursor_id in &cursor_ids {
-                cursors.remove(cursor_id);
-            }
             tracing::debug!(count = cursor_ids.len(), %session_id, "cleaned up cursors for disconnected session");
         }
         cursor_ids
