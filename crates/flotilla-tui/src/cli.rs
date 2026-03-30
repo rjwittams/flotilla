@@ -3,8 +3,9 @@ use std::{collections::HashMap, path::Path};
 use comfy_table::{presets::UTF8_FULL_CONDENSED, Cell, Table};
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_protocol::{
-    output::OutputFormat, Command, CommandValue, DaemonEvent, HostProvidersResponse, HostStatusResponse, PeerConnectionState,
-    RepoDetailResponse, RepoProvidersResponse, RepoWorkResponse, StatusResponse, StreamKey, TopologyResponse,
+    output::OutputFormat, Command, CommandValue, DaemonEvent, EnvironmentInfo, EnvironmentStatus, HostProvidersResponse,
+    HostStatusResponse, PeerConnectionState, RepoDetailResponse, RepoProvidersResponse, RepoWorkResponse, StatusResponse, StreamKey,
+    TopologyResponse,
 };
 
 use crate::socket::SocketDaemon;
@@ -69,6 +70,49 @@ fn inventory_is_empty(inventory: &flotilla_protocol::ToolInventory) -> bool {
     inventory.binaries.is_empty() && inventory.sockets.is_empty() && inventory.auth.is_empty() && inventory.env_vars.is_empty()
 }
 
+fn environment_status_label(status: &EnvironmentStatus) -> String {
+    match status {
+        EnvironmentStatus::Building => "building".to_string(),
+        EnvironmentStatus::Starting => "starting".to_string(),
+        EnvironmentStatus::Running => "running".to_string(),
+        EnvironmentStatus::Stopped => "stopped".to_string(),
+        EnvironmentStatus::Failed(message) => format!("failed: {message}"),
+    }
+}
+
+fn format_visible_environments_human(environments: &[EnvironmentInfo]) -> String {
+    if environments.is_empty() {
+        return String::new();
+    }
+
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL_CONDENSED);
+    table.set_header(vec!["Kind", "Id", "Display Name", "Status", "Image"]);
+    for environment in environments {
+        match environment {
+            EnvironmentInfo::Direct { id, display_name, status } => {
+                table.add_row(vec![
+                    Cell::new("direct"),
+                    Cell::new(id.as_str()),
+                    Cell::new(display_name.as_deref().unwrap_or("-")),
+                    Cell::new(environment_status_label(status)),
+                    Cell::new("-"),
+                ]);
+            }
+            EnvironmentInfo::Provisioned { id, display_name, image, status } => {
+                table.add_row(vec![
+                    Cell::new("provisioned"),
+                    Cell::new(id.as_str()),
+                    Cell::new(display_name.as_deref().unwrap_or("-")),
+                    Cell::new(environment_status_label(status)),
+                    Cell::new(image.as_str()),
+                ]);
+            }
+        }
+    }
+    format!("Visible Environments:\n{table}\n")
+}
+
 fn format_host_list_human(response: &flotilla_protocol::HostListResponse) -> String {
     if response.hosts.is_empty() {
         return "No hosts known.\n".into();
@@ -115,6 +159,8 @@ fn format_host_status_human(response: &HostStatusResponse) -> String {
         }
     }
 
+    out.push_str(&format_visible_environments_human(&response.visible_environments));
+
     out
 }
 
@@ -155,6 +201,7 @@ fn format_host_providers_human(response: &HostProvidersResponse) -> String {
     }
     out.push_str(&table.to_string());
     out.push('\n');
+    out.push_str(&format_visible_environments_human(&response.visible_environments));
     out
 }
 
@@ -193,6 +240,10 @@ fn format_topology_human(response: &TopologyResponse) -> String {
 /// matching `flotilla_core::model::repo_name`.
 fn repo_name(path: &std::path::Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string_lossy().to_string())
+}
+
+fn repo_label(path: Option<&std::path::Path>, identity: &flotilla_protocol::RepoIdentity) -> String {
+    path.map(repo_name).unwrap_or_else(|| identity.path.clone())
 }
 
 /// Format a `CommandValue` as a short human-readable string.
@@ -254,12 +305,17 @@ pub(crate) fn format_event_human(event: &flotilla_protocol::DaemonEvent) -> Stri
     use flotilla_protocol::{DaemonEvent, PeerConnectionState};
     match event {
         DaemonEvent::RepoSnapshot(snap) => {
-            format!("[snapshot] {}: full snapshot (seq {}, {} work items)", repo_name(&snap.repo), snap.seq, snap.work_items.len())
+            format!(
+                "[snapshot] {}: full snapshot (seq {}, {} work items)",
+                repo_label(snap.repo.as_deref(), &snap.repo_identity),
+                snap.seq,
+                snap.work_items.len()
+            )
         }
         DaemonEvent::RepoDelta(delta) => {
             format!(
                 "[delta]    {}: delta seq {}\u{2192}{} ({} changes)",
-                repo_name(&delta.repo),
+                repo_label(delta.repo.as_deref(), &delta.repo_identity),
                 delta.prev_seq,
                 delta.seq,
                 delta.changes.len()
@@ -268,27 +324,27 @@ pub(crate) fn format_event_human(event: &flotilla_protocol::DaemonEvent) -> Stri
         DaemonEvent::RepoTracked(info) => {
             format!("[repo]     {}: tracked", info.name)
         }
-        DaemonEvent::RepoUntracked { path, .. } => {
-            format!("[repo]     {}: untracked", repo_name(path))
+        DaemonEvent::RepoUntracked { repo_identity, path } => {
+            format!("[repo]     {}: untracked", repo_label(path.as_deref(), repo_identity))
         }
-        DaemonEvent::CommandStarted { repo, description, .. } => {
-            if repo.as_os_str().is_empty() {
+        DaemonEvent::CommandStarted { repo_identity, repo, description, .. } => {
+            if repo.is_none() && repo_identity.authority.is_empty() && repo_identity.path.is_empty() {
                 // Query commands have no repo context — show description only
                 format!("[query]    {description}")
             } else {
-                format!("[command]  {}: started \"{}\"", repo_name(repo), description)
+                format!("[command]  {}: started \"{}\"", repo_label(repo.as_deref(), repo_identity), description)
             }
         }
-        DaemonEvent::CommandFinished { repo, result, .. } => {
-            if repo.as_os_str().is_empty() {
+        DaemonEvent::CommandFinished { repo_identity, repo, result, .. } => {
+            if repo.is_none() && repo_identity.authority.is_empty() && repo_identity.path.is_empty() {
                 // Query commands have no repo context — show result directly
                 format_command_result(result)
             } else {
-                format!("[command]  {}: finished \u{2192} {}", repo_name(repo), format_command_result(result))
+                format!("[command]  {}: finished \u{2192} {}", repo_label(repo.as_deref(), repo_identity), format_command_result(result))
             }
         }
-        DaemonEvent::CommandStepUpdate { repo, description, step_index, step_count, .. } => {
-            format!("[step]     {}: {} ({}/{})", repo_name(repo), description, step_index + 1, step_count)
+        DaemonEvent::CommandStepUpdate { repo_identity, repo, description, step_index, step_count, .. } => {
+            format!("[step]     {}: {} ({}/{})", repo_label(repo.as_deref(), repo_identity), description, step_index + 1, step_count)
         }
         DaemonEvent::PeerStatusChanged { host, status } => {
             let state = match status {

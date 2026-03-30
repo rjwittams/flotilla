@@ -1,5 +1,5 @@
 use crossterm::event::KeyCode;
-use flotilla_protocol::{ProvisioningTarget, WorkItemIdentity};
+use flotilla_protocol::{Change, ProvisioningTarget, WorkItemIdentity};
 use tempfile::tempdir;
 use test_support::*;
 
@@ -397,6 +397,57 @@ fn apply_delta_health_only_change_does_not_set_unseen() {
     assert!(!app.model.repos[&inactive_repo].has_unseen_changes);
 }
 
+#[test]
+fn apply_delta_work_item_changes_update_repo_data() {
+    let mut app = stub_app();
+    let repo = app.model.active_repo_identity().clone();
+    let repo_path = active_repo_path(&app);
+
+    let mut snap = snapshot(&repo_path);
+    snap.work_items = vec![issue_item("1")];
+    app.apply_snapshot(snap);
+
+    let mut updated_issue = issue_item("1");
+    updated_issue.description = "Updated issue 1".into();
+    let added_issue = issue_item("2");
+
+    // Our branch sends full work_items with each delta, so set the expected list directly.
+    let mut d = delta(&repo_path, vec![
+        Change::WorkItem { identity: updated_issue.identity.clone(), op: flotilla_protocol::EntryOp::Updated(updated_issue.clone()) },
+        Change::WorkItem { identity: added_issue.identity.clone(), op: flotilla_protocol::EntryOp::Added(added_issue.clone()) },
+    ]);
+    d.work_items = vec![updated_issue.clone(), added_issue.clone()];
+    app.apply_delta(d);
+
+    let data = app.repo_data[&repo].read();
+    assert_eq!(data.work_items.len(), 2);
+    assert!(data.work_items.iter().any(|item| item.identity == updated_issue.identity && item.description == "Updated issue 1"));
+    assert!(data.work_items.iter().any(|item| item.identity == added_issue.identity));
+}
+
+#[test]
+fn apply_delta_work_item_remove_updates_repo_data() {
+    let mut app = stub_app();
+    let repo = app.model.active_repo_identity().clone();
+    let repo_path = active_repo_path(&app);
+
+    let mut snap = snapshot(&repo_path);
+    snap.work_items = vec![issue_item("1"), issue_item("2")];
+    app.apply_snapshot(snap);
+
+    // Our branch sends full work_items with each delta, so set the expected list directly.
+    let mut d = delta(&repo_path, vec![Change::WorkItem {
+        identity: flotilla_protocol::WorkItemIdentity::Issue("1".into()),
+        op: flotilla_protocol::EntryOp::Removed,
+    }]);
+    d.work_items = vec![issue_item("2")];
+    app.apply_delta(d);
+
+    let data = app.repo_data[&repo].read();
+    assert_eq!(data.work_items.len(), 1);
+    assert_eq!(data.work_items[0].identity, flotilla_protocol::WorkItemIdentity::Issue("2".into()));
+}
+
 // -- handle_repo_added / handle_repo_removed --
 
 #[test]
@@ -485,7 +536,7 @@ fn handle_daemon_event_command_started_tracked() {
         command_id: 99,
         host: HostName::local(),
         repo_identity: app.model.active_repo_identity().clone(),
-        repo: repo.clone(),
+        repo: Some(repo.clone()),
         description: "test cmd".into(),
     });
 
@@ -509,7 +560,7 @@ fn step_failure_surfaces_error_in_status_message() {
         command_id: 42,
         host: HostName::local(),
         repo_identity,
-        repo: repo_path,
+        repo: Some(repo_path),
         step_index: 0,
         step_count: 1,
         description: "Create checkout for branch my-branch".into(),
@@ -663,7 +714,7 @@ fn command_finished_ok_clears_pending_action() {
         command_id: 42,
         host: HostName::local(),
         repo_identity: repo.clone(),
-        repo: repo_path,
+        repo: Some(repo_path),
         result: CommandValue::Ok,
     });
 
@@ -690,7 +741,7 @@ fn command_finished_error_transitions_to_failed() {
         command_id: 42,
         host: HostName::local(),
         repo_identity: repo.clone(),
-        repo: repo_path,
+        repo: Some(repo_path),
         result: CommandValue::Error { message: "boom".into() },
     });
 
@@ -718,7 +769,7 @@ fn command_finished_cancelled_clears_pending_action() {
         command_id: 42,
         host: HostName::local(),
         repo_identity: repo.clone(),
-        repo: repo_path,
+        repo: Some(repo_path),
         result: CommandValue::Cancelled,
     });
 
@@ -746,7 +797,7 @@ fn orphaned_command_finished_harmlessly_ignored() {
         command_id: 42,
         host: HostName::local(),
         repo_identity: repo.clone(),
-        repo: repo_path,
+        repo: Some(repo_path),
         result: CommandValue::Ok,
     });
 
@@ -767,7 +818,7 @@ fn local_checkout_created_does_not_queue_workspace() {
         command_id: 42,
         host: HostName::new("my-desktop"),
         repo_identity,
-        repo: repo_path,
+        repo: Some(repo_path),
         result: CommandValue::CheckoutCreated { branch: "feat".into(), path: PathBuf::from("/tmp/repo/wt-feat") },
     });
 
@@ -787,7 +838,7 @@ fn remote_checkout_created_does_not_queue_workspace() {
         command_id: 42,
         host: HostName::new("remote-a"),
         repo_identity,
-        repo: repo_path,
+        repo: Some(repo_path),
         result: CommandValue::CheckoutCreated { branch: "feat".into(), path: PathBuf::from("/remote/wt-feat") },
     });
 

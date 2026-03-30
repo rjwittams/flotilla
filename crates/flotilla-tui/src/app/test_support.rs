@@ -94,7 +94,7 @@ pub(crate) fn snapshot(repo: &Path) -> RepoSnapshot {
     RepoSnapshot {
         seq: 1,
         repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: repo.display().to_string() },
-        repo: repo.to_path_buf(),
+        repo: Some(repo.to_path_buf()),
         host_name: flotilla_protocol::HostName::local(),
         work_items: vec![],
         providers: ProviderData::default(),
@@ -108,7 +108,7 @@ pub(crate) fn delta(repo: &Path, changes: Vec<Change>) -> RepoDelta {
         seq: 2,
         prev_seq: 1,
         repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: repo.display().to_string() },
-        repo: repo.to_path_buf(),
+        repo: Some(repo.to_path_buf()),
         changes,
         work_items: vec![],
     }

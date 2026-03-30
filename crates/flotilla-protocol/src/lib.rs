@@ -11,6 +11,7 @@ pub mod path_context;
 pub mod peer;
 pub mod provider_data;
 mod provisioning_target;
+pub mod qualified_path;
 pub mod query;
 pub mod snapshot;
 pub mod step;
@@ -18,7 +19,7 @@ pub mod step;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use environment::{EnvironmentId, EnvironmentInfo, EnvironmentSpec, EnvironmentStatus, ImageId, ImageSource};
+pub use environment::{EnvironmentId, EnvironmentInfo, EnvironmentKind, EnvironmentSpec, EnvironmentStatus, ImageId, ImageSource};
 pub use host::{HostName, HostPath, RepoIdentity};
 pub use host_summary::{DiscoveryFact, HostEnvironment, HostProviderStatus, HostSnapshot, HostSummary, SystemInfo, ToolInventory};
 pub use path_context::{DaemonHostPath, ExecutionEnvironmentPath};
@@ -76,7 +77,7 @@ pub use snapshot::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConfigLabel(pub String);
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Key for identifying an event stream in replay cursors.
 /// Each stream has its own independent sequence counter.
@@ -192,15 +193,27 @@ pub enum DaemonEvent {
     #[serde(rename = "repo_tracked")]
     RepoTracked(Box<RepoInfo>),
     #[serde(rename = "repo_untracked")]
-    RepoUntracked { repo_identity: RepoIdentity, path: std::path::PathBuf },
+    RepoUntracked {
+        repo_identity: RepoIdentity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<std::path::PathBuf>,
+    },
     #[serde(rename = "command_started")]
-    CommandStarted { command_id: u64, host: HostName, repo_identity: RepoIdentity, repo: std::path::PathBuf, description: String },
+    CommandStarted {
+        command_id: u64,
+        host: HostName,
+        repo_identity: RepoIdentity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<std::path::PathBuf>,
+        description: String,
+    },
     #[serde(rename = "command_finished")]
     CommandFinished {
         command_id: u64,
         host: HostName,
         repo_identity: RepoIdentity,
-        repo: std::path::PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<std::path::PathBuf>,
         result: commands::CommandValue,
     },
     #[serde(rename = "command_step_update")]
@@ -208,7 +221,8 @@ pub enum DaemonEvent {
         command_id: u64,
         host: HostName,
         repo_identity: RepoIdentity,
-        repo: std::path::PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<std::path::PathBuf>,
         step_index: usize,
         step_count: usize,
         description: String,
@@ -242,7 +256,8 @@ pub struct RepoDelta {
     pub seq: u64,
     pub prev_seq: u64,
     pub repo_identity: RepoIdentity,
-    pub repo: std::path::PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<std::path::PathBuf>,
     pub changes: Vec<Change>,
     /// Pre-correlated work items from the daemon (avoids re-correlation on TUI side).
     pub work_items: Vec<snapshot::WorkItem>,

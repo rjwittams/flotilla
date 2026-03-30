@@ -11,6 +11,7 @@ use flotilla_core::{
     config::ConfigStore,
     daemon::DaemonHandle,
     in_process::InProcessDaemon,
+    model::RepoModel,
     path_context::ExecutionEnvironmentPath,
     providers::{
         ai_utility::AiUtility,
@@ -19,19 +20,24 @@ use flotilla_core::{
         discovery::{
             test_support::{
                 fake_discovery, fake_discovery_with_provider_set, fake_discovery_with_providers, fake_vcs_discovery, git_process_discovery,
-                init_git_repo_with_remote, FakeCheckoutManager, FakeCheckoutManagerFactory, FakeDiscoveryProviders, FakeTerminalPool,
-                FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
+                init_git_repo, init_git_repo_with_remote, DiscoveryMockRunner, FakeCheckoutManager, FakeCheckoutManagerFactory,
+                FakeDiscoveryProviders, FakeIssueProvider, FakeTerminalPool, FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
+                TestEnvVars,
             },
-            DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostPlatform, ProviderCategory, ProviderDescriptor,
-            RepoDetector, UnmetRequirement,
+            DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, Factory, HostDetector, HostPlatform, ProviderCategory,
+            ProviderDescriptor, RepoDetector, UnmetRequirement,
         },
+        environment::{EnvironmentHandle, ProvisionedEnvironment},
+        terminal::TerminalPool,
         types::{ChangeRequest, CloudAgentSession, RepoCriteria, SessionStatus, Workspace},
+        ChannelLabel, CommandRunner,
     },
 };
 use flotilla_protocol::{
-    Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, CorrelationKey, DaemonEvent, HostEnvironment,
-    HostName, HostPath, HostProviderStatus, HostSummary, PeerConnectionState, ProviderData, RepoIdentity, RepoSelector, StreamKey,
-    SystemInfo, ToolInventory, TopologyRoute, WorkItemKind,
+    AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, CorrelationKey, DaemonEvent,
+    EnvironmentId, EnvironmentInfo, EnvironmentStatus, HostEnvironment, HostName, HostPath, HostProviderStatus, HostSummary, ImageId,
+    Issue, PeerConnectionState, ProviderData, RepoIdentity, RepoSelector, StreamKey, SystemInfo, ToolInventory, TopologyRoute,
+    WorkItemKind,
 };
 use tokio::sync::Notify;
 
@@ -49,6 +55,79 @@ impl RepoDetector for FixedRemoteHostDetector {
         _env: &dyn flotilla_core::providers::discovery::EnvVars,
     ) -> Vec<EnvironmentAssertion> {
         vec![EnvironmentAssertion::remote_host(HostPlatform::GitHub, self.owner, self.repo, "origin")]
+    }
+}
+
+struct RunnerEchoHostDetector {
+    probe: &'static str,
+    assertion_key: &'static str,
+}
+
+#[async_trait]
+impl HostDetector for RunnerEchoHostDetector {
+    async fn detect(
+        &self,
+        runner: &dyn CommandRunner,
+        _env: &dyn flotilla_core::providers::discovery::EnvVars,
+    ) -> Vec<EnvironmentAssertion> {
+        match runner.run("probe-env", &[self.probe], Path::new("/"), &ChannelLabel::Noop).await {
+            Ok(value) => vec![EnvironmentAssertion::env_var(self.assertion_key, value.trim())],
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+struct EnvVarEchoHostDetector {
+    env_var: &'static str,
+    assertion_key: &'static str,
+}
+
+#[async_trait]
+impl HostDetector for EnvVarEchoHostDetector {
+    async fn detect(
+        &self,
+        _runner: &dyn CommandRunner,
+        env: &dyn flotilla_core::providers::discovery::EnvVars,
+    ) -> Vec<EnvironmentAssertion> {
+        env.get(self.env_var).map(|value| vec![EnvironmentAssertion::env_var(self.assertion_key, value)]).unwrap_or_default()
+    }
+}
+
+struct HangingSshRunner {
+    delay: Duration,
+}
+
+#[async_trait]
+impl CommandRunner for HangingSshRunner {
+    async fn run(&self, cmd: &str, args: &[&str], _cwd: &Path, _label: &ChannelLabel) -> Result<String, String> {
+        if cmd == "probe-env" {
+            return Ok("local".into());
+        }
+        if cmd == "ssh" && args.iter().any(|arg| arg.contains("buildbox.example")) {
+            return Ok(String::new());
+        }
+        if cmd == "ssh" && args.iter().any(|arg| arg.contains("hangbox.example")) {
+            tokio::time::sleep(self.delay).await;
+            return Ok(String::new());
+        }
+        Err(format!("unexpected command: {cmd} {}", args.join(" ")))
+    }
+
+    async fn run_output(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: &Path,
+        label: &ChannelLabel,
+    ) -> Result<flotilla_core::providers::CommandOutput, String> {
+        match self.run(cmd, args, cwd, label).await {
+            Ok(stdout) => Ok(flotilla_core::providers::CommandOutput { stdout, stderr: String::new(), success: true }),
+            Err(stderr) => Ok(flotilla_core::providers::CommandOutput { stdout: String::new(), stderr, success: false }),
+        }
+    }
+
+    async fn exists(&self, _cmd: &str, _args: &[&str]) -> bool {
+        true
     }
 }
 
@@ -185,6 +264,80 @@ fn slow_ai_discovery(utility: Arc<SlowAiUtility>) -> DiscoveryRuntime {
     runtime
 }
 
+struct TestProvisionedEnvironment {
+    id: EnvironmentId,
+    image: ImageId,
+    runner: Arc<dyn CommandRunner>,
+    env_vars: HashMap<String, String>,
+}
+
+#[async_trait]
+impl ProvisionedEnvironment for TestProvisionedEnvironment {
+    fn id(&self) -> &EnvironmentId {
+        &self.id
+    }
+
+    fn image(&self) -> &ImageId {
+        &self.image
+    }
+
+    fn container_name(&self) -> Option<&str> {
+        None
+    }
+
+    async fn status(&self) -> Result<EnvironmentStatus, String> {
+        Ok(EnvironmentStatus::Running)
+    }
+
+    async fn env_vars(&self) -> Result<HashMap<String, String>, String> {
+        Ok(self.env_vars.clone())
+    }
+
+    fn runner(&self, _host_runner: Arc<dyn CommandRunner>) -> Arc<dyn CommandRunner> {
+        Arc::clone(&self.runner)
+    }
+
+    async fn destroy(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+struct EnvGatedTerminalPoolFactory {
+    required_env_var: &'static str,
+    pool: Arc<dyn TerminalPool>,
+}
+
+#[async_trait]
+impl Factory for EnvGatedTerminalPoolFactory {
+    type Output = dyn TerminalPool;
+    type Descriptor = ProviderDescriptor;
+
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor::labeled_simple(
+            ProviderCategory::TerminalPool,
+            "managed-bag-terminal-pool",
+            "Managed Bag Terminals",
+            "TP",
+            "Terminals",
+            "terminal",
+        )
+    }
+
+    async fn probe(
+        &self,
+        env: &EnvironmentBag,
+        _: &ConfigStore,
+        _: &ExecutionEnvironmentPath,
+        _: Arc<dyn flotilla_core::providers::CommandRunner>,
+    ) -> Result<Arc<Self::Output>, Vec<UnmetRequirement>> {
+        if env.find_env_var(self.required_env_var).is_some() {
+            Ok(Arc::clone(&self.pool))
+        } else {
+            Err(vec![UnmetRequirement::MissingEnvVar(self.required_env_var.into())])
+        }
+    }
+}
+
 fn sample_remote_host_summary(name: &str) -> HostSummary {
     HostSummary {
         host_name: HostName::new(name),
@@ -272,6 +425,716 @@ async fn daemon_for_plain_dir_with_discovery(discovery: DiscoveryRuntime) -> (te
     (temp, repo, daemon)
 }
 
+fn static_ssh_test_discovery(runner: Arc<dyn CommandRunner>) -> DiscoveryRuntime {
+    let mut runtime = fake_discovery(false);
+    runtime.runner = runner;
+    runtime.env = Arc::new(TestEnvVars::default());
+    runtime.host_detectors = vec![Box::new(RunnerEchoHostDetector { probe: "REMOTE_MARKER", assertion_key: "REMOTE_MARKER" })];
+    runtime
+}
+
+fn static_ssh_test_discovery_with_env_and_detectors(
+    runner: Arc<dyn CommandRunner>,
+    env: Arc<dyn flotilla_core::providers::discovery::EnvVars>,
+    host_detectors: Vec<Box<dyn HostDetector>>,
+) -> DiscoveryRuntime {
+    let mut runtime = fake_discovery(false);
+    runtime.runner = runner;
+    runtime.env = env;
+    runtime.host_detectors = host_detectors;
+    runtime
+}
+
+fn write_static_environment_config(config_dir: &Path, contents: &str) {
+    std::fs::create_dir_all(config_dir).expect("create config dir");
+    std::fs::write(config_dir.join("daemon.toml"), contents).expect("write daemon config");
+}
+
+async fn daemon_for_plain_dir_with_local_environment_id(local_environment_id: &str) -> (tempfile::TempDir, PathBuf, Arc<InProcessDaemon>) {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let config_dir = temp.path().join("config");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    let discovery = fake_discovery(false);
+    let machine_state_dir = flotilla_core::host_identity::resolve_local_environment_state_dir(&config_dir, &*discovery.runner).await;
+    std::fs::create_dir_all(&machine_state_dir).expect("create machine-scoped state dir");
+    std::fs::write(machine_state_dir.join("environment-id"), format!("{local_environment_id}\n")).expect("seed environment id");
+    let config = Arc::new(ConfigStore::with_base(config_dir));
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, discovery, HostName::local()).await;
+    (temp, repo, daemon)
+}
+
+async fn refresh_snapshot_for_model(model: &RepoModel) -> Arc<flotilla_core::refresh::RefreshSnapshot> {
+    let mut snapshot_rx = model.refresh_handle.snapshot_rx.clone();
+    model.refresh_handle.trigger_refresh();
+    tokio::time::timeout(Duration::from_secs(5), snapshot_rx.changed())
+        .await
+        .expect("timed out waiting for refresh snapshot")
+        .expect("refresh task should remain alive");
+    let snapshot = snapshot_rx.borrow().clone();
+    snapshot
+}
+
+fn checkout_state_for_repo(repo: &Path, branch: &str) -> Arc<std::sync::RwLock<FakeVcsState>> {
+    FakeVcsState::builder(repo.to_path_buf())
+        .checkout_raw(repo.join(branch), Checkout {
+            branch: branch.into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![CorrelationKey::Branch(branch.into())],
+            association_keys: vec![],
+            environment_id: None,
+        })
+        .build()
+}
+
+#[tokio::test]
+async fn configured_static_ssh_environments_are_registered_with_environment_scoped_bags() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run("git", &["--version"], Ok("git version 2.43.0".into()))
+            .on_run("env", &[], Ok(String::new()))
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'env'",
+                ],
+                Ok("XDG_STATE_HOME=/var/state\nTERM=screen-256color\nCOLORTERM=truecolor\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'cat' '/var/state/flotilla/environment-id'",
+                ],
+                Ok("buildbox-env-id\n".into()),
+            )
+            .build(),
+    );
+
+    let mut discovery = fake_discovery(false);
+    discovery.runner = ssh_runner;
+    discovery.host_detectors = vec![
+        Box::new(flotilla_core::providers::discovery::detectors::generic::CommandDetector::new(
+            "git",
+            &["--version"],
+            flotilla_core::providers::discovery::detectors::generic::parse_first_dotted_version,
+        )),
+        Box::new(flotilla_core::providers::discovery::detectors::generic::EnvVarDetector::new("TERM")),
+        Box::new(flotilla_core::providers::discovery::detectors::generic::EnvVarDetector::new("COLORTERM")),
+    ];
+    let daemon = InProcessDaemon::new(vec![repo], Arc::new(ConfigStore::with_base(config_dir)), discovery, HostName::local()).await;
+
+    let remote_env_id = EnvironmentId::new("buildbox-env-id");
+    let managed_ids = daemon.managed_environment_ids_for_test();
+    assert!(managed_ids.contains(daemon.local_environment_id()));
+    assert!(managed_ids.contains(&remote_env_id));
+
+    let local_bag = daemon.environment_bag_for_test(daemon.local_environment_id()).expect("local bag");
+    assert_eq!(local_bag.find_env_var("TERM"), None);
+
+    let remote_bag = daemon.environment_bag_for_test(&remote_env_id).expect("remote bag");
+    assert_eq!(remote_bag.find_env_var("TERM"), Some("screen-256color"));
+    assert_eq!(remote_bag.find_env_var("COLORTERM"), Some("truecolor"));
+}
+
+#[tokio::test]
+async fn static_ssh_environment_display_name_is_visible_without_detector_support() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+display_name = "Build Box"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run("git", &["--version"], Ok("git version 2.43.0".into()))
+            .on_run("env", &[], Ok(String::new()))
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'env'",
+                ],
+                Ok("HOME=/home/build\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'cat' '/home/build/.local/state/flotilla/environment-id'",
+                ],
+                Ok("buildbox-visible-id\n".into()),
+            )
+            .build(),
+    );
+
+    let daemon = InProcessDaemon::new(
+        vec![repo],
+        Arc::new(ConfigStore::with_base(config_dir)),
+        static_ssh_test_discovery(ssh_runner),
+        HostName::local(),
+    )
+    .await;
+
+    let status = daemon.get_host_status_internal(daemon.host_name().as_str()).await.expect("host status");
+    let visible = status
+        .visible_environments
+        .iter()
+        .find_map(|environment| match environment {
+            EnvironmentInfo::Direct { id, display_name, .. } if id.as_str() == "buildbox-visible-id" => Some(display_name.clone()),
+            _ => None,
+        })
+        .expect("static ssh direct environment should be visible");
+
+    assert_eq!(visible.as_deref(), Some("Build Box"));
+}
+
+#[tokio::test]
+async fn broken_static_ssh_environment_does_not_break_local_startup() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+
+[environments.brokenbox]
+hostname = "brokenbox.example"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run("probe-env", &["REMOTE_MARKER"], Ok("local".into()))
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
+                ],
+                Ok("buildbox".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "brokenbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Err("ssh failed".into()),
+            )
+            .build(),
+    );
+
+    let daemon = InProcessDaemon::new(
+        vec![repo.clone()],
+        Arc::new(ConfigStore::with_base(config_dir)),
+        static_ssh_test_discovery(ssh_runner),
+        HostName::local(),
+    )
+    .await;
+
+    assert!(daemon.tracked_repo_identity_for_path(&repo).await.is_some(), "repo should still be tracked");
+
+    let managed_ids = daemon.managed_environment_ids_for_test();
+    assert!(managed_ids.contains(daemon.local_environment_id()));
+    assert!(managed_ids.contains(&EnvironmentId::new("static-ssh-6275696c64626f78")));
+    assert!(!managed_ids.contains(&EnvironmentId::new("static-ssh-62726f6b656e626f78")));
+}
+
+#[tokio::test]
+async fn static_ssh_environment_detection_does_not_reuse_local_env_vars() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run("probe-env", &["REMOTE_MARKER"], Ok("local".into()))
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .build(),
+    );
+
+    let daemon = InProcessDaemon::new(
+        vec![repo],
+        Arc::new(ConfigStore::with_base(config_dir)),
+        static_ssh_test_discovery_with_env_and_detectors(
+            ssh_runner,
+            Arc::new(TestEnvVars::new([("LOCAL_ONLY_SECRET", "secret-value")])),
+            vec![Box::new(EnvVarEchoHostDetector { env_var: "LOCAL_ONLY_SECRET", assertion_key: "LOCAL_ONLY_SECRET" })],
+        ),
+        HostName::local(),
+    )
+    .await;
+
+    let local_bag = daemon.environment_bag_for_test(daemon.local_environment_id()).expect("local bag");
+    assert_eq!(local_bag.find_env_var("LOCAL_ONLY_SECRET"), Some("secret-value"));
+
+    let remote_bag = daemon.environment_bag_for_test(&EnvironmentId::new("static-ssh-6275696c64626f78")).expect("remote bag");
+    assert_eq!(remote_bag.find_env_var("LOCAL_ONLY_SECRET"), None);
+}
+
+#[tokio::test]
+async fn selected_static_ssh_repo_discovery_does_not_treat_local_git_checkout_as_remote_checkout() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    init_git_repo(&repo);
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run("git", &["--version"], Ok("git version 2.43.0".into()))
+            .on_run("env", &[], Ok("TERM=xterm-256color\n".into()))
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'env'",
+                ],
+                Ok("TERM=xterm-256color\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--is-inside-work-tree'", repo.display()).as_str(),
+                ],
+                Err("fatal: not a git repository".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--abbrev-ref' '@{{upstream}}'", repo.display()).as_str(),
+                ],
+                Err("fatal: not a git repository".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'remote'", repo.display()).as_str(),
+                ],
+                Err("fatal: not a git repository".into()),
+            )
+            .build(),
+    );
+
+    let mut discovery = fake_discovery(false);
+    discovery.runner = ssh_runner;
+    let daemon = InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(config_dir)), discovery, HostName::local()).await;
+
+    let result = daemon
+        .discover_repo_for_environment_for_test(&repo, &EnvironmentId::new("static-ssh-6275696c64626f78"))
+        .await
+        .expect("discover repo in remote direct environment");
+
+    assert!(result.repo_bag.find_vcs_checkout(flotilla_core::providers::discovery::VcsKind::Git).is_none());
+    assert!(
+        result.registry.provider_infos().iter().all(|(category, name)| { !(category == ProviderCategory::Vcs.slug() && name == "Git") }),
+        "remote discovery should not activate git from the daemon-local checkout path"
+    );
+}
+
+#[tokio::test]
+async fn static_ssh_registration_times_out_hung_hosts_and_keeps_startup_moving() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+
+[environments.hangbox]
+hostname = "hangbox.example"
+"#,
+    );
+
+    let daemon = tokio::time::timeout(
+        Duration::from_secs(7),
+        InProcessDaemon::new(
+            vec![repo],
+            Arc::new(ConfigStore::with_base(config_dir)),
+            static_ssh_test_discovery(Arc::new(HangingSshRunner { delay: Duration::from_secs(6) })),
+            HostName::local(),
+        ),
+    )
+    .await
+    .expect("daemon startup should not hang indefinitely");
+
+    let managed_ids = daemon.managed_environment_ids_for_test();
+    assert!(managed_ids.contains(&EnvironmentId::new("static-ssh-6275696c64626f78")));
+    assert!(!managed_ids.contains(&EnvironmentId::new("static-ssh-68616e67626f78")));
+}
+
+#[tokio::test]
+async fn temporary_static_ssh_environment_ids_are_injective_for_distinct_config_keys() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments."build box"]
+hostname = "buildbox.example"
+
+[environments."build-box"]
+hostname = "builddash.example"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run("probe-env", &["REMOTE_MARKER"], Ok("local".into()))
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
+                ],
+                Ok("box".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "builddash.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "builddash.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
+                ],
+                Ok("dash".into()),
+            )
+            .build(),
+    );
+
+    let daemon = InProcessDaemon::new(
+        vec![repo],
+        Arc::new(ConfigStore::with_base(config_dir)),
+        static_ssh_test_discovery(ssh_runner),
+        HostName::local(),
+    )
+    .await;
+
+    let managed_ids = daemon.managed_environment_ids_for_test();
+    assert!(managed_ids.contains(&EnvironmentId::new("static-ssh-6275696c6420626f78")));
+    assert!(managed_ids.contains(&EnvironmentId::new("static-ssh-6275696c642d626f78")));
+}
+
 fn init_bare_git_remote(path: &Path) {
     let status = std::process::Command::new("git")
         .args(["init", "--bare", "--initial-branch=main"])
@@ -357,6 +1220,94 @@ async fn get_host_providers_returns_local_summary_and_errors_for_unknown_remote_
 }
 
 #[tokio::test]
+async fn get_repo_providers_uses_preferred_root_environment_host_discovery_for_local_repo() {
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
+
+    daemon
+        .replace_local_environment_bag_for_test(EnvironmentBag::new().with(EnvironmentAssertion::env_var("LOCAL_MARKER", "local")))
+        .expect("replace local environment bag");
+
+    let providers = daemon.get_repo_providers_internal(&RepoSelector::Path(repo)).await.expect("repo providers should resolve");
+
+    assert!(
+        providers
+            .host_discovery
+            .iter()
+            .any(|entry| entry.kind == "env_var_set" && entry.detail.get("key").map(String::as_str) == Some("LOCAL_MARKER")),
+        "host discovery should report the preferred local environment bag"
+    );
+}
+
+#[tokio::test]
+async fn local_host_queries_include_visible_environments_without_changing_summary_environments() {
+    let (_temp, _repo, daemon, _identity) = daemon_for_fake_repo().await;
+
+    let direct_environment_id = EnvironmentId::new("direct-visible-env");
+    daemon
+        .register_direct_environment_for_test(
+            direct_environment_id.clone(),
+            Arc::new(DiscoveryMockRunner::builder().build()),
+            EnvironmentBag::new().with(EnvironmentAssertion::env_var("DISPLAY_NAME", "direct-visible")),
+        )
+        .expect("register direct environment");
+
+    let provisioned_environment_id = EnvironmentId::new("provisioned-visible-env");
+    let provisioned_handle: EnvironmentHandle = Arc::new(TestProvisionedEnvironment {
+        id: provisioned_environment_id.clone(),
+        image: ImageId::new("mock:image"),
+        runner: Arc::new(DiscoveryMockRunner::builder().build()),
+        env_vars: HashMap::new(),
+    });
+    daemon
+        .register_provisioned_environment_for_test(
+            provisioned_environment_id.clone(),
+            provisioned_handle,
+            EnvironmentBag::new().with(EnvironmentAssertion::env_var("DISPLAY_NAME", "provisioned-visible")),
+        )
+        .expect("register provisioned environment");
+
+    let status = daemon.get_host_status_internal(daemon.host_name().as_str()).await.expect("host status");
+    let providers = daemon.get_host_providers_internal(daemon.host_name().as_str()).await.expect("host providers");
+
+    let status_ids: Vec<_> = status
+        .visible_environments
+        .iter()
+        .map(|environment| match environment {
+            EnvironmentInfo::Direct { id, .. } | EnvironmentInfo::Provisioned { id, .. } => id.clone(),
+        })
+        .collect();
+    let provider_ids: Vec<_> = providers
+        .visible_environments
+        .iter()
+        .map(|environment| match environment {
+            EnvironmentInfo::Direct { id, .. } | EnvironmentInfo::Provisioned { id, .. } => id.clone(),
+        })
+        .collect();
+
+    assert!(status_ids.contains(daemon.local_environment_id()));
+    assert!(status_ids.contains(&direct_environment_id));
+    assert!(status_ids.contains(&provisioned_environment_id));
+    assert_eq!(status_ids, provider_ids, "host status and provider queries should expose the same visible environments");
+
+    let summary = status.summary.expect("local host summary");
+    assert!(
+        summary.environments.iter().all(|environment| matches!(environment, EnvironmentInfo::Provisioned { .. })),
+        "host summary environments must remain provisioned-only"
+    );
+    assert!(summary.environments.iter().any(|environment| match environment {
+        EnvironmentInfo::Provisioned { id, .. } => id == &provisioned_environment_id,
+        _ => false,
+    }));
+    assert!(
+        summary.environments.iter().all(|environment| match environment {
+            EnvironmentInfo::Direct { id, .. } => id != &direct_environment_id,
+            EnvironmentInfo::Provisioned { .. } => true,
+        }),
+        "direct environments must not leak into HostSummary.environments"
+    );
+}
+
+#[tokio::test]
 async fn list_hosts_counts_remote_repo_overlay_and_get_topology_returns_mirrored_routes() {
     let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
 
@@ -429,6 +1380,202 @@ async fn get_topology_includes_configured_but_disconnected_peers() {
     assert!(unreachable.fallbacks.is_empty());
 }
 
+#[tokio::test]
+async fn daemon_uses_persisted_local_environment_id() {
+    let (temp, repo, daemon) = daemon_for_plain_dir_with_local_environment_id("test-local-environment-id").await;
+
+    assert_eq!(daemon.local_environment_id().as_str(), "test-local-environment-id");
+
+    drop(daemon);
+
+    let restarted = InProcessDaemon::new(
+        vec![repo],
+        Arc::new(ConfigStore::with_base(temp.path().join("config"))),
+        fake_discovery(false),
+        HostName::local(),
+    )
+    .await;
+    assert_eq!(restarted.local_environment_id().as_str(), "test-local-environment-id");
+}
+
+#[tokio::test]
+async fn local_direct_repo_refresh_stamps_discovered_checkout_environment_id() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let checkout_manager = Arc::new(FakeCheckoutManager::new());
+    checkout_manager
+        .add_checkouts(vec![(repo.join("local-feature"), Checkout {
+            branch: "local-feature".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![CorrelationKey::Branch("local-feature".into())],
+            association_keys: vec![],
+            environment_id: None,
+        })])
+        .await;
+    let discovery =
+        fake_discovery_with_providers(Some(checkout_manager as Arc<dyn flotilla_core::providers::vcs::CheckoutManager>), None, None);
+
+    let daemon =
+        InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(temp.path().join("config"))), discovery, HostName::local()).await;
+    let result = daemon
+        .discover_repo_for_environment_for_test(&repo, daemon.local_environment_id())
+        .await
+        .expect("discover repo for local direct environment");
+
+    let model = RepoModel::new(
+        repo.clone(),
+        result.registry,
+        result.repo_slug,
+        Some(daemon.local_environment_id().clone()),
+        shared_in_memory_attachable_store(),
+        flotilla_core::agents::shared_in_memory_agent_state_store(),
+    );
+
+    let snapshot = refresh_snapshot_for_model(&model).await;
+    let checkout = snapshot
+        .providers
+        .checkouts
+        .get(&HostPath::new(HostName::local(), repo.join("local-feature")))
+        .expect("local direct checkout should be present");
+    assert_eq!(checkout.environment_id.as_ref(), Some(daemon.local_environment_id()));
+}
+
+#[tokio::test]
+async fn static_ssh_repo_refresh_stamps_discovered_checkout_environment_id() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+"#,
+    );
+
+    let state = checkout_state_for_repo(&repo, "ssh-feature");
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
+                ],
+                Ok("remote".into()),
+            )
+            .build(),
+    );
+
+    let mut discovery = static_ssh_test_discovery(ssh_runner);
+    discovery.factories.checkout_managers.push(Box::new(FakeCheckoutManagerFactory::new(state)));
+
+    let daemon = InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(config_dir)), discovery, HostName::local()).await;
+    let environment_id = EnvironmentId::new("static-ssh-6275696c64626f78");
+    let result =
+        daemon.discover_repo_for_environment_for_test(&repo, &environment_id).await.expect("discover repo for static ssh environment");
+
+    let model = RepoModel::new(
+        repo.clone(),
+        result.registry,
+        result.repo_slug,
+        Some(environment_id.clone()),
+        shared_in_memory_attachable_store(),
+        flotilla_core::agents::shared_in_memory_agent_state_store(),
+    );
+
+    let snapshot = refresh_snapshot_for_model(&model).await;
+    let checkout = snapshot
+        .providers
+        .checkouts
+        .get(&HostPath::new(HostName::local(), repo.join("ssh-feature")))
+        .expect("static ssh checkout should be present");
+    assert_eq!(checkout.environment_id.as_ref(), Some(&environment_id));
+}
+
+#[tokio::test]
+async fn provisioned_repo_refresh_stamps_discovered_checkout_environment_id() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let state = checkout_state_for_repo(&repo, "provisioned-feature");
+    let mut discovery = fake_discovery(false);
+    discovery.factories.checkout_managers.push(Box::new(FakeCheckoutManagerFactory::new(state)));
+
+    let runner = Arc::new(DiscoveryMockRunner::builder().build());
+    let daemon =
+        InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(temp.path().join("config"))), discovery, HostName::local()).await;
+    let environment_id = EnvironmentId::new("provisioned-checkout-env");
+    let handle: EnvironmentHandle = Arc::new(TestProvisionedEnvironment {
+        id: environment_id.clone(),
+        image: ImageId::new("ghcr.io/flotilla/test:latest"),
+        runner,
+        env_vars: HashMap::new(),
+    });
+    daemon
+        .register_provisioned_environment_for_test(environment_id.clone(), handle, EnvironmentBag::new())
+        .expect("register provisioned environment");
+
+    let result =
+        daemon.discover_repo_for_environment_for_test(&repo, &environment_id).await.expect("discover repo for provisioned environment");
+
+    let model = RepoModel::new(
+        repo.clone(),
+        result.registry,
+        result.repo_slug,
+        Some(environment_id.clone()),
+        shared_in_memory_attachable_store(),
+        flotilla_core::agents::shared_in_memory_agent_state_store(),
+    );
+
+    let snapshot = refresh_snapshot_for_model(&model).await;
+    let checkout = snapshot
+        .providers
+        .checkouts
+        .get(&HostPath::new(HostName::local(), repo.join("provisioned-feature")))
+        .expect("provisioned checkout should be present");
+    assert_eq!(checkout.environment_id.as_ref(), Some(&environment_id));
+}
+
 async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<DaemonEvent>) -> DaemonEvent {
     tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await.expect("timeout waiting for event").expect("recv error")
 }
@@ -451,11 +1598,11 @@ async fn daemon_broadcasts_snapshots() {
 
     match event {
         DaemonEvent::RepoSnapshot(snap) => {
-            assert_eq!(snap.repo, repo);
+            assert_eq!(snap.repo.as_deref(), Some(repo.as_path()));
             assert!(snap.seq > 0);
         }
         DaemonEvent::RepoDelta(delta) => {
-            assert_eq!(delta.repo, repo);
+            assert_eq!(delta.repo.as_deref(), Some(repo.as_path()));
             assert!(delta.seq > 0);
         }
         other => panic!("expected RepoSnapshot or RepoDelta, got {:?}", other),
@@ -493,14 +1640,14 @@ async fn execute_broadcasts_lifecycle_events() {
                 Ok(DaemonEvent::CommandStarted { command_id: id, host, repo_identity, repo: ref event_repo, .. }) => {
                     assert_eq!(host, HostName::local(), "CommandStarted host should default to local host");
                     assert_eq!(repo_identity, identity, "CommandStarted repo identity should match executed repo");
-                    assert_eq!(event_repo, &repo, "CommandStarted repo should match executed repo");
+                    assert_eq!(event_repo.as_deref(), Some(repo.as_path()), "CommandStarted repo should match executed repo");
                     started_id = Some(id);
                     got_started = true;
                 }
                 Ok(DaemonEvent::CommandFinished { command_id: id, host, repo_identity, repo: ref event_repo, .. }) => {
                     assert_eq!(host, HostName::local(), "CommandFinished host should default to local host");
                     assert_eq!(repo_identity, identity, "CommandFinished repo identity should match executed repo");
-                    assert_eq!(event_repo, &repo, "CommandFinished repo should match executed repo");
+                    assert_eq!(event_repo.as_deref(), Some(repo.as_path()), "CommandFinished repo should match executed repo");
                     finished_id = Some(id);
                     got_finished = true;
                 }
@@ -565,9 +1712,13 @@ async fn archive_session_can_be_cancelled_while_provider_call_is_in_flight() {
     let refresh_event = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
     match refresh_event {
         DaemonEvent::RepoSnapshot(snap) => assert!(snap.providers.sessions.contains_key("sess-1"), "refresh should expose sess-1"),
-        DaemonEvent::RepoDelta(delta) => {
-            assert!(delta.work_items.iter().any(|item| item.session_key.as_deref() == Some("sess-1")), "refresh should expose sess-1")
-        }
+        DaemonEvent::RepoDelta(delta) => assert!(delta.changes.iter().any(|change| matches!(
+            change,
+            flotilla_protocol::Change::WorkItem {
+                op: flotilla_protocol::EntryOp::Added(item) | flotilla_protocol::EntryOp::Updated(item),
+                ..
+            } if item.session_key.as_deref() == Some("sess-1")
+        ))),
         other => panic!("expected snapshot event, got {other:?}"),
     }
 
@@ -679,7 +1830,7 @@ async fn replay_since_returns_full_snapshot_for_unknown_seq() {
     assert_eq!(repo_events.len(), 1, "should get exactly one repo snapshot");
     match &repo_events[0] {
         DaemonEvent::RepoSnapshot(snap) => {
-            assert_eq!(snap.repo, repo);
+            assert_eq!(snap.repo.as_deref(), Some(repo.as_path()));
         }
         other => panic!("expected RepoSnapshot, got {:?}", other),
     }
@@ -701,7 +1852,7 @@ async fn replay_since_returns_full_snapshot_for_new_repo() {
     assert_eq!(repo_events.len(), 1, "should get one repo snapshot per tracked repo");
     match &repo_events[0] {
         DaemonEvent::RepoSnapshot(snap) => {
-            assert_eq!(snap.repo, repo);
+            assert_eq!(snap.repo.as_deref(), Some(repo.as_path()));
         }
         other => panic!("expected RepoSnapshot, got {:?}", other),
     }
@@ -1068,7 +2219,7 @@ async fn replay_since_includes_peer_checkouts_with_correct_host() {
     let snap = events
         .iter()
         .find_map(|e| match e {
-            DaemonEvent::RepoSnapshot(s) if s.repo == repo => Some(s),
+            DaemonEvent::RepoSnapshot(s) if s.repo.as_deref() == Some(repo.as_path()) => Some(s),
             _ => None,
         })
         .expect("should have a RepoSnapshot for our repo");
@@ -1123,7 +2274,7 @@ async fn replay_since_unknown_seq_includes_peer_checkouts_with_correct_host() {
     let snap = events
         .iter()
         .find_map(|e| match e {
-            DaemonEvent::RepoSnapshot(s) if s.repo == repo => Some(s),
+            DaemonEvent::RepoSnapshot(s) if s.repo.as_deref() == Some(repo.as_path()) => Some(s),
             _ => None,
         })
         .expect("unknown-seq fallback should produce a RepoSnapshot");
@@ -1187,7 +2338,7 @@ async fn replay_since_delta_replay_includes_peer_data() {
     let deltas: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            DaemonEvent::RepoDelta(d) if d.repo == repo => Some(d),
+            DaemonEvent::RepoDelta(d) if d.repo.as_deref() == Some(repo.as_path()) => Some(d),
             _ => None,
         })
         .collect();
@@ -1210,7 +2361,7 @@ async fn replay_since_delta_replay_includes_peer_data() {
     let full_snap = full_events
         .iter()
         .find_map(|e| match e {
-            DaemonEvent::RepoSnapshot(s) if s.repo == repo => Some(s),
+            DaemonEvent::RepoSnapshot(s) if s.repo.as_deref() == Some(repo.as_path()) => Some(s),
             _ => None,
         })
         .expect("full replay should produce RepoSnapshot");
@@ -1266,11 +2417,11 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     assert!(matches!(finished_result, CommandValue::RepoTracked { ref path, .. } if *path == repo));
     assert_eq!(finished_identity, added.identity, "CommandFinished should use the tracked repo identity");
     assert_eq!(started_add, added.identity, "CommandStarted should use the tracked repo identity");
-    assert_eq!(added.path, repo);
+    assert_eq!(added.path.as_deref(), Some(repo.as_path()));
 
     let repos = daemon.list_repos().await.expect("list_repos after add");
     assert_eq!(repos.len(), 1);
-    assert_eq!(repos[0].path, repo);
+    assert_eq!(repos[0].path.as_deref(), Some(repo.as_path()));
 
     let remove_id = daemon
         .execute(Command {
@@ -1299,7 +2450,7 @@ async fn add_and_remove_repo_updates_state_and_emits_events() {
     .await
     .expect("timeout waiting for remove command events");
     assert!(matches!(finished_remove, CommandValue::RepoUntracked { ref path } if *path == repo));
-    assert_eq!(removed, repo);
+    assert_eq!(removed.as_deref(), Some(repo.as_path()));
 
     let repos = daemon.list_repos().await.expect("list_repos after remove");
     assert!(repos.is_empty());
@@ -1320,13 +2471,13 @@ async fn duplicate_local_roots_share_identity_but_remain_tracked() {
     let repos = daemon.list_repos().await.expect("list_repos");
     assert_eq!(repos.len(), 1, "list_repos should expose one logical repo per identity");
     assert_eq!(repos[0].identity, identity_a);
-    assert_eq!(repos[0].path, repo_a, "first tracked root should remain the deterministic preferred path");
+    assert_eq!(repos[0].path.as_deref(), Some(repo_a.as_path()), "first tracked root should remain the deterministic preferred path");
 
     daemon.remove_repo(&repo_a).await.expect("remove preferred root");
     let repos = daemon.list_repos().await.expect("list_repos after removing preferred root");
     assert_eq!(repos.len(), 1);
     assert_eq!(repos[0].identity, identity_b);
-    assert_eq!(repos[0].path, repo_b, "remaining root should become the preferred path");
+    assert_eq!(repos[0].path.as_deref(), Some(repo_b.as_path()), "remaining root should become the preferred path");
     assert!(daemon.tracked_repo_identity_for_path(&repo_a).await.is_none());
     assert_eq!(daemon.tracked_repo_identity_for_path(&repo_b).await, Some(identity_b));
 }
@@ -1356,7 +2507,7 @@ async fn adding_local_clone_promotes_remote_only_identity_to_local_execution() {
     let repos = daemon.list_repos().await.expect("list repos");
     assert_eq!(repos.len(), 1);
     assert_eq!(repos[0].identity, identity);
-    assert_eq!(repos[0].path, canonical_repo, "local clone should become the preferred executable path");
+    assert_eq!(repos[0].path.as_deref(), Some(canonical_repo.as_path()), "local clone should become the preferred executable path");
     assert_eq!(tracked_path, canonical_repo);
     assert_eq!(daemon.preferred_local_path_for_identity(&identity).await, Some(canonical_repo.clone()));
     assert!(daemon.get_local_providers(&canonical_repo).await.is_some(), "local providers should now resolve for the identity");
@@ -1387,7 +2538,7 @@ async fn removing_preferred_root_emits_snapshot_for_new_preferred_path() {
     .expect("timeout waiting for preferred-path snapshot")
     .expect("snapshot event");
 
-    assert_eq!(event, repo_b, "surviving root should be broadcast immediately as the new preferred path");
+    assert_eq!(event.as_deref(), Some(repo_b.as_path()), "surviving root should be broadcast immediately as the new preferred path");
 }
 
 #[tokio::test]
@@ -1923,13 +3074,12 @@ async fn follower_mode_flag_is_stored() {
 
 #[tokio::test]
 async fn follower_mode_skips_external_providers() {
-    // Use a temp dir with a .git directory to guarantee VCS detection
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().to_path_buf();
-    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    init_git_repo(&repo);
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(true), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, git_process_discovery(true), HostName::local()).await;
 
     assert!(daemon.is_follower());
 
@@ -2011,7 +3161,7 @@ async fn add_virtual_repo_emits_repo_tracked_then_snapshot_and_is_queryable() {
     // Should appear in list_repos.
     let repos = daemon.list_repos().await.expect("list_repos");
     assert_eq!(repos.len(), 1);
-    assert_eq!(repos[0].path, synthetic_path);
+    assert_eq!(repos[0].path.as_deref(), Some(synthetic_path.as_path()));
     assert!(!repos[0].loading);
 
     // get_state() should return the peer checkout data immediately.
@@ -2043,7 +3193,15 @@ async fn add_virtual_repo_is_idempotent() {
 #[tokio::test]
 async fn get_status_returns_repo_summaries() {
     let (_temp, _repo, daemon) = daemon_for_cwd().await;
-    let repo = daemon.list_repos().await.expect("list_repos").into_iter().next().expect("tracked repo").path;
+    let repo = daemon
+        .list_repos()
+        .await
+        .expect("list_repos")
+        .into_iter()
+        .next()
+        .expect("tracked repo")
+        .path
+        .expect("tracked repo should have a local path");
     let mut rx = daemon.subscribe();
     trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
 
@@ -2120,11 +3278,442 @@ async fn get_repo_providers_returns_structured_unmet_requirements_and_discovery(
 }
 
 #[tokio::test]
+async fn add_repo_uses_manager_backed_local_environment_for_repo_identity() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon =
+        InProcessDaemon::new(vec![], config, fake_discovery_with_provider_set(FakeDiscoveryProviders::new()), HostName::local()).await;
+
+    daemon
+        .replace_local_environment_bag_for_test(EnvironmentBag::new().with(EnvironmentAssertion::remote_host(
+            HostPlatform::GitHub,
+            "owner",
+            "manager-backed-repo",
+            "origin",
+        )))
+        .expect("replace local environment bag");
+
+    let (tracked_path, resolved_from) = daemon.add_repo(&repo).await.expect("add repo");
+
+    assert_eq!(tracked_path, repo);
+    assert_eq!(resolved_from, None);
+    assert_eq!(
+        daemon.tracked_repo_identity_for_path(&tracked_path).await,
+        Some(RepoIdentity { authority: "github.com".into(), path: "owner/manager-backed-repo".into() })
+    );
+}
+
+#[tokio::test]
+async fn add_repo_uses_manager_backed_local_environment_for_provider_discovery() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let terminal_pool: Arc<dyn TerminalPool> = Arc::new(FakeTerminalPool::new());
+    let mut discovery = fake_discovery_with_provider_set(FakeDiscoveryProviders::new());
+    discovery
+        .factories
+        .terminal_pools
+        .push(Box::new(EnvGatedTerminalPoolFactory { required_env_var: "ENABLE_MANAGER_TERMINALS", pool: terminal_pool }));
+    let daemon = InProcessDaemon::new(vec![], config, discovery, HostName::local()).await;
+
+    daemon
+        .replace_local_environment_bag_for_test(EnvironmentBag::new().with(EnvironmentAssertion::env_var("ENABLE_MANAGER_TERMINALS", "1")))
+        .expect("replace local environment bag");
+    daemon.add_repo(&repo).await.expect("add repo");
+
+    let providers = daemon.get_repo_providers_internal(&RepoSelector::Path(repo.clone())).await.expect("get_repo_providers");
+
+    assert!(
+        providers
+            .providers
+            .iter()
+            .any(|provider| { provider.category == ProviderCategory::TerminalPool.slug() && provider.name == "Managed Bag Terminals" }),
+        "provider discovery should read the manager-backed local environment bag"
+    );
+}
+
+#[tokio::test]
+async fn selected_static_ssh_repo_discovery_uses_default_remote_host_detector_via_remote_runner() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run("git", &["--version"], Ok("git version 2.43.0".into()))
+            .on_run("env", &[], Ok("TERM=xterm-256color\n".into()))
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'env'",
+                ],
+                Ok("TERM=xterm-256color\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--is-inside-work-tree'", repo.display()).as_str(),
+                ],
+                Ok("true\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--path-format=absolute' '--git-dir'", repo.display()).as_str(),
+                ],
+                Ok("/remote/repo/.git\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--path-format=absolute' '--git-common-dir'", repo.display()).as_str(),
+                ],
+                Ok("/remote/repo/.git\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--abbrev-ref' '@{{upstream}}'", repo.display()).as_str(),
+                ],
+                Err("fatal: no upstream".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'remote'", repo.display()).as_str(),
+                ],
+                Ok("origin\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'remote' 'get-url' 'origin'", repo.display()).as_str(),
+                ],
+                Ok("git@github.com:owner/remote-repo.git\n".into()),
+            )
+            .build(),
+    );
+
+    let mut discovery = fake_discovery(false);
+    discovery.runner = ssh_runner;
+    let daemon = InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(config_dir)), discovery, HostName::local()).await;
+
+    let result = daemon
+        .discover_repo_for_environment_for_test(&repo, &EnvironmentId::new("static-ssh-6275696c64626f78"))
+        .await
+        .expect("discover repo in remote direct environment");
+
+    assert_eq!(
+        result.host_repo_bag.repo_identity(),
+        Some(RepoIdentity { authority: "github.com".into(), path: "owner/remote-repo".into() })
+    );
+}
+
+#[tokio::test]
+async fn provider_discovery_for_selected_static_ssh_environment_uses_its_environment_bag() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'probe-env' 'ENABLE_REMOTE_TERMINALS'",
+                ],
+                Ok("1".into()),
+            )
+            .build(),
+    );
+
+    let terminal_pool: Arc<dyn TerminalPool> = Arc::new(FakeTerminalPool::new());
+    let mut discovery = static_ssh_test_discovery_with_env_and_detectors(ssh_runner, Arc::new(TestEnvVars::default()), vec![Box::new(
+        RunnerEchoHostDetector { probe: "ENABLE_REMOTE_TERMINALS", assertion_key: "ENABLE_REMOTE_TERMINALS" },
+    )]);
+    discovery
+        .factories
+        .terminal_pools
+        .push(Box::new(EnvGatedTerminalPoolFactory { required_env_var: "ENABLE_REMOTE_TERMINALS", pool: terminal_pool }));
+    let daemon = InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(config_dir)), discovery, HostName::local()).await;
+
+    let result = daemon
+        .discover_repo_for_environment_for_test(&repo, &EnvironmentId::new("static-ssh-6275696c64626f78"))
+        .await
+        .expect("discover repo providers in remote direct environment");
+
+    assert!(
+        result
+            .registry
+            .provider_infos()
+            .iter()
+            .any(|(category, name)| category == ProviderCategory::TerminalPool.slug() && name == "Managed Bag Terminals"),
+        "provider discovery should use the selected direct environment bag"
+    );
+}
+
+#[tokio::test]
 async fn cancel_nonexistent_command_returns_error() {
     let (_temp, _repo, daemon) = daemon_for_cwd().await;
     let result = daemon.cancel(999).await;
     assert!(result.is_err(), "cancelling a non-existent command should fail");
     assert!(result.unwrap_err().contains("no matching active command"), "error should mention no matching active command");
+}
+
+#[tokio::test]
+async fn linked_issue_pinning_fetches_and_broadcasts_missing_issues() {
+    // --- Arrange ---
+
+    // Create a checkout that references issue #42
+    let checkout_manager = Arc::new(FakeCheckoutManager::new());
+    checkout_manager
+        .add_checkouts(vec![(PathBuf::from("/tmp/repo/feat-branch"), Checkout {
+            branch: "feat-branch".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![CorrelationKey::Branch("feat-branch".into())],
+            association_keys: vec![AssociationKey::IssueRef("fake-issues".into(), "42".into())],
+            environment_id: None,
+        })])
+        .await;
+
+    // Create an issue tracker that has issue #42 available
+    let issue_tracker = Arc::new(FakeIssueProvider::new());
+    issue_tracker
+        .add_issues(vec![("42".into(), Issue {
+            title: "Fix the widget".into(),
+            labels: vec!["bug".into()],
+            association_keys: vec![AssociationKey::IssueRef("fake-issues".into(), "42".into())],
+            provider_name: "fake-issues".into(),
+            provider_display_name: "Fake Issues".into(),
+        })])
+        .await;
+
+    let discovery = fake_discovery_with_providers(
+        Some(checkout_manager.clone() as Arc<dyn flotilla_core::providers::vcs::CheckoutManager>),
+        None,
+        Some(issue_tracker.clone() as Arc<dyn flotilla_core::providers::issue_tracker::IssueProvider>),
+    );
+
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let config = Arc::new(flotilla_core::config::ConfigStore::with_base(temp.path().join("config")));
+    let daemon =
+        flotilla_core::in_process::InProcessDaemon::new(vec![repo.clone()], config, discovery, flotilla_protocol::HostName::local()).await;
+
+    let mut rx = daemon.subscribe();
+
+    // --- Act ---
+    // Trigger a refresh. The refresh loop will:
+    // 1. Call FakeCheckoutManager::list_checkouts → checkout with IssueRef("42")
+    // 2. Broadcast initial snapshot (no issues yet)
+    // 3. Call fetch_missing_linked_issues → finds "42" missing → calls fetch_issues_by_id
+    // 4. Broadcast updated snapshot with pinned issue
+    daemon.refresh(&RepoSelector::Path(repo.clone())).await.expect("refresh should succeed");
+
+    // --- Assert ---
+    // Collect snapshot events until we see one containing issue "42".
+    // The daemon may send a RepoSnapshot or a RepoDelta depending on
+    // whether the delta is smaller than the full snapshot. We accept either.
+    let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(DaemonEvent::RepoSnapshot(snap)) if snap.repo.as_deref() == Some(repo.as_path()) => {
+                    if snap.providers.issues.contains_key("42") {
+                        return *snap;
+                    }
+                }
+                Ok(DaemonEvent::RepoDelta(ref delta)) if delta.repo.as_deref() == Some(repo.as_path()) => {
+                    // Check if the delta contains an Issue change for "42"
+                    let has_issue_42 = delta.changes.iter().any(|c| matches!(c, Change::Issue { key, .. } if key == "42"));
+                    if has_issue_42 {
+                        // Use replay_since to get the full snapshot with the issue
+                        let events = daemon.replay_since(&HashMap::new()).await.expect("replay_since");
+                        for event in events {
+                            if let DaemonEvent::RepoSnapshot(snap) = event {
+                                if snap.repo.as_deref() == Some(repo.as_path()) && snap.providers.issues.contains_key("42") {
+                                    return *snap;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => panic!("unexpected recv error: {e:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for snapshot with pinned issue");
+
+    // Verify the issue is present and correct
+    let issue = found.providers.issues.get("42").expect("issue 42 should be in snapshot");
+    assert_eq!(issue.title, "Fix the widget");
+    assert_eq!(issue.labels, vec!["bug".to_string()]);
+
+    // Verify fetch_issues_by_id was actually called (not just paginated)
+    let fetched: Vec<Vec<String>> = issue_tracker.fetched_by_id.lock().await.clone();
+    assert!(!fetched.is_empty(), "fetch_issues_by_id should have been called");
+    assert!(fetched.iter().any(|ids| ids.contains(&"42".to_string())), "fetch_issues_by_id should have been called with id '42'");
 }
 
 #[tokio::test]
@@ -2249,9 +3838,13 @@ async fn two_commands_can_run_concurrently() {
     let refresh_event = trigger_refresh_and_recv(&daemon, &repo, &mut rx).await;
     match refresh_event {
         DaemonEvent::RepoSnapshot(snap) => assert!(snap.providers.sessions.contains_key("sess-1"), "refresh should expose sess-1"),
-        DaemonEvent::RepoDelta(delta) => {
-            assert!(delta.work_items.iter().any(|item| item.session_key.as_deref() == Some("sess-1")), "refresh should expose sess-1")
-        }
+        DaemonEvent::RepoDelta(delta) => assert!(delta.changes.iter().any(|change| matches!(
+            change,
+            flotilla_protocol::Change::WorkItem {
+                op: flotilla_protocol::EntryOp::Added(item) | flotilla_protocol::EntryOp::Updated(item),
+                ..
+            } if item.session_key.as_deref() == Some("sess-1")
+        ))),
         other => panic!("expected snapshot event, got {other:?}"),
     }
 

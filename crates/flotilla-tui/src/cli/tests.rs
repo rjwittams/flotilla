@@ -36,8 +36,9 @@ fn make_work_item(kind: WorkItemKind, branch: Option<&str>, description: &str) -
 
 mod status_human {
     use flotilla_protocol::{
-        HostEnvironment, HostListEntry, HostListResponse, HostName, HostProviderStatus, HostProvidersResponse, HostStatusResponse,
-        HostSummary, PeerConnectionState, RepoSummary, StatusResponse, SystemInfo, ToolInventory, TopologyResponse, TopologyRoute,
+        EnvironmentId, EnvironmentInfo, EnvironmentStatus, HostEnvironment, HostListEntry, HostListResponse, HostName, HostProviderStatus,
+        HostProvidersResponse, HostStatusResponse, HostSummary, ImageId, PeerConnectionState, RepoSummary, StatusResponse, SystemInfo,
+        ToolInventory, TopologyResponse, TopologyRoute,
     };
 
     use super::*;
@@ -84,6 +85,22 @@ mod status_human {
         }
     }
 
+    fn sample_visible_environments() -> Vec<EnvironmentInfo> {
+        vec![
+            EnvironmentInfo::Direct {
+                id: EnvironmentId::new("direct-env"),
+                display_name: Some("direct".into()),
+                status: EnvironmentStatus::Running,
+            },
+            EnvironmentInfo::Provisioned {
+                id: EnvironmentId::new("provisioned-env"),
+                display_name: Some("provisioned".into()),
+                image: ImageId::new("mock:image"),
+                status: EnvironmentStatus::Running,
+            },
+        ]
+    }
+
     #[test]
     fn host_list_shows_hosts_and_counts() {
         let response = HostListResponse {
@@ -123,6 +140,7 @@ mod status_human {
             configured: false,
             connection_status: PeerConnectionState::Connected,
             summary: Some(sample_host_summary("local")),
+            visible_environments: sample_visible_environments(),
             repo_count: 2,
             work_item_count: 5,
         };
@@ -131,6 +149,9 @@ mod status_human {
         assert!(output.contains("Host: local"));
         assert!(output.contains("Repositories: 2"));
         assert!(output.contains("linux"));
+        assert!(output.contains("Visible Environments:"));
+        assert!(output.contains("direct-env"));
+        assert!(output.contains("provisioned-env"));
     }
 
     #[test]
@@ -141,11 +162,15 @@ mod status_human {
             configured: false,
             connection_status: PeerConnectionState::Connected,
             summary: sample_host_summary("local"),
+            visible_environments: sample_visible_environments(),
         };
 
         let output = format_host_providers_human(&response);
         assert!(output.contains("Providers:"));
         assert!(output.contains("Git"));
+        assert!(output.contains("Visible Environments:"));
+        assert!(output.contains("direct-env"));
+        assert!(output.contains("provisioned-env"));
     }
 
     #[test]
@@ -183,7 +208,7 @@ mod watch_human {
         RepoSnapshot {
             seq,
             repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: repo.into() },
-            repo: PathBuf::from(repo),
+            repo: Some(PathBuf::from(repo)),
             host_name: HostName::new("test"),
             work_items: (0..work_item_count)
                 .map(|i| WorkItem {
@@ -230,7 +255,7 @@ mod watch_human {
             seq: 42,
             prev_seq: 41,
             repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/my-repo".into() },
-            repo: PathBuf::from("/tmp/my-repo"),
+            repo: Some(PathBuf::from("/tmp/my-repo")),
             changes: vec![],
             work_items: vec![],
         }));
@@ -244,7 +269,7 @@ mod watch_human {
         let event = DaemonEvent::RepoTracked(Box::new(flotilla_protocol::snapshot::RepoInfo {
             identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/added-repo".into() },
             name: "added-repo".into(),
-            path: PathBuf::from("/tmp/added-repo"),
+            path: Some(PathBuf::from("/tmp/added-repo")),
             labels: Default::default(),
             provider_names: Default::default(),
             provider_health: Default::default(),
@@ -260,7 +285,7 @@ mod watch_human {
     fn repo_untracked() {
         let event = DaemonEvent::RepoUntracked {
             repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/old-repo".into() },
-            path: PathBuf::from("/tmp/old-repo"),
+            path: Some(PathBuf::from("/tmp/old-repo")),
         };
         let line = format_event_human(&event);
         assert!(line.contains("[repo]"), "should have repo tag");
@@ -274,7 +299,7 @@ mod watch_human {
             command_id: 1,
             host: HostName::local(),
             repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/my-repo".into() },
-            repo: PathBuf::from("/tmp/my-repo"),
+            repo: Some(PathBuf::from("/tmp/my-repo")),
             description: "Refreshing...".into(),
         };
         let line = format_event_human(&event);
@@ -289,7 +314,7 @@ mod watch_human {
             command_id: 1,
             host: HostName::local(),
             repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/my-repo".into() },
-            repo: PathBuf::from("/tmp/my-repo"),
+            repo: Some(PathBuf::from("/tmp/my-repo")),
             result: CommandValue::Ok,
         };
         let line = format_event_human(&event);
@@ -304,7 +329,7 @@ mod watch_human {
             command_id: 1,
             host: HostName::local(),
             repo_identity: flotilla_protocol::RepoIdentity { authority: "local".into(), path: "/tmp/my-repo".into() },
-            repo: PathBuf::from("/tmp/my-repo"),
+            repo: Some(PathBuf::from("/tmp/my-repo")),
             result: CommandValue::Error { message: "boom".into() },
         };
         let line = format_event_human(&event);
@@ -770,19 +795,13 @@ mod query_event_formatting {
             command_id: 1,
             host: HostName::local(),
             repo_identity: test_identity(),
-            repo: PathBuf::default(),
+            repo: None,
             description: description.to_string(),
         }
     }
 
     fn query_finished(result: CommandValue) -> DaemonEvent {
-        DaemonEvent::CommandFinished {
-            command_id: 1,
-            host: HostName::local(),
-            repo_identity: test_identity(),
-            repo: PathBuf::default(),
-            result,
-        }
+        DaemonEvent::CommandFinished { command_id: 1, host: HostName::local(), repo_identity: test_identity(), repo: None, result }
     }
 
     #[test]
@@ -798,7 +817,7 @@ mod query_event_formatting {
             command_id: 1,
             host: HostName::local(),
             repo_identity: test_identity(),
-            repo: PathBuf::from("/tmp/myrepo"),
+            repo: Some(PathBuf::from("/tmp/myrepo")),
             description: "checkout".to_string(),
         };
         let output = format_event_human(&event);
@@ -826,7 +845,7 @@ mod query_event_formatting {
             command_id: 1,
             host: HostName::local(),
             repo_identity: test_identity(),
-            repo: PathBuf::from("/tmp/myrepo"),
+            repo: Some(PathBuf::from("/tmp/myrepo")),
             result: CommandValue::Ok,
         };
         let output = format_event_human(&event);
