@@ -559,6 +559,7 @@ fn build_host_status(
         configured: !is_local && configured.contains(host),
         connection_status: connection_status(host, local_host, statuses),
         summary,
+        visible_environments: vec![],
         repo_count: counts.repo_count,
         work_item_count: counts.work_item_count,
     }
@@ -577,6 +578,7 @@ fn build_host_providers(
         configured: host != local_host && configured.contains(host),
         connection_status: connection_status(host, local_host, statuses),
         summary,
+        visible_environments: vec![],
     }
 }
 

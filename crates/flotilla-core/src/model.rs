@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-pub use flotilla_protocol::{CategoryLabels, RepoLabels};
+pub use flotilla_protocol::{CategoryLabels, EnvironmentId, RepoLabels};
 
 use crate::{
     attachable::SharedAttachableStore,
@@ -85,6 +85,7 @@ impl RepoModel {
         repo_root: PathBuf,
         registry: ProviderRegistry,
         repo_slug: Option<String>,
+        environment_id: Option<EnvironmentId>,
         attachable_store: SharedAttachableStore,
         agent_state_store: crate::agents::SharedAgentStateStore,
     ) -> Self {
@@ -92,7 +93,15 @@ impl RepoModel {
         let registry = Arc::new(registry);
         let criteria = RepoCriteria { repo_slug };
         let refresh_handle =
-            RepoRefreshHandle::spawn(repo_root, registry.clone(), criteria, attachable_store, agent_state_store, Duration::from_secs(10));
+            RepoRefreshHandle::spawn(
+                repo_root,
+                registry.clone(),
+                criteria,
+                environment_id,
+                attachable_store,
+                agent_state_store,
+                Duration::from_secs(10),
+            );
         Self { registry, data: DataStore::default(), labels, refresh_handle }
     }
 

@@ -204,9 +204,18 @@ mod tests {
         let summary = build_local_host_summary(&host_name, &manager, vec![], &env).await;
 
         assert_eq!(summary.environments.len(), 1);
-        assert_eq!(summary.environments[0].id, EnvironmentId::new("env-1"));
-        assert_eq!(summary.environments[0].image, ImageId::new("test-image:latest"));
-        assert_eq!(summary.environments[0].status, EnvironmentStatus::Running);
+
+        let provisioned = summary
+            .environments
+            .iter()
+            .find_map(|environment| match environment {
+                flotilla_protocol::EnvironmentInfo::Provisioned { id, image, status, .. } => Some((id, image, status)),
+                _ => None,
+            })
+            .expect("provisioned environment should be visible");
+        assert_eq!(provisioned.0, &EnvironmentId::new("env-1"));
+        assert_eq!(provisioned.1, &ImageId::new("test-image:latest"));
+        assert_eq!(provisioned.2, &EnvironmentStatus::Running);
     }
 
     #[tokio::test]
@@ -241,7 +250,14 @@ mod tests {
         let summary = build_local_host_summary(&host_name, &manager, vec![], &env).await;
 
         assert_eq!(summary.environments.len(), 1);
-        assert_eq!(summary.environments[0].id, EnvironmentId::new("env-1"));
+        match &summary.environments[0] {
+            flotilla_protocol::EnvironmentInfo::Provisioned { id, image, status, .. } => {
+                assert_eq!(id, &EnvironmentId::new("env-1"));
+                assert_eq!(image, &ImageId::new("test-image:latest"));
+                assert_eq!(status, &EnvironmentStatus::Running);
+            }
+            other => panic!("expected only provisioned environment in summary, got {other:?}"),
+        }
         assert!(manager.environment_bag(&direct_env_id).is_some());
     }
 }

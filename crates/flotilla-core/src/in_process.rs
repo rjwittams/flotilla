@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use flotilla_protocol::{
     AssociationKey, Command, CorrelationKey, DaemonEvent, DeltaEntry, EnvironmentId, HostListResponse, HostName, HostPath,
     HostProvidersResponse, HostStatusResponse, HostSummary, Issue, PeerConnectionState, ProviderData, ProviderInfo, RepoDelta,
-    RepoDetailResponse, RepoInfo, RepoProvidersResponse, RepoSnapshot, RepoSummary, RepoWorkResponse, StatusResponse, StreamKey,
-    TopologyResponse, TopologyRoute,
+    RepoDetailResponse, RepoInfo, RepoProvidersResponse, RepoSnapshot, RepoSummary, RepoWorkResponse, StatusResponse, StreamKey, TopologyResponse,
+    TopologyRoute,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -36,7 +36,7 @@ use crate::{
     model::{provider_names_from_registry, repo_name, RepoModel},
     path_context::{DaemonHostPath, ExecutionEnvironmentPath},
     providers::{
-        discovery::{discover_providers, run_host_detectors, DiscoveryResult, DiscoveryRuntime, EnvironmentBag},
+        discovery::{discover_providers, run_host_detectors, DiscoveryResult, DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag},
         ssh_runner::SshCommandRunner,
         ChannelLabel, CommandRunner,
     },
@@ -114,10 +114,13 @@ async fn register_static_ssh_direct_environment(
     let remote_env_vars =
         tokio::time::timeout(STATIC_SSH_REGISTRATION_TIMEOUT, load_env_vars(&*runner, Path::new("/"))).await.unwrap_or_default();
     let remote_env = StaticEnvVars { vars: remote_env_vars };
-    let env_bag =
+    let mut env_bag =
         tokio::time::timeout(STATIC_SSH_REGISTRATION_TIMEOUT, run_host_detectors(&discovery.host_detectors, &*runner, &remote_env))
             .await
             .map_err(|_| format!("host detector execution timed out for {}", environment.hostname))?;
+    if let Some(display_name) = environment.display_name.as_ref() {
+        env_bag = env_bag.with(EnvironmentAssertion::env_var("DISPLAY_NAME", display_name));
+    }
     environment_manager.register_direct_environment(env_id, runner, env_bag)
 }
 
@@ -460,7 +463,14 @@ impl InProcessDaemon {
 
             let identity = repo_identity_from_bag_or_path(&path, &host_repo_bag);
             let slug = repo_slug.clone();
-            let mut model = RepoModel::new(path.clone(), registry, repo_slug, attachable_store, Arc::clone(&agent_state_store));
+            let mut model = RepoModel::new(
+                path.clone(),
+                registry,
+                repo_slug,
+                Some(local_environment_id.clone()),
+                attachable_store,
+                Arc::clone(&agent_state_store),
+            );
             model.data.loading = true;
             let root = RepoRootState { path: path.clone(), model, slug, repo_bag, unmet, is_local: true };
 
@@ -553,6 +563,26 @@ impl InProcessDaemon {
 
     pub async fn daemon_socket_path(&self) -> Option<PathBuf> {
         self.daemon_socket_path.read().await.clone()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn register_direct_environment_for_test(
+        &self,
+        env_id: EnvironmentId,
+        runner: Arc<dyn CommandRunner>,
+        env_bag: EnvironmentBag,
+    ) -> Result<(), String> {
+        self.environment_manager.register_direct_environment(env_id, runner, env_bag)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn register_provisioned_environment_for_test(
+        &self,
+        env_id: EnvironmentId,
+        handle: crate::providers::environment::EnvironmentHandle,
+        env_bag: EnvironmentBag,
+    ) -> Result<(), String> {
+        self.environment_manager.register_provisioned_environment(env_id, handle, env_bag, None)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1573,6 +1603,7 @@ impl InProcessDaemon {
             path.clone(),
             registry,
             repo_slug,
+            Some(self.local_environment_id.clone()),
             self.discovery.shared_attachable_store(&self.config),
             Arc::clone(&self.agent_state_store),
         );
@@ -1799,13 +1830,21 @@ impl InProcessDaemon {
         let _ = self.refresh_local_host_summary().await;
         let local_counts = self.local_host_counts().await;
         let remote_counts = self.remote_host_counts().await;
-        self.host_registry.get_host_status(host, local_counts, &remote_counts).await
+        let mut response = self.host_registry.get_host_status(host, local_counts, &remote_counts).await?;
+        if host == self.host_name.as_str() {
+            response.visible_environments = self.environment_manager.visible_environments().await;
+        }
+        Ok(response)
     }
 
     pub async fn get_host_providers_internal(&self, host: &str) -> Result<HostProvidersResponse, String> {
         let _ = self.refresh_local_host_summary().await;
         let remote_counts = self.remote_host_counts().await;
-        self.host_registry.get_host_providers(host, &remote_counts).await
+        let mut response = self.host_registry.get_host_providers(host, &remote_counts).await?;
+        if host == self.host_name.as_str() {
+            response.visible_environments = self.environment_manager.visible_environments().await;
+        }
+        Ok(response)
     }
 
     async fn refresh_local_host_summary(&self) -> HostSummary {

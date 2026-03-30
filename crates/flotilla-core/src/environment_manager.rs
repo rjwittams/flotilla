@@ -27,12 +27,14 @@ pub enum ManagedEnvironmentKind {
 pub struct DirectEnvironmentState {
     pub runner: Arc<dyn CommandRunner>,
     pub env_bag: EnvironmentBag,
+    pub display_name: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct ProvisionedEnvironmentState {
     pub handle: EnvironmentHandle,
     pub env_bag: EnvironmentBag,
+    pub display_name: Option<String>,
     pub registry: Option<Arc<ProviderRegistry>>,
 }
 
@@ -59,9 +61,14 @@ impl EnvironmentManager {
 
     pub fn from_local_state(local_environment_id: EnvironmentId, local_runner: Arc<dyn CommandRunner>, env_bag: EnvironmentBag) -> Self {
         let mut managed = HashMap::new();
+        let display_name = Self::display_name_for_bag(&env_bag);
         managed.insert(
             local_environment_id.clone(),
-            ManagedEnvironmentKind::Direct(DirectEnvironmentState { runner: Arc::clone(&local_runner), env_bag }),
+            ManagedEnvironmentKind::Direct(DirectEnvironmentState {
+                runner: Arc::clone(&local_runner),
+                env_bag,
+                display_name,
+            }),
         );
 
         Self { local_environment_id, host_runner: local_runner, managed: Mutex::new(managed) }
@@ -93,7 +100,8 @@ impl EnvironmentManager {
                 }
             },
             Entry::Vacant(entry) => {
-                entry.insert(ManagedEnvironmentKind::Direct(DirectEnvironmentState { runner, env_bag }));
+                let display_name = Self::display_name_for_bag(&env_bag);
+                entry.insert(ManagedEnvironmentKind::Direct(DirectEnvironmentState { runner, env_bag, display_name }));
                 Ok(())
             }
         }
@@ -103,6 +111,7 @@ impl EnvironmentManager {
         let mut managed = self.managed.lock().expect("environment manager lock poisoned");
         match managed.get_mut(env_id) {
             Some(ManagedEnvironmentKind::Direct(state)) => {
+                state.display_name = Self::display_name_for_bag(&env_bag);
                 state.env_bag = env_bag;
                 Ok(())
             }
@@ -140,21 +149,45 @@ impl EnvironmentManager {
     }
 
     pub async fn host_summary_environments(&self) -> Vec<EnvironmentInfo> {
-        let provisioned: Vec<_> = self
-            .managed_environments()
-            .into_iter()
-            .filter_map(|(_, state)| match state {
-                ManagedEnvironmentKind::Direct(_) => None,
-                ManagedEnvironmentKind::Provisioned(state) => Some(Arc::clone(&state.handle)),
-            })
-            .collect();
-
-        let mut environments = Vec::with_capacity(provisioned.len());
-        for handle in provisioned {
-            let status = handle.status().await.unwrap_or_else(EnvironmentStatus::Failed);
-            environments.push(EnvironmentInfo { id: handle.id().clone(), image: handle.image().clone(), status });
+        let mut environments = Vec::new();
+        for (env_id, state) in self.managed_environments() {
+            if let ManagedEnvironmentKind::Provisioned(state) = state {
+                let status = state.handle.status().await.unwrap_or_else(EnvironmentStatus::Failed);
+                environments.push(EnvironmentInfo::Provisioned {
+                    id: env_id,
+                    display_name: state.display_name.clone(),
+                    image: state.handle.image().clone(),
+                    status,
+                });
+            }
         }
-        environments.sort_by(|a, b| a.id.cmp(&b.id));
+        environments.sort_by(|a, b| Self::environment_info_sort_key(a).cmp(&Self::environment_info_sort_key(b)));
+        environments
+    }
+
+    pub async fn visible_environments(&self) -> Vec<EnvironmentInfo> {
+        let mut environments = Vec::new();
+        for (env_id, state) in self.managed_environments() {
+            match state {
+                ManagedEnvironmentKind::Direct(state) => {
+                    environments.push(EnvironmentInfo::Direct {
+                        id: env_id,
+                        display_name: state.display_name.clone(),
+                        status: EnvironmentStatus::Running,
+                    });
+                }
+                ManagedEnvironmentKind::Provisioned(state) => {
+                    let status = state.handle.status().await.unwrap_or_else(EnvironmentStatus::Failed);
+                    environments.push(EnvironmentInfo::Provisioned {
+                        id: env_id,
+                        display_name: state.display_name.clone(),
+                        image: state.handle.image().clone(),
+                        status,
+                    });
+                }
+            }
+        }
+        environments.sort_by(|a, b| Self::environment_info_sort_key(a).cmp(&Self::environment_info_sort_key(b)));
         environments
     }
 
@@ -236,16 +269,30 @@ impl EnvironmentManager {
         env_bag: EnvironmentBag,
         registry: Option<Arc<ProviderRegistry>>,
     ) -> Result<(), String> {
+        if handle.id() != &env_id {
+            return Err(format!("provisioned environment id mismatch: key={env_id}, handle={}", handle.id()));
+        }
+
         let mut managed = self.managed.lock().expect("environment manager lock poisoned");
         match managed.entry(env_id.clone()) {
             Entry::Occupied(mut entry) => {
                 if matches!(entry.get(), ManagedEnvironmentKind::Direct(_)) {
                     return Err(format!("cannot replace direct environment {env_id} with a provisioned environment"));
                 }
-                entry.insert(ManagedEnvironmentKind::Provisioned(ProvisionedEnvironmentState { handle, env_bag, registry }));
+                entry.insert(ManagedEnvironmentKind::Provisioned(ProvisionedEnvironmentState {
+                    handle,
+                    display_name: Self::display_name_for_bag(&env_bag),
+                    env_bag,
+                    registry,
+                }));
             }
             Entry::Vacant(entry) => {
-                entry.insert(ManagedEnvironmentKind::Provisioned(ProvisionedEnvironmentState { handle, env_bag, registry }));
+                entry.insert(ManagedEnvironmentKind::Provisioned(ProvisionedEnvironmentState {
+                    handle,
+                    display_name: Self::display_name_for_bag(&env_bag),
+                    env_bag,
+                    registry,
+                }));
             }
         }
         Ok(())
@@ -297,6 +344,7 @@ impl EnvironmentManager {
         };
 
         if Arc::ptr_eq(&state.handle, expected_handle) {
+            state.display_name = Self::display_name_for_bag(&env_bag);
             state.env_bag = env_bag;
             state.registry = registry;
         }
@@ -306,6 +354,17 @@ impl EnvironmentManager {
         match self.managed_environment(env_id) {
             Some(ManagedEnvironmentKind::Provisioned(state)) => Ok(state),
             Some(ManagedEnvironmentKind::Direct(_)) | None => Err(format!("environment handle not found: {env_id}")),
+        }
+    }
+
+    fn display_name_for_bag(env_bag: &EnvironmentBag) -> Option<String> {
+        env_bag.find_env_var("DISPLAY_NAME").map(|value| value.to_owned())
+    }
+
+    fn environment_info_sort_key(info: &EnvironmentInfo) -> (&EnvironmentId, u8) {
+        match info {
+            EnvironmentInfo::Direct { id, .. } => (id, 0),
+            EnvironmentInfo::Provisioned { id, .. } => (id, 1),
         }
     }
 }
@@ -477,6 +536,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_provisioned_environment_rejects_handle_id_mismatch() {
+        let discovery = fake_discovery(false);
+        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id()).await;
+        let registration_id = EnvironmentId::new("provisioned-registration-id");
+        let handle_id = EnvironmentId::new("provisioned-handle-id");
+        let (handle, _) = mock_handle(&handle_id, HashMap::new(), None);
+
+        let result = manager.register_provisioned_environment(registration_id.clone(), handle, EnvironmentBag::new(), None);
+
+        assert_eq!(
+            result.unwrap_err(),
+            format!("provisioned environment id mismatch: key={registration_id}, handle={handle_id}")
+        );
+        assert!(manager.environment_bag(&registration_id).is_none());
+        assert!(manager.environment_bag(&handle_id).is_none());
+    }
+
+    #[tokio::test]
     async fn register_direct_environment_adds_an_independent_direct_environment() {
         let discovery = fake_discovery(false);
         let local_environment_id = test_local_environment_id();
@@ -495,6 +572,99 @@ mod tests {
         assert!(Arc::ptr_eq(&manager.environment_runner(&direct_environment_id).expect("direct runner"), &direct_runner));
         assert_eq!(manager.environment_bag(&direct_environment_id).expect("direct bag").find_env_var("DIRECT"), Some("true"));
         assert!(manager.environment_runner(&local_environment_id).is_some(), "local direct environment should remain registered");
+    }
+
+    #[tokio::test]
+    async fn visible_environments_includes_direct_and_provisioned_environments_with_display_names() {
+        let local_environment_id = EnvironmentId::new("local-env");
+        let local_bag = EnvironmentBag::new().with(EnvironmentAssertion::env_var("DISPLAY_NAME", "local-dev"));
+        let manager = EnvironmentManager::from_local_state(
+            local_environment_id.clone(),
+            Arc::new(DiscoveryMockRunner::builder().build()),
+            local_bag,
+        );
+
+        let ssh_environment_id = EnvironmentId::new("ssh-env");
+        manager
+            .register_direct_environment(
+                ssh_environment_id.clone(),
+                Arc::new(DiscoveryMockRunner::builder().build()),
+                EnvironmentBag::new().with(EnvironmentAssertion::env_var("DISPLAY_NAME", "ssh-dev")),
+            )
+            .expect("register ssh direct environment");
+
+        let provisioned_environment_id = EnvironmentId::new("provisioned-env");
+        let (handle, _) = mock_handle(
+            &provisioned_environment_id,
+            HashMap::from([(String::from("DISPLAY_NAME"), String::from("container-dev"))]),
+            None,
+        );
+        manager
+            .register_provisioned_environment(
+                provisioned_environment_id.clone(),
+                handle,
+                EnvironmentBag::new().with(EnvironmentAssertion::env_var("DISPLAY_NAME", "container-dev")),
+                None,
+            )
+            .expect("register provisioned environment");
+
+        let visible = manager.visible_environments().await;
+        let ids: Vec<_> = visible
+            .iter()
+            .map(|environment| match environment {
+                EnvironmentInfo::Direct { id, .. } | EnvironmentInfo::Provisioned { id, .. } => id.clone(),
+            })
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec![local_environment_id.clone(), provisioned_environment_id.clone(), ssh_environment_id.clone()],
+            "visible environments should be sorted deterministically by id",
+        );
+
+        match &visible[0] {
+            EnvironmentInfo::Direct { id, display_name, status } => {
+                assert_eq!(id, &local_environment_id);
+                assert_eq!(display_name.as_deref(), Some("local-dev"));
+                assert_eq!(status, &EnvironmentStatus::Running);
+            }
+            other => panic!("expected local direct environment, got {other:?}"),
+        }
+
+        match &visible[1] {
+            EnvironmentInfo::Provisioned { id, display_name, image, status } => {
+                assert_eq!(id, &provisioned_environment_id);
+                assert_eq!(display_name.as_deref(), Some("container-dev"));
+                assert_eq!(image, &ImageId::new("mock:image"));
+                assert_eq!(status, &EnvironmentStatus::Running);
+            }
+            other => panic!("expected provisioned environment, got {other:?}"),
+        }
+
+        match &visible[2] {
+            EnvironmentInfo::Direct { id, display_name, status } => {
+                assert_eq!(id, &ssh_environment_id);
+                assert_eq!(display_name.as_deref(), Some("ssh-dev"));
+                assert_eq!(status, &EnvironmentStatus::Running);
+            }
+            other => panic!("expected ssh direct environment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_environment_serialization_omits_image_metadata() {
+        let info = EnvironmentInfo::Direct {
+            id: EnvironmentId::new("direct-env"),
+            display_name: Some("ssh-dev".to_string()),
+            status: EnvironmentStatus::Running,
+        };
+
+        let json = serde_json::to_value(&info).expect("serialize direct environment");
+        let obj = json.as_object().expect("direct environment should serialize as a JSON object");
+
+        assert_eq!(obj.get("kind").and_then(|value| value.as_str()), Some("direct"));
+        assert_eq!(obj.get("id").and_then(|value| value.as_str()), Some("direct-env"));
+        assert!(obj.get("image").is_none(), "direct environments must not publish image metadata");
     }
 
     #[tokio::test]
@@ -593,7 +763,11 @@ mod tests {
             let mut managed = manager.managed.lock().expect("environment manager lock poisoned");
             managed.insert(
                 direct_env_id.clone(),
-                ManagedEnvironmentKind::Direct(DirectEnvironmentState { runner: direct_runner, env_bag: direct_bag.clone() }),
+                ManagedEnvironmentKind::Direct(DirectEnvironmentState {
+                    runner: direct_runner,
+                    env_bag: direct_bag.clone(),
+                    display_name: Some("direct-env".to_string()),
+                }),
             );
         }
 
