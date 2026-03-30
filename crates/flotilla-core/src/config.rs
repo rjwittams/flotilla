@@ -496,24 +496,13 @@ impl ConfigStore {
     }
 
     /// Load daemon config from `~/.config/flotilla/daemon.toml`.
-    pub fn load_daemon_config(&self) -> DaemonConfig {
+    pub fn load_daemon_config(&self) -> Result<DaemonConfig, String> {
         let path = self.base_path().join("daemon.toml");
         if path.as_path().exists() {
-            match std::fs::read_to_string(path.as_path()) {
-                Ok(content) => match toml::from_str(&content) {
-                    Ok(config) => config,
-                    Err(err) => {
-                        tracing::warn!(%path, err = %err, "failed to parse daemon config");
-                        DaemonConfig::default()
-                    }
-                },
-                Err(err) => {
-                    tracing::warn!(%path, err = %err, "failed to read daemon config");
-                    DaemonConfig::default()
-                }
-            }
+            let content = std::fs::read_to_string(path.as_path()).map_err(|err| format!("failed to read {path}: {err}"))?;
+            toml::from_str(&content).map_err(|err| format!("failed to parse {path}: {err}"))
         } else {
-            DaemonConfig::default()
+            Ok(DaemonConfig::default())
         }
     }
 

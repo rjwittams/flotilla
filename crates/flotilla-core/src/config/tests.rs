@@ -460,7 +460,7 @@ fn load_hosts_invalid_file_returns_error() {
 fn load_daemon_config_missing_file_returns_default() {
     let dir = tempdir().unwrap();
     let store = ConfigStore::with_base(dir.path());
-    let config = store.load_daemon_config();
+    let config = store.load_daemon_config().unwrap();
     assert!(!config.follower);
     assert_eq!(config.host_name, None);
 }
@@ -471,21 +471,20 @@ fn load_daemon_config_from_file() {
     let base = dir.path();
     std::fs::write(base.join("daemon.toml"), "follower = true\nhost_name = \"my-host\"\n").unwrap();
     let store = ConfigStore::with_base(base);
-    let config = store.load_daemon_config();
+    let config = store.load_daemon_config().unwrap();
     assert!(config.follower);
     assert_eq!(config.host_name, Some("my-host".into()));
 }
 
 #[test]
-fn load_daemon_config_invalid_file_returns_default() {
+fn load_daemon_config_invalid_file_returns_error() {
     let dir = tempdir().unwrap();
     let base = dir.path();
     std::fs::write(base.join("daemon.toml"), "environments = 123\n").unwrap();
     let store = ConfigStore::with_base(base);
-    let config = store.load_daemon_config();
-    assert!(!config.follower);
-    assert_eq!(config.host_name, None);
-    assert!(config.environments.is_empty());
+    let err = store.load_daemon_config().expect_err("invalid daemon config should return error");
+    assert!(err.contains("failed to parse"));
+    assert!(err.contains("daemon.toml"));
 }
 
 #[test]
