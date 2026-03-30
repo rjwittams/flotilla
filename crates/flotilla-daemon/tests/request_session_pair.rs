@@ -37,10 +37,9 @@ async fn in_memory_request_client_routes_remote_command_result() {
     match result {
         CommandValue::HostStatus(status) => {
             assert_eq!(status.host, HostName::new("follower"));
-            // Query commands now execute locally on the receiving daemon
-            // rather than being forwarded to the target host, so the
-            // follower appears as a remote peer (is_local == false).
-            assert!(!status.is_local, "follower should appear as remote from leader's perspective");
+            // The query targets host "follower", so it must be forwarded
+            // to the follower daemon and executed there — where it is local.
+            assert!(status.is_local, "follower should appear as local from its own perspective");
         }
         other => panic!("expected HostStatus result, got {other:?}"),
     }

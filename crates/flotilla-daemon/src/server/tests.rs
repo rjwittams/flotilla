@@ -466,10 +466,8 @@ async fn sync_peer_query_state_mirrors_host_summaries_and_routes_into_daemon() {
 
 #[tokio::test]
 async fn dispatch_execute_remote_query_routes_through_peer_manager() {
-    // Test dispatch_execute directly (not through RequestDispatcher) since
-    // query commands are routed via execute_query in the request dispatcher.
-    // The peer routing path in dispatch_execute is still used when the
-    // remote command router is called directly for forwarded queries.
+    // Test dispatch_execute directly on the RemoteCommandRouter level to
+    // verify the peer routing path for remote query commands.
     let (_tmp, daemon) = empty_daemon().await;
     let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
     let pending_remote_commands = Arc::new(Mutex::new(HashMap::new()));
@@ -538,30 +536,106 @@ async fn query_commands_return_directed_response_instead_of_remote_dispatch() {
     );
     let request_dispatcher = RequestDispatcher::new(&daemon, &remote_command_router, &agent_state_store, uuid::Uuid::nil());
 
-    // Query commands are executed locally and return QueryResult directly,
-    // bypassing the remote command router entirely.
+    // Local query commands (host=None) execute directly and return QueryResult.
     let response = request_dispatcher
         .dispatch(401, Request::Execute {
-            command: Command {
-                host: Some(HostName::new("feta")),
-                provisioning_target: None,
-                context_repo: None,
-                action: CommandAction::QueryHostList {},
-            },
+            command: Command { host: None, provisioning_target: None, context_repo: None, action: CommandAction::QueryHostList {} },
         })
         .await;
 
     match ok_response(response, 401) {
         Response::QueryResult { value, .. } => {
-            // QueryHostList should return a HostList value
             assert!(matches!(value, CommandValue::HostList(_)));
         }
         other => panic!("expected QueryResult response, got {:?}", other),
     }
 
-    // Verify nothing was sent to the peer — query commands execute locally.
-    let sent = sent.lock().expect("lock");
-    assert!(sent.is_empty(), "query commands should not be routed through peer manager");
+    // Local queries should not touch the peer manager.
+    let sent_msgs = sent.lock().expect("lock");
+    assert!(sent_msgs.is_empty(), "local query commands should not be routed through peer manager");
+    drop(sent_msgs);
+}
+
+#[tokio::test]
+async fn request_dispatcher_forwards_remote_query_through_peer_manager() {
+    let (_tmp, daemon) = empty_daemon().await;
+    let peer_manager = Arc::new(Mutex::new(PeerManager::new(HostName::new("local"))));
+    let pending_remote_commands = Arc::new(Mutex::new(HashMap::new()));
+    let forwarded_commands = Arc::new(Mutex::new(HashMap::new()));
+    let pending_remote_cancels = Arc::new(Mutex::new(HashMap::new()));
+    let next_remote_command_id = Arc::new(AtomicU64::new(1 << 62));
+    let sent = Arc::new(StdMutex::new(Vec::new()));
+    peer_manager.lock().await.register_sender(HostName::new("feta"), Arc::new(MockPeerSender { sent: Arc::clone(&sent) }));
+    let agent_state_store = flotilla_core::agents::shared_in_memory_agent_state_store();
+    let remote_command_router = make_remote_command_router(
+        &daemon,
+        &peer_manager,
+        &pending_remote_commands,
+        &forwarded_commands,
+        &pending_remote_cancels,
+        &next_remote_command_id,
+    );
+    // Remote query commands (host targeting a different daemon) must be forwarded
+    // through the peer manager, not executed locally. Inject a CommandFinished
+    // event to unblock the await in the dispatcher.
+    let dispatch_handle = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        let remote_command_router = remote_command_router.clone();
+        let agent_state_store = agent_state_store.clone();
+        async move {
+            let request_dispatcher = RequestDispatcher::new(&daemon, &remote_command_router, &agent_state_store, uuid::Uuid::nil());
+            request_dispatcher
+                .dispatch(402, Request::Execute {
+                    command: Command {
+                        host: Some(HostName::new("feta")),
+                        provisioning_target: None,
+                        context_repo: None,
+                        action: CommandAction::QueryHostList {},
+                    },
+                })
+                .await
+        }
+    });
+
+    // Wait for the dispatched command to appear as a pending remote command,
+    // then extract its command_id and simulate the remote response.
+    let command_id = tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            let pending = pending_remote_commands.lock().await;
+            if let Some(entry) = pending.values().next() {
+                return entry.command_id;
+            }
+            drop(pending);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for pending remote command");
+
+    // Inject a CommandFinished event to unblock the dispatcher's await_command_finished.
+    daemon.send_event(DaemonEvent::CommandFinished {
+        command_id,
+        host: HostName::new("feta"),
+        repo_identity: RepoIdentity { authority: String::new(), path: String::new() },
+        repo: PathBuf::new(),
+        result: CommandValue::HostList(Box::new(flotilla_protocol::HostListResponse { hosts: vec![] })),
+    });
+
+    let response = tokio::time::timeout(StdDuration::from_secs(5), dispatch_handle)
+        .await
+        .expect("dispatch timed out")
+        .expect("dispatch task panicked");
+
+    match ok_response(response, 402) {
+        Response::QueryResult { value, .. } => {
+            assert!(matches!(value, CommandValue::HostList(_)));
+        }
+        other => panic!("expected QueryResult response, got {:?}", other),
+    }
+
+    // Verify the query WAS forwarded to the peer manager.
+    let sent_msgs = sent.lock().expect("lock");
+    assert!(!sent_msgs.is_empty(), "remote query commands should be routed through peer manager");
 }
 
 #[tokio::test]
