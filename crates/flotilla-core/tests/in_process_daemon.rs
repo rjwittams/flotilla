@@ -19,7 +19,7 @@ use flotilla_core::{
         discovery::{
             test_support::{
                 fake_discovery, fake_discovery_with_provider_set, fake_discovery_with_providers, fake_vcs_discovery, git_process_discovery,
-                init_git_repo_with_remote, DiscoveryMockRunner, FakeCheckoutManager, FakeCheckoutManagerFactory,
+                init_git_repo, init_git_repo_with_remote, DiscoveryMockRunner, FakeCheckoutManager, FakeCheckoutManagerFactory,
                 FakeDiscoveryProviders, FakeIssueTracker, FakeTerminalPool, FakeVcsFactory, FakeVcsState, FakeWorkspaceManager,
                 TestEnvVars,
             },
@@ -52,26 +52,6 @@ impl RepoDetector for FixedRemoteHostDetector {
         _env: &dyn flotilla_core::providers::discovery::EnvVars,
     ) -> Vec<EnvironmentAssertion> {
         vec![EnvironmentAssertion::remote_host(HostPlatform::GitHub, self.owner, self.repo, "origin")]
-    }
-}
-
-struct RunnerRemoteHostDetector {
-    probe: &'static str,
-    owner: &'static str,
-}
-
-#[async_trait]
-impl RepoDetector for RunnerRemoteHostDetector {
-    async fn detect(
-        &self,
-        repo_root: &ExecutionEnvironmentPath,
-        runner: &dyn flotilla_core::providers::CommandRunner,
-        _env: &dyn flotilla_core::providers::discovery::EnvVars,
-    ) -> Vec<EnvironmentAssertion> {
-        match runner.run("probe-env", &[self.probe], repo_root.as_path(), &ChannelLabel::Noop).await {
-            Ok(value) => vec![EnvironmentAssertion::remote_host(HostPlatform::GitHub, self.owner, value.trim(), "origin")],
-            Err(_) => Vec::new(),
-        }
     }
 }
 
@@ -456,7 +436,8 @@ hostname = "buildbox.example"
 
     let ssh_runner = Arc::new(
         DiscoveryMockRunner::builder()
-            .on_run("probe-env", &["REMOTE_MARKER"], Ok("local".into()))
+            .on_run("git", &["--version"], Ok("git version 2.43.0".into()))
+            .on_run("env", &[], Ok(String::new()))
             .on_run(
                 "ssh",
                 &[
@@ -487,20 +468,25 @@ hostname = "buildbox.example"
                     "buildbox.example",
                     "sh",
                     "-lc",
-                    "cd '/' && exec 'probe-env' 'REMOTE_MARKER'",
+                    "cd '/' && exec 'env'",
                 ],
-                Ok("buildbox".into()),
+                Ok("TERM=screen-256color\nCOLORTERM=truecolor\n".into()),
             )
             .build(),
     );
 
-    let daemon = InProcessDaemon::new(
-        vec![repo],
-        Arc::new(ConfigStore::with_base(config_dir)),
-        static_ssh_test_discovery(ssh_runner),
-        HostName::local(),
-    )
-    .await;
+    let mut discovery = fake_discovery(false);
+    discovery.runner = ssh_runner;
+    discovery.host_detectors = vec![
+        Box::new(flotilla_core::providers::discovery::detectors::generic::CommandDetector::new(
+            "git",
+            &["--version"],
+            flotilla_core::providers::discovery::detectors::generic::parse_first_dotted_version,
+        )),
+        Box::new(flotilla_core::providers::discovery::detectors::generic::EnvVarDetector::new("TERM")),
+        Box::new(flotilla_core::providers::discovery::detectors::generic::EnvVarDetector::new("COLORTERM")),
+    ];
+    let daemon = InProcessDaemon::new(vec![repo], Arc::new(ConfigStore::with_base(config_dir)), discovery, HostName::local()).await;
 
     let remote_env_id = EnvironmentId::new("static-ssh-6275696c64626f78");
     let managed_ids = daemon.managed_environment_ids_for_test();
@@ -508,10 +494,11 @@ hostname = "buildbox.example"
     assert!(managed_ids.contains(&remote_env_id));
 
     let local_bag = daemon.environment_bag_for_test(daemon.local_environment_id()).expect("local bag");
-    assert_eq!(local_bag.find_env_var("REMOTE_MARKER"), Some("local"));
+    assert_eq!(local_bag.find_env_var("TERM"), None);
 
     let remote_bag = daemon.environment_bag_for_test(&remote_env_id).expect("remote bag");
-    assert_eq!(remote_bag.find_env_var("REMOTE_MARKER"), Some("buildbox"));
+    assert_eq!(remote_bag.find_env_var("TERM"), Some("screen-256color"));
+    assert_eq!(remote_bag.find_env_var("COLORTERM"), Some("truecolor"));
 }
 
 #[tokio::test]
@@ -651,6 +638,119 @@ hostname = "buildbox.example"
 
     let remote_bag = daemon.environment_bag_for_test(&EnvironmentId::new("static-ssh-6275696c64626f78")).expect("remote bag");
     assert_eq!(remote_bag.find_env_var("LOCAL_ONLY_SECRET"), None);
+}
+
+#[tokio::test]
+async fn selected_static_ssh_repo_discovery_does_not_treat_local_git_checkout_as_remote_checkout() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    init_git_repo(&repo);
+
+    let config_dir = temp.path().join("config");
+    write_static_environment_config(
+        &config_dir,
+        r#"
+[environments.buildbox]
+hostname = "buildbox.example"
+"#,
+    );
+
+    let ssh_runner = Arc::new(
+        DiscoveryMockRunner::builder()
+            .on_run("git", &["--version"], Ok("git version 2.43.0".into()))
+            .on_run("env", &[], Ok("TERM=xterm-256color\n".into()))
+            .on_run(
+                "ssh",
+                &[
+                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
+                    "-lc", "cd '/' && exec 'true'",
+                ],
+                Ok(String::new()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
+                    "-lc", "cd '/' && exec 'env'",
+                ],
+                Ok("TERM=xterm-256color\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--is-inside-work-tree'", repo.display()).as_str(),
+                ],
+                Err("fatal: not a git repository".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--abbrev-ref' '@{{upstream}}'", repo.display()).as_str(),
+                ],
+                Err("fatal: not a git repository".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'remote'", repo.display()).as_str(),
+                ],
+                Err("fatal: not a git repository".into()),
+            )
+            .build(),
+    );
+
+    let mut discovery = fake_discovery(false);
+    discovery.runner = ssh_runner;
+    let daemon = InProcessDaemon::new(
+        vec![],
+        Arc::new(ConfigStore::with_base(config_dir)),
+        discovery,
+        HostName::local(),
+    )
+    .await;
+
+    let result = daemon
+        .discover_repo_for_environment_for_test(&repo, &EnvironmentId::new("static-ssh-6275696c64626f78"))
+        .await
+        .expect("discover repo in remote direct environment");
+
+    assert!(result.repo_bag.find_vcs_checkout(flotilla_core::providers::discovery::VcsKind::Git).is_none());
+    assert!(
+        result.registry.provider_infos().iter().all(|(category, name)| {
+            !(category == ProviderCategory::Vcs.slug() && name == "Git")
+        }),
+        "remote discovery should not activate git from the daemon-local checkout path"
+    );
 }
 
 #[tokio::test]
@@ -2461,13 +2561,12 @@ async fn follower_mode_flag_is_stored() {
 
 #[tokio::test]
 async fn follower_mode_skips_external_providers() {
-    // Use a temp dir with a .git directory to guarantee VCS detection
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().to_path_buf();
-    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    init_git_repo(&repo);
 
     let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
-    let daemon = InProcessDaemon::new(vec![repo.clone()], config, fake_discovery(true), HostName::local()).await;
+    let daemon = InProcessDaemon::new(vec![repo.clone()], config, git_process_discovery(true), HostName::local()).await;
 
     assert!(daemon.is_follower());
 
@@ -2716,7 +2815,7 @@ async fn add_repo_uses_manager_backed_local_environment_for_provider_discovery()
 }
 
 #[tokio::test]
-async fn repo_detectors_can_run_against_selected_static_ssh_direct_environment_runner() {
+async fn selected_static_ssh_repo_discovery_uses_default_remote_host_detector_via_remote_runner() {
     let temp = tempfile::tempdir().expect("create tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir_all(&repo).expect("create repo dir");
@@ -2732,7 +2831,8 @@ hostname = "buildbox.example"
 
     let ssh_runner = Arc::new(
         DiscoveryMockRunner::builder()
-            .on_run("probe-env", &["REMOTE_REPO"], Ok("local-repo".into()))
+            .on_run("git", &["--version"], Ok("git version 2.43.0".into()))
+            .on_run("env", &[], Ok("TERM=xterm-256color\n".into()))
             .on_run(
                 "ssh",
                 &[
@@ -2745,15 +2845,108 @@ hostname = "buildbox.example"
                 "ssh",
                 &[
                     "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
-                    "-lc", format!("cd '{}' && exec 'probe-env' 'REMOTE_REPO'", repo.display()).as_str(),
+                    "-lc", "cd '/' && exec 'env'",
                 ],
-                Ok("remote-repo".into()),
+                Ok("TERM=xterm-256color\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--is-inside-work-tree'", repo.display()).as_str(),
+                ],
+                Ok("true\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--path-format=absolute' '--git-dir'", repo.display()).as_str(),
+                ],
+                Ok("/remote/repo/.git\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--path-format=absolute' '--git-common-dir'", repo.display()).as_str(),
+                ],
+                Ok("/remote/repo/.git\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'rev-parse' '--abbrev-ref' '@{{upstream}}'", repo.display()).as_str(),
+                ],
+                Err("fatal: no upstream".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    format!("cd '{}' && exec 'git' 'remote'", repo.display()).as_str(),
+                ],
+                Ok("origin\n".into()),
+            )
+            .on_run(
+                "ssh",
+                &[
+                    "-T", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "buildbox.example", "sh",
+                    "-lc", format!("cd '{}' && exec 'git' 'remote' 'get-url' 'origin'", repo.display()).as_str(),
+                ],
+                Ok("git@github.com:owner/remote-repo.git\n".into()),
             )
             .build(),
     );
 
-    let mut discovery = static_ssh_test_discovery(ssh_runner);
-    discovery.repo_detectors = vec![Box::new(RunnerRemoteHostDetector { probe: "REMOTE_REPO", owner: "owner" })];
+    let mut discovery = fake_discovery(false);
+    discovery.runner = ssh_runner;
     let daemon = InProcessDaemon::new(
         vec![],
         Arc::new(ConfigStore::with_base(config_dir)),

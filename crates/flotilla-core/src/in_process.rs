@@ -60,12 +60,41 @@ fn static_ssh_environment_id(config_key: &str) -> EnvironmentId {
     EnvironmentId::new(format!("static-ssh-{suffix}"))
 }
 
-struct RemoteNeutralEnvVars;
+#[derive(Default)]
+struct StaticEnvVars {
+    vars: HashMap<String, String>,
+}
 
-impl crate::providers::discovery::EnvVars for RemoteNeutralEnvVars {
-    fn get(&self, _key: &str) -> Option<String> {
-        None
+impl StaticEnvVars {
+    fn from_bag(bag: &EnvironmentBag) -> Self {
+        let mut vars = HashMap::new();
+        for assertion in bag.assertions() {
+            if let crate::providers::discovery::EnvironmentAssertion::EnvVarSet { key, value } = assertion {
+                vars.insert(key.clone(), value.clone());
+            }
+        }
+        Self { vars }
     }
+}
+
+impl crate::providers::discovery::EnvVars for StaticEnvVars {
+    fn get(&self, key: &str) -> Option<String> {
+        self.vars.get(key).cloned()
+    }
+}
+
+async fn load_env_vars(runner: &dyn CommandRunner, cwd: &Path) -> HashMap<String, String> {
+    let Ok(output) = runner.run("env", &[], cwd, &ChannelLabel::Noop).await else {
+        return HashMap::new();
+    };
+
+    output
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 const STATIC_SSH_REGISTRATION_TIMEOUT: Duration = Duration::from_millis(100);
@@ -85,9 +114,13 @@ async fn register_static_ssh_direct_environment(
     .await
     .map_err(|_| format!("ssh preflight timed out for {}", environment.hostname))?
     .map_err(|err| format!("ssh preflight failed for {}: {err}", environment.hostname))?;
+    let remote_env_vars = tokio::time::timeout(STATIC_SSH_REGISTRATION_TIMEOUT, load_env_vars(&*runner, Path::new("/")))
+        .await
+        .unwrap_or_default();
+    let remote_env = StaticEnvVars { vars: remote_env_vars };
     let env_bag = tokio::time::timeout(
         STATIC_SSH_REGISTRATION_TIMEOUT,
-        run_host_detectors(&discovery.host_detectors, &*runner, &RemoteNeutralEnvVars),
+        run_host_detectors(&discovery.host_detectors, &*runner, &remote_env),
     )
     .await
     .map_err(|_| format!("host detector execution timed out for {}", environment.hostname))?;
@@ -140,7 +173,7 @@ async fn discover_repo_for_environment(
     let runner =
         environment_manager.environment_runner(environment_id).ok_or_else(|| format!("environment runner not found: {environment_id}"))?;
     let ee_path = ExecutionEnvironmentPath::new(repo_path);
-    let remote_env = RemoteNeutralEnvVars;
+    let remote_env = StaticEnvVars::from_bag(&host_bag);
     let env: &dyn crate::providers::discovery::EnvVars =
         if environment_id == local_environment_id { &*discovery.env } else { &remote_env };
 
