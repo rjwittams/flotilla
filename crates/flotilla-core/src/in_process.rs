@@ -379,10 +379,6 @@ pub struct InProcessDaemon {
     /// Socket path for the daemon server — set by the daemon after startup.
     /// Used to inject FLOTILLA_DAEMON_SOCKET into managed terminal sessions.
     daemon_socket_path: RwLock<Option<PathBuf>>,
-    /// Maps active issue query cursor IDs to the repo identity and owning
-    /// session, so `execute_query` can look up the correct `IssueQueryService`
-    /// and `disconnect_client_session` can close remote cursors.
-    cursor_repo_map: RwLock<HashMap<crate::providers::issue_query::CursorId, (flotilla_protocol::RepoIdentity, uuid::Uuid)>>,
 }
 
 impl InProcessDaemon {
@@ -477,7 +473,6 @@ impl InProcessDaemon {
             session_id: uuid::Uuid::new_v4(),
             agent_state_store,
             daemon_socket_path: RwLock::new(None),
-            cursor_repo_map: RwLock::new(HashMap::new()),
         });
 
         // Spawn self-driving poll loop with a Weak reference.
@@ -1522,54 +1517,6 @@ impl InProcessDaemon {
             .ok_or_else(|| "no issue query service available on this host".to_string())
     }
 
-    async fn get_issue_query_service_for_cursor(
-        &self,
-        cursor: &crate::providers::issue_query::CursorId,
-    ) -> Result<Arc<dyn crate::providers::issue_query::IssueQueryService>, String> {
-        let identity = {
-            let map = self.cursor_repo_map.read().await;
-            map.get(cursor).map(|(id, _)| id.clone()).ok_or_else(|| format!("unknown cursor: {}", cursor.as_str()))?
-        };
-        let repos = self.repos.read().await;
-        let state = repos.get(&identity).ok_or_else(|| "repo no longer tracked".to_string())?;
-        state
-            .registry()
-            .issue_query_services
-            .preferred()
-            .cloned()
-            .ok_or_else(|| "no issue query service available on this host".to_string())
-    }
-
-    /// Return all cursor IDs owned by the given client session.
-    ///
-    /// Used by the server layer to close remote cursors before calling
-    /// `disconnect_client_session` for local cleanup.
-    pub async fn cursors_for_session(&self, session_id: uuid::Uuid) -> Vec<crate::providers::issue_query::CursorId> {
-        let map = self.cursor_repo_map.read().await;
-        map.iter().filter(|(_, (_, sid))| *sid == session_id).map(|(cid, _)| cid.clone()).collect()
-    }
-
-    /// Clean up all issue query cursors owned by the given client session.
-    ///
-    /// Called when a socket client disconnects. Iterates all tracked repos
-    /// and delegates to each `IssueQueryService::disconnect_session`.
-    pub async fn disconnect_client_session(&self, session_id: uuid::Uuid) {
-        let repos = self.repos.read().await;
-        let mut removed_cursors = Vec::new();
-        for state in repos.values() {
-            if let Some(service) = state.registry().issue_query_services.preferred() {
-                removed_cursors.extend(service.disconnect_session(session_id).await);
-            }
-        }
-        if !removed_cursors.is_empty() {
-            let mut map = self.cursor_repo_map.write().await;
-            for cursor_id in &removed_cursors {
-                map.remove(cursor_id);
-            }
-            debug!(%session_id, count = removed_cursors.len(), "cleaned up cursors for disconnected client session");
-        }
-    }
-
     pub async fn execute_with_remote_executor(
         &self,
         command: Command,
@@ -2011,7 +1958,7 @@ impl DaemonHandle for InProcessDaemon {
         self.execute_impl(command, Arc::new(crate::step::UnsupportedRemoteStepExecutor), false).await
     }
 
-    async fn execute_query(&self, command: Command, session_id: uuid::Uuid) -> Result<flotilla_protocol::CommandValue, String> {
+    async fn execute_query(&self, command: Command, _session_id: uuid::Uuid) -> Result<flotilla_protocol::CommandValue, String> {
         use flotilla_protocol::CommandAction;
         match &command.action {
             CommandAction::QueryRepoDetail { repo } => match self.get_repo_detail_internal(repo).await {
@@ -2038,25 +1985,11 @@ impl DaemonHandle for InProcessDaemon {
                 Ok(v) => Ok(flotilla_protocol::CommandValue::HostProviders(Box::new(v))),
                 Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
             },
-            CommandAction::QueryIssueOpen { repo, params } => {
+            CommandAction::QueryIssues { repo, params, page, count } => {
                 let repo_path = self.resolve_repo_selector(repo).await?;
-                let identity =
-                    self.tracked_repo_identity_for_path(&repo_path).await.ok_or_else(|| "no tracked repo for path".to_string())?;
                 let service = self.get_issue_query_service(&repo_path).await?;
-                let cursor = service.open_query(&repo_path, params.clone(), session_id).await?;
-                self.cursor_repo_map.write().await.insert(cursor.clone(), (identity, session_id));
-                Ok(flotilla_protocol::CommandValue::IssueQueryOpened { cursor })
-            }
-            CommandAction::QueryIssueFetchPage { cursor, count } => {
-                let service = self.get_issue_query_service_for_cursor(cursor).await?;
-                let page = service.fetch_page(cursor, *count).await?;
+                let page = service.query(&repo_path, params, *page, *count).await?;
                 Ok(flotilla_protocol::CommandValue::IssuePage(page))
-            }
-            CommandAction::QueryIssueClose { cursor } => {
-                let service = self.get_issue_query_service_for_cursor(cursor).await?;
-                service.close_query(cursor).await;
-                self.cursor_repo_map.write().await.remove(cursor);
-                Ok(flotilla_protocol::CommandValue::IssueQueryClosed)
             }
             CommandAction::QueryIssueFetchByIds { repo, ids } => {
                 let repo_path = self.resolve_repo_selector(repo).await?;

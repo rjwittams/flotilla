@@ -252,9 +252,7 @@ pub async fn build_plan(
         | CommandAction::QueryHostList {}
         | CommandAction::QueryHostStatus { .. }
         | CommandAction::QueryHostProviders { .. }
-        | CommandAction::QueryIssueOpen { .. }
-        | CommandAction::QueryIssueFetchPage { .. }
-        | CommandAction::QueryIssueClose { .. }
+        | CommandAction::QueryIssues { .. }
         | CommandAction::QueryIssueFetchByIds { .. }
         | CommandAction::QueryIssueOpenInBrowser { .. } => {
             Err(CommandValue::Error { message: "bug: daemon-level command reached per-repo executor".to_string() })
