@@ -48,9 +48,7 @@ impl ClientConnection {
     /// Run a stateful client session that began with a Hello handshake.
     ///
     /// Unlike `run`, the first message (Hello) has already been consumed and
-    /// replied to, so the loop starts by awaiting the next message. The
-    /// `client_session_id` ties cursor ownership to this connection for
-    /// cleanup on disconnect.
+    /// replied to, so the loop starts by awaiting the next message.
     pub(super) async fn run_stateful(self, session: Arc<MessageSession>, client_session_id: uuid::Uuid) {
         let (event_task, request_dispatcher, mut shutdown_rx) = self.start_session(&session, client_session_id);
         request_loop(&session, &request_dispatcher, &mut shutdown_rx).await;
@@ -94,19 +92,9 @@ impl ClientConnection {
         (event_task, request_dispatcher, self.shutdown_rx.clone())
     }
 
-    /// Common teardown: abort event relay, clean up session cursors, decrement client count.
-    ///
-    /// Closes any remote cursors owned by this session via the remote command
-    /// router before calling `disconnect_client_session` for local cleanup.
-    async fn finish_session(&self, event_task: tokio::task::JoinHandle<()>, session_id: uuid::Uuid) {
+    /// Common teardown: abort event relay, decrement client count.
+    async fn finish_session(&self, event_task: tokio::task::JoinHandle<()>, _session_id: uuid::Uuid) {
         event_task.abort();
-
-        // Close remote cursors first — the remote command router forwards
-        // QueryIssueClose to the target daemon that owns each cursor.
-        self.remote_command_router.disconnect_session_cursors(session_id).await;
-
-        // Clean up local cursors.
-        self.daemon.disconnect_client_session(session_id).await;
 
         let count = self.client_count.fetch_sub(1, Ordering::SeqCst) - 1;
         info!(%count, "client disconnected");
