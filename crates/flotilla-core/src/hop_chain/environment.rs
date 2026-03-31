@@ -41,12 +41,14 @@ impl EnvironmentHopResolver for DockerEnvironmentHopResolver {
             other => return Err(format!("resolve_wrap: expected Command on stack, got {other:?}")),
         };
 
-        let mut docker_args = vec![
-            Arg::Literal("docker".into()),
-            Arg::Literal("exec".into()),
-            Arg::Literal("-it".into()),
-            Arg::Literal(container.to_string()),
-        ];
+        let mut docker_args = vec![Arg::Literal("docker".into()), Arg::Literal("exec".into()), Arg::Literal("-it".into())];
+        // Consume working_directory here — it's a container-local path, so it
+        // must be passed via `docker exec -w`, not as a `cd` on the host.
+        if let Some(dir) = context.working_directory.take() {
+            docker_args.push(Arg::Literal("-w".into()));
+            docker_args.push(Arg::Quoted(dir.to_string()));
+        }
+        docker_args.push(Arg::Literal(container.to_string()));
         docker_args.extend(inner_args);
 
         context.actions.push(ResolvedAction::Command(docker_args));
@@ -71,13 +73,13 @@ impl EnvironmentHopResolver for DockerEnvironmentHopResolver {
         }
 
         // Push docker exec enter command
-        let docker_args = vec![
-            Arg::Literal("docker".into()),
-            Arg::Literal("exec".into()),
-            Arg::Literal("-it".into()),
-            Arg::Literal(container.to_string()),
-            Arg::Literal("/bin/sh".into()),
-        ];
+        let mut docker_args = vec![Arg::Literal("docker".into()), Arg::Literal("exec".into()), Arg::Literal("-it".into())];
+        if let Some(dir) = context.working_directory.take() {
+            docker_args.push(Arg::Literal("-w".into()));
+            docker_args.push(Arg::Quoted(dir.to_string()));
+        }
+        docker_args.push(Arg::Literal(container.to_string()));
+        docker_args.push(Arg::Literal("/bin/sh".into()));
         context.actions.push(ResolvedAction::Command(docker_args));
         Ok(())
     }
