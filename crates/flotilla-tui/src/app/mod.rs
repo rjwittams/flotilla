@@ -516,9 +516,14 @@ impl App {
                     let is_search = params.search.is_some();
                     let view = self.issue_views.entry(repo.clone()).or_default();
                     let target = if is_search {
+                        // Discard results from a stale search — the user may
+                        // have started a new search or cleared while this was
+                        // in flight.
+                        if view.search_query != params.search {
+                            continue;
+                        }
                         if view.search.is_none() {
                             view.search = Some(IssuePagingState::new(params.clone()));
-                            view.search_query = params.search.clone();
                         }
                         view.search.as_mut()
                     } else {
@@ -809,8 +814,13 @@ impl App {
                 }
                 AppAction::SetSearchQuery { repo, query } => {
                     if let Some(page) = self.screen.repo_pages.get_mut(&repo) {
-                        page.active_search_query = Some(query);
+                        page.active_search_query = Some(query.clone());
                     }
+                    // Reset search paging state and set search_query so that
+                    // in-flight results from a previous search are discarded.
+                    let view = self.issue_views.entry(repo.clone()).or_default();
+                    view.search = None;
+                    view.search_query = Some(query);
                 }
                 AppAction::ClearSearchQuery { repo } => {
                     if let Some(page) = self.screen.repo_pages.get_mut(&repo) {

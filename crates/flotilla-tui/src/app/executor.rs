@@ -1,4 +1,4 @@
-use flotilla_protocol::{Command, CommandValue};
+use flotilla_protocol::{Command, CommandAction, CommandValue};
 use tracing::info;
 
 use super::{
@@ -9,11 +9,28 @@ use crate::widgets::{branch_input::BranchInputWidget, delete_confirm::DeleteConf
 
 /// Dispatch a single protocol command through the daemon.
 ///
+/// Query commands (`QueryIssues`) are routed through `spawn_query_page` so
+/// results arrive via the background `issue_update_tx` channel.  Non-query
+/// commands use the regular `execute` path.
+///
 /// When `pending_ctx` is provided the successful command ID is recorded as a
 /// [`PendingAction`] on the active repo's UI state so the renderer can show
 /// an in-flight indicator on the affected work item row.
 pub async fn dispatch(cmd: Command, app: &mut App, pending_ctx: Option<PendingActionContext>) {
     app.model.status_message = None;
+
+    // Route issue query commands through the background query path.
+    if let CommandAction::QueryIssues { repo, params, page, count } = cmd.action {
+        let repo_identity = match repo {
+            flotilla_protocol::RepoSelector::Identity(id) => id,
+            _ => {
+                app.model.status_message = Some("issue query requires RepoSelector::Identity".into());
+                return;
+            }
+        };
+        app.spawn_query_page(repo_identity, params, page, count);
+        return;
+    }
 
     match app.daemon.execute(cmd).await {
         Ok(command_id) => {
