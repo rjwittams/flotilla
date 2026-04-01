@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use flotilla_protocol::arg::shell_quote;
+use uuid::Uuid;
 
 use crate::providers::{ChannelLabel, CommandOutput, CommandRunner};
 
@@ -20,6 +20,8 @@ impl SshCommandRunner {
         Self { destination: destination.into(), multiplex, runner }
     }
 
+    const ENSURE_FILE_IF_ABSENT_SCRIPT: &str = include_str!("scripts/ensure_file_if_absent.sh");
+
     fn ssh_args<'a>(&'a self, script: &'a str) -> Vec<&'a str> {
         let mut args = vec!["-T", "-o", "BatchMode=yes"];
         if self.multiplex {
@@ -32,28 +34,16 @@ impl SshCommandRunner {
         args
     }
 
-    fn remote_script(&self, cmd: &str, args: &[&str], cwd: &Path) -> String {
-        let mut parts = Vec::with_capacity(args.len() + 4);
-        parts.push(format!("cd {}", shell_quote(&cwd.to_string_lossy())));
-        parts.push("&&".to_string());
-        parts.push("exec".to_string());
-        parts.push(shell_quote(cmd));
-        parts.extend(args.iter().map(|arg| shell_quote(arg)));
-        parts.join(" ")
-    }
-
-    fn remote_write_script(&self, path: &Path, content: &str) -> String {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        format!(
-            "mkdir -p {} && printf %s {} > {}",
-            shell_quote(&parent.to_string_lossy()),
-            shell_quote(content),
-            shell_quote(&path.to_string_lossy())
-        )
-    }
-
     async fn execute(&self, cmd: &str, args: &[&str], cwd: &Path, label: &ChannelLabel) -> Result<String, String> {
-        let script = self.remote_script(cmd, args, cwd);
+        let script = {
+            let mut parts = Vec::with_capacity(args.len() + 4);
+            parts.push(format!("cd {}", flotilla_protocol::arg::shell_quote(&cwd.to_string_lossy())));
+            parts.push("&&".to_string());
+            parts.push("exec".to_string());
+            parts.push(flotilla_protocol::arg::shell_quote(cmd));
+            parts.extend(args.iter().map(|arg| flotilla_protocol::arg::shell_quote(arg)));
+            parts.join(" ")
+        };
         let ssh_args = self.ssh_args(&script);
         self.runner.run("ssh", &ssh_args, Path::new("/"), label).await
     }
@@ -66,7 +56,15 @@ impl CommandRunner for SshCommandRunner {
     }
 
     async fn run_output(&self, cmd: &str, args: &[&str], cwd: &Path, label: &ChannelLabel) -> Result<CommandOutput, String> {
-        let script = self.remote_script(cmd, args, cwd);
+        let script = {
+            let mut parts = Vec::with_capacity(args.len() + 4);
+            parts.push(format!("cd {}", flotilla_protocol::arg::shell_quote(&cwd.to_string_lossy())));
+            parts.push("&&".to_string());
+            parts.push("exec".to_string());
+            parts.push(flotilla_protocol::arg::shell_quote(cmd));
+            parts.extend(args.iter().map(|arg| flotilla_protocol::arg::shell_quote(arg)));
+            parts.join(" ")
+        };
         let ssh_args = self.ssh_args(&script);
         self.runner.run_output("ssh", &ssh_args, Path::new("/"), label).await
     }
@@ -75,10 +73,27 @@ impl CommandRunner for SshCommandRunner {
         self.execute(cmd, args, Path::new("/"), &ChannelLabel::Noop).await.is_ok()
     }
 
-    async fn ensure_file(&self, path: &Path, content: &str) -> Result<(), String> {
-        let script = self.remote_write_script(path, content);
-        let ssh_args = self.ssh_args(&script);
-        self.runner.run("ssh", &ssh_args, Path::new("/"), &ChannelLabel::Noop).await.map(|_| ())
+    async fn ensure_file(&self, path: &Path, content: &str) -> Result<String, String> {
+        let temp_suffix = Uuid::new_v4().to_string();
+        let script = Self::ENSURE_FILE_IF_ABSENT_SCRIPT;
+        let owned_args = vec![
+            "-T".to_string(),
+            "-o".to_string(),
+            "BatchMode=yes".to_string(),
+            self.destination.clone(),
+            "sh".to_string(),
+            "-lc".to_string(),
+            script.to_string(),
+            "ensure_file_if_absent.sh".to_string(),
+            path.to_string_lossy().into_owned(),
+            content.to_owned(),
+            temp_suffix,
+        ];
+        let mut arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+        if self.multiplex {
+            arg_refs.splice(3..3, ["-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/flotilla-ssh-%C", "-o", "ControlPersist=60"]);
+        }
+        self.runner.run("ssh", &arg_refs, Path::new("/"), &ChannelLabel::Noop).await
     }
 }
 
@@ -214,7 +229,8 @@ mod tests {
         let inner = std::sync::Arc::new(RecordingRunner::with_run_result(Ok(String::new())));
         let runner = SshCommandRunner::new("alice@feta.local", false, inner.clone());
 
-        runner.ensure_file(Path::new("/etc/flotilla/config.toml"), "key = true\n").await.expect("ensure_file");
+        let content = runner.ensure_file(Path::new("/etc/flotilla/config.toml"), "key = true\n").await.expect("ensure_file");
+        assert_eq!(content, String::new());
 
         let calls = inner.calls();
         let args = ssh_call_args(&calls);
@@ -224,7 +240,10 @@ mod tests {
         assert_eq!(args[3], "alice@feta.local");
         assert_eq!(args[4], "sh");
         assert_eq!(args[5], "-lc");
-        assert_eq!(args[6], "mkdir -p '/etc/flotilla' && printf %s 'key = true\n' > '/etc/flotilla/config.toml'");
+        assert!(args[6].contains("target=$1"));
+        assert_eq!(args[7], "ensure_file_if_absent.sh");
+        assert_eq!(args[8], "/etc/flotilla/config.toml");
+        assert_eq!(args[9], "key = true\n");
     }
 
     #[tokio::test]

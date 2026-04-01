@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     host::{HostName, HostPath, RepoIdentity},
     provider_data::{AttachableSetId, ProviderData},
+    qualified_path::{qualified_path_or_host_path, QualifiedPath},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +109,10 @@ pub struct WorkItem {
 
 impl WorkItem {
     pub fn checkout_key(&self) -> Option<&HostPath> {
+        self.checkout.as_ref().and_then(CheckoutRef::host_path)
+    }
+
+    pub fn qualified_checkout_key(&self) -> Option<&QualifiedPath> {
         self.checkout.as_ref().map(|co| &co.key)
     }
 }
@@ -134,16 +139,76 @@ pub enum WorkItemIdentity {
     Agent(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutRef {
-    pub key: HostPath,
+    pub key: QualifiedPath,
+    pub host_path: Option<HostPath>,
     pub is_main_checkout: bool,
+}
+
+impl CheckoutRef {
+    pub fn from_host_path(path: HostPath, is_main_checkout: bool) -> Self {
+        Self { key: QualifiedPath::from(&path), host_path: Some(path), is_main_checkout }
+    }
+
+    pub fn from_qualified_path(path: QualifiedPath, is_main_checkout: bool) -> Self {
+        let host_path = HostPath::try_from(&path).ok();
+        Self { key: path, host_path, is_main_checkout }
+    }
+
+    pub fn host_path(&self) -> Option<&HostPath> {
+        self.host_path.as_ref()
+    }
+}
+
+impl Serialize for CheckoutRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Repr<'a> {
+            #[serde(with = "qualified_path_or_host_path")]
+            key: &'a QualifiedPath,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            host_path: &'a Option<HostPath>,
+            is_main_checkout: bool,
+        }
+
+        Repr { key: &self.key, host_path: &self.host_path, is_main_checkout: self.is_main_checkout }.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CheckoutRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Repr {
+            #[serde(with = "qualified_path_or_host_path")]
+            key: QualifiedPath,
+            #[serde(default)]
+            host_path: Option<HostPath>,
+            is_main_checkout: bool,
+        }
+
+        let repr = Repr::deserialize(deserializer)?;
+        let host_path = repr.host_path.or_else(|| HostPath::try_from(&repr.key).ok());
+        Ok(Self { key: repr.key, host_path, is_main_checkout: repr.is_main_checkout })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{host::HostName, provider_data::ProviderData, test_helpers::assert_json_roundtrip, test_support::hp};
+    use crate::{
+        host::HostName,
+        provider_data::ProviderData,
+        qualified_path::{HostId, QualifiedPath},
+        test_helpers::assert_json_roundtrip,
+        test_support::hp,
+    };
 
     #[test]
     fn category_labels_defaults_and_capitalization() {
@@ -228,7 +293,7 @@ mod tests {
                     host: HostName::new("test-host"),
                     branch: Some("feat-x".into()),
                     description: "Feature X".into(),
-                    checkout: Some(CheckoutRef { key: hp("/repos/project/wt"), is_main_checkout: false }),
+                    checkout: Some(CheckoutRef::from_host_path(hp("/repos/project/wt"), false)),
                     change_request_key: None,
                     session_key: None,
                     issue_keys: vec![],
@@ -333,7 +398,7 @@ mod tests {
                 host: HostName::new("test-host"),
                 branch: Some("main".into()),
                 description: "Main".into(),
-                checkout: Some(CheckoutRef { key: hp("/repos/main"), is_main_checkout: true }),
+                checkout: Some(CheckoutRef::from_host_path(hp("/repos/main"), true)),
                 change_request_key: Some("1".into()),
                 session_key: Some("sess-1".into()),
                 issue_keys: vec!["I-1".into(), "I-2".into()],
@@ -353,12 +418,17 @@ mod tests {
             assert_eq!(decoded.kind, case.kind);
             assert_eq!(decoded.identity, case.identity);
             assert_eq!(decoded.checkout_key(), case.checkout_key());
+            assert_eq!(decoded.qualified_checkout_key(), case.qualified_checkout_key());
         }
 
         let without_checkout = &cases[0];
         assert!(without_checkout.checkout_key().is_none());
         let with_checkout = &cases[1];
         assert_eq!(with_checkout.checkout_key(), Some(&hp("/repos/main")));
+        assert_eq!(
+            with_checkout.qualified_checkout_key(),
+            Some(&QualifiedPath::from_host_name(&HostName::new("test-host"), "/repos/main"))
+        );
     }
 
     #[test]
@@ -448,15 +518,35 @@ mod tests {
 
     #[test]
     fn checkout_ref_roundtrip_covers_both_boolean_values() {
-        let cases = vec![CheckoutRef { key: hp("/repos/proj/wt-1"), is_main_checkout: true }, CheckoutRef {
-            key: hp("/tmp/wt"),
-            is_main_checkout: false,
-        }];
+        let cases = vec![CheckoutRef::from_host_path(hp("/repos/proj/wt-1"), true), CheckoutRef::from_host_path(hp("/tmp/wt"), false)];
         for case in &cases {
             let json = serde_json::to_string(case).expect("serialize");
             let decoded: CheckoutRef = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(decoded.key, case.key);
+            assert_eq!(decoded.host_path, case.host_path);
             assert_eq!(decoded.is_main_checkout, case.is_main_checkout);
         }
+    }
+
+    #[test]
+    fn checkout_ref_accepts_legacy_host_path_json() {
+        let json = r#"{
+            "key": {"host": "test-host", "path": "/repos/proj/wt-1"},
+            "is_main_checkout": true
+        }"#;
+        let decoded: CheckoutRef = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(decoded.key, QualifiedPath::from_host_name(&HostName::new("test-host"), "/repos/proj/wt-1"));
+        assert_eq!(decoded.host_path, Some(hp("/repos/proj/wt-1")));
+        assert!(decoded.is_main_checkout);
+    }
+
+    #[test]
+    fn checkout_ref_roundtrip_covers_real_host_id_qualified_paths() {
+        let case = CheckoutRef::from_qualified_path(QualifiedPath::host(HostId::new("host-uuid"), "/repos/proj/wt-1"), false);
+        let json = serde_json::to_string(&case).expect("serialize");
+        let decoded: CheckoutRef = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.key, case.key);
+        assert_eq!(decoded.host_path, None);
+        assert!(!decoded.is_main_checkout);
     }
 }

@@ -34,10 +34,10 @@ use flotilla_core::{
     },
 };
 use flotilla_protocol::{
-    AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, CorrelationKey, DaemonEvent,
-    EnvironmentId, EnvironmentInfo, EnvironmentStatus, HostEnvironment, HostName, HostPath, HostProviderStatus, HostSummary, ImageId,
-    Issue, PeerConnectionState, ProviderData, RepoIdentity, RepoSelector, StreamKey, SystemInfo, ToolInventory, TopologyRoute,
-    WorkItemKind,
+    qualified_path::HostId, AssociationKey, Change, Checkout, CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue,
+    CorrelationKey, DaemonEvent, EnvironmentId, EnvironmentInfo, EnvironmentStatus, HostEnvironment, HostName, HostPath,
+    HostProviderStatus, HostSummary, ImageId, Issue, PeerConnectionState, ProviderData, RepoIdentity, RepoSelector, StreamKey, SystemInfo,
+    ToolInventory, TopologyRoute, WorkItemKind,
 };
 use tokio::sync::Notify;
 
@@ -568,6 +568,25 @@ hostname = "buildbox.example"
                 ],
                 Ok("buildbox-env-id\n".into()),
             )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'cat' '/var/state/flotilla/host-id'",
+                ],
+                Ok("buildbox-host-id\n".into()),
+            )
             .build(),
     );
 
@@ -674,6 +693,25 @@ display_name = "Build Box"
                 ],
                 Ok("buildbox-visible-id\n".into()),
             )
+            .on_run(
+                "ssh",
+                &[
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    "ControlPath=/tmp/flotilla-ssh-%C",
+                    "-o",
+                    "ControlPersist=60",
+                    "buildbox.example",
+                    "sh",
+                    "-lc",
+                    "cd '/' && exec 'cat' '/home/build/.local/state/flotilla/host-id'",
+                ],
+                Ok("buildbox-visible-host-id\n".into()),
+            )
             .build(),
     );
 
@@ -690,7 +728,11 @@ display_name = "Build Box"
         .visible_environments
         .iter()
         .find_map(|environment| match environment {
-            EnvironmentInfo::Direct { id, display_name, .. } if id.as_str() == "buildbox-visible-id" => Some(display_name.clone()),
+            EnvironmentInfo::Direct { id, host_id, display_name, .. }
+                if id.as_str() == "buildbox-visible-id" && host_id.as_ref().map(HostId::as_str) == Some("buildbox-visible-host-id") =>
+            {
+                Some(display_name.clone())
+            }
             _ => None,
         })
         .expect("static ssh direct environment should be visible");
@@ -1243,11 +1285,13 @@ async fn local_host_queries_include_visible_environments_without_changing_summar
     let (_temp, _repo, daemon, _identity) = daemon_for_fake_repo().await;
 
     let direct_environment_id = EnvironmentId::new("direct-visible-env");
+    let direct_host_id = HostId::new("direct-visible-host");
     daemon
         .register_direct_environment_for_test(
             direct_environment_id.clone(),
             Arc::new(DiscoveryMockRunner::builder().build()),
             EnvironmentBag::new().with(EnvironmentAssertion::env_var("DISPLAY_NAME", "direct-visible")),
+            Some(direct_host_id.clone()),
         )
         .expect("register direct environment");
 
@@ -1288,6 +1332,16 @@ async fn local_host_queries_include_visible_environments_without_changing_summar
     assert!(status_ids.contains(&direct_environment_id));
     assert!(status_ids.contains(&provisioned_environment_id));
     assert_eq!(status_ids, provider_ids, "host status and provider queries should expose the same visible environments");
+
+    let direct_visible = status
+        .visible_environments
+        .iter()
+        .find(|environment| matches!(environment, EnvironmentInfo::Direct { id, .. } if id == &direct_environment_id))
+        .expect("direct visible environment should be present");
+    match direct_visible {
+        EnvironmentInfo::Direct { host_id, .. } => assert_eq!(host_id.as_ref(), Some(&direct_host_id)),
+        _ => unreachable!("already filtered to direct environment"),
+    }
 
     let summary = status.summary.expect("local host summary");
     assert!(
@@ -2770,7 +2824,7 @@ async fn in_process_daemon_keeps_remote_attachable_set_anchor_when_local_workspa
     let set_item =
         snapshot.work_items.iter().find(|item| item.attachable_set_id.as_ref() == Some(&set_id)).expect("attachable set work item");
     assert_eq!(set_item.host, remote_host);
-    assert_eq!(set_item.checkout.as_ref().map(|checkout| &checkout.key), Some(&remote_checkout));
+    assert_eq!(set_item.checkout.as_ref().and_then(|checkout| checkout.host_path()), Some(&remote_checkout));
     assert_eq!(set_item.workspace_refs, vec![workspace_ref]);
 }
 
@@ -2860,7 +2914,7 @@ async fn in_process_daemon_correlates_workspace_into_one_remote_checkout_item() 
     let item = matching_items[0];
     assert_eq!(item.kind, WorkItemKind::Checkout, "checkout should remain the primary anchor when present");
     assert_eq!(item.host, remote_host);
-    assert_eq!(item.checkout.as_ref().map(|checkout| &checkout.key), Some(&remote_checkout));
+    assert_eq!(item.checkout.as_ref().and_then(|checkout| checkout.host_path()), Some(&remote_checkout));
     assert_eq!(item.workspace_refs, vec![workspace_ref]);
 }
 

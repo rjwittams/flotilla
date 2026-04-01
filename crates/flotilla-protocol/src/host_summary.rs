@@ -106,6 +106,7 @@ mod tests {
                 EnvironmentInfo::Direct {
                     id: EnvironmentId::new("env-direct"),
                     display_name: Some("ssh-dev".into()),
+                    host_id: None,
                     status: EnvironmentStatus::Running,
                 },
                 EnvironmentInfo::Provisioned {

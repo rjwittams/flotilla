@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use flotilla_protocol::{CommandValue, EnvironmentId, EnvironmentInfo, EnvironmentStatus};
+use flotilla_protocol::{qualified_path::HostId, CommandValue, EnvironmentId, EnvironmentInfo, EnvironmentStatus};
 
 use crate::{
     config::ConfigStore,
@@ -27,6 +27,7 @@ pub enum ManagedEnvironmentKind {
 pub struct DirectEnvironmentState {
     pub runner: Arc<dyn CommandRunner>,
     pub env_bag: EnvironmentBag,
+    pub host_id: Option<HostId>,
     pub display_name: Option<String>,
 }
 
@@ -54,17 +55,27 @@ pub struct CreateProvisionedEnvironmentRequest<'a> {
 }
 
 impl EnvironmentManager {
-    pub async fn new_local(discovery: &DiscoveryRuntime, local_environment_id: EnvironmentId) -> Self {
+    pub async fn new_local(discovery: &DiscoveryRuntime, local_environment_id: EnvironmentId, local_host_id: HostId) -> Self {
         let env_bag = run_host_detectors(&discovery.host_detectors, &*discovery.runner, &*discovery.env).await;
-        Self::from_local_state(local_environment_id, Arc::clone(&discovery.runner), env_bag)
+        Self::from_local_state(local_environment_id, local_host_id, Arc::clone(&discovery.runner), env_bag)
     }
 
-    pub fn from_local_state(local_environment_id: EnvironmentId, local_runner: Arc<dyn CommandRunner>, env_bag: EnvironmentBag) -> Self {
+    pub fn from_local_state(
+        local_environment_id: EnvironmentId,
+        local_host_id: HostId,
+        local_runner: Arc<dyn CommandRunner>,
+        env_bag: EnvironmentBag,
+    ) -> Self {
         let mut managed = HashMap::new();
         let display_name = Self::display_name_for_bag(&env_bag);
         managed.insert(
             local_environment_id.clone(),
-            ManagedEnvironmentKind::Direct(DirectEnvironmentState { runner: Arc::clone(&local_runner), env_bag, display_name }),
+            ManagedEnvironmentKind::Direct(DirectEnvironmentState {
+                runner: Arc::clone(&local_runner),
+                env_bag,
+                host_id: Some(local_host_id),
+                display_name,
+            }),
         );
 
         Self { local_environment_id, host_runner: local_runner, managed: Mutex::new(managed) }
@@ -83,6 +94,7 @@ impl EnvironmentManager {
         env_id: EnvironmentId,
         runner: Arc<dyn CommandRunner>,
         env_bag: EnvironmentBag,
+        host_id: Option<HostId>,
     ) -> Result<(), String> {
         let mut managed = self.managed.lock().expect("environment manager lock poisoned");
         match managed.entry(env_id.clone()) {
@@ -97,7 +109,7 @@ impl EnvironmentManager {
             },
             Entry::Vacant(entry) => {
                 let display_name = Self::display_name_for_bag(&env_bag);
-                entry.insert(ManagedEnvironmentKind::Direct(DirectEnvironmentState { runner, env_bag, display_name }));
+                entry.insert(ManagedEnvironmentKind::Direct(DirectEnvironmentState { runner, env_bag, host_id, display_name }));
                 Ok(())
             }
         }
@@ -168,6 +180,7 @@ impl EnvironmentManager {
                 ManagedEnvironmentKind::Direct(state) => {
                     environments.push(EnvironmentInfo::Direct {
                         id: env_id,
+                        host_id: state.host_id.clone(),
                         display_name: state.display_name.clone(),
                         status: EnvironmentStatus::Running,
                     });
@@ -476,11 +489,15 @@ mod tests {
         EnvironmentId::new("test-local-environment")
     }
 
+    fn test_local_host_id() -> HostId {
+        HostId::new("test-local-host-id")
+    }
+
     #[tokio::test]
     async fn new_local_registers_direct_environment() {
         let env_id = test_local_environment_id();
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, env_id.clone()).await;
+        let manager = EnvironmentManager::new_local(&discovery, env_id.clone(), test_local_host_id()).await;
 
         assert_eq!(manager.local_environment_id(), &env_id);
         assert!(manager.environment_runner(&env_id).is_some());
@@ -492,7 +509,7 @@ mod tests {
     async fn direct_environment_lookup_uses_host_detectors() {
         let env_id = test_local_environment_id();
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, env_id.clone()).await;
+        let manager = EnvironmentManager::new_local(&discovery, env_id.clone(), test_local_host_id()).await;
 
         let bag = manager.environment_bag(&env_id).expect("local environment bag");
         assert!(bag.find_binary("git").is_some(), "host detectors should populate the direct environment bag");
@@ -502,7 +519,7 @@ mod tests {
     async fn register_and_remove_provisioned_environment_updates_state() {
         let env_id = EnvironmentId::new("env-provisioned-1");
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id()).await;
+        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id(), test_local_host_id()).await;
         let runner = Arc::new(DiscoveryMockRunner::builder().build()) as Arc<dyn CommandRunner>;
         let handle: EnvironmentHandle = Arc::new(MockProvisionedEnvironment {
             id: env_id.clone(),
@@ -534,7 +551,7 @@ mod tests {
     #[tokio::test]
     async fn register_provisioned_environment_rejects_handle_id_mismatch() {
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id()).await;
+        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id(), test_local_host_id()).await;
         let registration_id = EnvironmentId::new("provisioned-registration-id");
         let handle_id = EnvironmentId::new("provisioned-handle-id");
         let (handle, _) = mock_handle(&handle_id, HashMap::new(), None);
@@ -550,13 +567,13 @@ mod tests {
     async fn register_direct_environment_adds_an_independent_direct_environment() {
         let discovery = fake_discovery(false);
         let local_environment_id = test_local_environment_id();
-        let manager = EnvironmentManager::new_local(&discovery, local_environment_id.clone()).await;
+        let manager = EnvironmentManager::new_local(&discovery, local_environment_id.clone(), test_local_host_id()).await;
         let direct_environment_id = EnvironmentId::new("direct-environment");
         let direct_runner = Arc::new(DiscoveryMockRunner::builder().build()) as Arc<dyn CommandRunner>;
         let direct_bag = EnvironmentBag::new().with(EnvironmentAssertion::env_var("DIRECT", "true"));
 
         manager
-            .register_direct_environment(direct_environment_id.clone(), Arc::clone(&direct_runner), direct_bag.clone())
+            .register_direct_environment(direct_environment_id.clone(), Arc::clone(&direct_runner), direct_bag.clone(), None)
             .expect("register direct environment");
 
         let managed_ids: Vec<_> = manager.managed_environments().into_iter().map(|(id, _)| id).collect();
@@ -571,8 +588,12 @@ mod tests {
     async fn visible_environments_includes_direct_and_provisioned_environments_with_display_names() {
         let local_environment_id = EnvironmentId::new("local-env");
         let local_bag = EnvironmentBag::new().with(EnvironmentAssertion::env_var("DISPLAY_NAME", "local-dev"));
-        let manager =
-            EnvironmentManager::from_local_state(local_environment_id.clone(), Arc::new(DiscoveryMockRunner::builder().build()), local_bag);
+        let manager = EnvironmentManager::from_local_state(
+            local_environment_id.clone(),
+            HostId::new("local-host-id"),
+            Arc::new(DiscoveryMockRunner::builder().build()),
+            local_bag,
+        );
 
         let ssh_environment_id = EnvironmentId::new("ssh-env");
         manager
@@ -580,6 +601,7 @@ mod tests {
                 ssh_environment_id.clone(),
                 Arc::new(DiscoveryMockRunner::builder().build()),
                 EnvironmentBag::new().with(EnvironmentAssertion::env_var("DISPLAY_NAME", "ssh-dev")),
+                Some(HostId::new("ssh-host-id")),
             )
             .expect("register ssh direct environment");
 
@@ -610,8 +632,9 @@ mod tests {
         );
 
         match &visible[0] {
-            EnvironmentInfo::Direct { id, display_name, status } => {
+            EnvironmentInfo::Direct { id, host_id, display_name, status } => {
                 assert_eq!(id, &local_environment_id);
+                assert_eq!(host_id.as_ref().map(HostId::as_str), Some("local-host-id"));
                 assert_eq!(display_name.as_deref(), Some("local-dev"));
                 assert_eq!(status, &EnvironmentStatus::Running);
             }
@@ -629,8 +652,9 @@ mod tests {
         }
 
         match &visible[2] {
-            EnvironmentInfo::Direct { id, display_name, status } => {
+            EnvironmentInfo::Direct { id, host_id, display_name, status } => {
                 assert_eq!(id, &ssh_environment_id);
+                assert_eq!(host_id.as_ref().map(HostId::as_str), Some("ssh-host-id"));
                 assert_eq!(display_name.as_deref(), Some("ssh-dev"));
                 assert_eq!(status, &EnvironmentStatus::Running);
             }
@@ -642,6 +666,7 @@ mod tests {
     fn direct_environment_serialization_omits_image_metadata() {
         let info = EnvironmentInfo::Direct {
             id: EnvironmentId::new("direct-env"),
+            host_id: Some(HostId::new("direct-host-id")),
             display_name: Some("ssh-dev".to_string()),
             status: EnvironmentStatus::Running,
         };
@@ -651,6 +676,7 @@ mod tests {
 
         assert_eq!(obj.get("kind").and_then(|value| value.as_str()), Some("direct"));
         assert_eq!(obj.get("id").and_then(|value| value.as_str()), Some("direct-env"));
+        assert_eq!(obj.get("host_id").and_then(|value| value.as_str()), Some("direct-host-id"));
         assert!(obj.get("image").is_none(), "direct environments must not publish image metadata");
     }
 
@@ -658,11 +684,12 @@ mod tests {
     async fn register_direct_environment_rejects_local_collision() {
         let discovery = fake_discovery(false);
         let local_environment_id = test_local_environment_id();
-        let manager = EnvironmentManager::new_local(&discovery, local_environment_id.clone()).await;
+        let manager = EnvironmentManager::new_local(&discovery, local_environment_id.clone(), test_local_host_id()).await;
         let result = manager.register_direct_environment(
             local_environment_id.clone(),
             Arc::new(DiscoveryMockRunner::builder().build()),
             EnvironmentBag::new(),
+            None,
         );
 
         assert!(result.is_err(), "local direct environment must not be replaceable through direct registration");
@@ -673,14 +700,18 @@ mod tests {
     async fn register_direct_environment_rejects_provisioned_collision() {
         let env_id = EnvironmentId::new("shared-environment");
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id()).await;
+        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id(), test_local_host_id()).await;
         let (handle, _) = mock_handle(&env_id, HashMap::new(), None);
         manager
             .register_provisioned_environment(env_id.clone(), handle, EnvironmentBag::new(), None)
             .expect("register provisioned environment");
 
-        let result =
-            manager.register_direct_environment(env_id.clone(), Arc::new(DiscoveryMockRunner::builder().build()), EnvironmentBag::new());
+        let result = manager.register_direct_environment(
+            env_id.clone(),
+            Arc::new(DiscoveryMockRunner::builder().build()),
+            EnvironmentBag::new(),
+            None,
+        );
 
         assert!(result.is_err(), "existing provisioned environments must not be replaced by direct environments");
     }
@@ -689,7 +720,7 @@ mod tests {
     async fn update_direct_environment_bag_refreshes_lookup_state() {
         let discovery = fake_discovery(false);
         let local_environment_id = test_local_environment_id();
-        let manager = EnvironmentManager::new_local(&discovery, local_environment_id.clone()).await;
+        let manager = EnvironmentManager::new_local(&discovery, local_environment_id.clone(), test_local_host_id()).await;
         let direct_environment_id = EnvironmentId::new("refreshable-direct-environment");
 
         manager
@@ -697,6 +728,7 @@ mod tests {
                 direct_environment_id.clone(),
                 Arc::new(DiscoveryMockRunner::builder().build()),
                 EnvironmentBag::new().with(EnvironmentAssertion::env_var("INITIAL", "true")),
+                None,
             )
             .expect("register direct environment");
 
@@ -717,7 +749,7 @@ mod tests {
     async fn register_provisioned_environment_rejects_local_direct_collision() {
         let local_environment_id = test_local_environment_id();
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, local_environment_id.clone()).await;
+        let manager = EnvironmentManager::new_local(&discovery, local_environment_id.clone(), test_local_host_id()).await;
         let original_bag = manager.environment_bag(&local_environment_id).expect("local environment bag");
         let handle: EnvironmentHandle = Arc::new(MockProvisionedEnvironment {
             id: local_environment_id.clone(),
@@ -741,7 +773,7 @@ mod tests {
     async fn register_provisioned_environment_rejects_existing_direct_collision() {
         let local_environment_id = test_local_environment_id();
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, local_environment_id.clone()).await;
+        let manager = EnvironmentManager::new_local(&discovery, local_environment_id.clone(), test_local_host_id()).await;
         let direct_env_id = EnvironmentId::new("direct-environment");
         let direct_bag = EnvironmentBag::new().with(EnvironmentAssertion::env_var("DIRECT", "true"));
         let direct_runner = Arc::new(DiscoveryMockRunner::builder().build()) as Arc<dyn CommandRunner>;
@@ -753,6 +785,7 @@ mod tests {
                 ManagedEnvironmentKind::Direct(DirectEnvironmentState {
                     runner: direct_runner,
                     env_bag: direct_bag.clone(),
+                    host_id: Some(HostId::new("direct-host-id")),
                     display_name: Some("direct-env".to_string()),
                 }),
             );
@@ -778,7 +811,7 @@ mod tests {
     async fn create_provisioned_environment_registers_handle() {
         let env_id = EnvironmentId::new("env-created-1");
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id()).await;
+        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id(), test_local_host_id()).await;
         let (handle, _) = mock_handle(&env_id, HashMap::new(), None);
         let provider = Arc::new(MockEnvironmentProvider { create_result: tokio::sync::Mutex::new(Some(Ok(handle))) });
         let mut registry = ProviderRegistry::new();
@@ -816,7 +849,7 @@ mod tests {
     async fn discover_provisioned_environment_providers_updates_bag_and_registry() {
         let env_id = EnvironmentId::new("env-discover-1");
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id()).await;
+        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id(), test_local_host_id()).await;
         let (handle, _) = mock_handle(&env_id, HashMap::from([(String::from("ANTHROPIC_API_KEY"), String::from("test-key"))]), None);
         manager
             .register_provisioned_environment(env_id.clone(), handle, EnvironmentBag::new(), None)
@@ -835,7 +868,7 @@ mod tests {
     async fn destroy_provisioned_environment_unregisters_and_destroys_handle() {
         let env_id = EnvironmentId::new("env-destroy-1");
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id()).await;
+        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id(), test_local_host_id()).await;
         let (handle, destroyed) = mock_handle(&env_id, HashMap::new(), None);
         manager
             .register_provisioned_environment(env_id.clone(), handle, EnvironmentBag::new(), None)
@@ -852,7 +885,7 @@ mod tests {
     async fn destroy_provisioned_environment_keeps_state_when_destroy_fails() {
         let env_id = EnvironmentId::new("env-destroy-fail-1");
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id()).await;
+        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id(), test_local_host_id()).await;
         let (handle, destroyed) = mock_handle(&env_id, HashMap::new(), Some("boom".to_string()));
         manager
             .register_provisioned_environment(env_id.clone(), handle, EnvironmentBag::new(), None)
@@ -869,7 +902,7 @@ mod tests {
     async fn discovery_update_does_not_resurrect_environment_after_concurrent_destroy() {
         let env_id = EnvironmentId::new("env-discovery-race-1");
         let discovery = fake_discovery(false);
-        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id()).await;
+        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id(), test_local_host_id()).await;
         let (handle, _) = mock_handle(&env_id, HashMap::new(), None);
         manager
             .register_provisioned_environment(env_id.clone(), Arc::clone(&handle), EnvironmentBag::new(), None)
@@ -897,7 +930,7 @@ mod tests {
         let runner = Arc::new(DiscoveryMockRunner::builder().build()) as Arc<dyn CommandRunner>;
         let bag = EnvironmentBag::new().with(EnvironmentAssertion::env_var("SEEDED", "true"));
 
-        let manager = EnvironmentManager::from_local_state(env_id.clone(), Arc::clone(&runner), bag.clone());
+        let manager = EnvironmentManager::from_local_state(env_id.clone(), test_local_host_id(), Arc::clone(&runner), bag.clone());
 
         assert!(Arc::ptr_eq(&manager.environment_runner(&env_id).expect("runner"), &runner));
         assert_eq!(manager.environment_bag(&env_id).expect("bag").find_env_var("SEEDED"), Some("true"));

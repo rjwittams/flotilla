@@ -2,6 +2,8 @@ use std::{fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::qualified_path::HostId;
+
 /// Filesystem-safe identifier for a sandbox environment.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -136,6 +138,8 @@ pub enum EnvironmentInfo {
     Direct {
         id: EnvironmentId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_id: Option<HostId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         display_name: Option<String>,
         status: EnvironmentStatus,
     },
@@ -162,6 +166,8 @@ impl EnvironmentInfo {
 enum EnvironmentInfoTagged {
     Direct {
         id: EnvironmentId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_id: Option<HostId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_name: Option<String>,
         status: EnvironmentStatus,
@@ -195,7 +201,7 @@ enum EnvironmentInfoRepr {
 impl From<EnvironmentInfoTagged> for EnvironmentInfo {
     fn from(value: EnvironmentInfoTagged) -> Self {
         match value {
-            EnvironmentInfoTagged::Direct { id, display_name, status } => Self::Direct { id, display_name, status },
+            EnvironmentInfoTagged::Direct { id, host_id, display_name, status } => Self::Direct { id, host_id, display_name, status },
             EnvironmentInfoTagged::Provisioned { id, display_name, image, status } => Self::Provisioned { id, display_name, image, status },
         }
     }
@@ -262,6 +268,7 @@ token_env_vars: []
         let info = EnvironmentInfo::Direct {
             id: EnvironmentId::new("env-direct"),
             display_name: Some("ssh-dev".into()),
+            host_id: None,
             status: EnvironmentStatus::Running,
         };
 
@@ -276,6 +283,7 @@ token_env_vars: []
         assert_eq!(info, EnvironmentInfo::Direct {
             id: EnvironmentId::new("env-direct"),
             display_name: None,
+            host_id: None,
             status: EnvironmentStatus::Running,
         });
     }

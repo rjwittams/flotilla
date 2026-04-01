@@ -1,6 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::providers::{ChannelLabel, CommandOutput, CommandRunner};
 
@@ -16,6 +17,8 @@ impl EnvironmentRunner {
     pub fn new(container_name: String, inner: Arc<dyn CommandRunner>) -> Self {
         Self { container_name, inner }
     }
+
+    const ENSURE_FILE_IF_ABSENT_SCRIPT: &str = include_str!("../scripts/ensure_file_if_absent.sh");
 }
 
 #[async_trait]
@@ -39,19 +42,21 @@ impl CommandRunner for EnvironmentRunner {
         self.inner.run("docker", &docker_args, Path::new("/"), &ChannelLabel::Noop).await.is_ok()
     }
 
-    async fn ensure_file(&self, path: &Path, content: &str) -> Result<(), String> {
-        let parent = path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
-        let path_str = path.to_string_lossy();
-        // Use printf with %s to avoid echo's backslash interpretation.
-        // All interpolated values are single-quoted with embedded single
-        // quotes escaped via the '\'' idiom.
-        let escape = |s: &str| s.replace('\'', "'\\''");
-        let escaped_parent = escape(&parent);
-        let escaped_path = escape(&path_str);
-        let escaped_content = escape(content);
-        let script = format!("mkdir -p '{escaped_parent}' && printf '%s' '{escaped_content}' > '{escaped_path}'");
-        let docker_args = vec!["exec", &self.container_name, "sh", "-c", &script];
-        self.inner.run("docker", &docker_args, Path::new("/"), &ChannelLabel::Noop).await.map(|_| ())
+    async fn ensure_file(&self, path: &Path, content: &str) -> Result<String, String> {
+        let temp_suffix = Uuid::new_v4().to_string();
+        let owned_args = vec![
+            "exec".to_string(),
+            self.container_name.clone(),
+            "sh".to_string(),
+            "-lc".to_string(),
+            Self::ENSURE_FILE_IF_ABSENT_SCRIPT.to_string(),
+            "ensure_file_if_absent.sh".to_string(),
+            path.to_string_lossy().into_owned(),
+            content.to_owned(),
+            temp_suffix,
+        ];
+        let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+        self.inner.run("docker", &arg_refs, Path::new("/"), &ChannelLabel::Noop).await
     }
 }
 
@@ -67,7 +72,8 @@ mod tests {
         let inner = Arc::new(MockRunner::new(vec![Ok(String::new())]));
         let runner = EnvironmentRunner::new("my-container".into(), inner.clone());
 
-        runner.ensure_file(Path::new("/app/config/shpool.toml"), "key = true\n").await.expect("ensure_file");
+        let content = runner.ensure_file(Path::new("/app/config/shpool.toml"), "key = true\n").await.expect("ensure_file");
+        assert_eq!(content, String::new());
 
         let calls = inner.calls();
         assert_eq!(calls.len(), 1);
@@ -76,11 +82,11 @@ mod tests {
         assert!(args.contains(&"exec".to_string()));
         assert!(args.contains(&"my-container".to_string()));
         assert!(args.contains(&"sh".to_string()));
-        assert!(args.contains(&"-c".to_string()));
+        assert!(args.contains(&"-lc".to_string()));
         // The sh -c script should create the parent dir and write the file
-        let script = args.last().expect("should have script arg");
-        assert!(script.contains("mkdir -p"), "script should create parent dirs: {script}");
-        assert!(script.contains("/app/config/shpool.toml"), "script should reference target path: {script}");
-        assert!(script.contains("key = true"), "script should contain file content: {script}");
+        let script = args.get(4).expect("should have script arg");
+        assert!(script.contains("target=$1"));
+        assert_eq!(args.get(6).map(String::as_str), Some("/app/config/shpool.toml"));
+        assert_eq!(args.get(7).map(String::as_str), Some("key = true\n"));
     }
 }

@@ -37,6 +37,7 @@ fn desc(name: &str) -> ProviderDescriptor {
 use async_trait::async_trait;
 use flotilla_protocol::{
     arg::Arg,
+    qualified_path::HostId,
     test_support::{TestCheckout, TestIssue, TestSession},
     CheckoutSelector, CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath, PreparedTerminalCommand, RepoSelector,
     ResolvedPaneCommand, TerminalStatus,
@@ -318,7 +319,7 @@ fn local_environment_id() -> EnvironmentId {
 
 async fn empty_environment_manager() -> Arc<EnvironmentManager> {
     let discovery = fake_discovery(false);
-    Arc::new(EnvironmentManager::new_local(&discovery, local_environment_id()).await)
+    Arc::new(EnvironmentManager::new_local(&discovery, local_environment_id(), HostId::new("test-local-host-id")).await)
 }
 
 fn repo_identity() -> flotilla_protocol::RepoIdentity {

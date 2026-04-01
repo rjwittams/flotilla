@@ -164,11 +164,12 @@ mod tests {
 
     #[tokio::test]
     async fn build_local_host_summary_uses_manager_backed_local_inventory() {
-        use flotilla_protocol::EnvironmentId;
+        use flotilla_protocol::{qualified_path::HostId, EnvironmentId};
 
         let host_name = HostName::new("test-host");
         let manager = EnvironmentManager::from_local_state(
             EnvironmentId::new("test-local-environment"),
+            HostId::new("test-local-host-id"),
             Arc::new(crate::providers::discovery::test_support::DiscoveryMockRunner::builder().build()),
             EnvironmentBag::new().with(EnvironmentAssertion::versioned_binary("git", "/usr/bin/git", "2.40.0")),
         );
@@ -182,11 +183,12 @@ mod tests {
 
     #[tokio::test]
     async fn build_local_host_summary_populates_provisioned_environments_from_manager() {
-        use flotilla_protocol::{EnvironmentId, EnvironmentStatus, ImageId};
+        use flotilla_protocol::{qualified_path::HostId, EnvironmentId, EnvironmentStatus, ImageId};
 
         let host_name = HostName::new("test-host");
         let manager = EnvironmentManager::from_local_state(
             EnvironmentId::new("test-local-environment"),
+            HostId::new("test-local-host-id"),
             Arc::new(crate::providers::discovery::test_support::DiscoveryMockRunner::builder().build()),
             EnvironmentBag::new(),
         );
@@ -220,11 +222,12 @@ mod tests {
 
     #[tokio::test]
     async fn build_local_host_summary_keeps_direct_environments_out_of_summary_environments() {
-        use flotilla_protocol::{EnvironmentId, EnvironmentStatus, ImageId};
+        use flotilla_protocol::{qualified_path::HostId, EnvironmentId, EnvironmentStatus, ImageId};
 
         let host_name = HostName::new("test-host");
         let manager = EnvironmentManager::from_local_state(
             EnvironmentId::new("test-local-environment"),
+            HostId::new("test-local-host-id"),
             Arc::new(crate::providers::discovery::test_support::DiscoveryMockRunner::builder().build()),
             EnvironmentBag::new(),
         );
@@ -235,6 +238,7 @@ mod tests {
                 direct_env_id.clone(),
                 Arc::new(crate::providers::discovery::test_support::DiscoveryMockRunner::builder().build()),
                 EnvironmentBag::new(),
+                Some(HostId::new("direct-host-id")),
             )
             .expect("register direct environment");
 

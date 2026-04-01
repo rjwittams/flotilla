@@ -90,7 +90,7 @@ fn format_visible_environments_human(environments: &[EnvironmentInfo]) -> String
     table.set_header(vec!["Kind", "Id", "Display Name", "Status", "Image"]);
     for environment in environments {
         match environment {
-            EnvironmentInfo::Direct { id, display_name, status } => {
+            EnvironmentInfo::Direct { id, display_name, status, .. } => {
                 table.add_row(vec![
                     Cell::new("direct"),
                     Cell::new(id.as_str()),

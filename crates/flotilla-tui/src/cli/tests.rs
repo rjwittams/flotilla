@@ -90,6 +90,7 @@ mod status_human {
             EnvironmentInfo::Direct {
                 id: EnvironmentId::new("direct-env"),
                 display_name: Some("direct".into()),
+                host_id: None,
                 status: EnvironmentStatus::Running,
             },
             EnvironmentInfo::Provisioned {

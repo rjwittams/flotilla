@@ -116,7 +116,7 @@ fn message_event_snapshot_roundtrip() {
             host: HostName::new("test-host"),
             branch: Some("feature-x".to_string()),
             description: "Feature X".to_string(),
-            checkout: Some(CheckoutRef { key: hp("/tmp/my-repo/wt"), is_main_checkout: false }),
+            checkout: Some(CheckoutRef::from_host_path(hp("/tmp/my-repo/wt"), false)),
             change_request_key: Some("10".to_string()),
             session_key: None,
             issue_keys: vec!["ISSUE-1".to_string()],

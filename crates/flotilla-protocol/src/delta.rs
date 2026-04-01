@@ -32,6 +32,7 @@ pub struct Branch {
 
 /// A single change within a delta.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum Change {
     Checkout {
         key: HostPath,

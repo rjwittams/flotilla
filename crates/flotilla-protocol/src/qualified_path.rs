@@ -2,7 +2,7 @@ use std::{fmt, path::PathBuf, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::EnvironmentId;
+use crate::{EnvironmentId, HostPath};
 
 /// Unique identifier for a host machine.
 ///
@@ -106,6 +106,40 @@ impl QualifiedPath {
     }
 }
 
+impl From<HostPath> for QualifiedPath {
+    fn from(value: HostPath) -> Self {
+        Self::from_host_name(&value.host, value.path)
+    }
+}
+
+impl From<&HostPath> for QualifiedPath {
+    fn from(value: &HostPath) -> Self {
+        Self::from_host_name(&value.host, value.path.clone())
+    }
+}
+
+impl TryFrom<QualifiedPath> for HostPath {
+    type Error = QualifiedPath;
+
+    fn try_from(value: QualifiedPath) -> Result<Self, Self::Error> {
+        match value.qualifier {
+            PathQualifier::HostName(host) => Ok(Self::new(host, value.path)),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<&QualifiedPath> for HostPath {
+    type Error = ();
+
+    fn try_from(value: &QualifiedPath) -> Result<Self, Self::Error> {
+        match &value.qualifier {
+            PathQualifier::HostName(host) => Ok(Self::new(host.clone(), value.path.clone())),
+            _ => Err(()),
+        }
+    }
+}
+
 impl fmt::Display for QualifiedPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.qualifier {
@@ -191,6 +225,39 @@ pub mod qualified_path_map {
     }
 }
 
+/// Serde helpers for `QualifiedPath` fields that must accept legacy `HostPath`
+/// values during migration.
+pub mod qualified_path_or_host_path {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::QualifiedPath;
+    use crate::HostPath;
+
+    pub fn serialize<S>(path: &QualifiedPath, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        path.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<QualifiedPath, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Qualified(QualifiedPath),
+            Legacy(HostPath),
+        }
+
+        match Repr::deserialize(deserializer)? {
+            Repr::Qualified(path) => Ok(path),
+            Repr::Legacy(path) => Ok(QualifiedPath::from(path)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use indexmap::IndexMap;
@@ -254,6 +321,20 @@ mod tests {
         assert_eq!(qp.environment_id(), None);
         assert!(!qp.is_owned_by_host_id(&HostId::new("uuid-123")));
         assert!(qp.is_owned_by_host_name(&crate::HostName::new("desktop")));
+    }
+
+    #[test]
+    fn qualified_path_from_host_path_uses_legacy_hostname_qualifier() {
+        let hp = HostPath::new(crate::HostName::new("desktop"), "/home/dev/repo");
+        let qp = QualifiedPath::from(hp.clone());
+        assert_eq!(qp, QualifiedPath::from_host_name(&crate::HostName::new("desktop"), "/home/dev/repo"));
+        assert_eq!(HostPath::try_from(qp).expect("legacy hostname path should convert back"), hp);
+    }
+
+    #[test]
+    fn host_path_try_from_rejects_non_hostname_qualified_paths() {
+        let qp = QualifiedPath::host(HostId::new("uuid-123"), "/home/dev/repo");
+        assert!(HostPath::try_from(qp).is_err());
     }
 
     // QualifiedPath — Environment variant
