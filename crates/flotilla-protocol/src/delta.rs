@@ -32,6 +32,8 @@ pub struct Branch {
 
 /// A single change within a delta.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// TODO: revisit once checkout/work-item identity finishes migrating away from
+// dual HostPath/QualifiedPath publication state.
 #[allow(clippy::large_enum_variant)]
 pub enum Change {
     Checkout {

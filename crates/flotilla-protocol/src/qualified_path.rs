@@ -233,6 +233,8 @@ pub mod qualified_path_or_host_path {
     use super::QualifiedPath;
     use crate::HostPath;
 
+    // Serialization is a straight pass-through; only deserialization needs the
+    // legacy HostPath fallback for migration compatibility.
     pub fn serialize<S>(path: &QualifiedPath, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,

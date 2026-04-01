@@ -1,3 +1,5 @@
+set -eu
+
 target=$1
 content=$2
 temp_suffix=$3

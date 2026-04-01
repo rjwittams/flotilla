@@ -116,6 +116,9 @@ impl CorrelationResult {
         }
     }
 
+    /// Returns the legacy `HostPath` checkout key when one is still available.
+    /// HostId-qualified checkout refs will return `None` until the runtime key
+    /// space is migrated in the next tranche.
     pub fn checkout_key(&self) -> Option<&flotilla_protocol::HostPath> {
         self.checkout().and_then(CheckoutRef::host_path)
     }
@@ -218,6 +221,8 @@ impl CorrelationResult {
     pub fn identity(&self) -> WorkItemIdentity {
         match self {
             CorrelationResult::Correlated(c) => match &c.anchor {
+                // TODO: replace this legacy HostPath dependency when
+                // WorkItemIdentity::Checkout migrates to QualifiedPath.
                 CorrelatedAnchor::Checkout(co) => WorkItemIdentity::Checkout(
                     co.host_path().cloned().expect("checkout-anchored correlation results must retain a legacy HostPath during migration"),
                 ),

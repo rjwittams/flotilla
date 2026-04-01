@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::providers::{ChannelLabel, CommandOutput, CommandRunner};
+use crate::providers::{install_managed_helper_script, ChannelLabel, CommandOutput, CommandRunner};
 
 /// Command runner that executes commands on a remote host over SSH.
 ///
@@ -20,31 +20,39 @@ impl SshCommandRunner {
         Self { destination: destination.into(), multiplex, runner }
     }
 
+    const ENSURE_FILE_IF_ABSENT_NAME: &str = "ensure_file_if_absent.sh";
     const ENSURE_FILE_IF_ABSENT_SCRIPT: &str = include_str!("scripts/ensure_file_if_absent.sh");
 
-    fn ssh_args<'a>(&'a self, script: &'a str) -> Vec<&'a str> {
+    fn ssh_prefix_args(&self) -> Vec<&str> {
         let mut args = vec!["-T", "-o", "BatchMode=yes"];
         if self.multiplex {
             args.extend(["-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/flotilla-ssh-%C", "-o", "ControlPersist=60"]);
         }
         args.push(self.destination.as_str());
+        args
+    }
+
+    fn ssh_shell_args<'a>(&'a self, script: &'a str) -> Vec<&'a str> {
+        let mut args = self.ssh_prefix_args();
         args.push("sh");
         args.push("-lc");
         args.push(script);
         args
     }
 
+    fn remote_exec_script(&self, cmd: &str, args: &[&str], cwd: &Path) -> String {
+        let mut parts = Vec::with_capacity(args.len() + 4);
+        parts.push(format!("cd {}", flotilla_protocol::arg::shell_quote(&cwd.to_string_lossy())));
+        parts.push("&&".to_string());
+        parts.push("exec".to_string());
+        parts.push(flotilla_protocol::arg::shell_quote(cmd));
+        parts.extend(args.iter().map(|arg| flotilla_protocol::arg::shell_quote(arg)));
+        parts.join(" ")
+    }
+
     async fn execute(&self, cmd: &str, args: &[&str], cwd: &Path, label: &ChannelLabel) -> Result<String, String> {
-        let script = {
-            let mut parts = Vec::with_capacity(args.len() + 4);
-            parts.push(format!("cd {}", flotilla_protocol::arg::shell_quote(&cwd.to_string_lossy())));
-            parts.push("&&".to_string());
-            parts.push("exec".to_string());
-            parts.push(flotilla_protocol::arg::shell_quote(cmd));
-            parts.extend(args.iter().map(|arg| flotilla_protocol::arg::shell_quote(arg)));
-            parts.join(" ")
-        };
-        let ssh_args = self.ssh_args(&script);
+        let script = self.remote_exec_script(cmd, args, cwd);
+        let ssh_args = self.ssh_shell_args(&script);
         self.runner.run("ssh", &ssh_args, Path::new("/"), label).await
     }
 }
@@ -56,16 +64,8 @@ impl CommandRunner for SshCommandRunner {
     }
 
     async fn run_output(&self, cmd: &str, args: &[&str], cwd: &Path, label: &ChannelLabel) -> Result<CommandOutput, String> {
-        let script = {
-            let mut parts = Vec::with_capacity(args.len() + 4);
-            parts.push(format!("cd {}", flotilla_protocol::arg::shell_quote(&cwd.to_string_lossy())));
-            parts.push("&&".to_string());
-            parts.push("exec".to_string());
-            parts.push(flotilla_protocol::arg::shell_quote(cmd));
-            parts.extend(args.iter().map(|arg| flotilla_protocol::arg::shell_quote(arg)));
-            parts.join(" ")
-        };
-        let ssh_args = self.ssh_args(&script);
+        let script = self.remote_exec_script(cmd, args, cwd);
+        let ssh_args = self.ssh_shell_args(&script);
         self.runner.run_output("ssh", &ssh_args, Path::new("/"), label).await
     }
 
@@ -75,24 +75,17 @@ impl CommandRunner for SshCommandRunner {
 
     async fn ensure_file(&self, path: &Path, content: &str) -> Result<String, String> {
         let temp_suffix = Uuid::new_v4().to_string();
-        let script = Self::ENSURE_FILE_IF_ABSENT_SCRIPT;
-        let owned_args = vec![
-            "-T".to_string(),
-            "-o".to_string(),
-            "BatchMode=yes".to_string(),
-            self.destination.clone(),
-            "sh".to_string(),
-            "-lc".to_string(),
-            script.to_string(),
-            "ensure_file_if_absent.sh".to_string(),
-            path.to_string_lossy().into_owned(),
-            content.to_owned(),
-            temp_suffix,
-        ];
-        let mut arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
-        if self.multiplex {
-            arg_refs.splice(3..3, ["-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/flotilla-ssh-%C", "-o", "ControlPersist=60"]);
-        }
+        let helper_path = install_managed_helper_script(
+            &*self.runner,
+            "ssh",
+            &self.ssh_prefix_args(),
+            Self::ENSURE_FILE_IF_ABSENT_NAME,
+            Self::ENSURE_FILE_IF_ABSENT_SCRIPT,
+        )
+        .await?;
+        let mut owned_args: Vec<String> = self.ssh_prefix_args().into_iter().map(str::to_string).collect();
+        owned_args.extend([helper_path, path.to_string_lossy().into_owned(), content.to_owned(), temp_suffix]);
+        let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
         self.runner.run("ssh", &arg_refs, Path::new("/"), &ChannelLabel::Noop).await
     }
 }
@@ -100,6 +93,7 @@ impl CommandRunner for SshCommandRunner {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::VecDeque,
         path::{Path, PathBuf},
         sync::Mutex,
     };
@@ -111,17 +105,21 @@ mod tests {
 
     struct RecordingRunner {
         calls: Mutex<Vec<(String, Vec<String>, PathBuf)>>,
-        run_result: Mutex<Option<Result<String, String>>>,
+        run_results: Mutex<VecDeque<Result<String, String>>>,
         run_output_result: Mutex<Option<Result<CommandOutput, String>>>,
     }
 
     impl RecordingRunner {
         fn with_run_result(result: Result<String, String>) -> Self {
-            Self { calls: Mutex::new(Vec::new()), run_result: Mutex::new(Some(result)), run_output_result: Mutex::new(None) }
+            Self::with_run_results(vec![result])
+        }
+
+        fn with_run_results(results: Vec<Result<String, String>>) -> Self {
+            Self { calls: Mutex::new(Vec::new()), run_results: Mutex::new(results.into()), run_output_result: Mutex::new(None) }
         }
 
         fn with_run_output_result(result: Result<CommandOutput, String>) -> Self {
-            Self { calls: Mutex::new(Vec::new()), run_result: Mutex::new(None), run_output_result: Mutex::new(Some(result)) }
+            Self { calls: Mutex::new(Vec::new()), run_results: Mutex::new(VecDeque::new()), run_output_result: Mutex::new(Some(result)) }
         }
 
         fn calls(&self) -> Vec<(String, Vec<String>, PathBuf)> {
@@ -137,7 +135,7 @@ mod tests {
                 args.iter().map(|arg| (*arg).to_string()).collect(),
                 cwd.to_path_buf(),
             ));
-            self.run_result.lock().expect("run_result mutex").take().expect("run result not configured")
+            self.run_results.lock().expect("run_results mutex").pop_front().expect("run result not configured")
         }
 
         async fn run_output(&self, cmd: &str, args: &[&str], cwd: &Path, _label: &ChannelLabel) -> Result<CommandOutput, String> {
@@ -226,24 +224,34 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_file_writes_remote_file() {
-        let inner = std::sync::Arc::new(RecordingRunner::with_run_result(Ok(String::new())));
+        let inner = std::sync::Arc::new(RecordingRunner::with_run_results(vec![Ok(String::new()), Ok(String::new())]));
         let runner = SshCommandRunner::new("alice@feta.local", false, inner.clone());
 
         let content = runner.ensure_file(Path::new("/etc/flotilla/config.toml"), "key = true\n").await.expect("ensure_file");
         assert_eq!(content, String::new());
 
         let calls = inner.calls();
-        let args = ssh_call_args(&calls);
+        assert_eq!(calls.len(), 2);
+
+        let install_args = &calls[0].1;
+        assert_eq!(install_args[0], "-T");
+        assert_eq!(install_args[1], "-o");
+        assert_eq!(install_args[2], "BatchMode=yes");
+        assert_eq!(install_args[3], "alice@feta.local");
+        assert_eq!(install_args[4], "sh");
+        assert_eq!(install_args[5], "-lc");
+        assert!(install_args[6].contains("chmod +x"));
+        assert_eq!(install_args[7], "flotilla-bootstrap-install-managed-script");
+        assert_eq!(install_args[8], "/tmp/flotilla-tools/ensure_file_if_absent.sh");
+
+        let args = &calls[1].1;
         assert_eq!(args[0], "-T");
         assert_eq!(args[1], "-o");
         assert_eq!(args[2], "BatchMode=yes");
         assert_eq!(args[3], "alice@feta.local");
-        assert_eq!(args[4], "sh");
-        assert_eq!(args[5], "-lc");
-        assert!(args[6].contains("target=$1"));
-        assert_eq!(args[7], "ensure_file_if_absent.sh");
-        assert_eq!(args[8], "/etc/flotilla/config.toml");
-        assert_eq!(args[9], "key = true\n");
+        assert_eq!(args[4], "/tmp/flotilla-tools/ensure_file_if_absent.sh");
+        assert_eq!(args[5], "/etc/flotilla/config.toml");
+        assert_eq!(args[6], "key = true\n");
     }
 
     #[tokio::test]

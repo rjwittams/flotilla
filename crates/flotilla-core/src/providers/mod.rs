@@ -75,6 +75,9 @@ impl ChannelLabeler for TaskId {
 }
 
 pub(crate) const REPLAY_LABELS_ENABLED: bool = cfg!(any(test, feature = "replay"));
+pub(crate) const MANAGED_HELPER_DIR: &str = "/tmp/flotilla-tools";
+pub(crate) const INSTALL_MANAGED_SCRIPT: &str = include_str!("scripts/install_managed_script.sh");
+pub(crate) const INSTALL_MANAGED_SCRIPT_BOOTSTRAP_NAME: &str = "flotilla-bootstrap-install-managed-script";
 
 #[inline]
 pub(crate) fn noop_channel_label() -> ChannelLabel {
@@ -143,6 +146,30 @@ pub struct CommandOutput {
     pub stdout: String,
     pub stderr: String,
     pub success: bool,
+}
+
+pub(crate) async fn install_managed_helper_script(
+    runner: &dyn CommandRunner,
+    command: &str,
+    command_prefix: &[&str],
+    helper_name: &str,
+    helper_content: &str,
+) -> Result<String, String> {
+    let helper_path = format!("{MANAGED_HELPER_DIR}/{helper_name}");
+    let mut owned_args: Vec<String> = command_prefix.iter().map(|arg| (*arg).to_string()).collect();
+    owned_args.extend([
+        "sh".to_string(),
+        "-lc".to_string(),
+        INSTALL_MANAGED_SCRIPT.to_string(),
+        // `sh -c` treats the next argument as `$0`; this is only a diagnostic
+        // placeholder for the one-time bootstrap script text above.
+        INSTALL_MANAGED_SCRIPT_BOOTSTRAP_NAME.to_string(),
+        helper_path.clone(),
+        helper_content.to_string(),
+    ]);
+    let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+    runner.run(command, &arg_refs, Path::new("/"), &ChannelLabel::Noop).await?;
+    Ok(helper_path)
 }
 
 /// Trait abstracting command execution so providers can be tested without
