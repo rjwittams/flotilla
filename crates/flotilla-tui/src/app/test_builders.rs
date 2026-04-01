@@ -58,7 +58,7 @@ pub fn checkout_item(branch: &str, path: &str, is_main: bool) -> WorkItem {
         host: HostName::local(),
         branch: Some(branch.into()),
         description: format!("checkout {branch}"),
-        checkout: Some(CheckoutRef { key: host_path, is_main_checkout: is_main }),
+        checkout: Some(CheckoutRef::from_host_path(host_path, is_main)),
         change_request_key: None,
         session_key: None,
         issue_keys: Vec::new(),

@@ -1,8 +1,12 @@
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
+use uuid::Uuid;
 
-use crate::providers::{ChannelLabel, CommandOutput, CommandRunner};
+use crate::providers::{
+    helper_exec_script, install_managed_helper_script, ChannelLabel, CommandOutput, CommandRunner, FLOTILLA_HELPER_NAME,
+    FLOTILLA_HELPER_SCRIPT,
+};
 
 /// A `CommandRunner` decorator that executes all commands inside a Docker container
 /// via `docker exec`. The caller's working directory (a path inside the container)
@@ -15,6 +19,10 @@ pub struct EnvironmentRunner {
 impl EnvironmentRunner {
     pub fn new(container_name: String, inner: Arc<dyn CommandRunner>) -> Self {
         Self { container_name, inner }
+    }
+
+    fn docker_exec_prefix(&self) -> Vec<&str> {
+        vec!["exec", &self.container_name]
     }
 }
 
@@ -39,19 +47,17 @@ impl CommandRunner for EnvironmentRunner {
         self.inner.run("docker", &docker_args, Path::new("/"), &ChannelLabel::Noop).await.is_ok()
     }
 
-    async fn ensure_file(&self, path: &Path, content: &str) -> Result<(), String> {
-        let parent = path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
-        let path_str = path.to_string_lossy();
-        // Use printf with %s to avoid echo's backslash interpretation.
-        // All interpolated values are single-quoted with embedded single
-        // quotes escaped via the '\'' idiom.
-        let escape = |s: &str| s.replace('\'', "'\\''");
-        let escaped_parent = escape(&parent);
-        let escaped_path = escape(&path_str);
-        let escaped_content = escape(content);
-        let script = format!("mkdir -p '{escaped_parent}' && printf '%s' '{escaped_content}' > '{escaped_path}'");
-        let docker_args = vec!["exec", &self.container_name, "sh", "-c", &script];
-        self.inner.run("docker", &docker_args, Path::new("/"), &ChannelLabel::Noop).await.map(|_| ())
+    async fn ensure_file(&self, path: &Path, content: &str) -> Result<String, String> {
+        let temp_suffix = Uuid::new_v4().to_string();
+        let path_str = path.to_string_lossy().into_owned();
+        let helper_path =
+            install_managed_helper_script(&*self.inner, "docker", &self.docker_exec_prefix(), FLOTILLA_HELPER_NAME, FLOTILLA_HELPER_SCRIPT)
+                .await?;
+        let mut owned_args: Vec<String> = self.docker_exec_prefix().into_iter().map(str::to_string).collect();
+        let helper_script = helper_exec_script(&helper_path, "ensure-file-if-absent", &[&path_str, content, &temp_suffix])?;
+        owned_args.extend(["sh".to_string(), "-lc".to_string(), helper_script]);
+        let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+        self.inner.run("docker", &arg_refs, Path::new("/"), &ChannelLabel::Noop).await
     }
 }
 
@@ -64,23 +70,38 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_file_delegates_via_docker_exec_sh() {
-        let inner = Arc::new(MockRunner::new(vec![Ok(String::new())]));
+        let inner =
+            Arc::new(MockRunner::new(vec![Ok("/remote/state/flotilla/helpers/helper-hash/flotilla-helper\n".into()), Ok(String::new())]));
         let runner = EnvironmentRunner::new("my-container".into(), inner.clone());
 
-        runner.ensure_file(Path::new("/app/config/shpool.toml"), "key = true\n").await.expect("ensure_file");
+        let content = runner.ensure_file(Path::new("/app/config/shpool.toml"), "key = true\n").await.expect("ensure_file");
+        assert_eq!(content, String::new());
 
         let calls = inner.calls();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2);
+
         assert_eq!(calls[0].0, "docker");
-        let args = &calls[0].1;
+        let install_args = &calls[0].1;
+        assert!(install_args.contains(&"exec".to_string()));
+        assert!(install_args.contains(&"my-container".to_string()));
+        assert!(install_args.contains(&"sh".to_string()));
+        assert!(install_args.contains(&"-lc".to_string()));
+        let bootstrap_script = install_args.get(4).expect("should have install bootstrap script arg");
+        assert!(bootstrap_script.contains("helpers/$helper_hash"));
+        assert_eq!(install_args.get(5).map(String::as_str), Some("flotilla-bootstrap-install-managed-script"));
+        assert_eq!(install_args.get(6).map(String::as_str), Some("flotilla-helper"));
+        assert!(install_args.get(7).is_some());
+
+        assert_eq!(calls[1].0, "docker");
+        let args = &calls[1].1;
         assert!(args.contains(&"exec".to_string()));
         assert!(args.contains(&"my-container".to_string()));
-        assert!(args.contains(&"sh".to_string()));
-        assert!(args.contains(&"-c".to_string()));
-        // The sh -c script should create the parent dir and write the file
-        let script = args.last().expect("should have script arg");
-        assert!(script.contains("mkdir -p"), "script should create parent dirs: {script}");
-        assert!(script.contains("/app/config/shpool.toml"), "script should reference target path: {script}");
-        assert!(script.contains("key = true"), "script should contain file content: {script}");
+        assert_eq!(args.get(2).map(String::as_str), Some("sh"));
+        assert_eq!(args.get(3).map(String::as_str), Some("-lc"));
+        let script = args.get(4).expect("docker helper script");
+        assert!(script.contains("PATH='/remote/state/flotilla/helpers/helper-hash':\"$PATH\""));
+        assert!(script.contains("exec 'flotilla-helper' 'ensure-file-if-absent'"));
+        assert!(script.contains("'/app/config/shpool.toml'"));
+        assert!(script.contains("'key = true\n'"));
     }
 }

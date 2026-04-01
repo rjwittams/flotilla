@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use flotilla_protocol::{arg::shell_quote, qualified_path::HostId, EnvironmentId};
+use flotilla_protocol::{qualified_path::HostId, EnvironmentId};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -88,6 +88,13 @@ fn machine_scoped_state_dir_or_base(base_state_dir: &Path, resolved: Result<Path
 pub async fn resolve_local_environment_state_dir(base_state_dir: &Path, runner: &dyn CommandRunner) -> PathBuf {
     let resolved = machine_scoped_state_dir(base_state_dir, None, runner).await;
     machine_scoped_state_dir_or_base(base_state_dir, resolved)
+}
+
+/// Resolve or create a persisted local host id in the machine-scoped local
+/// state directory.
+pub async fn resolve_local_host_id(base_state_dir: &Path, runner: &dyn CommandRunner) -> Result<HostId, String> {
+    let state_dir = resolve_local_environment_state_dir(base_state_dir, runner).await;
+    resolve_or_create_host_id(&state_dir)
 }
 
 /// Resolve an existing `HostId` from `<state_dir>/host-id`, or generate and
@@ -224,6 +231,41 @@ pub async fn resolve_or_create_remote_environment_id(
     resolve_or_create_remote_environment_id_at(runner, &state_dir).await
 }
 
+/// Resolve or create a persisted remote host id.
+///
+/// Returns `Ok(None)` when the remote environment does not expose enough env
+/// vars to locate a persistent state directory.
+pub async fn resolve_or_create_remote_host_id(runner: &dyn CommandRunner, env: &dyn EnvVars) -> Result<Option<HostId>, String> {
+    let Some(state_dir) = remote_environment_state_dir(env) else {
+        return Ok(None);
+    };
+
+    resolve_or_create_remote_host_id_at(runner, &state_dir).await.map(Some)
+}
+
+async fn resolve_or_create_remote_host_id_at(runner: &dyn CommandRunner, state_dir: &Path) -> Result<HostId, String> {
+    let target = state_dir.join("host-id");
+    let target_str = target.to_string_lossy().into_owned();
+
+    if let Ok(content) = runner.run("cat", &[&target_str], Path::new("/"), &ChannelLabel::Noop).await {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return Err(format!("remote host-id file is empty: {}", target.display()));
+        }
+        return Ok(HostId::new(trimmed));
+    }
+
+    let content = runner
+        .ensure_file(&target, &format!("{}\n", Uuid::new_v4()))
+        .await
+        .map_err(|err| format!("failed to ensure remote host-id at {}: {err}", target.display()))?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(format!("remote host-id file is empty after ensure: {}", target.display()));
+    }
+    Ok(HostId::new(trimmed))
+}
+
 async fn resolve_or_create_remote_environment_id_at(runner: &dyn CommandRunner, state_dir: &Path) -> Result<EnvironmentId, String> {
     let target = state_dir.join("environment-id");
     let target_str = target.to_string_lossy().into_owned();
@@ -236,30 +278,13 @@ async fn resolve_or_create_remote_environment_id_at(runner: &dyn CommandRunner, 
         return Ok(EnvironmentId::new(trimmed));
     }
 
-    let new_id = Uuid::new_v4().to_string();
-    let create_script = format!(
-        "set -eu; target={target}; state_dir={state_dir}; \
-if [ -s \"$target\" ]; then cat \"$target\"; exit 0; fi; \
-mkdir -p \"$state_dir\"; \
-temp=\"$state_dir/.environment-id.{temp_suffix}\"; \
-printf '%s\\n' {new_id} > \"$temp\"; \
-if ln \"$temp\" \"$target\" 2>/dev/null; then cat \"$temp\"; \
-elif [ -s \"$target\" ]; then cat \"$target\"; \
-else rm -f \"$temp\"; exit 1; fi; \
-rm -f \"$temp\"",
-        target = shell_quote(&target_str),
-        state_dir = shell_quote(&state_dir.to_string_lossy()),
-        temp_suffix = Uuid::new_v4(),
-        new_id = shell_quote(&new_id),
-    );
-
     let content = runner
-        .run("sh", &["-lc", &create_script], Path::new("/"), &ChannelLabel::Noop)
+        .ensure_file(&target, &format!("{}\n", Uuid::new_v4()))
         .await
-        .map_err(|err| format!("failed to create remote environment-id at {}: {err}", target.display()))?;
+        .map_err(|err| format!("failed to ensure remote environment-id at {}: {err}", target.display()))?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        return Err(format!("remote environment-id file is empty after create: {}", target.display()));
+        return Err(format!("remote environment-id file is empty after ensure: {}", target.display()));
     }
     Ok(EnvironmentId::new(trimmed))
 }
@@ -320,6 +345,32 @@ mod tests {
         assert!(ids.iter().all(|id| *id == first), "all concurrent callers should observe the same id");
         let file = fs::read_to_string(dir.path().join("host-id")).expect("host-id file");
         assert_eq!(file.trim(), first.as_str());
+    }
+
+    #[tokio::test]
+    async fn resolve_local_host_id_persists_in_local_state_dir() {
+        let base = tempfile::tempdir().unwrap();
+        let runner = crate::providers::discovery::test_support::DiscoveryMockRunner::builder().build();
+
+        let first = resolve_local_host_id(base.path(), &runner).await.expect("resolve local host id");
+        let second = resolve_local_host_id(base.path(), &runner).await.expect("resolve local host id again");
+
+        assert_eq!(first, second);
+        assert!(!first.as_str().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_or_create_remote_host_id_reads_persisted_remote_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("flotilla");
+        let runner = crate::providers::discovery::test_support::DiscoveryMockRunner::builder()
+            .with_file(state_dir.join("host-id"), "remote-host-id\n")
+            .build();
+        let env = TestEnvVars::new([("XDG_STATE_HOME", temp.path().to_string_lossy().into_owned())]);
+
+        let resolved = resolve_or_create_remote_host_id(&runner, &env).await.expect("resolve remote host id");
+
+        assert_eq!(resolved.as_ref().map(HostId::as_str), Some("remote-host-id"));
     }
 
     #[test]

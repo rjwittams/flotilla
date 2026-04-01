@@ -296,7 +296,7 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
         snapshot.work_items.iter().find(|item| item.attachable_set_id.as_ref() == Some(&set_id)).expect("work item for attachable set");
     assert_eq!(set_item.host, remote_host, "correlated work item should be anchored to feta");
     assert_eq!(
-        set_item.checkout.as_ref().map(|checkout| &checkout.key),
+        set_item.checkout.as_ref().and_then(|checkout| checkout.host_path()),
         Some(&remote_checkout),
         "correlated work item should point at the remote checkout"
     );
@@ -482,6 +482,7 @@ async fn get_repo_providers_uses_preferred_root_environment_host_discovery_for_n
             remote_environment_id.clone(),
             Arc::new(DiscoveryMockRunner::builder().build()),
             EnvironmentBag::new().with(EnvironmentAssertion::env_var("REMOTE_MARKER", "remote")),
+            None,
         )
         .expect("register remote direct environment");
 

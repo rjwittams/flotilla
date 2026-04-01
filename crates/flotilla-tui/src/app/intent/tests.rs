@@ -386,8 +386,7 @@ fn resolve_create_workspace_on_remote_checkout_routes_single_command_to_remote_h
     insert_local_host(&mut app.model, &HostName::local().to_string());
     let mut item = checkout_item("feat/x", "/tmp/feat-x", false);
     item.host = HostName::new("remote-a");
-    item.checkout =
-        Some(CheckoutRef { key: HostPath::new(HostName::new("remote-a"), PathBuf::from("/remote/feat-x")), is_main_checkout: false });
+    item.checkout = Some(CheckoutRef::from_host_path(HostPath::new(HostName::new("remote-a"), PathBuf::from("/remote/feat-x")), false));
 
     let cmd = Intent::CreateWorkspace.resolve(&item, &app).unwrap();
 
@@ -437,8 +436,7 @@ fn resolve_remove_worktree_none_for_non_checkout_kind() {
     let app = stub_app();
     let mut item = pr_item("42");
     // Even with a checkout path, the kind check prevents resolve
-    item.checkout =
-        Some(CheckoutRef { key: HostPath::new(HostName::new("test-host"), PathBuf::from("/tmp/pr-co")), is_main_checkout: false });
+    item.checkout = Some(CheckoutRef::from_host_path(HostPath::new(HostName::new("test-host"), PathBuf::from("/tmp/pr-co")), false));
     assert!(Intent::RemoveCheckout.resolve(&item, &app).is_none());
 }
 
@@ -634,7 +632,7 @@ fn resolve_open_issue_none_without_issues() {
 fn resolve_teleport_session() {
     let app = stub_app();
     let mut item = session_item("sess-42");
-    item.checkout = Some(CheckoutRef { key: HostPath::new(HostName::new("test-host"), PathBuf::from("/tmp/co")), is_main_checkout: false });
+    item.checkout = Some(CheckoutRef::from_host_path(HostPath::new(HostName::new("test-host"), PathBuf::from("/tmp/co")), false));
     let cmd = Intent::TeleportSession.resolve(&item, &app);
     assert!(cmd.is_some());
     match cmd.unwrap() {
@@ -842,8 +840,7 @@ fn resolve_link_issues_to_pr_on_remote_only_repo_routes_to_remote_host_by_identi
 
     let mut item = checkout_item("feat/x", "/srv/repo.feat-x", false);
     item.host = HostName::new("desktop");
-    item.checkout =
-        Some(CheckoutRef { key: HostPath::new(HostName::new("desktop"), PathBuf::from("/srv/repo.feat-x")), is_main_checkout: false });
+    item.checkout = Some(CheckoutRef::from_host_path(HostPath::new(HostName::new("desktop"), PathBuf::from("/srv/repo.feat-x")), false));
     item.change_request_key = Some("42".into());
     item.issue_keys = vec!["10".into(), "20".into()];
 
@@ -973,7 +970,7 @@ fn teleport_session_with_branch_and_checkout() {
     let mut item = bare_item();
     item.session_key = Some("claude-1".into());
     item.branch = Some("feat".into());
-    item.checkout = Some(CheckoutRef { key: HostPath::new(HostName::local(), "/work/repo"), is_main_checkout: false });
+    item.checkout = Some(CheckoutRef::from_host_path(HostPath::new(HostName::local(), "/work/repo"), false));
     let noun = Intent::TeleportSession.to_noun_command(&item).expect("should produce noun");
     assert_eq!(noun.to_string(), "agent claude-1 teleport --branch feat --checkout /work/repo");
 }

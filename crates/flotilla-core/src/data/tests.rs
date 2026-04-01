@@ -40,7 +40,7 @@ fn checkout_item(path: &str, branch: Option<&str>, is_main: bool) -> Correlation
     CorrelationResult::Correlated(CorrelatedWorkItem {
         branch: branch.map(|s| s.to_string()),
         description: branch.unwrap_or("").to_string(),
-        ..correlated(CorrelatedAnchor::Checkout(CheckoutRef { key: hp(path), is_main_checkout: is_main }))
+        ..correlated(CorrelatedAnchor::Checkout(CheckoutRef::from_host_path(hp(path), is_main)))
     })
 }
 
@@ -172,7 +172,7 @@ fn description_returns_expected_value() {
 fn checkout_returns_some_for_checkout_anchor() {
     let wi = checkout_item("/tmp/wt", Some("main"), true);
     let co = wi.checkout().expect("should return checkout");
-    assert_eq!(co.key, hp("/tmp/wt"));
+    assert_eq!(co.host_path(), Some(&hp("/tmp/wt")));
     assert!(co.is_main_checkout);
 }
 
@@ -229,7 +229,7 @@ fn change_request_key_returns_expected_value() {
 fn change_request_key_from_linked_on_checkout() {
     let wi = CorrelationResult::Correlated(CorrelatedWorkItem {
         linked_change_request: Some("99".to_string()),
-        ..correlated(CorrelatedAnchor::Checkout(CheckoutRef { key: hp("/tmp/wt"), is_main_checkout: false }))
+        ..correlated(CorrelatedAnchor::Checkout(CheckoutRef::from_host_path(hp("/tmp/wt"), false)))
     });
     assert_eq!(wi.change_request_key(), Some("99"));
 }
@@ -251,7 +251,7 @@ fn session_key_returns_expected_value() {
 fn session_key_from_linked_on_checkout() {
     let wi = CorrelationResult::Correlated(CorrelatedWorkItem {
         linked_session: Some("linked-sess".to_string()),
-        ..correlated(CorrelatedAnchor::Checkout(CheckoutRef { key: hp("/tmp/wt"), is_main_checkout: false }))
+        ..correlated(CorrelatedAnchor::Checkout(CheckoutRef::from_host_path(hp("/tmp/wt"), false)))
     });
     assert_eq!(wi.session_key(), Some("linked-sess"));
 }
@@ -264,7 +264,7 @@ fn session_key_from_linked_on_checkout() {
 fn issue_keys_from_correlated_with_linked_issues() {
     let wi = CorrelationResult::Correlated(CorrelatedWorkItem {
         linked_issues: vec!["10".to_string(), "20".to_string()],
-        ..correlated(CorrelatedAnchor::Checkout(CheckoutRef { key: hp("/tmp/wt"), is_main_checkout: false }))
+        ..correlated(CorrelatedAnchor::Checkout(CheckoutRef::from_host_path(hp("/tmp/wt"), false)))
     });
     assert_eq!(wi.issue_keys(), &["10".to_string(), "20".to_string()]);
 }
@@ -286,7 +286,7 @@ fn issue_keys_returns_expected_value() {
 fn workspace_refs_from_correlated() {
     let wi = CorrelationResult::Correlated(CorrelatedWorkItem {
         workspace_refs: vec!["ws-1".to_string()],
-        ..correlated(CorrelatedAnchor::Checkout(CheckoutRef { key: hp("/tmp/wt"), is_main_checkout: false }))
+        ..correlated(CorrelatedAnchor::Checkout(CheckoutRef::from_host_path(hp("/tmp/wt"), false)))
     });
     assert_eq!(wi.workspace_refs(), &["ws-1".to_string()]);
 }

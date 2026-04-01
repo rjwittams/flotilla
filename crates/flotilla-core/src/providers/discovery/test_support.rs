@@ -40,11 +40,13 @@ type ResponseMap = HashMap<(String, String), Vec<Result<String, String>>>;
 pub struct DiscoveryMockRunnerBuilder {
     responses: ResponseMap,
     tool_exists: HashMap<String, bool>,
+    files: HashMap<PathBuf, String>,
 }
 
 pub struct DiscoveryMockRunner {
     responses: Mutex<ResponseMap>,
     tool_exists: HashMap<String, bool>,
+    files: Mutex<HashMap<PathBuf, String>>,
     seen_cwds: Mutex<Vec<PathBuf>>,
     exists_calls: Mutex<Vec<(String, String)>>,
 }
@@ -56,7 +58,7 @@ pub struct TestEnvVars {
 
 impl DiscoveryMockRunner {
     pub fn builder() -> DiscoveryMockRunnerBuilder {
-        DiscoveryMockRunnerBuilder { responses: HashMap::new(), tool_exists: HashMap::new() }
+        DiscoveryMockRunnerBuilder { responses: HashMap::new(), tool_exists: HashMap::new(), files: HashMap::new() }
     }
 
     #[allow(dead_code)]
@@ -170,10 +172,16 @@ impl DiscoveryMockRunnerBuilder {
         self
     }
 
+    pub fn with_file(mut self, path: impl Into<PathBuf>, content: impl Into<String>) -> Self {
+        self.files.insert(path.into(), content.into());
+        self
+    }
+
     pub fn build(self) -> DiscoveryMockRunner {
         DiscoveryMockRunner {
             responses: Mutex::new(self.responses),
             tool_exists: self.tool_exists,
+            files: Mutex::new(self.files),
             seen_cwds: Mutex::new(Vec::new()),
             exists_calls: Mutex::new(Vec::new()),
         }
@@ -221,6 +229,11 @@ impl CommandRunner for DiscoveryMockRunner {
     async fn exists(&self, cmd: &str, args: &[&str]) -> bool {
         self.exists_calls.lock().expect("lock poisoned").push((cmd.to_string(), args.join(" ")));
         self.tool_exists.get(cmd).copied().unwrap_or(false)
+    }
+
+    async fn ensure_file(&self, path: &Path, content: &str) -> Result<String, String> {
+        let mut files = self.files.lock().expect("lock poisoned");
+        Ok(files.entry(path.to_path_buf()).or_insert_with(|| content.to_owned()).clone())
     }
 }
 /// Build a `DiscoveryRuntime` that uses no-op env and a minimal fake runner

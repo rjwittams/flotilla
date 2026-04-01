@@ -29,7 +29,10 @@ use crate::{
     daemon::DaemonHandle,
     environment_manager::EnvironmentManager,
     executor,
-    host_identity::{resolve_local_environment_state_dir, resolve_or_create_environment_id, resolve_or_create_remote_environment_id},
+    host_identity::{
+        resolve_local_environment_state_dir, resolve_local_host_id, resolve_or_create_environment_id,
+        resolve_or_create_remote_environment_id, resolve_or_create_remote_host_id,
+    },
     host_registry::HostCounts,
     model::{provider_names_from_registry, repo_name, RepoModel},
     path_context::{DaemonHostPath, ExecutionEnvironmentPath},
@@ -113,6 +116,7 @@ async fn register_static_ssh_direct_environment(
         tokio::time::timeout(STATIC_SSH_REGISTRATION_TIMEOUT, load_env_vars(&*runner, Path::new("/"))).await.unwrap_or_default();
     let remote_env = StaticEnvVars { vars: remote_env_vars };
     let env_id = resolve_or_create_remote_environment_id(&*runner, &remote_env, fallback_env_id).await?;
+    let host_id = resolve_or_create_remote_host_id(&*runner, &remote_env).await?;
     let mut env_bag =
         tokio::time::timeout(STATIC_SSH_REGISTRATION_TIMEOUT, run_host_detectors(&discovery.host_detectors, &*runner, &remote_env))
             .await
@@ -120,7 +124,7 @@ async fn register_static_ssh_direct_environment(
     if let Some(display_name) = environment.display_name.as_ref() {
         env_bag = env_bag.with(EnvironmentAssertion::env_var("DISPLAY_NAME", display_name));
     }
-    environment_manager.register_direct_environment(env_id, runner, env_bag)
+    environment_manager.register_direct_environment(env_id, runner, env_bag, host_id)
 }
 
 async fn register_static_ssh_direct_environments(
@@ -399,7 +403,9 @@ impl InProcessDaemon {
         let local_environment_state_dir = resolve_local_environment_state_dir(config.state_dir().as_path(), &*discovery.runner).await;
         let local_environment_id =
             resolve_or_create_environment_id(&local_environment_state_dir).expect("failed to resolve local direct environment id");
-        let environment_manager = Arc::new(EnvironmentManager::new_local(&discovery, local_environment_id.clone()).await);
+        let local_host_id =
+            resolve_local_host_id(config.state_dir().as_path(), &*discovery.runner).await.expect("failed to resolve local host id");
+        let environment_manager = Arc::new(EnvironmentManager::new_local(&discovery, local_environment_id.clone(), local_host_id).await);
         register_static_ssh_direct_environments(&config, &discovery, &environment_manager).await;
         let agent_state_store = crate::agents::shared_file_backed_agent_state_store(config.base_path());
 
@@ -532,8 +538,9 @@ impl InProcessDaemon {
         env_id: EnvironmentId,
         runner: Arc<dyn CommandRunner>,
         env_bag: EnvironmentBag,
+        host_id: Option<flotilla_protocol::qualified_path::HostId>,
     ) -> Result<(), String> {
-        self.environment_manager.register_direct_environment(env_id, runner, env_bag)
+        self.environment_manager.register_direct_environment(env_id, runner, env_bag, host_id)
     }
 
     #[cfg(any(test, feature = "test-support"))]

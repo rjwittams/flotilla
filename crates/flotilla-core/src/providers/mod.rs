@@ -17,6 +17,7 @@ pub mod workspace;
 use std::path::Path;
 
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 
 /// Identifies the logical channel an interaction belongs to.
 /// Within a replay round, interactions on the same channel are FIFO-ordered,
@@ -75,6 +76,10 @@ impl ChannelLabeler for TaskId {
 }
 
 pub(crate) const REPLAY_LABELS_ENABLED: bool = cfg!(any(test, feature = "replay"));
+pub(crate) const INSTALL_MANAGED_SCRIPT: &str = include_str!("scripts/install_managed_script.sh");
+pub(crate) const INSTALL_MANAGED_SCRIPT_BOOTSTRAP_NAME: &str = "flotilla-bootstrap-install-managed-script";
+pub(crate) const FLOTILLA_HELPER_NAME: &str = "flotilla-helper";
+pub(crate) const FLOTILLA_HELPER_SCRIPT: &str = include_str!("scripts/flotilla_helper.sh");
 
 #[inline]
 pub(crate) fn noop_channel_label() -> ChannelLabel {
@@ -145,6 +150,47 @@ pub struct CommandOutput {
     pub success: bool,
 }
 
+pub(crate) fn helper_exec_script(helper_path: &str, subcommand: &str, args: &[&str]) -> Result<String, String> {
+    let helper_dir = Path::new(helper_path).parent().ok_or_else(|| format!("installed helper path has no parent: {helper_path}"))?;
+    let mut parts = vec![
+        format!("PATH={}:\"$PATH\"", flotilla_protocol::arg::shell_quote(&helper_dir.to_string_lossy())),
+        "exec".to_string(),
+        flotilla_protocol::arg::shell_quote("flotilla-helper"),
+        flotilla_protocol::arg::shell_quote(subcommand),
+    ];
+    parts.extend(args.iter().map(|arg| flotilla_protocol::arg::shell_quote(arg)));
+    Ok(parts.join(" "))
+}
+
+pub(crate) async fn install_managed_helper_script(
+    runner: &dyn CommandRunner,
+    command: &str,
+    command_prefix: &[&str],
+    helper_name: &str,
+    helper_content: &str,
+) -> Result<String, String> {
+    let helper_hash = format!("{:x}", Sha256::digest(helper_content.as_bytes()));
+    let mut owned_args: Vec<String> = command_prefix.iter().map(|arg| (*arg).to_string()).collect();
+    owned_args.extend([
+        "sh".to_string(),
+        "-lc".to_string(),
+        INSTALL_MANAGED_SCRIPT.to_string(),
+        // `sh -c` treats the next argument as `$0`; this is only a diagnostic
+        // placeholder for the one-time bootstrap script text above.
+        INSTALL_MANAGED_SCRIPT_BOOTSTRAP_NAME.to_string(),
+        helper_name.to_string(),
+        helper_hash,
+        helper_content.to_string(),
+    ]);
+    let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+    let helper_path = runner.run(command, &arg_refs, Path::new("/"), &ChannelLabel::Noop).await?;
+    let helper_path = helper_path.trim();
+    if helper_path.is_empty() {
+        return Err(format!("managed helper installer returned empty path for {helper_name}"));
+    }
+    Ok(helper_path.to_string())
+}
+
 /// Trait abstracting command execution so providers can be tested without
 /// spawning real processes.
 #[async_trait]
@@ -159,10 +205,10 @@ pub trait CommandRunner: Send + Sync {
     /// Check if a command is available by running it.
     async fn exists(&self, cmd: &str, args: &[&str]) -> bool;
 
-    /// Write `content` to `path`, creating parent directories as needed.
-    /// Default implementation succeeds silently — override in production runners.
-    async fn ensure_file(&self, _path: &Path, _content: &str) -> Result<(), String> {
-        Ok(())
+    /// Ensure `path` exists with `content` if absent, returning the resulting
+    /// file contents. Existing files are preserved.
+    async fn ensure_file(&self, _path: &Path, content: &str) -> Result<String, String> {
+        Ok(content.to_owned())
     }
 }
 
@@ -213,11 +259,23 @@ impl CommandRunner for ProcessCommandRunner {
             .unwrap_or(false)
     }
 
-    async fn ensure_file(&self, path: &Path, content: &str) -> Result<(), String> {
+    async fn ensure_file(&self, path: &Path, content: &str) -> Result<String, String> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| format!("create_dir_all {}: {e}", parent.display()))?;
         }
-        tokio::fs::write(path, content).await.map_err(|e| format!("write {}: {e}", path.display()))
+        match tokio::fs::OpenOptions::new().write(true).create_new(true).open(path).await {
+            Ok(mut file) => {
+                use tokio::io::AsyncWriteExt;
+                file.write_all(content.as_bytes()).await.map_err(|e| format!("write {}: {e}", path.display()))?;
+                file.flush().await.map_err(|e| format!("flush {}: {e}", path.display()))?;
+                drop(file);
+                Ok(content.to_owned())
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                tokio::fs::read_to_string(path).await.map_err(|e| format!("read {}: {e}", path.display()))
+            }
+            Err(err) => Err(format!("open {}: {err}", path.display())),
+        }
     }
 }
 
@@ -410,13 +468,28 @@ pub(crate) mod testing {
     }
 
     #[tokio::test]
-    async fn process_runner_ensure_file_creates_parents_and_writes() {
+    async fn process_runner_ensure_file_creates_parents_and_writes_when_absent() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested/dir/config.toml");
         let runner = super::ProcessCommandRunner;
-        runner.ensure_file(&path, "hello = true\n").await.expect("ensure_file");
-        let content = std::fs::read_to_string(&path).expect("read back");
-        assert_eq!(content, "hello = true\n");
+        let ensured = runner.ensure_file(&path, "hello = true\n").await.expect("ensure_file");
+        let on_disk = std::fs::read_to_string(&path).expect("read back");
+        assert_eq!(ensured, "hello = true\n");
+        assert_eq!(on_disk, "hello = true\n");
+    }
+
+    #[tokio::test]
+    async fn process_runner_ensure_file_preserves_existing_contents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested/dir/config.toml");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        std::fs::write(&path, "existing = true\n").expect("seed file");
+
+        let runner = super::ProcessCommandRunner;
+        let ensured = runner.ensure_file(&path, "hello = true\n").await.expect("ensure_file");
+        let on_disk = std::fs::read_to_string(&path).expect("read back");
+        assert_eq!(ensured, "existing = true\n");
+        assert_eq!(on_disk, "existing = true\n");
     }
 }
 
