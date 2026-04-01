@@ -2,7 +2,6 @@ use flotilla_protocol::{Command, CommandAction, CommandValue};
 use tracing::info;
 
 use super::{
-    issue_view::IssueQueryUpdate,
     ui_state::{PendingAction, PendingActionContext, PendingStatus},
     App,
 };
@@ -10,10 +9,9 @@ use crate::widgets::{branch_input::BranchInputWidget, delete_confirm::DeleteConf
 
 /// Dispatch a single protocol command through the daemon.
 ///
-/// Query commands (where `action.is_query()`) are dispatched via
-/// `execute_query` in a background task so results arrive asynchronously
-/// through the `issue_update_tx` channel. Non-query commands use the
-/// regular `execute` path.
+/// Query commands (`QueryIssues`) are routed through `spawn_query_page` so
+/// results arrive via the background `issue_update_tx` channel.  Non-query
+/// commands use the regular `execute` path.
 ///
 /// When `pending_ctx` is provided the successful command ID is recorded as a
 /// [`PendingAction`] on the active repo's UI state so the renderer can show
@@ -22,44 +20,15 @@ pub async fn dispatch(cmd: Command, app: &mut App, pending_ctx: Option<PendingAc
     app.model.status_message = None;
 
     // Route issue query commands through the background query path.
-    if let CommandAction::QueryIssueOpen { ref repo, ref params } = cmd.action {
+    if let CommandAction::QueryIssues { repo, params, page, count } = cmd.action {
         let repo_identity = match repo {
-            flotilla_protocol::RepoSelector::Identity(id) => id.clone(),
+            flotilla_protocol::RepoSelector::Identity(id) => id,
             _ => {
                 app.model.status_message = Some("issue query requires RepoSelector::Identity".into());
                 return;
             }
         };
-        let is_search = params.search.is_some();
-        let search_query = params.search.clone();
-        let daemon = app.daemon.clone();
-        let tx = app.issue_update_tx.clone();
-        let session_id = app.session_id;
-        tokio::spawn(async move {
-            match daemon.execute_query(cmd, session_id).await {
-                Ok(CommandValue::IssueQueryOpened { cursor }) => {
-                    if is_search {
-                        let _ = tx.send(IssueQueryUpdate::SearchCursorOpened {
-                            repo: repo_identity,
-                            cursor,
-                            query: search_query.unwrap_or_default(),
-                        });
-                    } else {
-                        let _ = tx.send(IssueQueryUpdate::DefaultCursorOpened { repo: repo_identity, cursor });
-                    }
-                }
-                Ok(other) => {
-                    let _ = tx.send(IssueQueryUpdate::QueryFailed {
-                        repo: repo_identity,
-                        message: format!("unexpected query result: {other:?}"),
-                        is_search,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(IssueQueryUpdate::QueryFailed { repo: repo_identity, message: e, is_search });
-                }
-            }
-        });
+        app.spawn_query_page(repo_identity, params, page, count);
         return;
     }
 
@@ -167,10 +136,7 @@ pub fn handle_result(result: CommandValue, app: &mut App) {
         CommandValue::ImageEnsured { .. } | CommandValue::EnvironmentCreated { .. } | CommandValue::EnvironmentSpecRead { .. } => {
             tracing::warn!("unexpected environment lifecycle result reached UI handler");
         }
-        CommandValue::IssueQueryOpened { .. }
-        | CommandValue::IssuePage(_)
-        | CommandValue::IssueQueryClosed
-        | CommandValue::IssuesByIds { .. } => {}
+        CommandValue::IssuePage(_) | CommandValue::IssuesByIds { .. } => {}
     }
 }
 
