@@ -332,6 +332,45 @@ async fn infinite_scroll_appends_the_next_issue_page_without_duplicates() {
 }
 
 #[test]
+fn first_page_search_failure_clears_active_search_state() {
+    use flotilla_protocol::issue_query::IssueQuery;
+
+    let mut app = stub_app();
+    let repo = app.model.active_repo_identity().clone();
+    if let Some(page) = app.screen.repo_pages.get_mut(&repo) {
+        page.active_search_query = Some("beta".into());
+    }
+
+    let view = app.issue_views.entry(repo.clone()).or_default();
+    view.search_query = Some("beta".into());
+    view.search = Some(issue_view::IssuePagingState {
+        params: IssueQuery { search: Some("beta".into()) },
+        items: vec![],
+        next_page: 1,
+        total: None,
+        has_more: true,
+        fetch_pending: true,
+    });
+
+    app.issue_update_tx
+        .send(issue_view::IssueQueryUpdate::QueryFailed {
+            repo: repo.clone(),
+            params: IssueQuery { search: Some("beta".into()) },
+            requested_page: 1,
+            message: "search failed".into(),
+        })
+        .expect("send");
+    app.drain_background_updates();
+
+    let page = app.screen.repo_pages.get(&repo).expect("repo page");
+    assert!(page.active_search_query.is_none(), "visible search state should clear after first-page failure");
+
+    let view = app.issue_views.get(&repo).expect("issue view");
+    assert!(view.search_query.is_none(), "search query bookkeeping should clear after first-page failure");
+    assert!(view.search.is_none(), "failed first page should not leave a pending search state behind");
+}
+
+#[test]
 fn apply_snapshot_maps_provider_health_to_statuses() {
     let mut app = stub_app();
     let repo = app.model.active_repo_identity().clone();

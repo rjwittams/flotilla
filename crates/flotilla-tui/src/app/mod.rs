@@ -536,6 +536,7 @@ impl App {
                     tracing::warn!(%message, requested_page, is_search = params.search.is_some(), "issue query failed");
                     let mut restore_default_rows = false;
                     let mut remove_default_state = false;
+                    let mut clear_search_ui = false;
                     if let Some(view) = self.issue_views.get_mut(&repo) {
                         let target = if params.search.is_some() {
                             if view.search_query != params.search {
@@ -552,7 +553,9 @@ impl App {
                         if requested_page == 1 && state.items.is_empty() {
                             if params.search.is_some() {
                                 view.search = None;
+                                view.search_query = None;
                                 restore_default_rows = true;
+                                clear_search_ui = true;
                             } else {
                                 remove_default_state = true;
                             }
@@ -566,6 +569,11 @@ impl App {
                     if remove_default_state {
                         if let Some(view) = self.issue_views.get_mut(&repo) {
                             view.default = None;
+                        }
+                    }
+                    if clear_search_ui {
+                        if let Some(page) = self.screen.repo_pages.get_mut(&repo) {
+                            page.active_search_query = None;
                         }
                     }
                     if restore_default_rows {
