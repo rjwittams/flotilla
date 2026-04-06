@@ -420,7 +420,6 @@ mod tests {
         assert!(without_checkout.checkout_key().is_none());
         let with_checkout = &cases[1];
         assert_eq!(with_checkout.checkout_key(), Some(&qp("/repos/main")));
-        assert_eq!(with_checkout.checkout_key(), Some(&QualifiedPath::from_host_name(&HostName::new("test-host"), "/repos/main")));
     }
 
     #[test]
