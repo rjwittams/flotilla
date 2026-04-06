@@ -307,10 +307,29 @@ async fn list_ignores_malformed_reference_repo_mount_metadata() {
     };
 
     provider.create(EnvironmentId::new("test-env-list-malformed"), &image, opts).await.expect("create");
-    let handles = provider.list().await.expect("list");
+    let result = provider.list().await;
 
-    assert_eq!(handles.len(), 1);
-    assert!(handles[0].provisioned_mounts().is_empty(), "malformed label content should not be treated as structured mount metadata");
+    assert!(result.is_err(), "malformed mount metadata must fail listing");
+}
+
+#[tokio::test]
+async fn list_rejects_missing_reference_repo_mount_metadata() {
+    use flotilla_protocol::ImageId;
+
+    let runner = Arc::new(QueuedRunner::new([Ok("container-id-123".into()), Ok("container-1\ttest-env-list\tubuntu:22.04\t\n".into())]));
+    let provider = DockerEnvironment::new(runner.clone());
+    let image = ImageId::new("ubuntu:22.04");
+    let opts = CreateOpts {
+        tokens: vec![],
+        daemon_socket_path: DaemonHostPath::new("/run/flotilla.sock"),
+        working_directory: None,
+        provisioned_mounts: vec![ProvisionedMount::new("/host/reference-repo", "/ref/repo")],
+    };
+
+    provider.create(EnvironmentId::new("test-env-list-missing"), &image, opts).await.expect("create");
+    let result = provider.list().await;
+
+    assert!(result.is_err(), "missing mount metadata must fail listing");
 }
 
 #[tokio::test]

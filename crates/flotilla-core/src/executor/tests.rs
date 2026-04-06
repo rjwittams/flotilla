@@ -3056,6 +3056,9 @@ impl ProvisionedEnvironment for MockProvisionedEnvironment {
     fn container_name(&self) -> Option<&str> {
         Some("mock-container")
     }
+    fn provisioned_mounts(&self) -> Vec<crate::providers::environment::ProvisionedMount> {
+        vec![]
+    }
     async fn status(&self) -> Result<EnvironmentStatus, String> {
         Ok(EnvironmentStatus::Running)
     }

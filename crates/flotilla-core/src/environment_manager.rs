@@ -175,6 +175,9 @@ impl EnvironmentManager {
             ManagedEnvironmentKind::Direct(_) => return None,
             ManagedEnvironmentKind::Provisioned(state) => state,
         };
+        if !Self::is_clean_absolute_path(path.as_path()) {
+            return None;
+        }
         let host_id = self.host_id_for_environment(env_id)?;
         let mount = Self::best_matching_mount(&state.provisioned_mounts, path.as_path(), MountDomain::Environment)?;
         let suffix = path.as_path().strip_prefix(mount.environment_path.as_path()).ok()?;
@@ -188,6 +191,9 @@ impl EnvironmentManager {
         };
         let host_id = self.host_id_for_environment(env_id)?;
         if !path.is_owned_by_host_id(&host_id) {
+            return None;
+        }
+        if !Self::is_clean_absolute_path(path.path.as_path()) {
             return None;
         }
         let mount = Self::best_matching_mount(&state.provisioned_mounts, path.path.as_path(), MountDomain::Host)?;
@@ -416,6 +422,11 @@ impl EnvironmentManager {
 
     fn display_name_for_bag(env_bag: &EnvironmentBag) -> Option<String> {
         env_bag.find_env_var("DISPLAY_NAME").map(|value| value.to_owned())
+    }
+
+    fn is_clean_absolute_path(path: &Path) -> bool {
+        let path_str = path.to_string_lossy();
+        path_str.starts_with('/') && path_str.split('/').all(|component| component != "." && component != "..")
     }
 
     fn host_id_for_environment(&self, env_id: &EnvironmentId) -> Option<HostId> {
@@ -990,6 +1001,22 @@ mod tests {
 
         let env_path = manager.resolve_host_path_to_environment_path(&env_id, &host_path).expect("environment path");
         assert_eq!(env_path, crate::path_context::ExecutionEnvironmentPath::new("/ref/repo/subdir"));
+
+        assert!(
+            manager
+                .resolve_environment_path_to_host_path(&env_id, &crate::path_context::ExecutionEnvironmentPath::new("/ref/repo/../other"))
+                .is_none(),
+            "escaping parent components must be rejected"
+        );
+        assert!(
+            manager
+                .resolve_host_path_to_environment_path(
+                    &env_id,
+                    &flotilla_protocol::qualified_path::QualifiedPath::host(test_local_host_id(), "/host/reference-repo/./other")
+                )
+                .is_none(),
+            "dot components in host paths must be rejected"
+        );
     }
 
     #[tokio::test]

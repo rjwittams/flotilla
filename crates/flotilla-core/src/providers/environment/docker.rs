@@ -118,35 +118,40 @@ impl EnvironmentProvider for DockerEnvironment {
             .run("docker", &["ps", "-a", "--filter", "label=flotilla.environment", "--format", format], Path::new("/"), &ChannelLabel::Noop)
             .await?;
 
-        let handles = output
-            .lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(4, '\t').collect();
-                if parts.len() < 4 {
-                    return None;
+        let mut handles = Vec::new();
+        for line in output.lines() {
+            let parts: Vec<&str> = line.splitn(4, '\t').collect();
+            if parts.len() < 4 {
+                tracing::warn!(raw = %line, "docker list output missing provisioned mount metadata");
+                return Err("docker list output missing provisioned mount metadata".to_string());
+            }
+            let container_name = parts[0].to_string();
+            let env_id = parts[1].to_string();
+            let image = parts[2].to_string();
+            if env_id.is_empty() {
+                tracing::warn!(container = %container_name, raw = %line, "docker list output missing environment id");
+                return Err("docker list output missing environment id".to_string());
+            }
+            let mount_metadata = parts[3].trim();
+            if mount_metadata.is_empty() {
+                tracing::warn!(container = %container_name, "docker list output missing provisioned mount metadata");
+                return Err(format!("docker list output missing provisioned mount metadata for container {container_name}"));
+            }
+            let provisioned_mounts = match serde_json::from_str(mount_metadata) {
+                Ok(mounts) => mounts,
+                Err(err) => {
+                    tracing::warn!(container = %container_name, err = %err, raw = %mount_metadata, "failed to parse provisioned mount metadata");
+                    return Err(format!("failed to parse provisioned mount metadata for container {container_name}: {err}"));
                 }
-                let container_name = parts[0].to_string();
-                let env_id = parts[1].to_string();
-                let image = parts[2].to_string();
-                if env_id.is_empty() {
-                    return None;
-                }
-                let provisioned_mounts = match serde_json::from_str(parts[3]) {
-                    Ok(mounts) => mounts,
-                    Err(err) => {
-                        tracing::warn!(container = %container_name, err = %err, raw = %parts[3], "failed to parse provisioned mount metadata; ignoring mount metadata");
-                        vec![]
-                    }
-                };
-                Some(Arc::new(DockerProvisionedEnvironment {
-                    id: EnvironmentId::new(env_id),
-                    container_name,
-                    image: ImageId::new(image),
-                    runner: self.runner.clone(),
-                    provisioned_mounts,
-                }) as EnvironmentHandle)
-            })
-            .collect();
+            };
+            handles.push(Arc::new(DockerProvisionedEnvironment {
+                id: EnvironmentId::new(env_id),
+                container_name,
+                image: ImageId::new(image),
+                runner: self.runner.clone(),
+                provisioned_mounts,
+            }) as EnvironmentHandle);
+        }
 
         Ok(handles)
     }

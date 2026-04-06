@@ -290,6 +290,10 @@ impl ProvisionedEnvironment for TestProvisionedEnvironment {
         None
     }
 
+    fn provisioned_mounts(&self) -> Vec<flotilla_core::providers::environment::ProvisionedMount> {
+        vec![]
+    }
+
     async fn status(&self) -> Result<EnvironmentStatus, String> {
         Ok(EnvironmentStatus::Running)
     }

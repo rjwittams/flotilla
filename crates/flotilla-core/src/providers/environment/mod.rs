@@ -59,9 +59,7 @@ pub trait ProvisionedEnvironment: Send + Sync {
     /// Provider-specific transport identifier (e.g. Docker container name).
     /// Used by hop chain to construct exec/enter commands.
     fn container_name(&self) -> Option<&str>;
-    fn provisioned_mounts(&self) -> Vec<ProvisionedMount> {
-        vec![]
-    }
+    fn provisioned_mounts(&self) -> Vec<ProvisionedMount>;
     async fn status(&self) -> Result<EnvironmentStatus, String>;
     async fn env_vars(&self) -> Result<HashMap<String, String>, String>;
     fn runner(&self, host_runner: Arc<dyn CommandRunner>) -> Arc<dyn CommandRunner>;
