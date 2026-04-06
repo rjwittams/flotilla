@@ -74,7 +74,7 @@ fn make_attachable_set(id: &str, path: &str) -> flotilla_protocol::AttachableSet
     flotilla_protocol::AttachableSet {
         id: flotilla_protocol::AttachableSetId::new(id),
         host_affinity: Some(flotilla_protocol::HostName::new("test-host")),
-        checkout: Some(flotilla_protocol::HostPath::new(flotilla_protocol::HostName::new("test-host"), PathBuf::from(path))),
+        checkout: Some(flotilla_protocol::HostPath::new(flotilla_protocol::HostName::new("test-host"), PathBuf::from(path)).into()),
         template_identity: None,
         environment_id: None,
         members: vec![],
@@ -843,7 +843,7 @@ fn workspace_only_joins_checkout_through_attachable_set() {
         id: set_id.clone(),
         host_affinity: Some(flotilla_protocol::HostName::new("feta")),
         checkout: Some(
-            flotilla_protocol::HostPath::try_from(&remote_checkout).expect("hostname-qualified path should convert to HostPath"),
+            flotilla_protocol::HostPath::try_from(&remote_checkout).expect("hostname-qualified path should convert to HostPath").into(),
         ),
         template_identity: None,
         environment_id: None,

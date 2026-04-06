@@ -245,13 +245,21 @@ fn normalize_local_provider_hosts(
     }
 
     for session in providers.sessions.values_mut() {
-        session.correlation_keys =
-            normalize_correlation_keys_for_environment(environment_manager, environment_id, host_name, std::mem::take(&mut session.correlation_keys));
+        session.correlation_keys = normalize_correlation_keys_for_environment(
+            environment_manager,
+            environment_id,
+            host_name,
+            std::mem::take(&mut session.correlation_keys),
+        );
     }
 
     for workspace in providers.workspaces.values_mut() {
-        workspace.correlation_keys =
-            normalize_correlation_keys_for_environment(environment_manager, environment_id, host_name, std::mem::take(&mut workspace.correlation_keys));
+        workspace.correlation_keys = normalize_correlation_keys_for_environment(
+            environment_manager,
+            environment_id,
+            host_name,
+            std::mem::take(&mut workspace.correlation_keys),
+        );
     }
 
     providers
@@ -459,7 +467,8 @@ impl InProcessDaemon {
             resolve_or_create_environment_id(&local_environment_state_dir).expect("failed to resolve local direct environment id");
         let local_host_id =
             resolve_local_host_id(config.state_dir().as_path(), &*discovery.runner).await.expect("failed to resolve local host id");
-        let environment_manager = Arc::new(EnvironmentManager::new_local(&discovery, local_environment_id.clone(), local_host_id.clone()).await);
+        let environment_manager =
+            Arc::new(EnvironmentManager::new_local(&discovery, local_environment_id.clone(), local_host_id.clone()).await);
         register_static_ssh_direct_environments(&config, &discovery, &environment_manager).await;
         let agent_state_store = crate::agents::shared_file_backed_agent_state_store(config.base_path());
 
@@ -878,8 +887,12 @@ impl InProcessDaemon {
         }
         // last_local_providers excludes peer overlay data; normalize so
         // outbound replication only sends this host's authoritative state.
-        let providers =
-            normalize_local_provider_hosts(state.last_local_providers.clone(), &self.environment_manager, state.preferred_environment_id(), &self.host_name);
+        let providers = normalize_local_provider_hosts(
+            state.last_local_providers.clone(),
+            &self.environment_manager,
+            state.preferred_environment_id(),
+            &self.host_name,
+        );
         Some((providers, state.local_data_version()))
     }
 
@@ -1208,8 +1221,11 @@ impl InProcessDaemon {
             return;
         };
 
-        let proto_snapshot =
-            build_repo_snapshot_with_peers(state.snapshot_context(&self.host_name, &self.environment_manager), state.seq() + 1, peer_overlay.as_deref());
+        let proto_snapshot = build_repo_snapshot_with_peers(
+            state.snapshot_context(&self.host_name, &self.environment_manager),
+            state.seq() + 1,
+            peer_overlay.as_deref(),
+        );
 
         // Compute and log delta (also advances seq)
         let delta_entry = state.record_delta(
@@ -2011,7 +2027,11 @@ impl DaemonHandle for InProcessDaemon {
         let state = repos.get(&identity).ok_or_else(|| format!("repo not tracked: {}", repo_path.display()))?;
         Ok(match state.cached_snapshot() {
             Some(s) => (**s).clone(),
-            None => build_repo_snapshot_with_peers(state.snapshot_context(&self.host_name, &self.environment_manager), state.seq(), peer_overlay.as_deref()),
+            None => build_repo_snapshot_with_peers(
+                state.snapshot_context(&self.host_name, &self.environment_manager),
+                state.seq(),
+                peer_overlay.as_deref(),
+            ),
         })
     }
 

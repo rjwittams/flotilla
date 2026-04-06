@@ -1,5 +1,5 @@
 pub use flotilla_protocol::CheckoutIntent;
-use flotilla_protocol::{qualified_path::QualifiedPath, CheckoutSelector, HostName, HostPath};
+use flotilla_protocol::{qualified_path::QualifiedPath, CheckoutSelector, HostName};
 use tracing::warn;
 
 use crate::{
@@ -47,7 +47,7 @@ impl<'a> CheckoutService<'a> {
         &self,
         repo_root: &ExecutionEnvironmentPath,
         branch: &str,
-        deleted_checkout_paths: &[HostPath],
+        deleted_checkout_paths: &[QualifiedPath],
         terminal_manager: Option<&TerminalManager>,
     ) -> Result<(), String> {
         let checkout_manager =

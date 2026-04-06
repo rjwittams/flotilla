@@ -1478,12 +1478,8 @@ async fn local_direct_repo_refresh_stamps_discovered_checkout_environment_id() {
         snapshot.providers.checkouts.keys().all(|path| path.host_name() != Some(&HostName::local())),
         "local direct checkout should stop using hostname-qualified publication once host id is available"
     );
-    let checkout = snapshot
-        .providers
-        .checkouts
-        .values()
-        .find(|checkout| checkout.branch == "main")
-        .expect("local checkout should be present");
+    let checkout =
+        snapshot.providers.checkouts.values().find(|checkout| checkout.branch == "main").expect("local checkout should be present");
     assert_eq!(checkout.environment_id.as_ref(), Some(daemon.local_environment_id()));
 }
 
@@ -1575,7 +1571,11 @@ hostname = "buildbox.example"
         );
         checkout
     } else {
-        snapshot.providers.checkouts.get(&qpath(&HostName::local(), repo.join("ssh-feature"))).expect("static ssh checkout should be present")
+        snapshot
+            .providers
+            .checkouts
+            .get(&qpath(&HostName::local(), repo.join("ssh-feature")))
+            .expect("static ssh checkout should be present")
     };
     assert_eq!(checkout.environment_id.as_ref(), Some(&environment_id));
 }
@@ -2756,7 +2756,7 @@ async fn in_process_daemon_keeps_remote_attachable_set_anchor_when_local_workspa
         store.insert_set(AttachableSet {
             id: set_id.clone(),
             host_affinity: Some(remote_host.clone()),
-            checkout: Some(remote_checkout.clone()),
+            checkout: Some(remote_checkout.clone().into()),
             template_identity: None,
             environment_id: None,
             members: vec![],
@@ -2799,7 +2799,7 @@ async fn in_process_daemon_keeps_remote_attachable_set_anchor_when_local_workspa
     peer_data.attachable_sets.insert(set_id.clone(), AttachableSet {
         id: set_id.clone(),
         host_affinity: Some(remote_host.clone()),
-        checkout: Some(remote_checkout.clone()),
+        checkout: Some(remote_checkout.clone().into()),
         template_identity: None,
         environment_id: None,
         members: vec![],
@@ -2820,7 +2820,7 @@ async fn in_process_daemon_keeps_remote_attachable_set_anchor_when_local_workspa
     let snapshot = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("merged state");
     let merged_set = snapshot.providers.attachable_sets.get(&set_id).expect("merged attachable set");
     assert_eq!(merged_set.host_affinity.as_ref(), Some(&remote_host));
-    assert_eq!(merged_set.checkout.as_ref(), Some(&remote_checkout));
+    assert_eq!(merged_set.checkout.as_ref(), Some(&remote_checkout.clone().into()));
 
     let set_item =
         snapshot.work_items.iter().find(|item| item.attachable_set_id.as_ref() == Some(&set_id)).expect("attachable set work item");
@@ -2852,7 +2852,7 @@ async fn in_process_daemon_correlates_workspace_into_one_remote_checkout_item() 
         store.insert_set(AttachableSet {
             id: set_id.clone(),
             host_affinity: Some(remote_host.clone()),
-            checkout: Some(remote_checkout.clone()),
+            checkout: Some(remote_checkout.clone().into()),
             template_identity: None,
             environment_id: None,
             members: vec![],
@@ -2898,7 +2898,7 @@ async fn in_process_daemon_correlates_workspace_into_one_remote_checkout_item() 
     peer_data.attachable_sets.insert(set_id.clone(), AttachableSet {
         id: set_id.clone(),
         host_affinity: Some(remote_host.clone()),
-        checkout: Some(remote_checkout.clone()),
+        checkout: Some(remote_checkout.clone().into()),
         template_identity: None,
         environment_id: None,
         members: vec![],
@@ -3799,7 +3799,7 @@ async fn attachable_set_cascade_deletes_on_checkout_removal() {
     let attachable_store = shared_in_memory_attachable_store();
     let set_id = {
         let mut store = attachable_store.lock().expect("lock attachable store");
-        let set_id = store.ensure_terminal_set(Some(HostName::local()), Some(host_path.clone()));
+        let set_id = store.ensure_terminal_set(Some(HostName::local()), Some(host_path.clone().into()));
         store.ensure_terminal_attachable(
             &set_id,
             "terminal_pool",

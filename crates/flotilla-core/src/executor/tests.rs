@@ -506,7 +506,7 @@ async fn create_workspace_for_checkout_persists_workspace_binding() {
         .lookup_binding("workspace_manager", "cmux", BindingObjectKind::AttachableSet, "mock-ref")
         .expect("workspace binding should exist");
     let set = store.registry().sets.values().find(|set| set.id.as_str() == object_id).expect("set should exist");
-    assert_eq!(set.checkout, Some(HostPath::new(local_host(), checkout_path)));
+    assert_eq!(set.checkout, Some(HostPath::new(local_host(), checkout_path).into()));
 }
 
 #[tokio::test]
@@ -568,11 +568,11 @@ async fn prepare_terminal_for_checkout_includes_attachable_set_id_when_present()
     let attachable_store = test_attachable_store(&DaemonHostPath::new(temp.path()));
     {
         let mut store = attachable_store.lock().expect("store lock");
-        let ensured_set_id = store.ensure_terminal_set(Some(local_host()), Some(HostPath::new(local_host(), path.clone())));
+        let ensured_set_id = store.ensure_terminal_set(Some(local_host()), Some(HostPath::new(local_host(), path.clone()).into()));
         store.save().expect("save attachable store");
         assert_eq!(
             store.registry().sets.get(&ensured_set_id).and_then(|set| set.checkout.clone()),
-            Some(HostPath::new(local_host(), path.clone()))
+            Some(HostPath::new(local_host(), path.clone()).into())
         );
     }
 
@@ -592,6 +592,42 @@ async fn prepare_terminal_for_checkout_includes_attachable_set_id_when_present()
             let set_id = attachable_set_id.expect("attachable set id");
             let store = AttachableStore::with_base(&crate::path_context::DaemonHostPath::new(temp.path()));
             assert!(store.registry().sets.contains_key(&set_id), "prepare should reuse persisted set");
+        }
+        other => panic!("expected TerminalPrepared, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn prepare_terminal_for_checkout_reuses_host_id_qualified_attachable_set() {
+    let registry = empty_registry();
+    let mut data = empty_data();
+    let path = PathBuf::from("/repo/wt-feat");
+    let checkout_key = flotilla_protocol::qualified_path::QualifiedPath::host(HostId::new("persisted-local-host-id"), path.clone());
+    data.checkouts.insert(checkout_key.clone(), TestCheckout::new("feat").build());
+    let runner = runner_ok();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let attachable_store = test_attachable_store(&DaemonHostPath::new(temp.path()));
+    let ensured_set_id = {
+        let mut store = attachable_store.lock().expect("store lock");
+        let ensured_set_id = store.ensure_terminal_set(Some(local_host()), Some(checkout_key.clone()));
+        store.save().expect("save attachable store");
+        ensured_set_id
+    };
+
+    let result = run_build_plan_to_completion_with(
+        CommandAction::PrepareTerminalForCheckout { checkout_path: path.clone(), commands: vec![] },
+        registry,
+        data,
+        runner,
+        repo_root(),
+        DaemonHostPath::new(temp.path()),
+        attachable_store,
+    )
+    .await;
+
+    match result {
+        CommandValue::TerminalPrepared { attachable_set_id, .. } => {
+            assert_eq!(attachable_set_id.as_ref(), Some(&ensured_set_id), "prepare should reuse host-id-qualified attachable set");
         }
         other => panic!("expected TerminalPrepared, got {other:?}"),
     }
@@ -625,7 +661,7 @@ async fn prepare_terminal_for_checkout_creates_and_persists_attachable_set() {
 
     let store = AttachableStore::with_base(&crate::path_context::DaemonHostPath::new(temp.path()));
     let set = store.registry().sets.get(&set_id).expect("set should exist");
-    assert_eq!(set.checkout, Some(HostPath::new(local_host(), path)));
+    assert_eq!(set.checkout, Some(HostPath::new(local_host(), path).into()));
     assert!(temp.path().join("attachables").join("registry.json").exists(), "registry should be written");
 }
 
@@ -756,7 +792,7 @@ async fn create_workspace_from_prepared_terminal_persists_remote_attachable_set_
         .expect("workspace binding should exist");
     assert_eq!(object_id, set_id.as_str());
     let set = store.registry().sets.get(&set_id).expect("set should exist");
-    assert_eq!(set.checkout, Some(HostPath::new(HostName::new("desktop"), PathBuf::from("/remote/feat"))));
+    assert_eq!(set.checkout, Some(HostPath::new(HostName::new("desktop"), PathBuf::from("/remote/feat")).into()));
 }
 
 #[tokio::test]
@@ -778,7 +814,7 @@ async fn create_workspace_for_checkout_selects_existing_workspace() {
         let mut store = attachable_store.lock().expect("lock store");
         let host = local_host();
         let checkout = HostPath::new(host.clone(), PathBuf::from("/repo/wt-feat"));
-        let set_id = store.ensure_terminal_set(Some(host), Some(checkout));
+        let set_id = store.ensure_terminal_set(Some(host), Some(checkout.into()));
         store.replace_binding(ProviderBinding {
             provider_category: "workspace_manager".into(),
             provider_name: "cmux".into(),
@@ -948,7 +984,7 @@ async fn teleport_session_persists_workspace_binding() {
         .lookup_binding("workspace_manager", "cmux", BindingObjectKind::AttachableSet, "mock-ref")
         .expect("workspace binding should exist");
     let set = store.registry().sets.values().find(|set| set.id.as_str() == object_id).expect("set should exist");
-    assert_eq!(set.checkout, Some(HostPath::new(local_host(), PathBuf::from("/repo/wt-feat"))));
+    assert_eq!(set.checkout, Some(HostPath::new(local_host(), PathBuf::from("/repo/wt-feat")).into()));
 }
 // -----------------------------------------------------------------------
 // Tests: SelectWorkspace
@@ -1852,7 +1888,7 @@ async fn remove_checkout_cascades_attachable_set_deletion() {
     {
         let mut store = attachable_store.lock().expect("lock store");
         let checkout_path = HostPath::new(host.clone(), "/repo/wt-feat-x");
-        let set_id = store.ensure_terminal_set(Some(host.clone()), Some(checkout_path));
+        let set_id = store.ensure_terminal_set(Some(host.clone()), Some(checkout_path.into()));
         store.ensure_terminal_attachable(
             &set_id,
             "terminal_pool",

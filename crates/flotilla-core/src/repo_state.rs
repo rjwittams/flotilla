@@ -222,7 +222,11 @@ impl RepoState {
     }
 
     /// Build a [`SnapshotBuildContext`] from the current state.
-    pub(crate) fn snapshot_context<'a>(&'a self, host_name: &'a HostName, environment_manager: &'a EnvironmentManager) -> SnapshotBuildContext<'a> {
+    pub(crate) fn snapshot_context<'a>(
+        &'a self,
+        host_name: &'a HostName,
+        environment_manager: &'a EnvironmentManager,
+    ) -> SnapshotBuildContext<'a> {
         SnapshotBuildContext {
             repo_identity: self.identity.clone(),
             path: self.preferred_path(),

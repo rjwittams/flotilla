@@ -76,6 +76,7 @@ pub(crate) fn normalize_checkout_correlation_keys(
 }
 
 impl RepoRefreshHandle {
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         repo_root: PathBuf,
         registry: Arc<ProviderRegistry>,
@@ -194,6 +195,7 @@ fn insert_category_health<I>(
 }
 
 /// Fetch all provider data into the given ProviderData struct.
+#[allow(clippy::too_many_arguments)]
 async fn refresh_providers(
     pd: &mut ProviderData,
     repo_root: &Path,
@@ -285,7 +287,8 @@ async fn refresh_providers(
             if co.environment_id.is_none() {
                 co.environment_id = environment_id.cloned();
             }
-            let publication = normalize_checkout_publication(QualifiedPath::from_host_name(&local_host, path.as_path()), host_id, &local_host);
+            let publication =
+                normalize_checkout_publication(QualifiedPath::from_host_name(&local_host, path.as_path()), host_id, &local_host);
             co.correlation_keys = normalize_checkout_correlation_keys(co.correlation_keys, host_id, &local_host);
             (publication, co)
         })
@@ -294,7 +297,8 @@ async fn refresh_providers(
 
     pd.change_requests = crs.into_iter().collect();
     for change_request in pd.change_requests.values_mut() {
-        change_request.correlation_keys = normalize_checkout_correlation_keys(change_request.correlation_keys.clone(), host_id, &local_host);
+        change_request.correlation_keys =
+            normalize_checkout_correlation_keys(change_request.correlation_keys.clone(), host_id, &local_host);
     }
     collect_errors(&mut errors, "PRs", cr_errors);
 

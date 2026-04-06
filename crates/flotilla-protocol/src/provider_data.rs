@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::{qualified_path::QualifiedPath, EnvironmentId, HostName, HostPath};
+use crate::{
+    qualified_path::{qualified_path_or_host_path, QualifiedPath},
+    EnvironmentId, HostName,
+};
 
 /// Identity keys — safe for union-find grouping. Items sharing a
 /// CorrelationKey are the same work unit.
@@ -303,7 +306,8 @@ pub struct AttachableSet {
     #[serde(default)]
     pub host_affinity: Option<HostName>,
     #[serde(default)]
-    pub checkout: Option<HostPath>,
+    #[serde(with = "qualified_path_or_host_path::option")]
+    pub checkout: Option<QualifiedPath>,
     #[serde(default)]
     pub template_identity: Option<String>,
     #[serde(default)]

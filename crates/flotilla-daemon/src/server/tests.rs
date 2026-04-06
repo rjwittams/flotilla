@@ -948,6 +948,7 @@ async fn remote_checkout_completion_runs_workspace_step_on_presentation_host() {
                 label: "feat-workspace-local@feta".into(),
                 target_host: HostName::new("feta"),
                 checkout_path: PathBuf::from("/srv/feta/repo/wt-feat-workspace-local"),
+                checkout_key: None,
                 attachable_set_id: None,
                 environment_id: None,
                 container_name: None,

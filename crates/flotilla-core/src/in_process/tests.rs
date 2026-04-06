@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::{Arc, OnceLock}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use async_trait::async_trait;
 use flotilla_protocol::{
@@ -13,11 +16,11 @@ use crate::{
     config::ConfigStore,
     environment_manager::EnvironmentManager,
     model::RepoModel,
-    providers::discovery::{
-        test_support::{fake_discovery, DiscoveryMockRunner},
-        EnvironmentAssertion, EnvironmentBag,
-    },
     providers::{
+        discovery::{
+            test_support::{fake_discovery, DiscoveryMockRunner},
+            EnvironmentAssertion, EnvironmentBag,
+        },
         environment::{EnvironmentHandle, ProvisionedEnvironment, ProvisionedMount},
         CommandRunner,
     },
@@ -283,7 +286,7 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
     local_providers.attachable_sets.insert(set_id.clone(), flotilla_protocol::AttachableSet {
         id: set_id.clone(),
         host_affinity: Some(remote_host.clone()),
-        checkout: Some(remote_checkout.clone()),
+        checkout: Some(remote_checkout.clone().into()),
         template_identity: None,
         environment_id: None,
         members: vec![],
@@ -324,7 +327,7 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
 
     let set = snapshot.providers.attachable_sets.get(&set_id).expect("attachable set should remain projected");
     assert_eq!(set.host_affinity.as_ref(), Some(&remote_host), "remote attachable set host affinity should stay on feta");
-    assert_eq!(set.checkout.as_ref(), Some(&remote_checkout), "remote attachable set checkout should stay on feta");
+    assert_eq!(set.checkout.as_ref(), Some(&remote_checkout.clone().into()), "remote attachable set checkout should stay on feta");
 
     let set_item =
         snapshot.work_items.iter().find(|item| item.attachable_set_id.as_ref() == Some(&set_id)).expect("work item for attachable set");
@@ -631,20 +634,17 @@ async fn normalize_local_provider_hosts_uses_mount_metadata_for_provisioned_chec
 
     let checkout_path = QualifiedPath::from_host_name(&HostName::local(), "/workspace/repo/feature");
     let mut providers = ProviderData::default();
-    providers.checkouts.insert(
-        checkout_path.clone(),
-        Checkout {
-            branch: "feature".into(),
-            is_main: false,
-            trunk_ahead_behind: None,
-            remote_ahead_behind: None,
-            working_tree: None,
-            last_commit: None,
-            correlation_keys: vec![CorrelationKey::CheckoutPath(checkout_path.clone())],
-            association_keys: vec![],
-            environment_id: Some(environment_id.clone()),
-        },
-    );
+    providers.checkouts.insert(checkout_path.clone(), Checkout {
+        branch: "feature".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![CorrelationKey::CheckoutPath(checkout_path.clone())],
+        association_keys: vec![],
+        environment_id: Some(environment_id.clone()),
+    });
 
     let normalized = normalize_local_provider_hosts(providers, &environment_manager, Some(&environment_id), &HostName::local());
     let expected = QualifiedPath::host(local_host_id, "/host/reference-repo/feature");
@@ -665,20 +665,17 @@ async fn normalize_local_provider_hosts_preserves_host_qualified_checkout_when_p
 
     let checkout_path = QualifiedPath::host(HostId::new("persistent-host-id"), "/workspace/repo/feature");
     let mut providers = ProviderData::default();
-    providers.checkouts.insert(
-        checkout_path.clone(),
-        Checkout {
-            branch: "feature".into(),
-            is_main: false,
-            trunk_ahead_behind: None,
-            remote_ahead_behind: None,
-            working_tree: None,
-            last_commit: None,
-            correlation_keys: vec![CorrelationKey::CheckoutPath(checkout_path.clone())],
-            association_keys: vec![],
-            environment_id: Some(environment_id.clone()),
-        },
-    );
+    providers.checkouts.insert(checkout_path.clone(), Checkout {
+        branch: "feature".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![CorrelationKey::CheckoutPath(checkout_path.clone())],
+        association_keys: vec![],
+        environment_id: Some(environment_id.clone()),
+    });
 
     let normalized = normalize_local_provider_hosts(providers, environment_manager, Some(&environment_id), &HostName::local());
     let checkout = normalized.checkouts.get(&checkout_path).expect("host-qualified checkout should be preserved");
@@ -701,20 +698,17 @@ async fn normalize_local_provider_hosts_keeps_environment_qualified_checkout_whe
     let environment_id = EnvironmentId::new("provisioned-env-no-mount");
     let checkout_path = QualifiedPath::environment(environment_id.clone(), "/workspace/repo/feature");
     let mut providers = ProviderData::default();
-    providers.checkouts.insert(
-        checkout_path.clone(),
-        Checkout {
-            branch: "feature".into(),
-            is_main: false,
-            trunk_ahead_behind: None,
-            remote_ahead_behind: None,
-            working_tree: None,
-            last_commit: None,
-            correlation_keys: vec![CorrelationKey::CheckoutPath(checkout_path.clone())],
-            association_keys: vec![],
-            environment_id: Some(environment_id.clone()),
-        },
-    );
+    providers.checkouts.insert(checkout_path.clone(), Checkout {
+        branch: "feature".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![CorrelationKey::CheckoutPath(checkout_path.clone())],
+        association_keys: vec![],
+        environment_id: Some(environment_id.clone()),
+    });
 
     let normalized = normalize_local_provider_hosts(providers, &environment_manager, Some(&environment_id), &HostName::local());
     let checkout = normalized.checkouts.get(&checkout_path).expect("environment-qualified checkout should remain environment-qualified");

@@ -404,7 +404,8 @@ async fn refresh_populates_all_provider_data_and_merged_wins_branch_conflict() {
 
     let mut pd = ProviderData::default();
     let errors =
-        refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, None, &test_attachable_store(), &test_agent_state_store()).await;
+        refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, None, &test_attachable_store(), &test_agent_state_store())
+            .await;
 
     assert!(errors.is_empty());
     assert_eq!(pd.checkouts.len(), 1);
@@ -460,7 +461,7 @@ fn project_attachable_data_populates_sets_and_ids() {
         let mut store = attachable_store.lock().expect("lock store");
         let set_id = store.ensure_terminal_set(
             Some(flotilla_protocol::HostName::local()),
-            Some(flotilla_protocol::HostPath::new(flotilla_protocol::HostName::local(), PathBuf::from("/tmp/wt-feat"))),
+            Some(flotilla_protocol::HostPath::new(flotilla_protocol::HostName::local(), PathBuf::from("/tmp/wt-feat")).into()),
         );
         let _attachable_id = store.ensure_terminal_attachable(
             &set_id,
@@ -513,7 +514,8 @@ async fn refresh_reports_checkout_errors() {
 
     let mut pd = ProviderData::default();
     let errors =
-        refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, None, &test_attachable_store(), &test_agent_state_store()).await;
+        refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, None, &test_attachable_store(), &test_agent_state_store())
+            .await;
 
     assert!(errors.iter().any(|e| e.category == "checkouts"));
     assert!(pd.checkouts.is_empty());
@@ -534,7 +536,8 @@ async fn refresh_collects_multiple_errors_and_preserves_successful_providers() {
 
     let mut pd = ProviderData::default();
     let errors =
-        refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, None, &test_attachable_store(), &test_agent_state_store()).await;
+        refresh_providers(&mut pd, &repo_root(), &registry, &criteria(), None, None, &test_attachable_store(), &test_agent_state_store())
+            .await;
 
     let categories: HashSet<&str> = errors.iter().map(|e| e.category).collect();
     for expected in ["PRs", "merged", "sessions", "branches", "workspaces"] {
@@ -659,8 +662,8 @@ fn project_attachable_data_only_includes_sets_matching_repo_checkouts() {
 
     {
         let mut s = store.lock().expect("lock");
-        s.ensure_terminal_set(Some(host.clone()), Some(checkout_a.clone()));
-        s.ensure_terminal_set(Some(host.clone()), Some(checkout_b.clone()));
+        s.ensure_terminal_set(Some(host.clone()), Some(checkout_a.clone().into()));
+        s.ensure_terminal_set(Some(host.clone()), Some(checkout_b.clone().into()));
     }
 
     let mut pd = ProviderData::default();
@@ -681,7 +684,7 @@ fn project_attachable_data_only_includes_sets_matching_repo_checkouts() {
 
     assert_eq!(pd.attachable_sets.len(), 1);
     let set = pd.attachable_sets.values().next().expect("one set");
-    assert_eq!(set.checkout, Some(checkout_a));
+    assert_eq!(set.checkout, Some(checkout_a.into()));
 }
 
 #[test]
@@ -692,7 +695,7 @@ fn project_attachable_data_set_appears_without_terminal_scan() {
 
     {
         let mut s = store.lock().expect("lock");
-        s.ensure_terminal_set(Some(host.clone()), Some(checkout.clone()));
+        s.ensure_terminal_set(Some(host.clone()), Some(checkout.clone().into()));
     }
 
     let mut pd = ProviderData::default();

@@ -313,7 +313,7 @@ fn group_to_work_item(providers: &ProviderData, group: &CorrelatedGroup, group_i
                     host = providers
                         .attachable_sets
                         .get(id)
-                        .and_then(|set| set.checkout.as_ref().map(|co| co.host.clone()).or_else(|| set.host_affinity.clone()));
+                        .and_then(|set| set.checkout.as_ref().and_then(|co| co.host_name().cloned()).or_else(|| set.host_affinity.clone()));
                 }
             }
             (CorItemKind::ChangeRequest, ProviderItemKey::ChangeRequest(id)) => {
@@ -396,7 +396,10 @@ fn group_to_work_item(providers: &ProviderData, group: &CorrelatedGroup, group_i
             co.host_path().map(|path| path.host.to_string()).or_else(|| co.key.host_name().map(ToString::to_string))
         }
         CorrelatedAnchor::AttachableSet(id) => providers.attachable_sets.get(id).and_then(|set| {
-            set.checkout.as_ref().map(|co| co.host.to_string()).or_else(|| set.host_affinity.as_ref().map(ToString::to_string))
+            set.checkout
+                .as_ref()
+                .and_then(|co| co.host_name().map(ToString::to_string))
+                .or_else(|| set.host_affinity.as_ref().map(ToString::to_string))
         }),
         CorrelatedAnchor::ChangeRequest(key) => {
             providers.change_requests.get(key.as_str()).map(|cr| cr.provider_display_name.clone()).filter(|s| !s.is_empty())
@@ -446,7 +449,7 @@ pub fn correlate(providers: &ProviderData) -> (Vec<CorrelationResult>, Vec<Corre
     for (id, set) in &providers.attachable_sets {
         let mut keys = vec![CorrelationKey::AttachableSet(id.clone())];
         if let Some(checkout) = &set.checkout {
-            keys.push(CorrelationKey::CheckoutPath(checkout.clone().into()));
+            keys.push(CorrelationKey::CheckoutPath(checkout.clone()));
         }
         items.push(CorrelatedItem {
             provider_name: "attachable_set".to_string(),

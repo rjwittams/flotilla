@@ -14,7 +14,8 @@ use std::{
 };
 
 use flotilla_protocol::{
-    arg::Arg, CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath, PreparedWorkspace, ResolvedPaneCommand,
+    arg::Arg, qualified_path::QualifiedPath, CheckoutTarget, Command, CommandAction, CommandValue, HostName, PreparedWorkspace,
+    ResolvedPaneCommand,
 };
 use tracing::{debug, error, info};
 
@@ -155,11 +156,11 @@ pub async fn build_plan(
             );
             match resolve_checkout_branch(&checkout, &providers_data, &target_host) {
                 Ok(branch) => {
-                    let deleted_paths: Vec<HostPath> = providers_data
+                    let deleted_paths: Vec<QualifiedPath> = providers_data
                         .checkouts
                         .iter()
                         .filter(|(qp, co)| co.branch == branch && checkout_is_local_owned(qp, &target_host))
-                        .map(|(qp, _)| HostPath::new(target_host.clone(), qp.path.clone()))
+                        .map(|(qp, _)| qp.clone())
                         .collect();
                     info!(%branch, ?deleted_paths, %target_host, "built remove checkout plan");
                     Ok(build_remove_checkout_plan(branch, deleted_paths, target_host))
@@ -525,7 +526,7 @@ async fn build_teleport_session_plan(
 /// Steps:
 /// 1. Remove the checkout via the checkout manager
 /// 2. Clean up correlated terminal sessions (best-effort)
-fn build_remove_checkout_plan(branch: String, deleted_checkout_paths: Vec<HostPath>, local_host: HostName) -> StepPlan {
+fn build_remove_checkout_plan(branch: String, deleted_checkout_paths: Vec<QualifiedPath>, local_host: HostName) -> StepPlan {
     StepPlan::new(vec![Step {
         description: format!("Remove checkout for branch {branch}"),
         host: StepExecutionContext::Host(local_host),
@@ -695,33 +696,32 @@ impl StepResolver for ExecutorStepResolver {
                 Ok(StepOutcome::CompletedWith(session_actions.generate_branch_name_result(&issue_keys).await))
             }
             StepAction::PrepareWorkspace { checkout_path: explicit_path, label } => {
-                let prepared_checkout: Option<(ExecutionEnvironmentPath, String)> = if let Some(p) = explicit_path {
+                let prepared_checkout: Option<(ExecutionEnvironmentPath, String, Option<QualifiedPath>)> = if let Some(p) = explicit_path {
                     let host_key =
                         flotilla_protocol::qualified_path::QualifiedPath::from_host_name(&self.local_host, p.as_path().to_path_buf());
-                    let branch = self
+                    let (checkout_key, branch) = self
                         .providers_data
                         .checkouts
-                        .get(&host_key)
+                        .get_key_value(&host_key)
                         .or_else(|| {
                             self.providers_data
                                 .checkouts
                                 .iter()
                                 .find(|(hp, _)| checkout_is_local_owned(hp, &self.local_host) && hp.path == p.as_path())
-                                .map(|(_, checkout)| checkout)
                         })
-                        .map(|checkout| checkout.branch.clone())
+                        .map(|(path, checkout)| (path.clone(), checkout.branch.clone()))
                         .ok_or_else(|| format!("checkout not found: {}", p))?;
-                    Some((p, branch))
+                    Some((p, branch, Some(checkout_key)))
                 } else {
                     prior.iter().find_map(|o| match o {
                         StepOutcome::CompletedWith(CommandValue::CheckoutCreated { branch, path }) => {
-                            Some((ExecutionEnvironmentPath::new(path), branch.clone()))
+                            Some((ExecutionEnvironmentPath::new(path), branch.clone(), None))
                         }
                         _ => None,
                     })
                 };
 
-                let Some((checkout_path, branch)) = prepared_checkout else {
+                let Some((checkout_path, branch, checkout_key)) = prepared_checkout else {
                     return Ok(StepOutcome::Skipped);
                 };
 
@@ -738,6 +738,7 @@ impl StepResolver for ExecutorStepResolver {
                 let attachable_set_id = workspace_orchestrator.ensure_attachable_set_for_checkout(
                     &self.local_host,
                     checkout_path.as_path(),
+                    checkout_key.as_ref(),
                     context_environment_id.as_ref(),
                 );
                 let workspace_config =
@@ -764,6 +765,7 @@ impl StepResolver for ExecutorStepResolver {
                     label,
                     target_host: self.local_host.clone(),
                     checkout_path: checkout_path.into_path_buf(),
+                    checkout_key,
                     attachable_set_id,
                     environment_id: context_environment_id.clone(),
                     container_name,
@@ -815,6 +817,7 @@ impl StepResolver for ExecutorStepResolver {
                             label: format!("{branch}@{target_host}"),
                             target_host,
                             checkout_path: checkout_path.into_path_buf(),
+                            checkout_key: None,
                             attachable_set_id,
                             environment_id: None,
                             container_name: None,
@@ -846,7 +849,22 @@ impl StepResolver for ExecutorStepResolver {
                     &self.local_host,
                     checkout_path.as_path().to_path_buf(),
                 );
-                if let Some(co) = self.providers_data.checkouts.get(&host_key).cloned() {
+                let Some((checkout_key, co)) = self
+                    .providers_data
+                    .checkouts
+                    .get_key_value(&host_key)
+                    .or_else(|| {
+                        self.providers_data
+                            .checkouts
+                            .iter()
+                            .find(|(hp, _)| checkout_is_local_owned(hp, &self.local_host) && hp.path == checkout_path.as_path())
+                    })
+                    .map(|(path, checkout)| (path.clone(), checkout.clone()))
+                else {
+                    return Err(format!("checkout not found: {}", checkout_path));
+                };
+
+                {
                     let tm = self.terminal_manager();
                     let workspace_orchestrator = WorkspaceOrchestrator::new(
                         self.repo.root.as_path(),
@@ -857,8 +875,12 @@ impl StepResolver for ExecutorStepResolver {
                         &self.local_host,
                         tm.as_ref(),
                     );
-                    let attachable_set_id =
-                        workspace_orchestrator.ensure_attachable_set_for_checkout(&self.local_host, checkout_path.as_path(), None);
+                    let attachable_set_id = workspace_orchestrator.ensure_attachable_set_for_checkout(
+                        &self.local_host,
+                        checkout_path.as_path(),
+                        Some(&checkout_key),
+                        None,
+                    );
                     let commands = if let Some(ref tm) = tm {
                         let terminal_preparation =
                             TerminalPreparationService::new(tm, self.daemon_socket_path.as_ref().map(|p| p.as_path()));
@@ -900,8 +922,6 @@ impl StepResolver for ExecutorStepResolver {
                         attachable_set_id,
                         commands,
                     }))
-                } else {
-                    Err(format!("checkout not found: {}", checkout_path))
                 }
             }
             StepAction::FetchCheckoutStatus { branch, checkout_path, change_request_id } => {

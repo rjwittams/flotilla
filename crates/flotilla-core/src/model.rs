@@ -5,8 +5,8 @@ use std::{
     time::Duration,
 };
 
-pub use flotilla_protocol::{CategoryLabels, EnvironmentId, RepoLabels};
 use flotilla_protocol::qualified_path::HostId;
+pub use flotilla_protocol::{CategoryLabels, EnvironmentId, RepoLabels};
 
 use crate::{
     attachable::SharedAttachableStore,
