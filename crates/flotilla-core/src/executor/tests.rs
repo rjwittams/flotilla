@@ -18,7 +18,10 @@ use crate::{
         ai_utility::AiUtility,
         change_request::ChangeRequestTracker,
         coding_agent::CloudAgentService,
-        discovery::{test_support::fake_discovery, ProviderCategory, ProviderDescriptor},
+        discovery::{
+            test_support::{fake_discovery, DiscoveryMockRunner},
+            ProviderCategory, ProviderDescriptor,
+        },
         issue_tracker::IssueProvider,
         registry::ProviderRegistry,
         terminal::TerminalPool,
@@ -2493,41 +2496,38 @@ async fn build_plan_with_environment_prepends_lifecycle_steps() {
     .await
     .expect("build_plan should succeed");
 
-    // Verify 7 steps (ReadEnvironmentSpec prepended)
-    assert_eq!(plan.steps.len(), 7);
+    // Verify 6 steps (create now initializes the environment for later env-scoped steps)
+    assert_eq!(plan.steps.len(), 6);
 
     // Verify step actions in order
     assert!(matches!(plan.steps[0].action, StepAction::ReadEnvironmentSpec));
     assert!(matches!(plan.steps[1].action, StepAction::EnsureEnvironmentImage { .. }));
     assert!(matches!(plan.steps[2].action, StepAction::CreateEnvironment { .. }));
-    assert!(matches!(plan.steps[3].action, StepAction::DiscoverEnvironmentProviders { .. }));
-    assert!(matches!(plan.steps[4].action, StepAction::CreateCheckout { .. }));
-    assert!(matches!(plan.steps[5].action, StepAction::PrepareWorkspace { .. }));
-    assert!(matches!(plan.steps[6].action, StepAction::AttachWorkspace));
+    assert!(matches!(plan.steps[3].action, StepAction::CreateCheckout { .. }));
+    assert!(matches!(plan.steps[4].action, StepAction::PrepareWorkspace { .. }));
+    assert!(matches!(plan.steps[5].action, StepAction::AttachWorkspace));
 
-    // Verify host assignments — steps 0-3: Host(feta)
+    // Verify host assignments — steps 0-2: Host(feta)
     assert_eq!(*plan.steps[0].host.host_name(), HostName::new("feta"));
     assert_eq!(*plan.steps[1].host.host_name(), HostName::new("feta"));
     assert_eq!(*plan.steps[2].host.host_name(), HostName::new("feta"));
-    assert_eq!(*plan.steps[3].host.host_name(), HostName::new("feta"));
     assert!(matches!(&plan.steps[0].host, StepExecutionContext::Host(_)));
     assert!(matches!(&plan.steps[1].host, StepExecutionContext::Host(_)));
     assert!(matches!(&plan.steps[2].host, StepExecutionContext::Host(_)));
-    assert!(matches!(&plan.steps[3].host, StepExecutionContext::Host(_)));
 
-    // Steps 4-5: Environment(feta, env_id)
+    // Steps 3-4: Environment(feta, env_id)
+    assert!(matches!(&plan.steps[3].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
     assert!(matches!(&plan.steps[4].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
-    assert!(matches!(&plan.steps[5].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
 
-    // Step 6: Host(laptop) — attach on local
-    assert_eq!(*plan.steps[6].host.host_name(), HostName::new("laptop"));
-    assert!(matches!(&plan.steps[6].host, StepExecutionContext::Host(_)));
+    // Step 5: Host(laptop) — attach on local
+    assert_eq!(*plan.steps[5].host.host_name(), HostName::new("laptop"));
+    assert!(matches!(&plan.steps[5].host, StepExecutionContext::Host(_)));
 
     // Verify workspace label includes remote host suffix
-    if let StepAction::PrepareWorkspace { ref label, .. } = plan.steps[5].action {
+    if let StepAction::PrepareWorkspace { ref label, .. } = plan.steps[4].action {
         assert_eq!(label, "feature-x@feta");
     } else {
-        panic!("step 5 should be PrepareWorkspace");
+        panic!("step 4 should be PrepareWorkspace");
     }
 }
 
@@ -2559,27 +2559,27 @@ async fn build_plan_with_environment_local_host_omits_suffix() {
     .await
     .expect("build_plan should succeed");
 
-    assert_eq!(plan.steps.len(), 7);
+    assert_eq!(plan.steps.len(), 6);
 
     // When target_host == local_host, workspace label should be just the branch
-    if let StepAction::PrepareWorkspace { ref label, .. } = plan.steps[5].action {
+    if let StepAction::PrepareWorkspace { ref label, .. } = plan.steps[4].action {
         assert_eq!(label, "main");
     } else {
-        panic!("step 5 should be PrepareWorkspace");
+        panic!("step 4 should be PrepareWorkspace");
     }
 
     // Checkout step should use ExistingBranch intent
-    if let StepAction::CreateCheckout { ref branch, create_branch, intent, .. } = plan.steps[4].action {
+    if let StepAction::CreateCheckout { ref branch, create_branch, intent, .. } = plan.steps[3].action {
         assert_eq!(branch, "main");
         assert!(!create_branch);
         assert_eq!(intent, CheckoutIntent::ExistingBranch);
     } else {
-        panic!("step 4 should be CreateCheckout");
+        panic!("step 3 should be CreateCheckout");
     }
 }
 
 #[tokio::test]
-async fn build_plan_with_existing_environment_returns_4_steps() {
+async fn build_plan_with_existing_environment_returns_3_steps() {
     let registry = empty_registry();
     let data = empty_data();
 
@@ -2610,24 +2610,19 @@ async fn build_plan_with_existing_environment_returns_4_steps() {
     .await
     .expect("build_plan should succeed");
 
-    assert_eq!(plan.steps.len(), 4, "existing-environment checkout should have 4 steps");
+    assert_eq!(plan.steps.len(), 3, "existing-environment checkout should have 3 steps");
 
-    assert!(matches!(plan.steps[0].action, StepAction::DiscoverEnvironmentProviders { .. }));
-    assert!(matches!(plan.steps[1].action, StepAction::CreateCheckout { .. }));
-    assert!(matches!(plan.steps[2].action, StepAction::PrepareWorkspace { .. }));
-    assert!(matches!(plan.steps[3].action, StepAction::AttachWorkspace));
+    assert!(matches!(plan.steps[0].action, StepAction::CreateCheckout { .. }));
+    assert!(matches!(plan.steps[1].action, StepAction::PrepareWorkspace { .. }));
+    assert!(matches!(plan.steps[2].action, StepAction::AttachWorkspace));
 
-    // Steps 0 executes on Host(feta)
-    assert_eq!(*plan.steps[0].host.host_name(), HostName::new("feta"));
-    assert!(matches!(&plan.steps[0].host, StepExecutionContext::Host(_)));
-
-    // Steps 1-2 execute in Environment(feta, env_id)
+    // Steps 0-1 execute in Environment(feta, env_id)
+    assert!(matches!(&plan.steps[0].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
     assert!(matches!(&plan.steps[1].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
-    assert!(matches!(&plan.steps[2].host, StepExecutionContext::Environment(h, _) if *h == HostName::new("feta")));
 
-    // Step 3 attaches on the local host
-    assert_eq!(*plan.steps[3].host.host_name(), HostName::new("laptop"));
-    assert!(matches!(&plan.steps[3].host, StepExecutionContext::Host(_)));
+    // Step 2 attaches on the local host
+    assert_eq!(*plan.steps[2].host.host_name(), HostName::new("laptop"));
+    assert!(matches!(&plan.steps[2].host, StepExecutionContext::Host(_)));
 }
 
 #[tokio::test]
@@ -3043,6 +3038,7 @@ impl EnvironmentProvider for MockEnvironmentProvider {
 struct MockProvisionedEnvironment {
     id: EnvironmentId,
     image: ImageId,
+    runner: Arc<dyn CommandRunner>,
 }
 
 #[async_trait]
@@ -3064,8 +3060,8 @@ impl ProvisionedEnvironment for MockProvisionedEnvironment {
         vars.insert("PATH".to_string(), "/usr/bin".to_string());
         Ok(vars)
     }
-    fn runner(&self, host_runner: Arc<dyn CommandRunner>) -> Arc<dyn CommandRunner> {
-        host_runner
+    fn runner(&self) -> Arc<dyn CommandRunner> {
+        Arc::clone(&self.runner)
     }
     async fn destroy(&self) -> Result<(), String> {
         Ok(())
@@ -3156,7 +3152,11 @@ async fn executor_step_resolver_create_environment() {
     let env_id = EnvironmentId::new("env-test-1");
     let image_id = ImageId::new("flotilla:test-abc123");
 
-    let mock_env: EnvironmentHandle = Arc::new(MockProvisionedEnvironment { id: env_id.clone(), image: image_id.clone() });
+    let mock_env: EnvironmentHandle = Arc::new(MockProvisionedEnvironment {
+        id: env_id.clone(),
+        image: image_id.clone(),
+        runner: Arc::new(DiscoveryMockRunner::builder().build()),
+    });
 
     let provider = Arc::new(MockEnvironmentProvider {
         ensure_image_results: tokio::sync::Mutex::new(vec![]),
@@ -3196,12 +3196,37 @@ async fn executor_step_resolver_create_environment() {
 }
 
 #[tokio::test]
+async fn executor_step_resolver_create_environment_errors_without_image_outcome() {
+    let config_base = config_base();
+    let env_id = EnvironmentId::new("env-test-missing-image");
+    let resolver = ExecutorStepResolver {
+        repo: RepoExecutionContext { identity: repo_identity(), root: repo_root() },
+        registry: Arc::new(empty_registry()),
+        providers_data: Arc::new(empty_data()),
+        runner: Arc::new(runner_ok()),
+        config_base: config_base.clone(),
+        attachable_store: test_attachable_store(&config_base),
+        daemon_socket_path: Some(DaemonHostPath::new("/tmp/flotilla.sock")),
+        local_host: local_host(),
+        environment_manager: empty_environment_manager().await,
+    };
+
+    let action = StepAction::CreateEnvironment { env_id, provider: "docker".into(), image: None };
+    let context = StepExecutionContext::Host(local_host());
+    let outcome = resolver.resolve("create env", &context, action, &[]).await;
+
+    assert!(outcome.is_err(), "create environment should fail without an ensured image");
+    assert!(outcome.unwrap_err().contains("image not produced by prior EnsureEnvironmentImage step"));
+}
+
+#[tokio::test]
 async fn executor_step_resolver_destroy_environment() {
     let config_base = config_base();
     let env_id = EnvironmentId::new("env-destroy-1");
     let image_id = ImageId::new("flotilla:test");
 
-    let mock_env: EnvironmentHandle = Arc::new(MockProvisionedEnvironment { id: env_id.clone(), image: image_id });
+    let mock_env: EnvironmentHandle =
+        Arc::new(MockProvisionedEnvironment { id: env_id.clone(), image: image_id, runner: Arc::new(runner_ok()) });
 
     let environment_manager = manager_with_provisioned_environment(&env_id, mock_env, None).await;
 
@@ -3255,7 +3280,8 @@ async fn executor_step_resolver_prepare_workspace_uses_manager_container_name_fo
     let config_base = config_base();
     let env_id = EnvironmentId::new("env-prepare-1");
     let image_id = ImageId::new("flotilla:test");
-    let handle: EnvironmentHandle = Arc::new(MockProvisionedEnvironment { id: env_id.clone(), image: image_id });
+    let handle: EnvironmentHandle =
+        Arc::new(MockProvisionedEnvironment { id: env_id.clone(), image: image_id, runner: Arc::new(runner_ok()) });
     let mut env_registry = empty_registry();
     env_registry.workspace_managers.insert("cmux", desc("cmux"), Arc::new(MockWorkspaceManager::succeeding()));
 
