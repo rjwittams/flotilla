@@ -420,8 +420,8 @@ fn replay_cursor_with_stream_key_host_roundtrip() {
 fn message_hello_roundtrip() {
     let msg = Message::Hello {
         protocol_version: PROTOCOL_VERSION,
-        node_id: NodeId::new("desktop"),
-        display_name: "Desktop".into(),
+        node_id: NodeId::new("node-desktop-1"),
+        display_name: "Desktop Workstation".into(),
         session_id: uuid::Uuid::nil(),
         connection_role: None,
     };

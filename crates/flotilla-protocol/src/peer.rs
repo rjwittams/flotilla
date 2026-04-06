@@ -153,7 +153,7 @@ pub enum RoutedPeerMessage {
         /// requester uses this offset when remapping them back onto the global
         /// command step sequence.
         step_offset: usize,
-        /// Every step in the batch is expected to target `target_host`.
+        /// Every step in the batch is expected to target `target_node_id`.
         /// The receiver should reject mismatched steps instead of trying to route them.
         steps: Vec<Step>,
     },

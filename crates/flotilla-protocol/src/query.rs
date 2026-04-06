@@ -216,7 +216,7 @@ mod tests {
     fn host_list_response_roundtrips_without_summary_data() {
         let response = HostListResponse {
             hosts: vec![HostListEntry {
-                node: NodeInfo::new(NodeId::new("remote"), "Remote"),
+                node: NodeInfo::new(NodeId::new("node-remote-1"), "Remote Laptop"),
                 is_local: false,
                 configured: true,
                 connection_status: PeerConnectionState::Disconnected,
@@ -227,15 +227,15 @@ mod tests {
         };
 
         let json = serde_json::to_value(&response).expect("serialize host list");
-        assert_eq!(json["hosts"][0]["node"]["node_id"], "remote");
-        assert_eq!(json["hosts"][0]["node"]["display_name"], "Remote");
+        assert_eq!(json["hosts"][0]["node"]["node_id"], "node-remote-1");
+        assert_eq!(json["hosts"][0]["node"]["display_name"], "Remote Laptop");
         assert_roundtrip(&response);
     }
 
     #[test]
     fn host_status_response_roundtrips_with_summary() {
         let response = HostStatusResponse {
-            node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
+            node: NodeInfo::new(NodeId::new("node-desktop-1"), "Desktop Workstation"),
             is_local: true,
             configured: true,
             connection_status: PeerConnectionState::Connected,
@@ -246,7 +246,7 @@ mod tests {
         };
 
         let json = serde_json::to_value(&response).expect("serialize host status");
-        assert_eq!(json["node"]["node_id"], "desktop");
+        assert_eq!(json["node"]["node_id"], "node-desktop-1");
         assert_eq!(json["summary"]["node"]["display_name"], "Desktop");
         assert_roundtrip(&response);
     }
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn host_providers_response_roundtrips_summary() {
         let response = HostProvidersResponse {
-            node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
+            node: NodeInfo::new(NodeId::new("node-desktop-1"), "Desktop Workstation"),
             is_local: true,
             configured: true,
             connection_status: PeerConnectionState::Connected,
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn host_status_response_defaults_missing_visible_environments() {
         let mut value = serde_json::to_value(HostStatusResponse {
-            node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
+            node: NodeInfo::new(NodeId::new("node-desktop-1"), "Desktop Workstation"),
             is_local: true,
             configured: true,
             connection_status: PeerConnectionState::Connected,
@@ -287,13 +287,13 @@ mod tests {
     #[test]
     fn topology_response_roundtrips_fallbacks() {
         let response = TopologyResponse {
-            local_node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
+            local_node: NodeInfo::new(NodeId::new("node-desktop-1"), "Desktop Workstation"),
             routes: vec![TopologyRoute {
-                target: NodeInfo::new(NodeId::new("worker"), "Worker"),
-                next_hop: NodeInfo::new(NodeId::new("relay"), "Relay"),
+                target: NodeInfo::new(NodeId::new("node-worker-1"), "Worker"),
+                next_hop: NodeInfo::new(NodeId::new("node-relay-1"), "Relay"),
                 direct: false,
                 connected: true,
-                fallbacks: vec![NodeInfo::new(NodeId::new("backup-relay"), "Backup Relay")],
+                fallbacks: vec![NodeInfo::new(NodeId::new("node-backup-relay-1"), "Backup Relay")],
             }],
         };
 

@@ -200,12 +200,11 @@ impl<'de> Deserialize<'de> for CheckoutRef {
 mod tests {
     use super::*;
     use crate::{
-        HostName,
         provider_data::ProviderData,
         qualified_path::{HostId, QualifiedPath},
         test_helpers::assert_json_roundtrip,
         test_support::{hp, qp},
-        NodeId,
+        HostName, NodeId,
     };
 
     #[test]

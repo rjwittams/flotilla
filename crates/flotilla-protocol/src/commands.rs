@@ -179,10 +179,10 @@ pub enum CommandAction {
     },
     QueryHostList {},
     QueryHostStatus {
-        target_host: String,
+        target_node_id: crate::NodeId,
     },
     QueryHostProviders {
-        target_host: String,
+        target_node_id: crate::NodeId,
     },
 }
 
@@ -498,13 +498,13 @@ mod tests {
                 node_id: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostStatus { target_host: "desktop".into() },
+                action: CommandAction::QueryHostStatus { target_node_id: NodeId::new("node-desktop") },
             },
             Command {
                 node_id: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostProviders { target_host: "desktop".into() },
+                action: CommandAction::QueryHostProviders { target_node_id: NodeId::new("node-desktop") },
             },
             Command {
                 node_id: None,
@@ -883,13 +883,13 @@ mod tests {
                 node_id: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostStatus { target_host: "desktop".into() },
+                action: CommandAction::QueryHostStatus { target_node_id: NodeId::new("node-desktop") },
             },
             Command {
                 node_id: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostProviders { target_host: "desktop".into() },
+                action: CommandAction::QueryHostProviders { target_node_id: NodeId::new("node-desktop") },
             },
             Command {
                 node_id: None,
