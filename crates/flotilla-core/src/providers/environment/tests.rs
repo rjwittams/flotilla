@@ -341,7 +341,7 @@ async fn list_preserves_reference_repo_mount_metadata() {
 }
 
 #[tokio::test]
-async fn list_ignores_malformed_reference_repo_mount_metadata() {
+async fn list_fails_on_malformed_reference_repo_mount_metadata() {
     use flotilla_protocol::ImageId;
 
     let runner =
