@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use flotilla_protocol::{DaemonHostPath, EnvironmentId, EnvironmentSpec, EnvironmentStatus, HostName, ImageSource};
 
-use super::{docker::DockerEnvironment, runner::EnvironmentRunner, CreateOpts, EnvironmentProvider};
+use super::{docker::DockerEnvironment, runner::EnvironmentRunner, CreateOpts, EnvironmentProvider, ProvisionedMount};
 use crate::providers::{ChannelLabel, CommandOutput, CommandRunner};
 
 /// A mock CommandRunner that records all (cmd, args, cwd) tuples passed to run/run_output.
@@ -203,6 +203,7 @@ async fn create_returns_handle() {
         reference_repo: None,
         daemon_socket_path: DaemonHostPath::new("/run/flotilla.sock"),
         working_directory: None,
+        provisioned_mounts: vec![],
     };
 
     let id = EnvironmentId::new("test-env-1");
@@ -236,6 +237,32 @@ async fn create_returns_handle() {
 }
 
 #[tokio::test]
+async fn create_preserves_reference_repo_mount_metadata() {
+    use flotilla_protocol::ImageId;
+
+    let runner = Arc::new(RecordingRunner::new_ok("container-id-123"));
+    let provider = DockerEnvironment::new(runner.clone());
+    let image = ImageId::new("ubuntu:22.04");
+    let reference_repo = DaemonHostPath::new("/host/reference-repo");
+    let opts = CreateOpts {
+        tokens: vec![],
+        reference_repo: Some(reference_repo.clone()),
+        daemon_socket_path: DaemonHostPath::new("/run/flotilla.sock"),
+        working_directory: None,
+        provisioned_mounts: vec![ProvisionedMount::new(reference_repo.as_path().to_path_buf(), "/ref/repo")],
+    };
+
+    let id = EnvironmentId::new("test-env-metadata");
+    let handle = provider.create(id, &image, opts).await.expect("create");
+
+    assert_eq!(
+        handle.provisioned_mounts(),
+        vec![ProvisionedMount::new(reference_repo.as_path().to_path_buf(), "/ref/repo")],
+        "docker provisioned environments should retain flotilla-managed bind mount metadata",
+    );
+}
+
+#[tokio::test]
 async fn status_returns_running() {
     use flotilla_protocol::ImageId;
     let runner = Arc::new(QueuedRunner::new([
@@ -249,6 +276,7 @@ async fn status_returns_running() {
         reference_repo: None,
         daemon_socket_path: DaemonHostPath::new("/run/flotilla.sock"),
         working_directory: None,
+        provisioned_mounts: vec![],
     };
 
     let id = EnvironmentId::new("test-env-status");
@@ -278,6 +306,7 @@ async fn env_vars_parses_output() {
         reference_repo: None,
         daemon_socket_path: DaemonHostPath::new("/run/flotilla.sock"),
         working_directory: None,
+        provisioned_mounts: vec![],
     };
 
     let id = EnvironmentId::new("test-env-vars");
@@ -309,6 +338,7 @@ async fn destroy_calls_docker_rm() {
         reference_repo: None,
         daemon_socket_path: DaemonHostPath::new("/run/flotilla.sock"),
         working_directory: None,
+        provisioned_mounts: vec![],
     };
 
     let id = EnvironmentId::new("test-env-destroy");

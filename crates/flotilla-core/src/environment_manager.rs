@@ -1,16 +1,20 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
-use flotilla_protocol::{qualified_path::HostId, CommandValue, EnvironmentId, EnvironmentInfo, EnvironmentStatus};
+use flotilla_protocol::{
+    qualified_path::{HostId, QualifiedPath},
+    CommandValue, EnvironmentId, EnvironmentInfo, EnvironmentStatus,
+};
 
 use crate::{
     config::ConfigStore,
     path_context::{DaemonHostPath, ExecutionEnvironmentPath},
     providers::{
         discovery::{run_host_detectors, DiscoveryRuntime, EnvironmentAssertion, EnvironmentBag, FactoryRegistry},
-        environment::{CreateOpts, EnvironmentHandle},
+        environment::{CreateOpts, EnvironmentHandle, ProvisionedMount},
         registry::ProviderRegistry,
         CommandRunner,
     },
@@ -37,6 +41,7 @@ pub struct ProvisionedEnvironmentState {
     pub env_bag: EnvironmentBag,
     pub display_name: Option<String>,
     pub registry: Option<Arc<ProviderRegistry>>,
+    pub provisioned_mounts: Vec<ProvisionedMount>,
 }
 
 pub struct EnvironmentManager {
@@ -156,6 +161,38 @@ impl EnvironmentManager {
         }
     }
 
+    pub fn provisioned_mounts(&self, env_id: &EnvironmentId) -> Option<Vec<ProvisionedMount>> {
+        match self.managed_environment(env_id)? {
+            ManagedEnvironmentKind::Direct(_) => None,
+            ManagedEnvironmentKind::Provisioned(state) => Some(state.provisioned_mounts.clone()),
+        }
+    }
+
+    pub fn resolve_environment_path_to_host_path(&self, env_id: &EnvironmentId, path: &ExecutionEnvironmentPath) -> Option<QualifiedPath> {
+        let state = match self.managed_environment(env_id)? {
+            ManagedEnvironmentKind::Direct(_) => return None,
+            ManagedEnvironmentKind::Provisioned(state) => state,
+        };
+        let host_id = self.host_id_for_environment(env_id)?;
+        let mount = Self::best_matching_mount(&state.provisioned_mounts, path.as_path(), MountDomain::Environment)?;
+        let suffix = path.as_path().strip_prefix(mount.environment_path.as_path()).ok()?;
+        Some(QualifiedPath::host(host_id, mount.host_path.as_path().join(suffix)))
+    }
+
+    pub fn resolve_host_path_to_environment_path(&self, env_id: &EnvironmentId, path: &QualifiedPath) -> Option<ExecutionEnvironmentPath> {
+        let state = match self.managed_environment(env_id)? {
+            ManagedEnvironmentKind::Direct(_) => return None,
+            ManagedEnvironmentKind::Provisioned(state) => state,
+        };
+        let host_id = self.host_id_for_environment(env_id)?;
+        if !path.is_owned_by_host_id(&host_id) {
+            return None;
+        }
+        let mount = Self::best_matching_mount(&state.provisioned_mounts, path.path.as_path(), MountDomain::Host)?;
+        let suffix = path.path.strip_prefix(mount.host_path.as_path()).ok()?;
+        Some(ExecutionEnvironmentPath::new(mount.environment_path.as_path().join(suffix)))
+    }
+
     pub async fn host_summary_environments(&self) -> Vec<EnvironmentInfo> {
         let mut environments = Vec::new();
         for (env_id, state) in self.managed_environments() {
@@ -233,7 +270,17 @@ impl EnvironmentManager {
             })
             .unwrap_or_default();
 
-        let opts = CreateOpts { tokens, reference_repo, daemon_socket_path: daemon_socket_path.clone(), working_directory: None };
+        let provisioned_mounts = reference_repo
+            .as_ref()
+            .map(|repo| vec![ProvisionedMount::new(repo.as_path().to_path_buf(), PathBuf::from("/ref/repo"))])
+            .unwrap_or_default();
+        let opts = CreateOpts {
+            tokens,
+            reference_repo,
+            daemon_socket_path: daemon_socket_path.clone(),
+            working_directory: None,
+            provisioned_mounts,
+        };
         let handle = env_provider.create(env_id.clone(), &image, opts).await?;
         self.register_provisioned_environment(env_id, handle, EnvironmentBag::new(), None)
     }
@@ -281,6 +328,7 @@ impl EnvironmentManager {
         if handle.id() != &env_id {
             return Err(format!("provisioned environment id mismatch: key={env_id}, handle={}", handle.id()));
         }
+        let provisioned_mounts = handle.provisioned_mounts();
 
         let mut managed = self.managed.lock().expect("environment manager lock poisoned");
         match managed.entry(env_id.clone()) {
@@ -293,6 +341,7 @@ impl EnvironmentManager {
                     display_name: Self::display_name_for_bag(&env_bag),
                     env_bag,
                     registry,
+                    provisioned_mounts: provisioned_mounts.clone(),
                 }));
             }
             Entry::Vacant(entry) => {
@@ -301,6 +350,7 @@ impl EnvironmentManager {
                     display_name: Self::display_name_for_bag(&env_bag),
                     env_bag,
                     registry,
+                    provisioned_mounts,
                 }));
             }
         }
@@ -370,12 +420,41 @@ impl EnvironmentManager {
         env_bag.find_env_var("DISPLAY_NAME").map(|value| value.to_owned())
     }
 
+    fn host_id_for_environment(&self, env_id: &EnvironmentId) -> Option<HostId> {
+        match self.managed_environment(env_id)? {
+            ManagedEnvironmentKind::Direct(state) => state.host_id,
+            ManagedEnvironmentKind::Provisioned(_) => match self.managed_environment(&self.local_environment_id)? {
+                ManagedEnvironmentKind::Direct(state) => state.host_id,
+                ManagedEnvironmentKind::Provisioned(_) => None,
+            },
+        }
+    }
+
+    fn best_matching_mount<'a>(mounts: &'a [ProvisionedMount], path: &Path, domain: MountDomain) -> Option<&'a ProvisionedMount> {
+        mounts
+            .iter()
+            .filter(|mount| match domain {
+                MountDomain::Environment => path.starts_with(mount.environment_path.as_path()),
+                MountDomain::Host => path.starts_with(mount.host_path.as_path()),
+            })
+            .max_by_key(|mount| match domain {
+                MountDomain::Environment => mount.environment_path.as_path().components().count(),
+                MountDomain::Host => mount.host_path.as_path().components().count(),
+            })
+    }
+
     fn environment_info_sort_key(info: &EnvironmentInfo) -> (&EnvironmentId, u8) {
         match info {
             EnvironmentInfo::Direct { id, .. } => (id, 0),
             EnvironmentInfo::Provisioned { id, .. } => (id, 1),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum MountDomain {
+    Host,
+    Environment,
 }
 
 #[cfg(test)]
@@ -398,7 +477,7 @@ mod tests {
                 test_support::{fake_discovery, DiscoveryMockRunner},
                 EnvironmentAssertion,
             },
-            environment::{CreateOpts, EnvironmentHandle, EnvironmentProvider, ProvisionedEnvironment},
+            environment::{CreateOpts, EnvironmentHandle, EnvironmentProvider, ProvisionedEnvironment, ProvisionedMount},
             registry::ProviderRegistry,
             CommandRunner,
         },
@@ -410,6 +489,7 @@ mod tests {
         image: ImageId,
         runner: Arc<dyn CommandRunner>,
         env_vars: HashMap<String, String>,
+        provisioned_mounts: Vec<ProvisionedMount>,
         destroyed: Arc<AtomicBool>,
         destroy_error: Option<String>,
     }
@@ -434,6 +514,10 @@ mod tests {
 
         async fn env_vars(&self) -> Result<HashMap<String, String>, String> {
             Ok(self.env_vars.clone())
+        }
+
+        fn provisioned_mounts(&self) -> Vec<ProvisionedMount> {
+            self.provisioned_mounts.clone()
         }
 
         fn runner(&self, _host_runner: Arc<dyn CommandRunner>) -> Arc<dyn CommandRunner> {
@@ -479,6 +563,7 @@ mod tests {
             image: ImageId::new("mock:image"),
             runner: Arc::new(DiscoveryMockRunner::builder().build()),
             env_vars,
+            provisioned_mounts: vec![],
             destroyed: Arc::clone(&destroyed),
             destroy_error,
         });
@@ -491,6 +576,10 @@ mod tests {
 
     fn test_local_host_id() -> HostId {
         HostId::new("test-local-host-id")
+    }
+
+    fn reference_repo_mount() -> ProvisionedMount {
+        ProvisionedMount::new("/host/reference-repo", "/ref/repo")
     }
 
     #[tokio::test]
@@ -526,6 +615,7 @@ mod tests {
             image: ImageId::new("mock:image"),
             runner,
             env_vars: HashMap::new(),
+            provisioned_mounts: vec![reference_repo_mount()],
             destroyed: Arc::new(AtomicBool::new(false)),
             destroy_error: None,
         });
@@ -541,9 +631,11 @@ mod tests {
 
         let lookup_registry = manager.environment_registry(&env_id).expect("provisioned environment registry");
         assert!(Arc::ptr_eq(&lookup_registry, &registry));
+        assert_eq!(manager.provisioned_mounts(&env_id).expect("provisioned mounts"), vec![reference_repo_mount()]);
 
         let removed = manager.remove_provisioned_environment(&env_id).expect("provisioned environment removed");
         assert_eq!(removed.env_bag.find_env_var("PROVISIONED"), Some("true"));
+        assert_eq!(removed.provisioned_mounts, vec![reference_repo_mount()]);
         assert!(manager.environment_bag(&env_id).is_none());
         assert!(manager.environment_registry(&env_id).is_none());
     }
@@ -756,6 +848,7 @@ mod tests {
             image: ImageId::new("mock:image"),
             runner: Arc::new(DiscoveryMockRunner::builder().build()),
             env_vars: HashMap::new(),
+            provisioned_mounts: vec![],
             destroyed: Arc::new(AtomicBool::new(false)),
             destroy_error: None,
         });
@@ -796,6 +889,7 @@ mod tests {
             image: ImageId::new("mock:image"),
             runner: Arc::new(DiscoveryMockRunner::builder().build()),
             env_vars: HashMap::new(),
+            provisioned_mounts: vec![],
             destroyed: Arc::new(AtomicBool::new(false)),
             destroy_error: None,
         });
@@ -862,6 +956,41 @@ mod tests {
 
         assert_eq!(manager.environment_bag(&env_id).expect("environment bag").find_env_var("ANTHROPIC_API_KEY"), Some("test-key"));
         assert!(manager.environment_registry(&env_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn provisioned_mount_helpers_translate_paths_for_the_owning_environment() {
+        let env_id = EnvironmentId::new("env-mount-translate-1");
+        let discovery = fake_discovery(false);
+        let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id(), test_local_host_id()).await;
+        let handle: EnvironmentHandle = Arc::new(MockProvisionedEnvironment {
+            id: env_id.clone(),
+            image: ImageId::new("mock:image"),
+            runner: Arc::new(DiscoveryMockRunner::builder().build()),
+            env_vars: HashMap::new(),
+            provisioned_mounts: vec![reference_repo_mount()],
+            destroyed: Arc::new(AtomicBool::new(false)),
+            destroy_error: None,
+        });
+        manager
+            .register_provisioned_environment(env_id.clone(), handle, EnvironmentBag::new(), None)
+            .expect("register provisioned environment");
+
+        assert!(manager.provisioned_mounts(&EnvironmentId::new("missing")).is_none());
+        assert!(manager
+            .resolve_environment_path_to_host_path(
+                &EnvironmentId::new("missing"),
+                &crate::path_context::ExecutionEnvironmentPath::new("/ref/repo")
+            )
+            .is_none());
+
+        let host_path = manager
+            .resolve_environment_path_to_host_path(&env_id, &crate::path_context::ExecutionEnvironmentPath::new("/ref/repo/subdir"))
+            .expect("host path");
+        assert_eq!(host_path.to_string(), format!("host:{}:/host/reference-repo/subdir", test_local_host_id()));
+
+        let env_path = manager.resolve_host_path_to_environment_path(&env_id, &host_path).expect("environment path");
+        assert_eq!(env_path, crate::path_context::ExecutionEnvironmentPath::new("/ref/repo/subdir"));
     }
 
     #[tokio::test]

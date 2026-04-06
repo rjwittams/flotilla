@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use flotilla_protocol::{EnvironmentId, EnvironmentSpec, EnvironmentStatus, ImageId, ImageSource};
 use uuid::Uuid;
 
-use super::{runner::EnvironmentRunner, CreateOpts, EnvironmentHandle, EnvironmentProvider, ProvisionedEnvironment};
+use super::{runner::EnvironmentRunner, CreateOpts, EnvironmentHandle, EnvironmentProvider, ProvisionedEnvironment, ProvisionedMount};
 use crate::providers::{ChannelLabel, CommandRunner};
 
 /// Fixed path inside the container where the daemon socket is mounted.
@@ -87,7 +87,13 @@ impl EnvironmentProvider for DockerEnvironment {
 
         self.runner.run("docker", &args, Path::new("/"), &ChannelLabel::Noop).await?;
 
-        Ok(Arc::new(DockerProvisionedEnvironment { id, container_name, image: image.clone(), runner: self.runner.clone() }))
+        Ok(Arc::new(DockerProvisionedEnvironment {
+            id,
+            container_name,
+            image: image.clone(),
+            runner: self.runner.clone(),
+            provisioned_mounts: opts.provisioned_mounts,
+        }))
     }
 
     async fn list(&self) -> Result<Vec<EnvironmentHandle>, String> {
@@ -115,6 +121,7 @@ impl EnvironmentProvider for DockerEnvironment {
                     container_name,
                     image: ImageId::new(image),
                     runner: self.runner.clone(),
+                    provisioned_mounts: vec![],
                 }) as EnvironmentHandle)
             })
             .collect();
@@ -133,6 +140,7 @@ pub struct DockerProvisionedEnvironment {
     container_name: String,
     image: ImageId,
     runner: Arc<dyn CommandRunner>,
+    provisioned_mounts: Vec<ProvisionedMount>,
 }
 
 #[async_trait]
@@ -147,6 +155,10 @@ impl ProvisionedEnvironment for DockerProvisionedEnvironment {
 
     fn container_name(&self) -> Option<&str> {
         Some(&self.container_name)
+    }
+
+    fn provisioned_mounts(&self) -> Vec<ProvisionedMount> {
+        self.provisioned_mounts.clone()
     }
 
     async fn status(&self) -> Result<EnvironmentStatus, String> {

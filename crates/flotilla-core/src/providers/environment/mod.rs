@@ -4,7 +4,11 @@ pub mod runner;
 #[cfg(test)]
 mod tests;
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use flotilla_protocol::{DaemonHostPath, EnvironmentId, EnvironmentSpec, EnvironmentStatus, ExecutionEnvironmentPath, ImageId};
@@ -20,6 +24,20 @@ pub struct CreateOpts {
     pub reference_repo: Option<DaemonHostPath>,
     pub daemon_socket_path: DaemonHostPath,
     pub working_directory: Option<ExecutionEnvironmentPath>,
+    pub provisioned_mounts: Vec<ProvisionedMount>,
+}
+
+/// Structured metadata for a flotilla-managed bind mount inside a provisioned environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvisionedMount {
+    pub host_path: DaemonHostPath,
+    pub environment_path: ExecutionEnvironmentPath,
+}
+
+impl ProvisionedMount {
+    pub fn new(host_path: impl Into<PathBuf>, environment_path: impl Into<PathBuf>) -> Self {
+        Self { host_path: DaemonHostPath::new(host_path), environment_path: ExecutionEnvironmentPath::new(environment_path) }
+    }
 }
 
 /// A live handle to a provisioned sandbox environment.
@@ -41,6 +59,9 @@ pub trait ProvisionedEnvironment: Send + Sync {
     /// Provider-specific transport identifier (e.g. Docker container name).
     /// Used by hop chain to construct exec/enter commands.
     fn container_name(&self) -> Option<&str>;
+    fn provisioned_mounts(&self) -> Vec<ProvisionedMount> {
+        vec![]
+    }
     async fn status(&self) -> Result<EnvironmentStatus, String>;
     async fn env_vars(&self) -> Result<HashMap<String, String>, String>;
     fn runner(&self, host_runner: Arc<dyn CommandRunner>) -> Arc<dyn CommandRunner>;
