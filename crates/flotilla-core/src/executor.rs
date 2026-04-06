@@ -30,7 +30,9 @@ use crate::{
     environment_manager::{CreateProvisionedEnvironmentRequest, EnvironmentManager},
     path_context::{DaemonHostPath, ExecutionEnvironmentPath},
     provider_data::ProviderData,
-    providers::{registry::ProviderRegistry, run, types::WorkspaceConfig, vcs::write_branch_issue_links, CommandRunner},
+    providers::{
+        discovery::EnvVars, registry::ProviderRegistry, run, types::WorkspaceConfig, vcs::write_branch_issue_links, CommandRunner,
+    },
     step::{Step, StepAction, StepExecutionContext, StepOutcome, StepPlan, StepResolver},
     terminal_manager::TerminalManager,
 };
@@ -524,6 +526,7 @@ pub(crate) struct ExecutorStepResolver {
     pub registry: Arc<ProviderRegistry>,
     pub providers_data: Arc<ProviderData>,
     pub runner: Arc<dyn CommandRunner>,
+    pub env: Arc<dyn EnvVars>,
     pub config_base: DaemonHostPath,
     pub attachable_store: SharedAttachableStore,
     pub daemon_socket_path: Option<DaemonHostPath>,
@@ -1003,9 +1006,9 @@ impl StepResolver for ExecutorStepResolver {
                     .map(|spec| {
                         spec.token_env_vars
                             .iter()
-                            .filter_map(|name| match std::env::var(name) {
-                                Ok(val) => Some((name.clone(), val)),
-                                Err(_) => {
+                            .filter_map(|name| match self.env.get(name) {
+                                Some(val) => Some((name.clone(), val)),
+                                None => {
                                     tracing::warn!(env_var = %name, "token env var not set on host, skipping");
                                     None
                                 }
@@ -1029,10 +1032,6 @@ impl StepResolver for ExecutorStepResolver {
                     })
                     .await?;
                 Ok(StepOutcome::Produced(CommandValue::EnvironmentCreated { env_id }))
-            }
-            StepAction::DiscoverEnvironmentProviders { env_id } => {
-                self.environment_manager.discover_provisioned_environment_providers(&env_id, &self.config_base).await?;
-                Ok(StepOutcome::Completed)
             }
             StepAction::DestroyEnvironment { env_id } => {
                 self.environment_manager.destroy_provisioned_environment(&env_id).await?;

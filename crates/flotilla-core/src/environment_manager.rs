@@ -235,17 +235,6 @@ impl EnvironmentManager {
         Ok(())
     }
 
-    pub async fn discover_provisioned_environment_providers(
-        &self,
-        env_id: &EnvironmentId,
-        config_base: &DaemonHostPath,
-    ) -> Result<(), String> {
-        let state = self.provisioned_environment(env_id)?;
-        let (bag, provider_registry) = self.probe_provisioned_environment(env_id, &state.handle, config_base).await?;
-        self.update_provisioned_environment_discovery(env_id, &state.handle, bag, Some(Arc::new(provider_registry)));
-        Ok(())
-    }
-
     pub async fn destroy_provisioned_environment(&self, env_id: &EnvironmentId) -> Result<(), String> {
         let state = self.provisioned_environment(env_id)?;
         match state.handle.destroy().await {

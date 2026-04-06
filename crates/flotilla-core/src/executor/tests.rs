@@ -1834,6 +1834,7 @@ async fn run_build_plan_to_completion_with(
                 registry,
                 providers_data,
                 runner,
+                env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
                 config_base,
                 attachable_store,
                 daemon_socket_path: None,
@@ -2198,6 +2199,7 @@ async fn checkout_plan_end_to_end_creates_workspace() {
         registry,
         providers_data,
         runner,
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: cb,
         attachable_store: attachable,
         daemon_socket_path: None,
@@ -2259,6 +2261,7 @@ async fn checkout_plan_creates_workspace_for_preexisting_checkout() {
         registry,
         providers_data,
         runner,
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: cb,
         attachable_store: attachable,
         daemon_socket_path: None,
@@ -2319,6 +2322,7 @@ async fn checkout_plan_preserves_checkout_created_when_workspace_step_fails() {
         registry,
         providers_data,
         runner,
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: cb,
         attachable_store: attachable,
         daemon_socket_path: None,
@@ -2965,6 +2969,7 @@ async fn executor_step_resolver_prepare_workspace_produces_prepared_workspace() 
         registry: Arc::new(empty_registry()),
         providers_data: Arc::new(empty_data()),
         runner: Arc::new(runner_ok()),
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: config_base.clone(),
         attachable_store: test_attachable_store(&config_base),
         daemon_socket_path: None,
@@ -2996,6 +3001,7 @@ async fn executor_step_resolver_prepare_workspace_skips_when_no_checkout_path() 
         registry: Arc::new(empty_registry()),
         providers_data: Arc::new(empty_data()),
         runner: Arc::new(runner_ok()),
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: config_base.clone(),
         attachable_store: test_attachable_store(&config_base),
         daemon_socket_path: None,
@@ -3020,6 +3026,7 @@ use crate::providers::environment::{CreateOpts, EnvironmentHandle, EnvironmentPr
 struct MockEnvironmentProvider {
     ensure_image_results: tokio::sync::Mutex<Vec<Result<ImageId, String>>>,
     create_results: tokio::sync::Mutex<Vec<Result<EnvironmentHandle, String>>>,
+    seen_create_opts: tokio::sync::Mutex<Vec<CreateOpts>>,
 }
 
 #[async_trait]
@@ -3027,7 +3034,8 @@ impl EnvironmentProvider for MockEnvironmentProvider {
     async fn ensure_image(&self, _spec: &EnvironmentSpec, _repo_root: &std::path::Path) -> Result<ImageId, String> {
         self.ensure_image_results.lock().await.remove(0)
     }
-    async fn create(&self, _id: EnvironmentId, _image: &ImageId, _opts: CreateOpts) -> Result<EnvironmentHandle, String> {
+    async fn create(&self, _id: EnvironmentId, _image: &ImageId, opts: CreateOpts) -> Result<EnvironmentHandle, String> {
+        self.seen_create_opts.lock().await.push(opts);
         self.create_results.lock().await.remove(0)
     }
     async fn list(&self) -> Result<Vec<EnvironmentHandle>, String> {
@@ -3093,13 +3101,15 @@ async fn executor_step_resolver_ensure_environment_image() {
     let provider = Arc::new(MockEnvironmentProvider {
         ensure_image_results: tokio::sync::Mutex::new(vec![Ok(ImageId::new("flotilla:test-abc123"))]),
         create_results: tokio::sync::Mutex::new(vec![]),
+        seen_create_opts: tokio::sync::Mutex::new(vec![]),
     });
-    let registry = registry_with_env_provider(provider);
+    let registry = registry_with_env_provider(provider.clone());
     let resolver = ExecutorStepResolver {
         repo: RepoExecutionContext { identity: repo_identity(), root: repo_root() },
         registry: Arc::new(registry),
         providers_data: Arc::new(empty_data()),
         runner: Arc::new(runner_ok()),
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: config_base.clone(),
         attachable_store: test_attachable_store(&config_base),
         daemon_socket_path: None,
@@ -3129,6 +3139,7 @@ async fn executor_step_resolver_ensure_environment_image_error_when_no_provider(
         registry: Arc::new(empty_registry()),
         providers_data: Arc::new(empty_data()),
         runner: Arc::new(runner_ok()),
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: config_base.clone(),
         attachable_store: test_attachable_store(&config_base),
         daemon_socket_path: None,
@@ -3161,8 +3172,9 @@ async fn executor_step_resolver_create_environment() {
     let provider = Arc::new(MockEnvironmentProvider {
         ensure_image_results: tokio::sync::Mutex::new(vec![]),
         create_results: tokio::sync::Mutex::new(vec![Ok(mock_env)]),
+        seen_create_opts: tokio::sync::Mutex::new(vec![]),
     });
-    let registry = registry_with_env_provider(provider);
+    let registry = registry_with_env_provider(provider.clone());
     // resolve_reference_repo calls `git rev-parse --git-common-dir`
     let runner = Arc::new(MockRunner::new(vec![Ok("/tmp/test-repo/.git".into())]));
     let resolver = ExecutorStepResolver {
@@ -3170,6 +3182,7 @@ async fn executor_step_resolver_create_environment() {
         registry: Arc::new(registry),
         providers_data: Arc::new(empty_data()),
         runner,
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::new([("GITHUB_TOKEN", "gh-test-token")])),
         config_base: config_base.clone(),
         attachable_store: test_attachable_store(&config_base),
         daemon_socket_path: Some(DaemonHostPath::new("/tmp/flotilla.sock")),
@@ -3177,8 +3190,14 @@ async fn executor_step_resolver_create_environment() {
         environment_manager: empty_environment_manager().await,
     };
 
-    // Prior step must have produced the image
-    let prior = vec![StepOutcome::Produced(CommandValue::ImageEnsured { image: image_id.clone() })];
+    let spec = EnvironmentSpec {
+        image: flotilla_protocol::ImageSource::Registry("test:latest".into()),
+        token_env_vars: vec!["GITHUB_TOKEN".into()],
+    };
+    let prior = vec![
+        StepOutcome::Produced(CommandValue::EnvironmentSpecRead { spec }),
+        StepOutcome::Produced(CommandValue::ImageEnsured { image: image_id.clone() }),
+    ];
     let action = StepAction::CreateEnvironment { env_id: env_id.clone(), provider: "docker".into(), image: None };
     let context = StepExecutionContext::Host(local_host());
     let outcome = resolver.resolve("create env", &context, action, &prior).await;
@@ -3193,6 +3212,9 @@ async fn executor_step_resolver_create_environment() {
         resolver.environment_manager.environment_runner(&env_id).is_some(),
         "environment manager should expose the created environment runner"
     );
+    let seen_create_opts = provider.seen_create_opts.lock().await;
+    assert_eq!(seen_create_opts.len(), 1);
+    assert_eq!(seen_create_opts[0].tokens, vec![("GITHUB_TOKEN".to_string(), "gh-test-token".to_string())]);
 }
 
 #[tokio::test]
@@ -3204,6 +3226,7 @@ async fn executor_step_resolver_create_environment_errors_without_image_outcome(
         registry: Arc::new(empty_registry()),
         providers_data: Arc::new(empty_data()),
         runner: Arc::new(runner_ok()),
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: config_base.clone(),
         attachable_store: test_attachable_store(&config_base),
         daemon_socket_path: Some(DaemonHostPath::new("/tmp/flotilla.sock")),
@@ -3235,6 +3258,7 @@ async fn executor_step_resolver_destroy_environment() {
         registry: Arc::new(empty_registry()),
         providers_data: Arc::new(empty_data()),
         runner: Arc::new(runner_ok()),
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: config_base.clone(),
         attachable_store: test_attachable_store(&config_base),
         daemon_socket_path: None,
@@ -3261,6 +3285,7 @@ async fn executor_step_resolver_destroy_environment_not_found() {
         registry: Arc::new(empty_registry()),
         providers_data: Arc::new(empty_data()),
         runner: Arc::new(runner_ok()),
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: config_base.clone(),
         attachable_store: test_attachable_store(&config_base),
         daemon_socket_path: None,
@@ -3290,6 +3315,7 @@ async fn executor_step_resolver_prepare_workspace_uses_manager_container_name_fo
         registry: Arc::new(empty_registry()),
         providers_data: Arc::new(empty_data()),
         runner: Arc::new(runner_ok()),
+        env: Arc::new(crate::providers::discovery::test_support::TestEnvVars::default()),
         config_base: config_base.clone(),
         attachable_store: test_attachable_store(&config_base),
         daemon_socket_path: None,
