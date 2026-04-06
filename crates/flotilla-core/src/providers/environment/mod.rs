@@ -12,6 +12,7 @@ use std::{
 
 use async_trait::async_trait;
 use flotilla_protocol::{DaemonHostPath, EnvironmentId, EnvironmentSpec, EnvironmentStatus, ExecutionEnvironmentPath, ImageId};
+use serde::{Deserialize, Serialize};
 
 use super::CommandRunner;
 
@@ -28,7 +29,7 @@ pub struct CreateOpts {
 }
 
 /// Structured metadata for a flotilla-managed bind mount inside a provisioned environment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvisionedMount {
     pub host_path: DaemonHostPath,
     pub environment_path: ExecutionEnvironmentPath,

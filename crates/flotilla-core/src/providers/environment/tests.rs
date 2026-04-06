@@ -263,6 +263,38 @@ async fn create_preserves_reference_repo_mount_metadata() {
 }
 
 #[tokio::test]
+async fn list_preserves_reference_repo_mount_metadata() {
+    use flotilla_protocol::ImageId;
+
+    let runner = Arc::new(QueuedRunner::new([
+        Ok("container-id-123".into()),
+        Ok(format!(
+            "container-1\ttest-env-list\tubuntu:22.04\t{}\n",
+            serde_json::to_string(&vec![ProvisionedMount::new("/host/reference-repo", "/ref/repo")]).expect("serialize mount metadata")
+        )),
+    ]));
+    let provider = DockerEnvironment::new(runner.clone());
+    let image = ImageId::new("ubuntu:22.04");
+    let opts = CreateOpts {
+        tokens: vec![],
+        reference_repo: Some(DaemonHostPath::new("/host/reference-repo")),
+        daemon_socket_path: DaemonHostPath::new("/run/flotilla.sock"),
+        working_directory: None,
+        provisioned_mounts: vec![ProvisionedMount::new("/host/reference-repo", "/ref/repo")],
+    };
+
+    provider.create(EnvironmentId::new("test-env-list"), &image, opts).await.expect("create");
+    let handles = provider.list().await.expect("list");
+
+    assert_eq!(handles.len(), 1);
+    assert_eq!(
+        handles[0].provisioned_mounts(),
+        vec![ProvisionedMount::new("/host/reference-repo", "/ref/repo")],
+        "docker list should preserve flotilla-managed bind mount metadata",
+    );
+}
+
+#[tokio::test]
 async fn status_returns_running() {
     use flotilla_protocol::ImageId;
     let runner = Arc::new(QueuedRunner::new([

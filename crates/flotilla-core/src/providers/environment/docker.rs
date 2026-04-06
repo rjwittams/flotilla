@@ -59,12 +59,28 @@ impl EnvironmentProvider for DockerEnvironment {
         let env_id_str = id.to_string();
         let image_str = image.as_str().to_string();
         let label_val = format!("flotilla.environment={}", id);
+        let mounts_label_val =
+            format!("flotilla.provisioned_mounts={}", serde_json::to_string(&opts.provisioned_mounts).map_err(|err| err.to_string())?);
         let socket_mount = format!("{}:{CONTAINER_SOCKET_PATH}", socket_str);
         let env_id_env = format!("FLOTILLA_ENVIRONMENT_ID={}", env_id_str);
         let socket_env = format!("FLOTILLA_DAEMON_SOCKET={CONTAINER_SOCKET_PATH}");
 
-        let mut args =
-            vec!["run", "-d", "--name", &container_name, "--label", &label_val, "-v", &socket_mount, "-e", &socket_env, "-e", &env_id_env];
+        let mut args = vec![
+            "run",
+            "-d",
+            "--name",
+            &container_name,
+            "--label",
+            &label_val,
+            "--label",
+            &mounts_label_val,
+            "-v",
+            &socket_mount,
+            "-e",
+            &socket_env,
+            "-e",
+            &env_id_env,
+        ];
 
         // Optional reference_repo mount
         let reference_repo_mount;
@@ -97,7 +113,7 @@ impl EnvironmentProvider for DockerEnvironment {
     }
 
     async fn list(&self) -> Result<Vec<EnvironmentHandle>, String> {
-        let format = r#"{{.Names}}\t{{.Label "flotilla.environment"}}\t{{.Image}}"#;
+        let format = r#"{{.Names}}\t{{.Label "flotilla.environment"}}\t{{.Image}}\t{{.Label "flotilla.provisioned_mounts"}}"#;
         let output = self
             .runner
             .run("docker", &["ps", "-a", "--filter", "label=flotilla.environment", "--format", format], Path::new("/"), &ChannelLabel::Noop)
@@ -106,13 +122,14 @@ impl EnvironmentProvider for DockerEnvironment {
         let handles = output
             .lines()
             .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(3, '\t').collect();
-                if parts.len() < 3 {
+                let parts: Vec<&str> = line.splitn(4, '\t').collect();
+                if parts.len() < 4 {
                     return None;
                 }
                 let container_name = parts[0].to_string();
                 let env_id = parts[1].to_string();
                 let image = parts[2].to_string();
+                let provisioned_mounts = serde_json::from_str(parts[3]).unwrap_or_default();
                 if env_id.is_empty() {
                     return None;
                 }
@@ -121,7 +138,7 @@ impl EnvironmentProvider for DockerEnvironment {
                     container_name,
                     image: ImageId::new(image),
                     runner: self.runner.clone(),
-                    provisioned_mounts: vec![],
+                    provisioned_mounts,
                 }) as EnvironmentHandle)
             })
             .collect();

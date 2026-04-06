@@ -609,6 +609,10 @@ mod tests {
         let env_id = EnvironmentId::new("env-provisioned-1");
         let discovery = fake_discovery(false);
         let manager = EnvironmentManager::new_local(&discovery, test_local_environment_id(), test_local_host_id()).await;
+        assert!(
+            manager.provisioned_mounts(&test_local_environment_id()).is_none(),
+            "direct environments must not expose provisioned mounts"
+        );
         let runner = Arc::new(DiscoveryMockRunner::builder().build()) as Arc<dyn CommandRunner>;
         let handle: EnvironmentHandle = Arc::new(MockProvisionedEnvironment {
             id: env_id.clone(),
@@ -628,10 +632,10 @@ mod tests {
 
         let bag = manager.environment_bag(&env_id).expect("provisioned environment bag");
         assert_eq!(bag.find_env_var("PROVISIONED"), Some("true"));
+        assert_eq!(manager.provisioned_mounts(&env_id).expect("provisioned mounts"), vec![reference_repo_mount()]);
 
         let lookup_registry = manager.environment_registry(&env_id).expect("provisioned environment registry");
         assert!(Arc::ptr_eq(&lookup_registry, &registry));
-        assert_eq!(manager.provisioned_mounts(&env_id).expect("provisioned mounts"), vec![reference_repo_mount()]);
 
         let removed = manager.remove_provisioned_environment(&env_id).expect("provisioned environment removed");
         assert_eq!(removed.env_bag.find_env_var("PROVISIONED"), Some("true"));
