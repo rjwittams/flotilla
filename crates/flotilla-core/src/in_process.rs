@@ -177,7 +177,7 @@ fn normalize_checkout_for_environment(
         return host_path;
     }
 
-    if environment_manager.provisioned_mounts(environment_id).is_some() {
+    if matches!(checkout.qualifier, flotilla_protocol::qualified_path::PathQualifier::Environment(_)) {
         return QualifiedPath::environment(environment_id.clone(), checkout.path);
     }
 

@@ -1567,11 +1567,16 @@ hostname = "buildbox.example"
 
     let snapshot = refresh_snapshot_for_model(&model).await;
     let checkout = if let Some(host_id) = host_id {
-        snapshot.providers.checkouts.get(&QualifiedPath::host(host_id, repo.join("ssh-feature")))
+        let expected = QualifiedPath::host(host_id, repo.join("ssh-feature"));
+        let checkout = snapshot.providers.checkouts.get(&expected).expect("static ssh checkout should be host-qualified");
+        assert!(
+            !snapshot.providers.checkouts.contains_key(&qpath(&HostName::local(), repo.join("ssh-feature"))),
+            "static ssh checkout should not fall back to hostname-qualified publication when a host id is available"
+        );
+        checkout
     } else {
-        snapshot.providers.checkouts.get(&qpath(&HostName::local(), repo.join("ssh-feature")))
-    }
-    .expect("static ssh checkout should be present");
+        snapshot.providers.checkouts.get(&qpath(&HostName::local(), repo.join("ssh-feature"))).expect("static ssh checkout should be present")
+    };
     assert_eq!(checkout.environment_id.as_ref(), Some(&environment_id));
 }
 

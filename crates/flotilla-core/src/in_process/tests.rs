@@ -657,3 +657,68 @@ async fn normalize_local_provider_hosts_uses_mount_metadata_for_provisioned_chec
         "environment-local publication should be replaced by the host-qualified path"
     );
 }
+
+#[tokio::test]
+async fn normalize_local_provider_hosts_preserves_host_qualified_checkout_when_provisioned_mount_lookup_misses() {
+    let environment_manager = test_environment_manager();
+    let environment_id = EnvironmentId::new("provisioned-env-miss");
+
+    let checkout_path = QualifiedPath::host(HostId::new("persistent-host-id"), "/workspace/repo/feature");
+    let mut providers = ProviderData::default();
+    providers.checkouts.insert(
+        checkout_path.clone(),
+        Checkout {
+            branch: "feature".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![CorrelationKey::CheckoutPath(checkout_path.clone())],
+            association_keys: vec![],
+            environment_id: Some(environment_id.clone()),
+        },
+    );
+
+    let normalized = normalize_local_provider_hosts(providers, environment_manager, Some(&environment_id), &HostName::local());
+    let checkout = normalized.checkouts.get(&checkout_path).expect("host-qualified checkout should be preserved");
+
+    assert_eq!(checkout.environment_id.as_ref(), Some(&environment_id));
+    assert_eq!(checkout.correlation_keys, vec![CorrelationKey::CheckoutPath(checkout_path.clone())]);
+}
+
+#[tokio::test]
+async fn normalize_local_provider_hosts_keeps_environment_qualified_checkout_when_no_host_mapping_exists() {
+    let local_environment_id = EnvironmentId::new("local-env-no-mount");
+    let local_host_id = HostId::new("local-host-id-no-mount");
+    let environment_manager = EnvironmentManager::from_local_state(
+        local_environment_id,
+        local_host_id,
+        Arc::new(DiscoveryMockRunner::builder().build()),
+        EnvironmentBag::new(),
+    );
+
+    let environment_id = EnvironmentId::new("provisioned-env-no-mount");
+    let checkout_path = QualifiedPath::environment(environment_id.clone(), "/workspace/repo/feature");
+    let mut providers = ProviderData::default();
+    providers.checkouts.insert(
+        checkout_path.clone(),
+        Checkout {
+            branch: "feature".into(),
+            is_main: false,
+            trunk_ahead_behind: None,
+            remote_ahead_behind: None,
+            working_tree: None,
+            last_commit: None,
+            correlation_keys: vec![CorrelationKey::CheckoutPath(checkout_path.clone())],
+            association_keys: vec![],
+            environment_id: Some(environment_id.clone()),
+        },
+    );
+
+    let normalized = normalize_local_provider_hosts(providers, &environment_manager, Some(&environment_id), &HostName::local());
+    let checkout = normalized.checkouts.get(&checkout_path).expect("environment-qualified checkout should remain environment-qualified");
+
+    assert_eq!(checkout.environment_id.as_ref(), Some(&environment_id));
+    assert_eq!(checkout.correlation_keys, vec![CorrelationKey::CheckoutPath(checkout_path.clone())]);
+}
