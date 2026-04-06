@@ -19,6 +19,8 @@ pub mod step;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+use std::fmt;
+
 pub use environment::{EnvironmentId, EnvironmentInfo, EnvironmentKind, EnvironmentSpec, EnvironmentStatus, ImageId, ImageSource};
 pub use host::{HostName, HostPath, RepoIdentity};
 pub use host_summary::{
@@ -34,7 +36,25 @@ pub use step::{CheckoutIntent, Step, StepAction, StepExecutionContext, StepOutco
 /// This is the routing key for peer discovery, vector clocks, replay cursors,
 /// and event attribution. `HostName` remains only for display metadata and
 /// legacy execution/path contexts that are not mesh identity.
-pub type NodeId = qualified_path::HostId;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NodeId(String);
+
+impl NodeId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for NodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
@@ -171,8 +191,6 @@ pub enum Message {
         session_id: uuid::Uuid,
         #[serde(default)]
         connection_role: Option<ConnectionRole>,
-        #[serde(default)]
-        environment_id: Option<EnvironmentId>,
     },
     #[serde(rename = "peer")]
     Peer(Box<PeerWireMessage>),

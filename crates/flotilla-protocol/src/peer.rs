@@ -235,7 +235,7 @@ pub enum PeerDataKind {
 mod tests {
     use super::*;
     use crate::{
-        Command, CommandAction, CommandValue, HostEnvironment, HostName, HostProviderStatus, HostSummary, NodeId, RepoSelector, StepAction,
+        Command, CommandAction, CommandValue, HostEnvironment, HostProviderStatus, HostSummary, NodeId, RepoSelector, StepAction,
         StepExecutionContext, SystemInfo, ToolInventory,
     };
 
@@ -433,7 +433,7 @@ mod tests {
             target_node_id: NodeId::new("feta"),
             remaining_hops: 7,
             command: Box::new(Command {
-                host: Some(HostName::new("feta")),
+                node_id: Some(NodeId::new("feta")),
                 provisioning_target: None,
                 context_repo: None,
                 action: CommandAction::Refresh { repo: Some(RepoSelector::Query("flotilla".into())) },
@@ -579,7 +579,7 @@ mod tests {
             step_offset: 2,
             steps: vec![Step {
                 description: "Prepare terminal".into(),
-                host: StepExecutionContext::Host(HostName::new("feta")),
+                host: StepExecutionContext::Host(NodeId::new("feta")),
                 action: StepAction::PrepareTerminalForCheckout {
                     checkout_path: crate::ExecutionEnvironmentPath::new("/repo"),
                     commands: vec![],
