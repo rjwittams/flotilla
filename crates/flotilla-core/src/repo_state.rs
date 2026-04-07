@@ -337,7 +337,7 @@ mod tests {
         WorkItem {
             kind: WorkItemKind::Issue,
             identity: WorkItemIdentity::Issue(id.into()),
-            host: HostName::new("host"),
+            node_id: NodeId::new("host-node"),
             branch: None,
             description: description.into(),
             checkout: None,

@@ -218,7 +218,7 @@ fn work_item(identity: WorkItemIdentity, desc: &str) -> flotilla_protocol::WorkI
     flotilla_protocol::WorkItem {
         kind: flotilla_protocol::WorkItemKind::Checkout,
         identity,
-        host: flotilla_protocol::HostName::new("test-host"),
+        node_id: flotilla_protocol::NodeId::new("test-node"),
         branch: None,
         description: desc.into(),
         checkout: None,

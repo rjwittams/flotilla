@@ -307,7 +307,7 @@ mod tests {
 
     use flotilla_protocol::{
         test_support::{hp, qp},
-        CheckoutRef, HostName, HostPath, HostProviderStatus, WorkItemIdentity, WorkItemKind,
+        CheckoutRef, HostName, HostPath, HostProviderStatus, NodeId, WorkItemIdentity, WorkItemKind,
     };
 
     use super::*;
@@ -405,6 +405,10 @@ mod tests {
         HostName::new("test-host")
     }
 
+    fn test_node_id() -> NodeId {
+        NodeId::new("test-node")
+    }
+
     #[test]
     fn convert_correlated_checkout() {
         let item = CorrelationResult::Correlated(CorrelatedWorkItem {
@@ -424,12 +428,12 @@ mod tests {
             agent_keys: vec![],
         });
 
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
 
         assert_eq!(proto.kind, WorkItemKind::Checkout);
         assert_eq!(proto.identity, WorkItemIdentity::Checkout(qp("/repos/my-project/wt-1")));
         // Checkout-anchored items derive host from HostPath
-        assert_eq!(proto.host, test_host());
+        assert_eq!(proto.node_id, test_node_id());
         assert_eq!(proto.branch.as_deref(), Some("feature-login"));
         assert_eq!(proto.description, "Implement login flow");
 
@@ -452,11 +456,11 @@ mod tests {
             source: String::new(),
         });
 
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
 
         assert_eq!(proto.kind, WorkItemKind::Issue);
         assert_eq!(proto.identity, WorkItemIdentity::Issue("42".to_string()));
-        assert_eq!(proto.host, test_host());
+        assert_eq!(proto.node_id, test_node_id());
         assert_eq!(proto.description, "Fix the login bug");
         assert_eq!(proto.issue_keys, vec!["42"]);
         assert!(proto.branch.is_none());
@@ -486,7 +490,7 @@ mod tests {
             terminal_ids: vec![],
             agent_keys: vec![],
         });
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
         assert_eq!(proto.source, Some(hostname));
     }
 
@@ -508,10 +512,10 @@ mod tests {
             terminal_ids: vec![],
             agent_keys: vec![],
         });
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
         assert_eq!(proto.source, Some("Claude".to_string()));
         // Session-anchored items use the provided local host name
-        assert_eq!(proto.host, test_host());
+        assert_eq!(proto.node_id, test_node_id());
     }
 
     #[test]
@@ -521,14 +525,14 @@ mod tests {
             description: "Fix the bug".to_string(),
             source: "GitHub".to_string(),
         });
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
         assert_eq!(proto.source, Some("GitHub".to_string()));
     }
 
     #[test]
     fn convert_standalone_remote_branch_has_git_source() {
         let item = CorrelationResult::Standalone(StandaloneResult::RemoteBranch { branch: "origin/feat".to_string() });
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
         assert_eq!(proto.source, Some("git".to_string()));
     }
 
@@ -554,9 +558,7 @@ mod tests {
             host: Some(remote_host.clone()),
             source: None,
         });
-        let local = HostName::new("local-machine");
-        let proto = correlation_result_to_work_item(&item, &[], &local);
-        // Should use the checkout's HostPath host, not the local fallback
-        assert_eq!(proto.host, remote_host);
+        let proto = correlation_result_to_work_item(&item, &[], NodeId::new("local-machine-node"));
+        assert_eq!(proto.node_id, NodeId::new("local-machine-node"));
     }
 }

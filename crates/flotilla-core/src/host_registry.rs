@@ -425,6 +425,10 @@ fn update_host_summary(
     summary: HostSummary,
 ) -> Option<HostSnapshot> {
     let state = ensure_remote_host_state(hosts, &node.node_id);
+    if summary_is_overlay_placeholder(&summary) && state.summary.as_ref().is_some_and(|existing| !summary_is_overlay_placeholder(existing))
+    {
+        return None;
+    }
     if !state.removed && state.summary.as_ref() == Some(&summary) {
         return None;
     }
@@ -432,6 +436,13 @@ fn update_host_summary(
     state.removed = false;
     state.seq += 1;
     Some(build_host_snapshot(local_node, configured, &node.node_id, state))
+}
+
+fn summary_is_overlay_placeholder(summary: &HostSummary) -> bool {
+    summary.system == SystemInfo::default()
+        && summary.inventory == ToolInventory::default()
+        && summary.providers.is_empty()
+        && summary.environments.is_empty()
 }
 
 fn clear_host_summary(
@@ -664,5 +675,32 @@ mod tests {
         let peer = hosts.hosts.into_iter().find(|entry| entry.node.node_id == peer_node().node_id).expect("peer entry");
         assert_eq!(peer.node.display_name, "Build Box");
         assert_eq!(peer.node.node_id, peer_node().node_id);
+    }
+
+    #[tokio::test]
+    async fn overlay_placeholder_does_not_clobber_existing_real_summary() {
+        let registry = HostRegistry::new(local_node(), minimal_summary(&local_node()));
+        let peer = NodeInfo::new(NodeId::new("peer-node-42"), "Build Box");
+        let real_summary = HostSummary {
+            node: peer.clone(),
+            system: SystemInfo { os: Some("linux".into()), arch: Some("x86_64".into()), ..SystemInfo::default() },
+            inventory: ToolInventory::default(),
+            providers: vec![flotilla_protocol::HostProviderStatus {
+                category: "workspace".into(),
+                name: "cmux".into(),
+                implementation: "cmux".into(),
+                healthy: true,
+            }],
+            environments: vec![],
+        };
+
+        registry.publish_peer_summary(real_summary.clone(), &|_| {}).await;
+        registry.publish_peer_summary(minimal_summary(&peer), &|_| {}).await;
+
+        let status = registry.get_host_status(peer.node_id.as_str(), HostCounts::default(), &HashMap::new()).await.expect("host status");
+        let summary = status.summary.expect("summary should remain available");
+        assert_eq!(summary.node.display_name, "Build Box");
+        assert_eq!(summary.providers, real_summary.providers);
+        assert_eq!(summary.system, real_summary.system);
     }
 }
