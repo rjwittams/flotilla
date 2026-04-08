@@ -101,8 +101,7 @@ impl Serialize for EnvironmentId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Host(host_id) => serializer.serialize_str(&format!("host:{host_id}")),
-            Self::Provisioned(id) if id.starts_with("host:") => serializer.serialize_str(&format!("prov:{id}")),
-            Self::Provisioned(id) => serializer.serialize_str(id),
+            Self::Provisioned(id) => serializer.serialize_str(&format!("prov:{id}")),
         }
     }
 }
@@ -110,14 +109,14 @@ impl Serialize for EnvironmentId {
 impl<'de> Deserialize<'de> for EnvironmentId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        if let Some(id) = raw.strip_prefix("prov:") {
-            return Ok(Self::Provisioned(id.to_string()));
-        }
         if let Some(host_id) = raw.strip_prefix("host:") {
             if host_id.is_empty() {
                 return Err(serde::de::Error::custom("host environment id must not be empty"));
             }
             return Ok(Self::Host(HostId::new(host_id)));
+        }
+        if let Some(id) = raw.strip_prefix("prov:") {
+            return Ok(Self::Provisioned(id.to_string()));
         }
         Ok(Self::Provisioned(raw))
     }
@@ -395,6 +394,13 @@ token_env_vars: []
 
         assert_eq!(decoded, id);
         assert!(!decoded.is_host(), "reserved host prefix must not flip a provisioned environment into a host environment");
+    }
+
+    #[test]
+    fn environment_id_roundtrips_provisioned_value_with_provisioned_prefix() {
+        let id = EnvironmentId::new("prov:foo");
+
+        assert_roundtrip(&id);
     }
 
     #[test]
