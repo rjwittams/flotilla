@@ -1605,22 +1605,22 @@ impl InProcessDaemon {
         Ok(self.host_registry.list_hosts(local_counts, &remote_counts).await)
     }
 
-    pub async fn get_host_status_internal(&self, host: &str) -> Result<HostStatusResponse, String> {
-        let _ = self.refresh_local_host_summary().await;
+    pub async fn get_host_status_internal(&self, environment_id: &EnvironmentId) -> Result<HostStatusResponse, String> {
+        let local_summary = self.refresh_local_host_summary().await;
         let local_counts = self.local_host_counts().await;
         let remote_counts = self.remote_host_counts().await;
-        let mut response = self.host_registry.get_host_status(host, local_counts, &remote_counts).await?;
-        if host == self.host_name.as_str() || host == self.node_id.as_str() {
+        let mut response = self.host_registry.get_host_status(environment_id, local_counts, &remote_counts).await?;
+        if environment_id == &local_summary.environment_id {
             response.visible_environments = self.environment_manager.visible_environments().await;
         }
         Ok(response)
     }
 
-    pub async fn get_host_providers_internal(&self, host: &str) -> Result<HostProvidersResponse, String> {
-        let _ = self.refresh_local_host_summary().await;
+    pub async fn get_host_providers_internal(&self, environment_id: &EnvironmentId) -> Result<HostProvidersResponse, String> {
+        let local_summary = self.refresh_local_host_summary().await;
         let remote_counts = self.remote_host_counts().await;
-        let mut response = self.host_registry.get_host_providers(host, &remote_counts).await?;
-        if host == self.host_name.as_str() || host == self.node_id.as_str() {
+        let mut response = self.host_registry.get_host_providers(environment_id, &remote_counts).await?;
+        if environment_id == &local_summary.environment_id {
             response.visible_environments = self.environment_manager.visible_environments().await;
         }
         Ok(response)
@@ -2126,11 +2126,11 @@ impl DaemonHandle for InProcessDaemon {
                 Ok(v) => Ok(flotilla_protocol::CommandValue::HostList(Box::new(v))),
                 Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
             },
-            CommandAction::QueryHostStatus { target_node_id } => match self.get_host_status_internal(target_node_id.as_str()).await {
+            CommandAction::QueryHostStatus { target_environment_id } => match self.get_host_status_internal(target_environment_id).await {
                 Ok(v) => Ok(flotilla_protocol::CommandValue::HostStatus(Box::new(v))),
                 Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
             },
-            CommandAction::QueryHostProviders { target_node_id } => match self.get_host_providers_internal(target_node_id.as_str()).await {
+            CommandAction::QueryHostProviders { target_environment_id } => match self.get_host_providers_internal(target_environment_id).await {
                 Ok(v) => Ok(flotilla_protocol::CommandValue::HostProviders(Box::new(v))),
                 Err(message) => Ok(flotilla_protocol::CommandValue::Error { message }),
             },

@@ -240,21 +240,24 @@ async fn query_commands_roundtrip() {
 
     // Test host query commands via execute_query()
     let hosts_result = run_query(&*client, CommandAction::QueryHostList {}).await;
-    let local_node_id = match hosts_result {
+    let (local_node_id, local_environment_id) = match hosts_result {
         CommandValue::HostList(hosts) => {
-            hosts.hosts.iter().find(|entry| entry.is_local).map(|entry| entry.node.node_id.clone()).expect("expected local host entry")
+            let entry = hosts.hosts.iter().find(|entry| entry.is_local).expect("expected local host entry");
+            (entry.node.node_id.clone(), entry.environment_id.clone())
         }
         other => panic!("expected HostList, got {other:?}"),
     };
-    let host_status_result = run_query(&*client, CommandAction::QueryHostStatus { target_node_id: local_node_id.clone() }).await;
+    let host_status_result =
+        run_query(&*client, CommandAction::QueryHostStatus { target_environment_id: local_environment_id.clone() }).await;
     match host_status_result {
         CommandValue::HostStatus(status) => assert!(status.is_local, "local host query should resolve to local host"),
         other => panic!("expected HostStatus, got {other:?}"),
     }
 
-    let host_providers_result = run_query(&*client, CommandAction::QueryHostProviders { target_node_id: local_node_id.clone() }).await;
+    let host_providers_result =
+        run_query(&*client, CommandAction::QueryHostProviders { target_environment_id: local_environment_id.clone() }).await;
     match host_providers_result {
-        CommandValue::HostProviders(providers) => assert_eq!(providers.summary.node.node_id, local_node_id),
+        CommandValue::HostProviders(providers) => assert_eq!(providers.environment_id, local_environment_id),
         other => panic!("expected HostProviders, got {other:?}"),
     }
 

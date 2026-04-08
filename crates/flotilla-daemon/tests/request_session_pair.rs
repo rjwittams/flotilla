@@ -56,6 +56,7 @@ async fn in_memory_request_client_routes_remote_command_result() {
     let follower = empty_daemon_named("follower").await;
     let topology = spawn_in_memory_request_topology(leader, follower).await.expect("spawn in-memory topology");
     let follower_node_id = topology.follower.node_id().clone();
+    let follower_environment_id = topology.follower.local_host_summary().await.environment_id;
 
     // Query commands return a directed QueryResult response instead of
     // broadcasting via CommandFinished, so use execute_query.
@@ -66,7 +67,7 @@ async fn in_memory_request_client_routes_remote_command_result() {
                 node_id: Some(follower_node_id.clone()),
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostStatus { target_node_id: follower_node_id.clone() },
+                action: CommandAction::QueryHostStatus { target_environment_id: follower_environment_id.clone() },
             },
             uuid::Uuid::nil(),
         )

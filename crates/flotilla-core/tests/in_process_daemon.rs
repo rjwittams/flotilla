@@ -817,7 +817,8 @@ display_name = "Build Box"
     )
     .await;
 
-    let status = daemon.get_host_status_internal(daemon.node_id().as_str()).await.expect("host status");
+    let local_environment_id = daemon.local_host_summary().await.environment_id;
+    let status = daemon.get_host_status_internal(&local_environment_id).await.expect("host status");
     let visible = status
         .visible_environments
         .iter()
@@ -1346,18 +1347,27 @@ async fn get_host_providers_returns_local_summary_and_errors_for_unknown_remote_
     let (_temp, _repo, daemon, _identity) = daemon_for_fake_repo().await;
 
     daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
+    daemon.publish_peer_connection_status(&HostName::new("remote"), PeerConnectionState::Connected).await;
 
-    let local_host = daemon.node_id().to_string();
-    let local = daemon.get_host_providers_internal(&local_host).await.expect("local host providers should resolve");
+    let local_environment_id = daemon.local_host_summary().await.environment_id;
+    let local = daemon.get_host_providers_internal(&local_environment_id).await.expect("local host providers should resolve");
     assert_eq!(local.node.node_id, daemon.node_id().clone());
     assert_eq!(local.node.display_name, daemon.host_name().as_str());
     assert_eq!(summary_host(&local.summary), *daemon.host_name());
 
-    let err = daemon
-        .get_host_providers_internal(test_node("remote").node_id.as_str())
+    let remote_environment_id = daemon
+        .list_hosts_internal()
         .await
-        .expect_err("remote host without summary should error");
-    assert!(err.contains("summary"), "unexpected error: {err}");
+        .expect("list hosts")
+        .hosts
+        .into_iter()
+        .find(|entry| entry.node.node_id == test_node("remote").node_id)
+        .map(|entry| entry.environment_id)
+        .expect("remote host entry");
+    let remote = daemon.get_host_providers_internal(&remote_environment_id).await.expect("remote host providers should resolve");
+    assert_eq!(remote.environment_id, remote_environment_id);
+    assert_eq!(remote.node.node_id, test_node("remote").node_id);
+    assert!(remote.summary.providers.is_empty(), "placeholder summary should remain empty");
 }
 
 #[tokio::test]
@@ -1409,8 +1419,9 @@ async fn local_host_queries_include_visible_environments_without_changing_summar
         )
         .expect("register provisioned environment");
 
-    let status = daemon.get_host_status_internal(daemon.node_id().as_str()).await.expect("host status");
-    let providers = daemon.get_host_providers_internal(daemon.node_id().as_str()).await.expect("host providers");
+    let local_environment_id = daemon.local_host_summary().await.environment_id;
+    let status = daemon.get_host_status_internal(&local_environment_id).await.expect("host status");
+    let providers = daemon.get_host_providers_internal(&local_environment_id).await.expect("host providers");
 
     let status_ids: Vec<_> = status
         .visible_environments

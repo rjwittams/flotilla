@@ -1,7 +1,7 @@
 use std::{ffi::OsString, fmt};
 
 use clap::{Parser, Subcommand};
-use flotilla_protocol::{Command, CommandAction, NodeId, RepoSelector};
+use flotilla_protocol::{qualified_path::HostId, Command, CommandAction, EnvironmentId, NodeId, RepoSelector};
 
 use crate::{noun::NounCommand, Refinable, Resolved};
 
@@ -102,7 +102,7 @@ impl HostNoun {
                     node_id: None,
                     provisioning_target: None,
                     context_repo: None,
-                    action: CommandAction::QueryHostStatus { target_node_id: NodeId::new(host) },
+                    action: CommandAction::QueryHostStatus { target_environment_id: EnvironmentId::host(HostId::new(host)) },
                 }))
             }
             HostVerb::Providers => {
@@ -111,7 +111,7 @@ impl HostNoun {
                     node_id: None,
                     provisioning_target: None,
                     context_repo: None,
-                    action: CommandAction::QueryHostProviders { target_node_id: NodeId::new(host) },
+                    action: CommandAction::QueryHostProviders { target_environment_id: EnvironmentId::host(HostId::new(host)) },
                 }))
             }
             HostVerb::Refresh { repo } => {
@@ -175,7 +175,7 @@ impl fmt::Display for HostNounPartial {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use flotilla_protocol::{Command, CommandAction, NodeId, RepoSelector};
+    use flotilla_protocol::{qualified_path::HostId, Command, CommandAction, EnvironmentId, NodeId, RepoSelector};
 
     use super::HostNounPartial;
     use crate::{Refinable, Resolved};
@@ -206,7 +206,7 @@ mod tests {
                 node_id: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostStatus { target_node_id: NodeId::new("alpha") },
+                action: CommandAction::QueryHostStatus { target_environment_id: EnvironmentId::host(HostId::new("alpha")) },
             })
         );
     }
@@ -219,7 +219,7 @@ mod tests {
                 node_id: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostProviders { target_node_id: NodeId::new("alpha") },
+                action: CommandAction::QueryHostProviders { target_environment_id: EnvironmentId::host(HostId::new("alpha")) },
             })
         );
     }

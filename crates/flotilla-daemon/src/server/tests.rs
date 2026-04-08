@@ -279,7 +279,7 @@ async fn dispatch_replay_since_with_empty_last_seen_returns_only_host_snapshots(
 #[tokio::test]
 async fn dispatch_host_query_methods_round_trip() {
     let (_tmp, daemon) = empty_daemon().await;
-    let local_host = daemon.node_id().to_string();
+    let local_environment_id = daemon.local_host_summary().await.environment_id;
     daemon
         .set_topology_routes(vec![flotilla_protocol::TopologyRoute {
             target: node_info("remote"),
@@ -295,10 +295,10 @@ async fn dispatch_host_query_methods_round_trip() {
     let hosts = daemon.list_hosts_internal().await.expect("list hosts");
     assert!(hosts.hosts.iter().any(|entry| entry.node.node_id == *daemon.node_id()));
 
-    let status = daemon.get_host_status_internal(&local_host).await.expect("host status");
+    let status = daemon.get_host_status_internal(&local_environment_id).await.expect("host status");
     assert!(status.is_local);
 
-    let providers = daemon.get_host_providers_internal(&daemon.node_id().to_string()).await.expect("host providers");
+    let providers = daemon.get_host_providers_internal(&local_environment_id).await.expect("host providers");
     assert_eq!(providers.summary.node.node_id, *daemon.node_id());
 
     // Topology still has a dedicated Request variant.
@@ -504,7 +504,9 @@ async fn dispatch_execute_remote_query_routes_through_peer_manager() {
             node_id: Some(node("feta")),
             provisioning_target: None,
             context_repo: None,
-            action: CommandAction::QueryHostStatus { target_node_id: node("feta") },
+            action: CommandAction::QueryHostStatus {
+                target_environment_id: EnvironmentId::host(flotilla_protocol::qualified_path::HostId::new("feta-host")),
+            },
         })
         .await
         .expect("dispatch_execute should succeed");
@@ -522,7 +524,9 @@ async fn dispatch_execute_remote_query_routes_through_peer_manager() {
                 node_id: Some(node("feta")),
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostStatus { target_node_id: node("feta") }
+                action: CommandAction::QueryHostStatus {
+                    target_environment_id: EnvironmentId::host(flotilla_protocol::qualified_path::HostId::new("feta-host"))
+                }
             });
         }
         other => panic!("expected routed command request, got {other:?}"),
@@ -1150,7 +1154,9 @@ async fn dispatch_execute_remote_does_not_hold_peer_manager_lock_across_send() {
                 node_id: Some(NodeId::new("feta")),
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostStatus { target_node_id: NodeId::new("feta") },
+                action: CommandAction::QueryHostStatus {
+                    target_environment_id: EnvironmentId::host(flotilla_protocol::qualified_path::HostId::new("feta-host")),
+                },
             })
             .await
     });

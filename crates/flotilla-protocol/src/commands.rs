@@ -184,10 +184,10 @@ pub enum CommandAction {
     },
     QueryHostList {},
     QueryHostStatus {
-        target_node_id: crate::NodeId,
+        target_environment_id: crate::EnvironmentId,
     },
     QueryHostProviders {
-        target_node_id: crate::NodeId,
+        target_environment_id: crate::EnvironmentId,
     },
 }
 
@@ -503,13 +503,13 @@ mod tests {
                 node_id: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostStatus { target_node_id: NodeId::new("node-desktop") },
+                action: CommandAction::QueryHostStatus { target_environment_id: EnvironmentId::host(HostId::new("desktop-host")) },
             },
             Command {
                 node_id: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostProviders { target_node_id: NodeId::new("node-desktop") },
+                action: CommandAction::QueryHostProviders { target_environment_id: EnvironmentId::host(HostId::new("desktop-host")) },
             },
             Command {
                 node_id: None,
@@ -895,13 +895,13 @@ mod tests {
                 node_id: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostStatus { target_node_id: NodeId::new("node-desktop") },
+                action: CommandAction::QueryHostStatus { target_environment_id: EnvironmentId::host(HostId::new("desktop-host")) },
             },
             Command {
                 node_id: None,
                 provisioning_target: None,
                 context_repo: None,
-                action: CommandAction::QueryHostProviders { target_node_id: NodeId::new("node-desktop") },
+                action: CommandAction::QueryHostProviders { target_environment_id: EnvironmentId::host(HostId::new("desktop-host")) },
             },
             Command {
                 node_id: None,
