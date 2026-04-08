@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flotilla_protocol::{GoodbyeReason, PeerWireMessage};
+use flotilla_protocol::{GoodbyeReason, NodeInfo, PeerWireMessage};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +32,11 @@ pub trait PeerTransport: Send + Sync {
 
     /// Return the session ID received during the last handshake, if any.
     fn remote_session_id(&self) -> Option<uuid::Uuid> {
+        None
+    }
+
+    /// Return the remote node identity learned during the last handshake, if any.
+    fn remote_node_info(&self) -> Option<NodeInfo> {
         None
     }
 }

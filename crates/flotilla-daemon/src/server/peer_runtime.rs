@@ -143,41 +143,39 @@ impl PeerRuntime {
         let inbound_handle = tokio::spawn(async move {
             if let Some(mut rx) = peer_data_rx {
                 let mut resync_sweep = tokio::time::interval(Duration::from_secs(5));
-                let mut initial_rx_map: HashMap<NodeId, (u64, mpsc::Receiver<PeerWireMessage>)> = HashMap::new();
-                let configured_peers = {
+                let mut initial_connections = HashMap::new();
+                let configured_targets = {
                     let mut pm = peer_manager_task.lock().await;
-                    let peers = pm.configured_peers();
-                    for (name, generation, rx) in pm.connect_all().await {
-                        initial_rx_map.insert(name, (generation, rx));
+                    let targets = pm.configured_targets();
+                    for connection in pm.connect_all().await {
+                        initial_connections.insert(connection.label.clone(), connection);
                     }
-                    peers
+                    targets
                 };
 
-                for node in &configured_peers {
-                    peer_daemon.publish_peer_connection_status(node, PeerConnectionState::Connecting).await;
-                }
-                for node in &configured_peers {
-                    let status = if initial_rx_map.contains_key(&node.node_id) {
-                        PeerConnectionState::Connected
-                    } else {
-                        PeerConnectionState::Disconnected
-                    };
-                    peer_daemon.publish_peer_connection_status(node, status).await;
+                for connection in initial_connections.values() {
+                    peer_daemon.publish_peer_connection_status(&connection.node, PeerConnectionState::Connected).await;
                 }
                 sync_peer_query_state(&peer_manager_task, &peer_daemon).await;
 
-                for peer_name in configured_peers.into_iter().map(|node| node.node_id) {
+                for target in configured_targets {
                     let tx = peer_data_tx_for_ssh.clone();
                     let pm = Arc::clone(&peer_manager_task);
                     let daemon_for_cleanup = Arc::clone(&peer_daemon);
                     let remote_command_router_for_cleanup = remote_command_router_task.clone();
-                    let initial_rx = initial_rx_map.remove(&peer_name);
+                    let initial_connection = initial_connections.remove(&target.label);
                     let peer_connected_tx_clone = peer_connected_tx_for_ssh.clone();
+                    let target_label = target.label.clone();
 
                     tokio::spawn(async move {
+                        let mut current_peer: Option<NodeInfo> = None;
                         let mut last_known_session_id: Option<uuid::Uuid> = None;
 
-                        if let Some((generation, mut inbound_rx)) = initial_rx {
+                        if let Some(initial_connection) = initial_connection {
+                            let peer_name = initial_connection.node.node_id.clone();
+                            current_peer = Some(initial_connection.node.clone());
+                            let mut inbound_rx = initial_connection.inbound_rx;
+                            let generation = initial_connection.generation;
                             let _ = peer_connected_tx_clone.send(PeerConnectedNotice { peer: peer_name.clone(), generation });
                             last_known_session_id = {
                                 let pm_lock = pm.lock().await;
@@ -195,59 +193,61 @@ impl PeerRuntime {
                             match forward_result {
                                 ForwardResult::Shutdown => return,
                                 ForwardResult::Disconnected => {
-                                    info!(peer = %peer_name, "SSH connection dropped, will reconnect");
+                                    info!(target = %target_label.0, peer = %peer_name, "SSH connection dropped, will reconnect");
                                 }
                                 ForwardResult::KeepaliveTimeout => {
-                                    info!(peer = %peer_name, "keepalive timeout, forcing reconnect");
+                                    info!(target = %target_label.0, peer = %peer_name, "keepalive timeout, forcing reconnect");
                                 }
                             }
                             let plan = disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
                             remote_command_router_for_cleanup.fail_pending_remote_steps_for_host(&peer_name).await;
                             if plan.was_active {
                                 daemon_for_cleanup
-                                    .publish_peer_connection_status(
-                                        &NodeInfo::new(peer_name.clone(), peer_name.to_string()),
-                                        PeerConnectionState::Disconnected,
-                                    )
+                                    .publish_peer_connection_status(&initial_connection.node, PeerConnectionState::Disconnected)
                                     .await;
                             }
                         }
 
                         let mut attempt: u32 = 1;
                         loop {
-                            if let Some(delay) = {
+                            let suppressed = if let Some(peer) = current_peer.as_ref() {
                                 let mut pm = pm.lock().await;
-                                pm.reconnect_suppressed_until(&peer_name).map(|deadline| deadline.saturating_duration_since(Instant::now()))
-                            } {
-                                info!(peer = %peer_name, delay_secs = delay.as_secs(), "reconnect suppressed after peer retirement");
+                                pm.reconnect_suppressed_until(&peer.node_id)
+                                    .map(|deadline| (peer.node_id.clone(), deadline.saturating_duration_since(Instant::now())))
+                            } else {
+                                None
+                            };
+                            if let Some((peer_name, delay)) = suppressed {
+                                info!(target = %target_label.0, peer = %peer_name, delay_secs = delay.as_secs(), "reconnect suppressed after peer retirement");
                                 tokio::time::sleep(delay).await;
                                 attempt = 1;
                                 continue;
                             }
-                            daemon_for_cleanup
-                                .publish_peer_connection_status(
-                                    &NodeInfo::new(peer_name.clone(), peer_name.to_string()),
-                                    PeerConnectionState::Reconnecting,
-                                )
-                                .await;
+                            if let Some(peer) = current_peer.as_ref() {
+                                daemon_for_cleanup.publish_peer_connection_status(peer, PeerConnectionState::Reconnecting).await;
+                            }
                             let delay = SshTransport::backoff_delay(attempt);
-                            info!(peer = %peer_name, %attempt, delay_secs = delay.as_secs(), "reconnecting after backoff");
+                            info!(target = %target_label.0, %attempt, delay_secs = delay.as_secs(), "reconnecting after backoff");
                             tokio::time::sleep(delay).await;
 
                             let reconnect_result = {
                                 let mut pm = pm.lock().await;
-                                pm.reconnect_peer(&peer_name).await
+                                pm.reconnect_target(&target_label).await
                             };
 
                             match reconnect_result {
-                                Ok((generation, mut inbound_rx)) => {
+                                Ok(connection) => {
+                                    let peer_name = connection.node.node_id.clone();
+                                    current_peer = Some(connection.node.clone());
+                                    let generation = connection.generation;
+                                    let mut inbound_rx = connection.inbound_rx;
                                     info!(peer = %peer_name, "reconnected successfully");
                                     last_known_session_id =
                                         handle_remote_restart_if_needed(&pm, &daemon_for_cleanup, &peer_name, last_known_session_id).await;
                                     sync_peer_query_state(&pm, &daemon_for_cleanup).await;
                                     daemon_for_cleanup
                                         .publish_peer_connection_status(
-                                            &NodeInfo::new(peer_name.clone(), peer_name.to_string()),
+                                            current_peer.as_ref().expect("current peer"),
                                             PeerConnectionState::Connected,
                                         )
                                         .await;
@@ -265,10 +265,10 @@ impl PeerRuntime {
                                     match forward_result {
                                         ForwardResult::Shutdown => return,
                                         ForwardResult::Disconnected => {
-                                            info!(peer = %peer_name, "SSH connection dropped, will reconnect");
+                                            info!(target = %target_label.0, peer = %peer_name, "SSH connection dropped, will reconnect");
                                         }
                                         ForwardResult::KeepaliveTimeout => {
-                                            info!(peer = %peer_name, "keepalive timeout, forcing reconnect");
+                                            info!(target = %target_label.0, peer = %peer_name, "keepalive timeout, forcing reconnect");
                                         }
                                     }
                                     let plan = disconnect_peer_and_rebuild(&pm, &daemon_for_cleanup, &peer_name, generation).await;
@@ -276,14 +276,14 @@ impl PeerRuntime {
                                     if plan.was_active {
                                         daemon_for_cleanup
                                             .publish_peer_connection_status(
-                                                &NodeInfo::new(peer_name.clone(), peer_name.to_string()),
+                                                current_peer.as_ref().expect("current peer"),
                                                 PeerConnectionState::Disconnected,
                                             )
                                             .await;
                                     }
                                 }
                                 Err(e) => {
-                                    warn!(peer = %peer_name, err = %e, %attempt, "reconnection failed");
+                                    warn!(target = %target_label.0, err = %e, %attempt, "reconnection failed");
                                     attempt = attempt.saturating_add(1);
                                 }
                             }

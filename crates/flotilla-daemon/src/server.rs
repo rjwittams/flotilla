@@ -73,22 +73,17 @@ fn build_peer_manager(daemon: &Arc<InProcessDaemon>, config: &ConfigStore) -> Re
     let peer_count = hosts_config.hosts.len();
     let mut peer_manager = PeerManager::new(local_node_id.clone());
     for (name, host_config) in hosts_config.hosts {
-        let peer_node_id = NodeId::new(&host_config.expected_host_name);
-        if peer_node_id.as_str() == host_name.as_str() {
-            warn!(
-                host = %host_name,
-                "peer config uses same name as local host — messages will be ignored"
-            );
-        }
+        let expected_host_name = HostName::new(&host_config.expected_host_name);
         match SshTransport::new(
             local_node_id.clone(),
+            host_name.to_string(),
             ConfigLabel(name.clone()),
             host_config,
             daemon.session_id(),
             config.state_dir().as_path(),
         ) {
             Ok(transport) => {
-                peer_manager.add_peer(peer_node_id, Box::new(transport));
+                peer_manager.add_configured_target(ConfigLabel(name), expected_host_name, Box::new(transport));
             }
             Err(e) => {
                 warn!(host = %name, err = %e, "skipping peer with invalid host name");
@@ -450,7 +445,7 @@ async fn handle_client_session(
                 .run(Arc::clone(&session), id, request)
                 .await;
         }
-        Message::Hello { protocol_version, node_id, display_name: _, session_id, connection_role } => {
+        Message::Hello { protocol_version, node_id, display_name, session_id, connection_role } => {
             if environment_context.is_some() {
                 warn!("peer/client hello on per-environment socket is unsupported");
                 return;
@@ -478,7 +473,7 @@ async fn handle_client_session(
             } else {
                 // Peer path (ConnectionRole::Peer or None) — existing behavior.
                 PeerConnection::new(daemon, shutdown_rx, peer_data_tx, peer_manager, peer_connected_tx, client_count, client_notify)
-                    .run(session, protocol_version, node_id, session_id)
+                    .run(session, protocol_version, node_id, display_name, session_id)
                     .await;
             }
         }

@@ -22,8 +22,8 @@ use flotilla_daemon::peer::{
     HandleResult, PeerManager, PeerTransport,
 };
 use flotilla_protocol::{
-    qualified_path::QualifiedPath, test_support::TestCheckout, CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath,
-    NodeId, NodeInfo, PeerDataKind, PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RepoSelector, VectorClock,
+    qualified_path::QualifiedPath, test_support::TestCheckout, CheckoutTarget, Command, CommandAction, CommandValue, ConfigLabel, HostName,
+    HostPath, NodeId, NodeInfo, PeerDataKind, PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RepoSelector, VectorClock,
 };
 use indexmap::IndexMap;
 
@@ -59,6 +59,10 @@ fn node(name: &str) -> NodeId {
 
 fn node_info(name: &str) -> NodeInfo {
     NodeInfo::new(node(name), name)
+}
+
+fn add_configured_transport(mgr: &mut PeerManager, label: &str, expected_host_name: &str, transport: MockTransport) {
+    mgr.add_configured_target(ConfigLabel(label.into()), HostName::new(expected_host_name), Box::new(transport));
 }
 
 async fn wait_for_local_checkout(daemon: &Arc<InProcessDaemon>, repo: &std::path::Path, branch: &str) -> ProviderData {
@@ -367,12 +371,14 @@ async fn host_summary_round_trip_between_connected_peers() {
     let (leader_transport, follower_transport) = channel_transport_pair(HostName::new("leader"), HostName::new("follower"));
     let mut leader_mgr = PeerManager::new(node("leader"));
     let mut follower_mgr = PeerManager::new(node("follower"));
-    leader_mgr.add_peer(node("follower"), Box::new(leader_transport));
-    follower_mgr.add_peer(node("leader"), Box::new(follower_transport));
+    leader_mgr.add_configured_target(ConfigLabel("follower".into()), HostName::new("follower"), Box::new(leader_transport));
+    follower_mgr.add_configured_target(ConfigLabel("leader".into()), HostName::new("leader"), Box::new(follower_transport));
 
     let mut leader_receivers = leader_mgr.connect_all().await;
     let _follower_receivers = follower_mgr.connect_all().await;
-    let (_peer, generation, mut leader_rx) = leader_receivers.pop().expect("leader receiver");
+    let leader_connection = leader_receivers.pop().expect("leader receiver");
+    let generation = leader_connection.generation;
+    let mut leader_rx = leader_connection.inbound_rx;
 
     follower_mgr
         .send_to(&node("leader"), PeerWireMessage::HostSummary(follower_daemon.local_host_summary().await))
@@ -421,9 +427,9 @@ async fn relay_excludes_origin_and_sends_to_other_peers() {
     let sender_b = transport_b.sender().expect("sender");
     let sender_c = transport_c.sender().expect("sender");
 
-    mgr.add_peer(node("follower-a"), Box::new(transport_a));
-    mgr.add_peer(node("follower-b"), Box::new(transport_b));
-    mgr.add_peer(node("follower-c"), Box::new(transport_c));
+    add_configured_transport(&mut mgr, "follower-a", "follower-a", transport_a);
+    add_configured_transport(&mut mgr, "follower-b", "follower-b", transport_b);
+    add_configured_transport(&mut mgr, "follower-c", "follower-c", transport_c);
     mgr.register_sender(node("follower-a"), sender_a);
     mgr.register_sender(node("follower-b"), sender_b);
     mgr.register_sender(node("follower-c"), sender_c);
@@ -458,8 +464,8 @@ async fn relay_excludes_self_even_if_registered_as_peer() {
     let self_sender = self_transport.sender().expect("sender");
     let other_sender = other_transport.sender().expect("sender");
 
-    mgr.add_peer(node("leader"), Box::new(self_transport));
-    mgr.add_peer(node("follower"), Box::new(other_transport));
+    add_configured_transport(&mut mgr, "leader", "leader", self_transport);
+    add_configured_transport(&mut mgr, "follower", "follower", other_transport);
     mgr.register_sender(node("leader"), self_sender);
     mgr.register_sender(node("follower"), other_sender);
 

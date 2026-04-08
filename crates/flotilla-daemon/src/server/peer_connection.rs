@@ -38,7 +38,14 @@ impl PeerConnection {
         Self { daemon, shutdown_rx, peer_data_tx, peer_manager, peer_connected_tx, client_count, client_notify }
     }
 
-    pub(super) async fn run(mut self, session: Arc<MessageSession>, protocol_version: u32, node_id: NodeId, session_id: uuid::Uuid) {
+    pub(super) async fn run(
+        mut self,
+        session: Arc<MessageSession>,
+        protocol_version: u32,
+        node_id: NodeId,
+        display_name: String,
+        session_id: uuid::Uuid,
+    ) {
         if protocol_version != PROTOCOL_VERSION {
             warn!(
                 peer = %node_id,
@@ -75,7 +82,7 @@ impl PeerConnection {
             }
         });
 
-        let peer_node = NodeInfo::new(node_id.clone(), node_id.to_string());
+        let peer_node = NodeInfo::new(node_id.clone(), display_name);
         let (generation, displaced_generation) = {
             let mut pm = self.peer_manager.lock().await;
             match pm.activate_connection_with_session(

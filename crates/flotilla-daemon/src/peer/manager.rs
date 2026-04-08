@@ -7,9 +7,9 @@ use std::{
 };
 
 use flotilla_protocol::{
-    Command, CommandPeerEvent, CommandValue, ConfigLabel, EnvironmentId, GoodbyeReason, HostSummary, NodeId, NodeInfo, PeerDataKind,
-    PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RoutedPeerMessage, Step, StepOutcome, StepStatus, TopologyRoute,
-    VectorClock,
+    Command, CommandPeerEvent, CommandValue, ConfigLabel, EnvironmentId, GoodbyeReason, HostName, HostSummary, NodeId, NodeInfo,
+    PeerDataKind, PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RoutedPeerMessage, Step, StepOutcome, StepStatus,
+    TopologyRoute, VectorClock,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -165,6 +165,25 @@ pub struct PendingPeerSend {
     pub msg: PeerWireMessage,
 }
 
+struct ConfiguredPeerTarget {
+    expected_host_name: HostName,
+    transport: Box<dyn PeerTransport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredPeerTargetInfo {
+    pub label: ConfigLabel,
+    pub expected_host_name: HostName,
+}
+
+#[derive(Debug)]
+pub struct ConnectedConfiguredPeer {
+    pub label: ConfigLabel,
+    pub node: NodeInfo,
+    pub generation: u64,
+    pub inbound_rx: mpsc::Receiver<PeerWireMessage>,
+}
+
 pub async fn dispatch_pending_sends(pending_sends: Vec<PendingPeerSend>) {
     for pending in pending_sends {
         let msg_kind = peer_wire_message_kind(&pending.msg);
@@ -240,7 +259,7 @@ pub struct PerRepoPeerState {
 /// re-merge on the daemon.
 pub struct PeerManager {
     local_node_id: NodeId,
-    peers: HashMap<NodeId, Box<dyn PeerTransport>>,
+    configured_targets: HashMap<ConfigLabel, ConfiguredPeerTarget>,
     senders: HashMap<NodeId, Arc<dyn PeerSender>>,
     active_connections: HashMap<NodeId, ActiveConnection>,
     displaced_senders: HashMap<(NodeId, u64), Arc<dyn PeerSender>>,
@@ -281,7 +300,7 @@ impl PeerManager {
     pub fn new(local_node_id: NodeId) -> Self {
         Self {
             local_node_id,
-            peers: HashMap::new(),
+            configured_targets: HashMap::new(),
             senders: HashMap::new(),
             active_connections: HashMap::new(),
             displaced_senders: HashMap::new(),
@@ -322,10 +341,10 @@ impl PeerManager {
             .unwrap_or_else(|| NodeInfo::new(node_id.clone(), node_id.to_string()))
     }
 
-    /// Register a peer transport.
-    pub fn add_peer(&mut self, name: NodeId, transport: Box<dyn PeerTransport>) {
-        info!(peer = %name, "registered peer transport");
-        self.peers.insert(name, transport);
+    /// Register a configured outbound connection target.
+    pub fn add_configured_target(&mut self, label: ConfigLabel, expected_host_name: HostName, transport: Box<dyn PeerTransport>) {
+        info!(target = %label.0, expected_host = %expected_host_name, "registered configured peer target");
+        self.configured_targets.insert(label, ConfiguredPeerTarget { expected_host_name, transport });
     }
 
     /// Register or replace a sender for a connected peer.
@@ -1295,17 +1314,19 @@ impl PeerManager {
     /// For each successfully connected peer, calls `subscribe()` to obtain the
     /// inbound message receiver. The caller should spawn forwarding tasks that
     /// feed these receivers into the shared `peer_data_tx` channel.
-    pub async fn connect_all(&mut self) -> Vec<(NodeId, u64, mpsc::Receiver<PeerWireMessage>)> {
-        let names: Vec<NodeId> = self.peers.keys().cloned().collect();
+    pub async fn connect_all(&mut self) -> Vec<ConnectedConfiguredPeer> {
+        let labels: Vec<ConfigLabel> = self.configured_targets.keys().cloned().collect();
         let mut receivers = Vec::new();
-        for name in names {
-            let connect_result = if let Some(transport) = self.peers.get_mut(&name) {
+        for label in labels {
+            let connect_result = if let Some(target) = self.configured_targets.get_mut(&label) {
+                let transport = &mut target.transport;
                 match transport.connect().await {
                     Ok(()) => {
                         let sender = transport.sender();
                         let subscribe_result = transport.subscribe().await;
+                        let remote_node = transport.remote_node_info();
                         let remote_session_id = transport.remote_session_id();
-                        Ok((sender, subscribe_result, remote_session_id))
+                        Ok((sender, subscribe_result, remote_node, remote_session_id))
                     }
                     Err(e) => Err(e),
                 }
@@ -1314,8 +1335,16 @@ impl PeerManager {
             };
 
             match connect_result {
-                Ok((sender, subscribe_result, remote_session_id)) => {
-                    info!(peer = %name, "peer transport connected");
+                Ok((sender, subscribe_result, remote_node, remote_session_id)) => {
+                    let Some(remote_node) = remote_node else {
+                        warn!(target = %label.0, "peer transport connected without remote node identity");
+                        if let Some(target) = self.configured_targets.get_mut(&label) {
+                            let _ = target.transport.disconnect().await;
+                        }
+                        continue;
+                    };
+                    let name = remote_node.node_id.clone();
+                    info!(target = %label.0, peer = %name, "peer transport connected");
                     let mut generation = 0;
                     if let Some(sender) = sender {
                         let displaced = match self.activate_connection_with_session(
@@ -1323,7 +1352,7 @@ impl PeerManager {
                             sender,
                             ConnectionMeta {
                                 direction: ConnectionDirection::Outbound,
-                                config_label: None,
+                                config_label: Some(label.clone()),
                                 expected_peer: Some(name.clone()),
                                 config_backed: true,
                             },
@@ -1334,8 +1363,8 @@ impl PeerManager {
                                 displaced_generation
                             }
                             ActivationResult::Rejected { .. } => {
-                                if let Some(transport) = self.peers.get_mut(&name) {
-                                    let _ = transport.disconnect().await;
+                                if let Some(target) = self.configured_targets.get_mut(&label) {
+                                    let _ = target.transport.disconnect().await;
                                 }
                                 continue;
                             }
@@ -1347,14 +1376,16 @@ impl PeerManager {
                         }
                     }
                     match subscribe_result {
-                        Ok(rx) => receivers.push((name.clone(), generation, rx)),
+                        Ok(rx) => {
+                            receivers.push(ConnectedConfiguredPeer { label: label.clone(), node: remote_node, generation, inbound_rx: rx })
+                        }
                         Err(e) => {
-                            warn!(peer = %name, err = %e, "failed to subscribe to peer");
+                            warn!(peer = %name, target = %label.0, err = %e, "failed to subscribe to peer");
                         }
                     }
                 }
                 Err(e) => {
-                    warn!(peer = %name, err = %e, "failed to connect peer transport");
+                    warn!(target = %label.0, err = %e, "failed to connect peer transport");
                 }
             }
         }
@@ -1363,16 +1394,15 @@ impl PeerManager {
 
     /// Disconnect all registered peer transports.
     pub async fn disconnect_all(&mut self) {
-        let names: Vec<NodeId> = self.peers.keys().cloned().collect();
-        for name in names {
-            if let Some(transport) = self.peers.get_mut(&name) {
-                match transport.disconnect().await {
+        let labels: Vec<ConfigLabel> = self.configured_targets.keys().cloned().collect();
+        for label in labels {
+            if let Some(target) = self.configured_targets.get_mut(&label) {
+                match target.transport.disconnect().await {
                     Ok(()) => {
-                        self.senders.remove(&name);
-                        info!(peer = %name, "peer transport disconnected");
+                        info!(target = %label.0, "peer transport disconnected");
                     }
                     Err(e) => {
-                        warn!(peer = %name, err = %e, "failed to disconnect peer transport");
+                        warn!(target = %label.0, err = %e, "failed to disconnect peer transport");
                     }
                 }
             }
@@ -1399,13 +1429,21 @@ impl PeerManager {
         &self.known_remote_repos
     }
 
-    /// Iterate over all registered peer transports.
-    pub fn peers(&self) -> &HashMap<NodeId, Box<dyn PeerTransport>> {
-        &self.peers
+    pub fn configured_targets(&self) -> Vec<ConfiguredPeerTargetInfo> {
+        let mut targets: Vec<_> = self
+            .configured_targets
+            .iter()
+            .map(|(label, target)| ConfiguredPeerTargetInfo { label: label.clone(), expected_host_name: target.expected_host_name.clone() })
+            .collect();
+        targets.sort_by(|a, b| a.label.0.cmp(&b.label.0));
+        targets
     }
 
     pub fn configured_peers(&self) -> Vec<NodeInfo> {
-        self.peers.keys().map(|node_id| self.node_info_for(node_id)).collect()
+        let mut peers: Vec<_> = self.transport_peers.values().map(|node_id| self.node_info_for(node_id)).collect();
+        peers.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        peers.dedup_by(|a, b| a.node_id == b.node_id);
+        peers
     }
 
     /// Return the currently addressable peers that have active senders.
@@ -1486,26 +1524,31 @@ impl PeerManager {
         mem::take(&mut self.pending_sends)
     }
 
-    /// Reconnect a specific peer: disconnect, then connect + subscribe.
-    ///
-    /// Returns the new inbound receiver on success.
-    pub async fn reconnect_peer(&mut self, name: &NodeId) -> Result<(u64, mpsc::Receiver<PeerWireMessage>), String> {
-        if let Some(deadline) = self.reconnect_suppressed_until(name) {
-            return Err(format!("reconnect suppressed until {:?}", deadline));
+    /// Reconnect a specific configured target: disconnect, then connect + subscribe.
+    pub async fn reconnect_target(&mut self, label: &ConfigLabel) -> Result<ConnectedConfiguredPeer, String> {
+        let current_peer = self.transport_peers.get(label).cloned();
+        if let Some(current_peer) = current_peer.as_ref() {
+            if let Some(deadline) = self.reconnect_suppressed_until(current_peer) {
+                return Err(format!("reconnect suppressed until {:?}", deadline));
+            }
         }
 
-        let (sender, rx, remote_session_id) = {
-            let transport = self.peers.get_mut(name).ok_or_else(|| format!("unknown peer: {name}"))?;
+        let (sender, rx, remote_node, remote_session_id) = {
+            let target = self.configured_targets.get_mut(label).ok_or_else(|| format!("unknown configured target: {}", label.0))?;
+            let transport = &mut target.transport;
 
-            // Best-effort disconnect before reconnecting
             let _ = transport.disconnect().await;
 
             transport.connect().await?;
             let sender = transport.sender();
             let rx = transport.subscribe().await?;
+            let remote_node = transport.remote_node_info();
             let remote_session_id = transport.remote_session_id();
-            (sender, rx, remote_session_id)
+            (sender, rx, remote_node, remote_session_id)
         };
+
+        let remote_node = remote_node.ok_or_else(|| format!("configured target {} connected without remote node identity", label.0))?;
+        let name = remote_node.node_id.clone();
 
         let mut generation = 0;
         if let Some(sender) = sender {
@@ -1514,7 +1557,7 @@ impl PeerManager {
                 sender,
                 ConnectionMeta {
                     direction: ConnectionDirection::Outbound,
-                    config_label: None,
+                    config_label: Some(label.clone()),
                     expected_peer: Some(name.clone()),
                     config_backed: true,
                 },
@@ -1525,20 +1568,20 @@ impl PeerManager {
                     displaced_generation
                 }
                 ActivationResult::Rejected { .. } => {
-                    if let Some(transport) = self.peers.get_mut(name) {
-                        let _ = transport.disconnect().await;
+                    if let Some(target) = self.configured_targets.get_mut(label) {
+                        let _ = target.transport.disconnect().await;
                     }
                     return Err(format!("connection for {name} lost duplicate arbitration"));
                 }
             };
             if let Some(displaced_generation) = displaced {
-                if let Some(displaced_sender) = self.take_displaced_sender(name, displaced_generation) {
+                if let Some(displaced_sender) = self.take_displaced_sender(&name, displaced_generation) {
                     let _ = displaced_sender.retire(GoodbyeReason::Superseded).await;
                 }
             }
         }
 
-        Ok((generation, rx))
+        Ok(ConnectedConfiguredPeer { label: label.clone(), node: remote_node, generation, inbound_rx: rx })
     }
 
     /// Clear all stored peer data originating from a specific host.

@@ -54,6 +54,14 @@ fn accepted_generation(result: ActivationResult) -> u64 {
     }
 }
 
+fn add_configured_transport(mgr: &mut PeerManager, label: &str, expected_host_name: &str, transport: MockTransport) {
+    mgr.add_configured_target(ConfigLabel(label.into()), HostName::new(expected_host_name), Box::new(transport));
+}
+
+fn remote_node(node_id: &str, display_name: &str) -> NodeInfo {
+    NodeInfo::new(NodeId::new(node_id), display_name)
+}
+
 #[tokio::test]
 async fn handle_snapshot_stores_data() {
     let mut mgr = PeerManager::new(NodeId::new("local"));
@@ -169,9 +177,9 @@ async fn relay_sends_to_all_except_origin() {
     let sender_b = transport_b.sender().expect("sender");
     let sender_c = transport_c.sender().expect("sender");
 
-    mgr.add_peer(NodeId::new("peer-a"), Box::new(transport_a));
-    mgr.add_peer(NodeId::new("peer-b"), Box::new(transport_b));
-    mgr.add_peer(NodeId::new("peer-c"), Box::new(transport_c));
+    add_configured_transport(&mut mgr, "peer-a", "peer-a", transport_a);
+    add_configured_transport(&mut mgr, "peer-b", "peer-b", transport_b);
+    add_configured_transport(&mut mgr, "peer-c", "peer-c", transport_c);
     mgr.register_sender(NodeId::new("peer-a"), sender_a);
     mgr.register_sender(NodeId::new("peer-b"), sender_b);
     mgr.register_sender(NodeId::new("peer-c"), sender_c);
@@ -192,7 +200,7 @@ async fn relay_does_not_send_to_self() {
 
     let (transport, sent) = MockTransport::with_sender();
     let sender = transport.sender().expect("sender");
-    mgr.add_peer(NodeId::new("local"), Box::new(transport));
+    add_configured_transport(&mut mgr, "local", "local", transport);
     mgr.register_sender(NodeId::new("local"), sender);
 
     let msg = snapshot_msg("remote", 1);
@@ -212,7 +220,7 @@ async fn relay_skips_peers_already_in_clock() {
 
     let (transport_leader, sent_leader) = MockTransport::with_sender();
     let sender_leader = transport_leader.sender().expect("sender");
-    mgr.add_peer(NodeId::new("leader"), Box::new(transport_leader));
+    add_configured_transport(&mut mgr, "leader", "leader", transport_leader);
     mgr.register_sender(NodeId::new("leader"), sender_leader);
 
     // Simulate a message that was relayed through leader:
@@ -362,16 +370,18 @@ async fn routed_remote_step_request_for_local_host_surfaces_identity_and_steps()
 async fn connect_all_connects_peers() {
     let mut mgr = PeerManager::new(NodeId::new("local"));
 
-    let transport = MockTransport::new();
+    let transport = MockTransport::new().with_remote_node(remote_node("peer-node-1", "Peer One"));
     // Start disconnected
     let mut transport = transport;
     transport.status = PeerConnectionStatus::Disconnected;
 
-    mgr.add_peer(NodeId::new("peer"), Box::new(transport));
-    mgr.connect_all().await;
+    add_configured_transport(&mut mgr, "peer", "peer", transport);
+    let connections = mgr.connect_all().await;
+    assert_eq!(connections.len(), 1);
+    assert_eq!(connections[0].node.node_id, NodeId::new("peer-node-1"));
 
     // After connect_all, the mock transport's connect() sets status to Connected
-    let peer_transport = mgr.peers.get(&NodeId::new("peer")).expect("peer exists");
+    let peer_transport = &mgr.configured_targets.get(&ConfigLabel("peer".into())).expect("peer exists").transport;
     assert_eq!(peer_transport.status(), PeerConnectionStatus::Connected);
 }
 
@@ -380,10 +390,10 @@ async fn disconnect_all_disconnects_peers() {
     let mut mgr = PeerManager::new(NodeId::new("local"));
 
     let transport = MockTransport::new();
-    mgr.add_peer(NodeId::new("peer"), Box::new(transport));
+    add_configured_transport(&mut mgr, "peer", "peer", transport);
     mgr.disconnect_all().await;
 
-    let peer_transport = mgr.peers.get(&NodeId::new("peer")).expect("peer exists");
+    let peer_transport = &mgr.configured_targets.get(&ConfigLabel("peer".into())).expect("peer exists").transport;
     assert_eq!(peer_transport.status(), PeerConnectionStatus::Disconnected);
 }
 
@@ -608,25 +618,30 @@ async fn send_to_returns_error_when_no_direct_sender_or_route() {
 }
 
 #[tokio::test]
-async fn configured_peer_names_include_all_configured_peers() {
+async fn configured_targets_are_stored_separately_from_established_peers() {
     let mut mgr = PeerManager::new(NodeId::new("m"));
-    mgr.add_peer(NodeId::new("z"), Box::new(MockTransport::new()));
-    mgr.add_peer(NodeId::new("a"), Box::new(MockTransport::new()));
+    add_configured_transport(&mut mgr, "z", "z-host", MockTransport::new());
+    add_configured_transport(&mut mgr, "a", "a-host", MockTransport::new());
 
-    let mut configured = mgr.configured_peers();
-    configured.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    let configured = mgr.configured_targets();
+    let established = mgr.configured_peers();
 
-    assert_eq!(configured, vec![NodeInfo::new(NodeId::new("a"), "a"), NodeInfo::new(NodeId::new("z"), "z")]);
+    assert_eq!(configured, vec![
+        ConfiguredPeerTargetInfo { label: ConfigLabel("a".into()), expected_host_name: HostName::new("a-host") },
+        ConfiguredPeerTargetInfo { label: ConfigLabel("z".into()), expected_host_name: HostName::new("z-host") },
+    ]);
+    assert!(established.is_empty(), "configured targets should not look established before handshake");
 }
 
 #[tokio::test]
-async fn reconnect_peer_allows_configured_peer_regardless_of_host_order() {
+async fn reconnect_target_uses_handshake_node_identity() {
     let mut mgr = PeerManager::new(NodeId::new("z"));
-    mgr.add_peer(NodeId::new("a"), Box::new(MockTransport::new()));
+    add_configured_transport(&mut mgr, "a", "expected-a", MockTransport::new().with_remote_node(remote_node("real-node-a", "Real Node A")));
 
-    let (generation, _rx) = mgr.reconnect_peer(&NodeId::new("a")).await.expect("reconnect should succeed for configured peer");
+    let connection = mgr.reconnect_target(&ConfigLabel("a".into())).await.expect("reconnect should succeed for configured target");
 
-    assert_eq!(generation, 0);
+    assert_eq!(connection.label, ConfigLabel("a".into()));
+    assert_eq!(connection.node.node_id, NodeId::new("real-node-a"));
 }
 
 #[tokio::test]
@@ -643,9 +658,9 @@ async fn reconnect_peer_retires_displaced_connection() {
     }));
 
     let (transport, _new_sent) = MockTransport::with_sender();
-    mgr.add_peer(NodeId::new("peer"), Box::new(transport));
+    add_configured_transport(&mut mgr, "peer", "peer", transport.with_remote_node(remote_node("peer", "peer")));
 
-    let _ = mgr.reconnect_peer(&NodeId::new("peer")).await.expect("reconnect should succeed");
+    let _ = mgr.reconnect_target(&ConfigLabel("peer".into())).await.expect("reconnect should succeed");
 
     let sent = displaced_sent.lock().expect("lock");
     assert_eq!(sent.len(), 1);
@@ -696,7 +711,7 @@ async fn goodbye_superseded_suppresses_reconnect_for_peer() {
         expected_peer: Some(NodeId::new("peer")),
         config_backed: true,
     }));
-    mgr.add_peer(NodeId::new("peer"), Box::new(MockTransport::new()));
+    add_configured_transport(&mut mgr, "peer", "peer", MockTransport::new().with_remote_node(remote_node("peer", "peer")));
 
     let result = mgr
         .handle_inbound(InboundPeerEnvelope {
@@ -707,7 +722,7 @@ async fn goodbye_superseded_suppresses_reconnect_for_peer() {
         .await;
 
     assert_eq!(result, HandleResult::ReconnectSuppressed { peer: NodeId::new("peer") });
-    let err = mgr.reconnect_peer(&NodeId::new("peer")).await.expect_err("reconnect should be suppressed");
+    let err = mgr.reconnect_target(&ConfigLabel("peer".into())).await.expect_err("reconnect should be suppressed");
     assert!(err.contains("suppressed"));
 }
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flotilla_protocol::{GoodbyeReason, HostName, PeerWireMessage};
+use flotilla_protocol::{GoodbyeReason, HostName, NodeId, NodeInfo, PeerWireMessage};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -275,6 +275,10 @@ impl PeerTransport for ChannelTransport {
             session_tx: std::sync::Mutex::new(session_tx),
             remote_session_tx_slot: Arc::clone(&self.remote_session_tx_slot),
         }) as Arc<dyn PeerSender>)
+    }
+
+    fn remote_node_info(&self) -> Option<NodeInfo> {
+        Some(NodeInfo::new(NodeId::new(self.remote_name.as_str()), self.remote_name.to_string()))
     }
 }
 
