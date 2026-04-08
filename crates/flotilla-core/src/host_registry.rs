@@ -290,10 +290,10 @@ impl HostRegistry {
                     continue;
                 }
                 if !summaries.contains_key(&environment_id) {
-                    if let Some(snapshot) =
-                        clear_host_summary(&self.local_node, &configured, &node_connectivity, &mut hosts, &environment_id)
-                    {
-                        emit(DaemonEvent::HostSnapshot(Box::new(snapshot)));
+                    let node_id = state.node_id.clone();
+                    if let Some(seq) = mark_host_removed(&mut hosts, &environment_id) {
+                        reassign_node_environment_if_needed(&hosts, &mut node_environments, &node_id, &environment_id);
+                        emit(DaemonEvent::HostRemoved { environment_id, seq });
                     }
                 }
             }
@@ -533,24 +533,6 @@ fn summary_is_overlay_placeholder(summary: &HostSummary) -> bool {
         && summary.inventory == ToolInventory::default()
         && summary.providers.is_empty()
         && summary.environments.is_empty()
-}
-
-fn clear_host_summary(
-    local_node: &NodeInfo,
-    configured: &HashMap<NodeId, String>,
-    node_connectivity: &HashMap<NodeId, PeerConnectionState>,
-    hosts: &mut HashMap<EnvironmentId, HostState>,
-    environment_id: &EnvironmentId,
-) -> Option<HostSnapshot> {
-    let state = hosts.get_mut(environment_id)?;
-    if state.node_id == local_node.node_id {
-        return None;
-    }
-    state.summary.as_ref()?;
-    state.summary = None;
-    state.removed = false;
-    state.seq += 1;
-    Some(build_host_snapshot(local_node, configured, node_connectivity, environment_id, state))
 }
 
 fn should_present_host_state(
@@ -868,6 +850,61 @@ mod tests {
             hosts.hosts.iter().any(|entry| entry.environment_id == second_environment_id),
             "the second live environment should be visible even with a placeholder summary"
         );
+    }
+
+    #[tokio::test]
+    async fn set_peer_host_summaries_removes_missing_environment_for_connected_node() {
+        let registry = HostRegistry::new(local_node(), minimal_summary(&local_node()));
+        let peer = NodeInfo::new(NodeId::new("peer-node-44"), "Build Box");
+        let first_environment_id = EnvironmentId::host(HostId::new("peer-node-44-host-a"));
+        let second_environment_id = EnvironmentId::host(HostId::new("peer-node-44-host-b"));
+
+        let first_summary = HostSummary {
+            environment_id: first_environment_id.clone(),
+            host_name: Some(HostName::new("build-box-a")),
+            node: peer.clone(),
+            system: SystemInfo::default(),
+            inventory: ToolInventory::default(),
+            providers: vec![],
+            environments: vec![],
+        };
+        let second_summary = HostSummary {
+            environment_id: second_environment_id.clone(),
+            host_name: Some(HostName::new("build-box-b")),
+            node: peer.clone(),
+            system: SystemInfo::default(),
+            inventory: ToolInventory::default(),
+            providers: vec![],
+            environments: vec![],
+        };
+
+        registry.publish_peer_connection_status(&peer, PeerConnectionState::Connected, &HashMap::new(), &|_| {}).await;
+        registry.publish_peer_summary(first_summary.clone(), &|_| {}).await;
+        registry.publish_peer_summary(second_summary.clone(), &|_| {}).await;
+
+        let events = RefCell::new(Vec::new());
+        let emit = |event: DaemonEvent| events.borrow_mut().push(event);
+        registry
+            .set_peer_host_summaries(HashMap::from([(second_environment_id.clone(), second_summary.clone())]), &HashMap::new(), &emit)
+            .await;
+
+        {
+            let captured = events.borrow();
+            assert!(
+                captured.iter().any(
+                    |event| matches!(event, DaemonEvent::HostRemoved { environment_id, .. } if *environment_id == first_environment_id)
+                ),
+                "missing environment should be removed when it disappears from the peer summary set"
+            );
+        }
+
+        let err = registry.get_host_status(&first_environment_id, &HashMap::new()).await.expect_err("removed environment should disappear");
+        assert!(err.contains("host not found"), "unexpected error: {err}");
+
+        let status =
+            registry.get_host_status(&second_environment_id, &HashMap::new()).await.expect("remaining environment should stay live");
+        assert_eq!(status.environment_id, second_environment_id);
+        assert_eq!(registry.environment_id_for_node(&peer.node_id).await, Some(second_environment_id));
     }
 
     #[tokio::test]

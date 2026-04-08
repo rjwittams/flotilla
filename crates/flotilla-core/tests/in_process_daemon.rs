@@ -2546,7 +2546,7 @@ async fn list_hosts_and_replay_drop_stale_non_configured_hosts() {
 }
 
 #[tokio::test]
-async fn clearing_summary_for_visible_host_emits_host_snapshot() {
+async fn clearing_summary_for_visible_host_emits_host_removed() {
     let (_temp, _repo, daemon, _identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
     let peer_host = HostName::new("configured-peer");
@@ -2565,17 +2565,21 @@ async fn clearing_summary_for_visible_host_emits_host_snapshot() {
     .expect("timeout waiting for summary snapshot");
 
     daemon.set_peer_host_summaries(HashMap::new()).await;
-    let cleared = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let removed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             match rx.recv().await.expect("recv") {
-                DaemonEvent::HostSnapshot(snap) if snapshot_host(&snap) == peer_host => return snap,
+                DaemonEvent::HostRemoved { environment_id, seq }
+                    if environment_id == EnvironmentId::host(HostId::new("configured-peer-host")) =>
+                {
+                    return seq;
+                }
                 _ => continue,
             }
         }
     })
     .await
-    .expect("timeout waiting for cleared summary snapshot");
-    assert!(cleared.summary.providers.is_empty(), "cleared summary should fall back to the default empty summary");
+    .expect("timeout waiting for host removal after clearing summary");
+    assert!(removed >= 1, "removed host should carry a stream seq");
 }
 
 /// replay_since must include peer provider data, just like get_state and live
