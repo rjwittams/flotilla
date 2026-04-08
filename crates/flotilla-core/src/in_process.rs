@@ -4,7 +4,7 @@
 //! and broadcasts events — all within the same process.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -49,6 +49,18 @@ use crate::{
         RemoteStepBatchRequest, RemoteStepExecutor, RemoteStepProgressSink, StepOutcome, StepResolver, run_step_plan_with_remote_executor,
     },
 };
+
+fn host_environment_ids_in_provider_data(providers: &ProviderData) -> Vec<EnvironmentId> {
+    let mut environment_ids = HashSet::new();
+    for checkout in providers.checkouts.values() {
+        if let Some(environment_id) = checkout.environment_id.as_ref().filter(|environment_id| environment_id.is_host()) {
+            environment_ids.insert(environment_id.clone());
+        }
+    }
+    let mut environment_ids: Vec<_> = environment_ids.into_iter().collect();
+    environment_ids.sort();
+    environment_ids
+}
 
 fn static_ssh_environment_id(config_key: &str) -> EnvironmentId {
     let mut encoded = String::with_capacity(config_key.len() * 2);
@@ -98,6 +110,17 @@ async fn load_env_vars(runner: &dyn CommandRunner, cwd: &Path) -> HashMap<String
             Some((key.to_string(), value.to_string()))
         })
         .collect()
+}
+
+fn merge_host_counts(
+    counts: &mut HashMap<EnvironmentId, HostCounts>,
+    other: HashMap<EnvironmentId, HostCounts>,
+) {
+    for (environment_id, delta) in other {
+        let entry = counts.entry(environment_id).or_default();
+        entry.repo_count += delta.repo_count;
+        entry.work_item_count += delta.work_item_count;
+    }
 }
 
 const STATIC_SSH_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -716,34 +739,42 @@ impl InProcessDaemon {
         self.host_registry.set_topology_routes(routes).await;
     }
 
-    async fn local_host_counts(&self) -> HostCounts {
+    async fn local_host_counts(&self) -> HashMap<EnvironmentId, HostCounts> {
         let repos = self.repos.read().await;
         let repo_order = self.repo_order.read().await;
-        let mut counts = HostCounts::default();
+        let mut counts: HashMap<EnvironmentId, HostCounts> = HashMap::new();
 
         for identity in repo_order.iter() {
             let Some(state) = repos.get(identity) else { continue };
-            if !state.preferred_root().is_local {
+            let Some(environment_id) = state.preferred_environment_id().cloned() else {
                 continue;
-            }
-            counts.repo_count += 1;
+            };
+            let entry = counts.entry(environment_id).or_default();
+            entry.repo_count += 1;
             if let Some(snapshot) = state.cached_snapshot() {
-                counts.work_item_count += snapshot.work_items.len();
+                entry.work_item_count += snapshot.work_items.len();
             }
         }
 
         counts
     }
 
-    async fn remote_host_counts(&self) -> HashMap<NodeId, HostCounts> {
+    async fn remote_host_counts(&self) -> HashMap<EnvironmentId, HostCounts> {
         let peer_providers = self.peer_providers.read().await;
-        let mut counts: HashMap<NodeId, HostCounts> = HashMap::new();
+        let mut counts: HashMap<EnvironmentId, HostCounts> = HashMap::new();
 
         for peers in peer_providers.values() {
-            for (node, providers) in peers {
-                let entry = counts.entry(node.node_id.clone()).or_default();
-                entry.repo_count += 1;
-                entry.work_item_count += crate::data::correlate(providers).0.len();
+            for (_node, providers) in peers {
+                let environment_ids = host_environment_ids_in_provider_data(providers);
+                if environment_ids.is_empty() {
+                    continue;
+                }
+                let work_item_count = crate::data::correlate(providers).0.len();
+                for environment_id in environment_ids {
+                    let entry = counts.entry(environment_id).or_default();
+                    entry.repo_count += 1;
+                    entry.work_item_count += work_item_count;
+                }
             }
         }
 
@@ -913,7 +944,6 @@ impl InProcessDaemon {
         let Some(identity) = self.tracked_repo_identity_for_path(repo_path).await else {
             return;
         };
-        let peer_nodes: Vec<NodeInfo> = peers.iter().map(|(node, _)| node.clone()).collect();
         {
             let mut versions = self.peer_overlay_versions.write().await;
             let stored = versions.entry(identity.clone()).or_insert(0);
@@ -930,25 +960,24 @@ impl InProcessDaemon {
                 pp.insert(identity.clone(), peers);
             }
         }
-        for node in &peer_nodes {
-            let Some(environment_id) = self.host_registry.environment_id_for_node(&node.node_id).await else {
-                continue;
-            };
-            self.host_registry
-                .publish_peer_summary(
-                    HostSummary {
-                        environment_id,
-                        node: node.clone(),
-                        system: SystemInfo::default(),
-                        inventory: ToolInventory::default(),
-                        providers: vec![],
-                        environments: vec![],
-                    },
-                    &|e| {
-                        let _ = self.event_tx.send(e);
-                    },
-                )
-                .await;
+        for (node, providers) in self.peer_providers.read().await.get(&identity).cloned().unwrap_or_default() {
+            for environment_id in host_environment_ids_in_provider_data(&providers) {
+                self.host_registry
+                    .publish_peer_summary(
+                        HostSummary {
+                            environment_id,
+                            node: node.clone(),
+                            system: SystemInfo::default(),
+                            inventory: ToolInventory::default(),
+                            providers: vec![],
+                            environments: vec![],
+                        },
+                        &|e| {
+                            let _ = self.event_tx.send(e);
+                        },
+                    )
+                    .await;
+            }
         }
         let remote_counts = self.remote_host_counts().await;
         self.host_registry
@@ -1599,16 +1628,16 @@ impl InProcessDaemon {
 
     pub async fn list_hosts_internal(&self) -> Result<HostListResponse, String> {
         let _ = self.refresh_local_host_summary().await;
-        let local_counts = self.local_host_counts().await;
-        let remote_counts = self.remote_host_counts().await;
-        Ok(self.host_registry.list_hosts(local_counts, &remote_counts).await)
+        let mut counts = self.local_host_counts().await;
+        merge_host_counts(&mut counts, self.remote_host_counts().await);
+        Ok(self.host_registry.list_hosts(&counts).await)
     }
 
     pub async fn get_host_status_internal(&self, environment_id: &EnvironmentId) -> Result<HostStatusResponse, String> {
         let local_summary = self.refresh_local_host_summary().await;
-        let local_counts = self.local_host_counts().await;
-        let remote_counts = self.remote_host_counts().await;
-        let mut response = self.host_registry.get_host_status(environment_id, local_counts, &remote_counts).await?;
+        let mut counts = self.local_host_counts().await;
+        merge_host_counts(&mut counts, self.remote_host_counts().await);
+        let mut response = self.host_registry.get_host_status(environment_id, &counts).await?;
         if environment_id == &local_summary.environment_id {
             response.visible_environments = self.environment_manager.visible_environments().await;
         }
@@ -1617,8 +1646,9 @@ impl InProcessDaemon {
 
     pub async fn get_host_providers_internal(&self, environment_id: &EnvironmentId) -> Result<HostProvidersResponse, String> {
         let local_summary = self.refresh_local_host_summary().await;
-        let remote_counts = self.remote_host_counts().await;
-        let mut response = self.host_registry.get_host_providers(environment_id, &remote_counts).await?;
+        let mut counts = self.local_host_counts().await;
+        merge_host_counts(&mut counts, self.remote_host_counts().await);
+        let mut response = self.host_registry.get_host_providers(environment_id, &counts).await?;
         if environment_id == &local_summary.environment_id {
             response.visible_environments = self.environment_manager.visible_environments().await;
         }

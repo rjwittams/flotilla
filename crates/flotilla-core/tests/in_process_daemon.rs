@@ -1326,7 +1326,7 @@ async fn daemon_for_duplicate_fake_repos() -> (tempfile::TempDir, PathBuf, PathB
 }
 
 #[tokio::test]
-async fn list_hosts_includes_local_and_configured_disconnected_peers() {
+async fn list_hosts_does_not_materialize_configured_peers_without_host_environment_identity() {
     let (_temp, _repo, daemon, _identity) = daemon_for_fake_repo().await;
 
     daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
@@ -1334,16 +1334,11 @@ async fn list_hosts_includes_local_and_configured_disconnected_peers() {
     let hosts = daemon.list_hosts_internal().await.expect("list hosts");
 
     assert!(hosts.hosts.iter().any(|entry| entry.node.node_id == daemon.node_id().clone() && entry.is_local));
-    assert!(hosts.hosts.iter().any(|entry| {
-        entry.node == test_node("remote")
-            && entry.configured
-            && !entry.has_summary
-            && entry.connection_status == PeerConnectionState::Disconnected
-    }));
+    assert!(!hosts.hosts.iter().any(|entry| entry.node == test_node("remote")));
 }
 
 #[tokio::test]
-async fn get_host_providers_returns_local_summary_and_errors_for_unknown_remote_summary() {
+async fn get_host_providers_returns_local_summary_and_unmapped_remote_host_is_absent() {
     let (_temp, _repo, daemon, _identity) = daemon_for_fake_repo().await;
 
     daemon.set_configured_peer_names(vec![HostName::new("remote")]).await;
@@ -1355,19 +1350,15 @@ async fn get_host_providers_returns_local_summary_and_errors_for_unknown_remote_
     assert_eq!(local.node.display_name, daemon.host_name().as_str());
     assert_eq!(summary_host(&local.summary), *daemon.host_name());
 
-    let remote_environment_id = daemon
-        .list_hosts_internal()
-        .await
-        .expect("list hosts")
-        .hosts
-        .into_iter()
-        .find(|entry| entry.node.node_id == test_node("remote").node_id)
-        .map(|entry| entry.environment_id)
-        .expect("remote host entry");
-    let remote = daemon.get_host_providers_internal(&remote_environment_id).await.expect("remote host providers should resolve");
-    assert_eq!(remote.environment_id, remote_environment_id);
-    assert_eq!(remote.node.node_id, test_node("remote").node_id);
-    assert!(remote.summary.providers.is_empty(), "placeholder summary should remain empty");
+    assert!(
+        !daemon
+            .list_hosts_internal()
+            .await
+            .expect("list hosts")
+            .hosts
+            .into_iter()
+            .any(|entry| entry.node.node_id == test_node("remote").node_id)
+    );
 }
 
 #[tokio::test]
@@ -1499,7 +1490,7 @@ async fn list_hosts_counts_remote_repo_overlay_and_get_topology_returns_mirrored
         correlation_keys: vec![],
         association_keys: vec![],
         host_name: None,
-        environment_id: None,
+        environment_id: Some(sample_remote_host_summary("remote").environment_id),
     });
     daemon.send_event(DaemonEvent::PeerStatusChanged { node_id: test_node("remote").node_id, status: PeerConnectionState::Connected });
     daemon.set_peer_providers(&repo, vec![(HostName::new("remote"), peer_data)], 0).await;
@@ -2193,6 +2184,131 @@ async fn set_peer_providers_reuses_existing_peer_host_environment_identity() {
 }
 
 #[tokio::test]
+async fn list_hosts_uses_environment_scoped_counts_for_multiple_hosts_on_same_node() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    std::fs::create_dir_all(&repo_a).expect("create repo-a dir");
+    std::fs::create_dir_all(&repo_b).expect("create repo-b dir");
+
+    let state_a = FakeVcsState::builder(repo_a.clone()).branch("main", true).checkout("main").is_main(true).build().build();
+    let state_b = FakeVcsState::builder(repo_b.clone()).branch("main", true).checkout("main").is_main(true).build().build();
+
+    let mut discovery = fake_discovery(false);
+    discovery.factories.vcs = vec![Box::new(FakeVcsFactory::new(state_a.clone())), Box::new(FakeVcsFactory::new(state_b.clone()))];
+    discovery.factories.checkout_managers =
+        vec![Box::new(FakeCheckoutManagerFactory::new(state_a)), Box::new(FakeCheckoutManagerFactory::new(state_b))];
+
+    let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
+    let daemon = InProcessDaemon::new(vec![repo_a.clone(), repo_b.clone()], config, discovery, HostName::local()).await;
+    let peer = test_node("shared-peer");
+    let env_a = EnvironmentId::host(HostId::new("shared-peer-host-a"));
+    let env_b = EnvironmentId::host(HostId::new("shared-peer-host-b"));
+
+    InProcessDaemon::set_peer_host_summaries(
+        daemon.as_ref(),
+        HashMap::from([
+            (env_a.clone(), HostSummary { environment_id: env_a.clone(), node: peer.clone(), ..sample_remote_host_summary("shared-peer") }),
+            (env_b.clone(), HostSummary { environment_id: env_b.clone(), node: peer.clone(), ..sample_remote_host_summary("shared-peer") }),
+        ]),
+    )
+    .await;
+
+    let mut providers_a = ProviderData::default();
+    providers_a.checkouts.insert(qpath(&HostName::new("shared-peer-a"), PathBuf::from("/srv/shared/a")), Checkout {
+        branch: "env-a".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+        host_name: None,
+        environment_id: Some(env_a.clone()),
+    });
+    providers_a.checkouts.insert(qpath(&HostName::new("shared-peer-b"), PathBuf::from("/srv/shared/b")), Checkout {
+        branch: "env-b-on-a".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+        host_name: None,
+        environment_id: Some(env_b.clone()),
+    });
+
+    let mut providers_b = ProviderData::default();
+    providers_b.checkouts.insert(qpath(&HostName::new("shared-peer-b"), PathBuf::from("/srv/shared/b-2")), Checkout {
+        branch: "env-b-on-b".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+        host_name: None,
+        environment_id: Some(env_b.clone()),
+    });
+
+    daemon.set_peer_providers(&repo_a, vec![(HostName::new("shared-peer"), providers_a)], 0).await;
+    daemon.set_peer_providers(&repo_b, vec![(HostName::new("shared-peer"), providers_b)], 0).await;
+
+    let hosts = daemon.list_hosts_internal().await.expect("list hosts");
+    let host_a = hosts.hosts.iter().find(|entry| entry.environment_id == env_a).expect("host a");
+    let host_b = hosts.hosts.iter().find(|entry| entry.environment_id == env_b).expect("host b");
+
+    assert_eq!(host_a.repo_count, 1);
+    assert_eq!(host_b.repo_count, 2);
+}
+
+#[tokio::test]
+async fn set_peer_providers_keeps_multiple_host_environments_visible_for_one_node() {
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
+    let peer = test_node("overlay-peer");
+    let env_a = EnvironmentId::host(HostId::new("overlay-peer-host-a"));
+    let env_b = EnvironmentId::host(HostId::new("overlay-peer-host-b"));
+
+    let mut peer_data = ProviderData::default();
+    peer_data.checkouts.insert(qpath(&HostName::new("overlay-peer-a"), PathBuf::from("/srv/overlay/a")), Checkout {
+        branch: "overlay-a".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+        host_name: None,
+        environment_id: Some(env_a.clone()),
+    });
+    peer_data.checkouts.insert(qpath(&HostName::new("overlay-peer-b"), PathBuf::from("/srv/overlay/b")), Checkout {
+        branch: "overlay-b".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+        host_name: None,
+        environment_id: Some(env_b.clone()),
+    });
+
+    daemon.set_peer_providers(&repo, vec![(HostName::new("overlay-peer"), peer_data)], 0).await;
+
+    let hosts = daemon.list_hosts_internal().await.expect("list hosts");
+    let peer_entries: Vec<_> = hosts.hosts.iter().filter(|entry| entry.node == peer).collect();
+
+    assert_eq!(peer_entries.len(), 2);
+    assert!(peer_entries.iter().any(|entry| entry.environment_id == env_a));
+    assert!(peer_entries.iter().any(|entry| entry.environment_id == env_b));
+}
+
+#[tokio::test]
 async fn set_peer_providers_without_environment_mapping_does_not_synthesize_host_identity() {
     let (_temp, repo, daemon) = daemon_for_cwd().await;
 
@@ -2340,17 +2456,6 @@ async fn clearing_summary_for_visible_host_emits_host_snapshot() {
     let peer_host = HostName::new("configured-peer");
 
     daemon.set_configured_peer_names(vec![peer_host.clone()]).await;
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            match rx.recv().await.expect("recv") {
-                DaemonEvent::HostSnapshot(snap) if snapshot_host(&snap) == peer_host => return snap,
-                _ => continue,
-            }
-        }
-    })
-    .await
-    .expect("timeout waiting for configured host snapshot");
-
     daemon.set_peer_host_summaries(HashMap::from([(peer_host.clone(), sample_remote_host_summary("configured-peer"))])).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
