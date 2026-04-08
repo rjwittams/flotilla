@@ -479,6 +479,46 @@ async fn sync_peer_query_state_mirrors_host_summaries_and_routes_into_daemon() {
 }
 
 #[tokio::test]
+async fn sync_peer_query_state_preserves_multiple_host_summaries_for_one_node() {
+    let (_tmp, daemon) = empty_daemon().await;
+    let peer_manager = Arc::new(Mutex::new(PeerManager::new(NodeId::new("local"))));
+
+    {
+        let mut pm = peer_manager.lock().await;
+        pm.store_host_summary(flotilla_protocol::HostSummary {
+            environment_id: EnvironmentId::host(flotilla_protocol::qualified_path::HostId::new("remote-host-a")),
+            node: node_info("remote"),
+            system: flotilla_protocol::SystemInfo {
+                home_dir: Some(PathBuf::from("/home/remote-a")),
+                ..Default::default()
+            },
+            inventory: flotilla_protocol::ToolInventory::default(),
+            providers: vec![],
+            environments: vec![],
+        });
+        pm.store_host_summary(flotilla_protocol::HostSummary {
+            environment_id: EnvironmentId::host(flotilla_protocol::qualified_path::HostId::new("remote-host-b")),
+            node: node_info("remote"),
+            system: flotilla_protocol::SystemInfo {
+                home_dir: Some(PathBuf::from("/home/remote-b")),
+                ..Default::default()
+            },
+            inventory: flotilla_protocol::ToolInventory::default(),
+            providers: vec![],
+            environments: vec![],
+        });
+
+        ensure_test_connection_generation(&mut pm, &NodeId::new("remote"), MockPeerSender::discard);
+    }
+
+    sync_peer_query_state(&peer_manager, &daemon).await;
+
+    let hosts = daemon.list_hosts_internal().await.expect("list hosts after sync");
+    let remote_hosts: Vec<_> = hosts.hosts.into_iter().filter(|entry| entry.node.node_id == node("remote")).collect();
+    assert_eq!(remote_hosts.len(), 2, "both host environments for the same node should remain visible");
+}
+
+#[tokio::test]
 async fn dispatch_execute_remote_query_routes_through_peer_manager() {
     // Test dispatch_execute directly on the RemoteCommandRouter level to
     // verify the peer routing path for remote query commands.
@@ -2581,7 +2621,9 @@ async fn handle_remote_restart_if_needed_clears_stale_remote_only_peer_state() {
         "restart cleanup should clear stale cached repo data for the restarted peer"
     );
     assert!(
-        !pm.get_peer_host_summaries().contains_key(&NodeId::new("peer-a")),
+        !pm.get_peer_host_summaries()
+            .values()
+            .any(|summary| summary.node.node_id == NodeId::new("peer-a")),
         "restart cleanup should clear stale host summary for the restarted peer"
     );
 }

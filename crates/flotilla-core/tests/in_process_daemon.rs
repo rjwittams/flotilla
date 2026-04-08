@@ -404,7 +404,7 @@ impl DaemonTestCompat for Arc<InProcessDaemon> {
                 .into_iter()
                 .map(|(host, mut summary)| {
                     summary.node = test_node(host.as_str());
-                    (summary.node.node_id.clone(), summary)
+                    (summary.environment_id.clone(), summary)
                 })
                 .collect(),
         )

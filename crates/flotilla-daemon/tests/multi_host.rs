@@ -393,15 +393,22 @@ async fn host_summary_round_trip_between_connected_peers() {
         .await;
 
     assert_eq!(result, HandleResult::Ignored);
-    let stored = leader_mgr.get_peer_host_summaries().get(&node("follower")).expect("leader stored follower summary");
+    let expected = follower_daemon.local_host_summary().await;
+    let stored = leader_mgr
+        .get_peer_host_summaries()
+        .get(&expected.environment_id)
+        .expect("leader stored follower summary");
     assert_eq!(stored.node.node_id, node("follower"));
-    let mut expected = follower_daemon.local_host_summary().await;
+    let mut expected = expected;
     expected.node.node_id = node("follower");
     assert_eq!(stored, &expected);
 
     let plan = leader_mgr.disconnect_peer(&node("follower"), generation);
     assert!(plan.was_active, "disconnect should clear active peer state");
-    assert!(!leader_mgr.get_peer_host_summaries().contains_key(&node("follower")), "disconnect should clear the stored host summary");
+    assert!(
+        !leader_mgr.get_peer_host_summaries().contains_key(&expected.environment_id),
+        "disconnect should clear the stored host summary"
+    );
 
     let _ = leader_daemon;
 }

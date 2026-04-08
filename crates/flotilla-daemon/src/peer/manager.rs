@@ -7,8 +7,9 @@ use std::{
 };
 
 use flotilla_protocol::{
-    Command, CommandPeerEvent, CommandValue, ConfigLabel, GoodbyeReason, HostSummary, NodeId, NodeInfo, PeerDataKind, PeerDataMessage,
-    PeerWireMessage, ProviderData, RepoIdentity, RoutedPeerMessage, Step, StepOutcome, StepStatus, TopologyRoute, VectorClock,
+    Command, CommandPeerEvent, CommandValue, ConfigLabel, EnvironmentId, GoodbyeReason, HostSummary, NodeId, NodeInfo, PeerDataKind,
+    PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RoutedPeerMessage, Step, StepOutcome, StepStatus, TopologyRoute,
+    VectorClock,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -258,7 +259,7 @@ pub struct PeerManager {
     route_epoch: u64,
     request_id_counter: u64,
     peer_data: HashMap<NodeId, HashMap<RepoIdentity, PerRepoPeerState>>,
-    peer_host_summaries: HashMap<NodeId, HostSummary>,
+    peer_host_summaries: HashMap<EnvironmentId, HostSummary>,
     /// RepoIdentity values that exist only on remote peers — no local repo
     /// matches. Each maps to the synthetic path used for tab identity.
     known_remote_repos: HashMap<RepoIdentity, PathBuf>,
@@ -315,7 +316,8 @@ impl PeerManager {
 
     fn node_info_for(&self, node_id: &NodeId) -> NodeInfo {
         self.peer_host_summaries
-            .get(node_id)
+            .values()
+            .find(|summary| summary.node.node_id == *node_id)
             .map(|summary| summary.node.clone())
             .unwrap_or_else(|| NodeInfo::new(node_id.clone(), node_id.to_string()))
     }
@@ -1244,10 +1246,10 @@ impl PeerManager {
     }
 
     pub fn store_host_summary(&mut self, summary: HostSummary) {
-        self.peer_host_summaries.insert(summary.node.node_id.clone(), summary);
+        self.peer_host_summaries.insert(summary.environment_id.clone(), summary);
     }
 
-    pub fn get_peer_host_summaries(&self) -> &HashMap<NodeId, HostSummary> {
+    pub fn get_peer_host_summaries(&self) -> &HashMap<EnvironmentId, HostSummary> {
         &self.peer_host_summaries
     }
 
@@ -1445,7 +1447,7 @@ impl PeerManager {
     pub fn remove_peer_data(&mut self, name: &NodeId) -> Vec<RepoIdentity> {
         let affected: Vec<RepoIdentity> = self.peer_data.get(name).map(|repos| repos.keys().cloned().collect()).unwrap_or_default();
         self.peer_data.remove(name);
-        self.peer_host_summaries.remove(name);
+        self.peer_host_summaries.retain(|_, summary| summary.node.node_id != *name);
         self.last_seen_clocks.retain(|(host, _), _| host != name);
         info!(peer = %name, repos = affected.len(), "cleared peer data");
         affected
@@ -1546,11 +1548,11 @@ impl PeerManager {
     pub fn clear_peer_data_for_restart(&mut self, origin: &NodeId) -> Vec<RepoIdentity> {
         let Some(repos) = self.peer_data.remove(origin) else {
             // Restart cleanup still owns host-summary eviction even when no repo snapshots were cached.
-            self.peer_host_summaries.remove(origin);
+            self.peer_host_summaries.retain(|_, summary| summary.node.node_id != *origin);
             return Vec::new();
         };
         let affected: Vec<RepoIdentity> = repos.keys().cloned().collect();
-        self.peer_host_summaries.remove(origin);
+        self.peer_host_summaries.retain(|_, summary| summary.node.node_id != *origin);
         self.last_seen_clocks.retain(|(host, _), _| host != origin);
         if !affected.is_empty() {
             self.bump_overlay_version();
@@ -1576,7 +1578,7 @@ impl PeerManager {
         self.reverse_paths.retain(|_, hop| hop.next_hop != *name);
         self.command_reverse_paths.retain(|_, hop| hop.next_hop != *name);
         self.pending_resync_requests.retain(|key, _| key.target_node_id != *name);
-        self.peer_host_summaries.remove(name);
+        self.peer_host_summaries.retain(|_, summary| summary.node.node_id != *name);
 
         let mut affected_repos = Vec::new();
         let mut resync_requests = Vec::new();

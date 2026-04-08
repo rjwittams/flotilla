@@ -265,7 +265,11 @@ async fn host_summary_handle_inbound_stores_for_connection_peer() {
         .await;
 
     assert_eq!(result, HandleResult::Ignored);
-    let stored = mgr.get_peer_host_summaries().get(&connection_peer).expect("stored host summary");
+    let stored = mgr
+        .get_peer_host_summaries()
+        .values()
+        .find(|summary| summary.node.node_id == connection_peer)
+        .expect("stored host summary");
     assert_eq!(stored.node.node_id, connection_peer);
 }
 
@@ -287,6 +291,22 @@ fn clear_peer_data_for_restart_clears_host_summary() {
     mgr.clear_peer_data_for_restart(&NodeId::new("remote"));
 
     assert!(mgr.get_peer_host_summaries().is_empty());
+}
+
+#[test]
+fn stores_multiple_host_summaries_for_the_same_node() {
+    let mut mgr = PeerManager::new(NodeId::new("local"));
+    let first = sample_host_summary_for("remote");
+    let mut second = sample_host_summary_for("remote");
+    second.environment_id = EnvironmentId::host(HostId::new("remote-host-b"));
+    second.system.home_dir = Some(PathBuf::from("/srv/remote-b"));
+
+    mgr.store_host_summary(first.clone());
+    mgr.store_host_summary(second.clone());
+
+    assert_eq!(mgr.get_peer_host_summaries().len(), 2);
+    assert_eq!(mgr.get_peer_host_summaries().get(&first.environment_id), Some(&first));
+    assert_eq!(mgr.get_peer_host_summaries().get(&second.environment_id), Some(&second));
 }
 
 #[tokio::test]

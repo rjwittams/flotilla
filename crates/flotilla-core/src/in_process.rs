@@ -686,7 +686,7 @@ impl InProcessDaemon {
             .await;
     }
 
-    pub async fn set_peer_host_summaries(&self, summaries: HashMap<NodeId, HostSummary>) {
+    pub async fn set_peer_host_summaries(&self, summaries: HashMap<EnvironmentId, HostSummary>) {
         let remote_counts = self.remote_host_counts().await;
         self.host_registry
             .set_peer_host_summaries(summaries, &remote_counts, &|e| {
