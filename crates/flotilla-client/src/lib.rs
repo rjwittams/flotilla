@@ -522,12 +522,12 @@ fn handle_event(
             local_seqs.write().unwrap().remove(&StreamKey::Repo { identity: repo_identity.clone() });
             let _ = event_tx.send(event);
         }
-        DaemonEvent::HostRemoved { node_id, seq } => {
-            local_seqs.write().unwrap().insert(StreamKey::Host { node_id: node_id.clone() }, *seq);
+        DaemonEvent::HostRemoved { environment_id, seq } => {
+            local_seqs.write().unwrap().insert(StreamKey::Host { environment_id: environment_id.clone() }, *seq);
             let _ = event_tx.send(event);
         }
         DaemonEvent::HostSnapshot(snap) => {
-            let stream_key = StreamKey::Host { node_id: snap.node.node_id.clone() };
+            let stream_key = StreamKey::Host { environment_id: snap.environment_id.clone() };
             local_seqs.write().unwrap().insert(stream_key, snap.seq);
             let _ = event_tx.send(event);
         }
@@ -583,14 +583,14 @@ async fn recover_from_gap(
                                 }
                             }
                             DaemonEvent::HostSnapshot(snap) => {
-                                let key = StreamKey::Host { node_id: snap.node.node_id.clone() };
+                                let key = StreamKey::Host { environment_id: snap.environment_id.clone() };
                                 let current = seqs.get(&key).copied().unwrap_or(0);
                                 if snap.seq >= current {
                                     seqs.insert(key, snap.seq);
                                 }
                             }
-                            DaemonEvent::HostRemoved { node_id, seq } => {
-                                let key = StreamKey::Host { node_id: node_id.clone() };
+                            DaemonEvent::HostRemoved { environment_id, seq } => {
+                                let key = StreamKey::Host { environment_id: environment_id.clone() };
                                 let current = seqs.get(&key).copied().unwrap_or(0);
                                 if *seq >= current {
                                     seqs.insert(key, *seq);
@@ -688,8 +688,8 @@ impl DaemonHandle for SocketDaemon {
                 let (stream_key, seq) = match event {
                     DaemonEvent::RepoSnapshot(snap) => (StreamKey::Repo { identity: snap.repo_identity.clone() }, snap.seq),
                     DaemonEvent::RepoDelta(delta) => (StreamKey::Repo { identity: delta.repo_identity.clone() }, delta.seq),
-                    DaemonEvent::HostSnapshot(snap) => (StreamKey::Host { node_id: snap.node.node_id.clone() }, snap.seq),
-                    DaemonEvent::HostRemoved { node_id, seq } => (StreamKey::Host { node_id: node_id.clone() }, *seq),
+                    DaemonEvent::HostSnapshot(snap) => (StreamKey::Host { environment_id: snap.environment_id.clone() }, snap.seq),
+                    DaemonEvent::HostRemoved { environment_id, seq } => (StreamKey::Host { environment_id: environment_id.clone() }, *seq),
                     _ => continue,
                 };
                 seqs.entry(stream_key).and_modify(|s| *s = (*s).max(seq)).or_insert(seq);

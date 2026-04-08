@@ -116,7 +116,7 @@ pub enum StreamKey {
     #[serde(rename = "repo")]
     Repo { identity: RepoIdentity },
     #[serde(rename = "host")]
-    Host { node_id: NodeId },
+    Host { environment_id: EnvironmentId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,7 +267,7 @@ pub enum DaemonEvent {
     HostSnapshot(Box<HostSnapshot>),
     /// Node stream tombstone — sent when a previously visible node disappears.
     #[serde(rename = "host_removed")]
-    HostRemoved { node_id: NodeId, seq: u64 },
+    HostRemoved { environment_id: EnvironmentId, seq: u64 },
 }
 
 /// Peer connection state as seen by the TUI.

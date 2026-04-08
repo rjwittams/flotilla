@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use flotilla_protocol::{NodeId, NodeInfo, RepoDelta, RepoIdentity, RepoSnapshot};
+use flotilla_protocol::{qualified_path::HostId, EnvironmentId, NodeId, NodeInfo, RepoDelta, RepoIdentity, RepoSnapshot};
 use flotilla_transport::message::{message_session_pair, MessageSession};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -573,10 +573,10 @@ async fn handle_event_forwards_host_removed_and_tracks_seq() {
     let recovering: Arc<std::sync::Mutex<HashMap<RepoIdentity, Vec<DaemonEvent>>>> = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let (event_tx, mut event_rx) = broadcast::channel(16);
     let (session, pending, next_id, _server) = event_harness();
-    let node_id = NodeId::new("peer-1");
+    let environment_id = EnvironmentId::host(HostId::new("peer-host"));
 
     handle_event(
-        DaemonEvent::HostRemoved { node_id: node_id.clone(), seq: 9 },
+        DaemonEvent::HostRemoved { environment_id: environment_id.clone(), seq: 9 },
         &local_seqs,
         &recovering,
         &event_tx,
@@ -587,7 +587,7 @@ async fn handle_event_forwards_host_removed_and_tracks_seq() {
 
     let event = event_rx.try_recv().expect("should receive HostRemoved");
     assert!(matches!(event, DaemonEvent::HostRemoved { seq: 9, .. }));
-    assert_eq!(local_seqs.read().expect("local_seqs read lock").get(&StreamKey::Host { node_id }).copied(), Some(9));
+    assert_eq!(local_seqs.read().expect("local_seqs read lock").get(&StreamKey::Host { environment_id }).copied(), Some(9));
 }
 
 // --- RepoRemoved evicts seq and forwards ---

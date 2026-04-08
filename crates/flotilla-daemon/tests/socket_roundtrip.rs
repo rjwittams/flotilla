@@ -116,12 +116,12 @@ async fn socket_roundtrip() {
     let local_host_seq = host_replay
         .iter()
         .find_map(|event| match event {
-            DaemonEvent::HostSnapshot(snap) if snap.node.node_id == local_node_id => Some(snap.seq),
+            DaemonEvent::HostSnapshot(snap) if snap.node.node_id == local_node_id => Some((snap.environment_id.clone(), snap.seq)),
             _ => None,
         })
         .expect("expected local host snapshot seq");
     let replay = client
-        .replay_since(&HashMap::from([(StreamKey::Host { node_id: local_node_id.clone() }, local_host_seq)]))
+        .replay_since(&HashMap::from([(StreamKey::Host { environment_id: local_host_seq.0 }, local_host_seq.1)]))
         .await
         .expect("replay_since");
     let host_events: Vec<_> =

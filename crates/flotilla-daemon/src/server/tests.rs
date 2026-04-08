@@ -20,10 +20,10 @@ use flotilla_core::{
 };
 use flotilla_protocol::{
     AgentEventType, AgentHarness, AgentHookEvent, AgentStatus, AttachableId, Checkout, CheckoutTarget, Command, CommandAction,
-    CommandPeerEvent, CommandValue, ConfigLabel, DaemonEvent, HostName, HostPath, HostSummary, Message, NodeId, NodeInfo,
-    PeerConnectionState, PeerDataKind, PeerDataMessage, PeerWireMessage, PreparedWorkspace, ProviderData, RepoIdentity, RepoSelector,
-    Request, Response, ResponseResult, RoutedPeerMessage, StepAction, StepExecutionContext, StepOutcome, StepStatus, StreamKey,
-    VectorClock, PROTOCOL_VERSION,
+    CommandPeerEvent, CommandValue, ConfigLabel, DaemonEvent, EnvironmentId, HostName, HostPath, HostSummary, Message, NodeId,
+    NodeInfo, PeerConnectionState, PeerDataKind, PeerDataMessage, PeerWireMessage, PreparedWorkspace, ProviderData, RepoIdentity,
+    RepoSelector, Request, Response, ResponseResult, RoutedPeerMessage, StepAction, StepExecutionContext, StepOutcome, StepStatus,
+    StreamKey, VectorClock, PROTOCOL_VERSION,
 };
 use flotilla_transport::message::{message_session_pair, MessageSession};
 use indexmap::IndexMap;
@@ -451,6 +451,7 @@ async fn sync_peer_query_state_mirrors_host_summaries_and_routes_into_daemon() {
     {
         let mut pm = peer_manager.lock().await;
         pm.store_host_summary(flotilla_protocol::HostSummary {
+            environment_id: EnvironmentId::host(flotilla_protocol::qualified_path::HostId::new("remote-host")),
             node: node_info("remote"),
             system: flotilla_protocol::SystemInfo {
                 home_dir: Some(PathBuf::from("/home/remote")),
@@ -1976,10 +1977,13 @@ fn test_peer_msg(host: &str) -> PeerDataMessage {
 }
 
 fn host_seq_for(events: &[DaemonEvent], host_name: &NodeId) -> Option<u64> {
-    events.iter().find_map(|event| match event {
-        DaemonEvent::HostSnapshot(snap) if snap.node.node_id == *host_name => Some(snap.seq),
-        _ => None,
-    })
+    events
+        .iter()
+        .filter_map(|event| match event {
+            DaemonEvent::HostSnapshot(snap) if snap.node.node_id == *host_name => Some(snap.seq),
+            _ => None,
+        })
+        .max()
 }
 
 #[tokio::test]
@@ -2110,98 +2114,48 @@ async fn handle_client_forwards_peer_data_and_registers_peer() {
 #[tokio::test]
 async fn handle_client_does_not_advance_host_cursor_for_duplicate_host_summary() {
     let (_tmp, daemon) = empty_daemon().await;
-    let (peer_data_tx, mut peer_data_rx) = mpsc::channel(16);
     let peer_manager = Arc::new(Mutex::new(PeerManager::new(NodeId::new("local"))));
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let client_count = Arc::new(AtomicUsize::new(0));
-    let client_notify = Arc::new(Notify::new());
-    let (peer_connected_tx, _peer_connected_rx) = mpsc::unbounded_channel::<PeerConnectedNotice>();
-
-    let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("pair");
-    let daemon_for_task = Arc::clone(&daemon);
-    let pm = Arc::clone(&peer_manager);
-    let count_ref = Arc::clone(&client_count);
-    let notify_ref = Arc::clone(&client_notify);
-    let handle = tokio::spawn(async move {
-        let remote_command_router = empty_remote_command_router(&daemon_for_task, &pm);
-        handle_client(
-            server_stream,
-            daemon_for_task,
-            shutdown_rx,
-            peer_data_tx,
-            pm,
-            remote_command_router,
-            count_ref,
-            notify_ref,
-            peer_connected_tx,
-            flotilla_core::agents::shared_in_memory_agent_state_store(),
-            None,
-        )
-        .await;
-    });
-
-    let (read_half, write_half) = client_stream.into_split();
-    let mut reader = BufReader::new(read_half).lines();
-    let mut writer = BufWriter::new(write_half);
     let remote_host = NodeId::new("remote-host");
 
-    let hello = Message::Hello {
-        protocol_version: PROTOCOL_VERSION,
-        node_id: NodeId::new("remote-host"),
-        display_name: "remote-host".into(),
-        session_id: uuid::Uuid::nil(),
-        connection_role: None,
-    };
-    flotilla_protocol::framing::write_message_line(&mut writer, &hello).await.expect("write hello");
-    let line = reader.next_line().await.expect("read hello response").expect("hello line");
-    let hello_back: Message = serde_json::from_str(&line).expect("parse hello");
-    assert!(matches!(hello_back, Message::Hello { .. }), "expected hello response");
-
     let summary = HostSummary {
+        environment_id: EnvironmentId::host(flotilla_protocol::qualified_path::HostId::new("remote-host")),
         node: node_info("remote-host"),
         system: Default::default(),
         inventory: Default::default(),
         providers: vec![],
         environments: vec![],
     };
+    let summary_environment_id = summary.environment_id.clone();
 
-    flotilla_protocol::framing::write_message_line(&mut writer, &Message::Peer(Box::new(PeerWireMessage::HostSummary(summary.clone()))))
-        .await
-        .expect("write first host summary");
-    flotilla_protocol::framing::write_message_line(
-        &mut writer,
-        &Message::Peer(Box::new(PeerWireMessage::Data(test_peer_msg("remote-host")))),
-    )
-    .await
-    .expect("write first barrier");
-    let _ = tokio::time::timeout(Duration::from_secs(2), peer_data_rx.recv())
-        .await
-        .expect("timeout waiting for first barrier")
-        .expect("first barrier channel closed");
+    {
+        let mut pm = peer_manager.lock().await;
+        pm.store_host_summary(summary.clone());
+        ensure_test_connection_generation(&mut pm, &remote_host, MockPeerSender::discard);
+    }
+    sync_peer_query_state(&peer_manager, &daemon).await;
 
     let initial_replay = daemon.replay_since(&HashMap::new()).await.expect("initial replay");
-    let host_seq = host_seq_for(&initial_replay, &remote_host).expect("host snapshot after first summary");
+    let host_seq = initial_replay
+        .iter()
+        .find_map(|event| match event {
+            DaemonEvent::HostSnapshot(snap) if snap.node.node_id == remote_host && snap.environment_id == summary_environment_id => {
+                Some(snap.seq)
+            }
+            _ => None,
+        })
+        .expect("host snapshot after first summary");
 
-    flotilla_protocol::framing::write_message_line(&mut writer, &Message::Peer(Box::new(PeerWireMessage::HostSummary(summary))))
-        .await
-        .expect("write duplicate host summary");
-    flotilla_protocol::framing::write_message_line(
-        &mut writer,
-        &Message::Peer(Box::new(PeerWireMessage::Data(test_peer_msg("remote-host")))),
-    )
-    .await
-    .expect("write second barrier");
-    let _ = tokio::time::timeout(Duration::from_secs(2), peer_data_rx.recv())
-        .await
-        .expect("timeout waiting for second barrier")
-        .expect("second barrier channel closed");
+    {
+        let mut pm = peer_manager.lock().await;
+        pm.store_host_summary(summary);
+    }
+    sync_peer_query_state(&peer_manager, &daemon).await;
 
     let replay =
-        daemon.replay_since(&HashMap::from([(StreamKey::Host { node_id: remote_host.clone() }, host_seq)])).await.expect("replay_since");
+        daemon.replay_since(&HashMap::from([(StreamKey::Host { environment_id: summary_environment_id }, host_seq)]))
+            .await
+            .expect("replay_since");
     assert!(host_seq_for(&replay, &remote_host).is_none(), "duplicate host summary should not advance the host cursor");
-
-    drop(writer);
-    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 }
 
 #[tokio::test]
@@ -2529,6 +2483,7 @@ async fn handle_remote_restart_if_needed_clears_stale_remote_only_peer_state() {
             crate::peer::HandleResult::Updated(repo_identity.clone())
         );
         pm.store_host_summary(flotilla_protocol::HostSummary {
+            environment_id: EnvironmentId::host(flotilla_protocol::qualified_path::HostId::new("peer-a-host")),
             node: node_info("peer-a"),
             system: flotilla_protocol::SystemInfo {
                 home_dir: None,

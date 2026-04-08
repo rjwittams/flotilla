@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use flotilla_protocol::{NodeId, NodeInfo, StepAction, StepExecutionContext};
+use flotilla_protocol::{qualified_path::HostId, EnvironmentId, NodeId, NodeInfo, StepAction, StepExecutionContext};
 
 use super::*;
 use crate::peer::{
@@ -28,6 +28,7 @@ fn snapshot_msg(origin: &str, seq: u64) -> PeerDataMessage {
 
 fn sample_host_summary_for(name: &str) -> flotilla_protocol::HostSummary {
     flotilla_protocol::HostSummary {
+        environment_id: EnvironmentId::host(HostId::new(format!("{name}-host"))),
         node: NodeInfo::new(NodeId::new(name), name),
         system: flotilla_protocol::SystemInfo {
             home_dir: Some(PathBuf::from("/home/dev")),

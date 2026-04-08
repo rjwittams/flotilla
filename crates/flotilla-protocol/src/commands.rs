@@ -10,6 +10,9 @@ use crate::{
     AttachableSetId, RepoIdentity,
 };
 
+#[cfg(test)]
+use crate::{qualified_path::HostId, EnvironmentId};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepoSelector {
     Path(PathBuf),
@@ -618,6 +621,7 @@ mod tests {
             })),
             CommandValue::HostList(Box::new(HostListResponse {
                 hosts: vec![HostListEntry {
+                    environment_id: EnvironmentId::host(HostId::new("desktop-host")),
                     node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
                     is_local: true,
                     configured: true,
@@ -628,11 +632,13 @@ mod tests {
                 }],
             })),
             CommandValue::HostStatus(Box::new(HostStatusResponse {
+                environment_id: EnvironmentId::host(HostId::new("desktop-host")),
                 node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
                 is_local: true,
                 configured: true,
                 connection_status: PeerConnectionState::Connected,
                 summary: Some(HostSummary {
+                    environment_id: EnvironmentId::host(HostId::new("desktop-host")),
                     node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
                     system: SystemInfo {
                         home_dir: Some("/home/dev".into()),
@@ -656,11 +662,13 @@ mod tests {
                 work_item_count: 3,
             })),
             CommandValue::HostProviders(Box::new(HostProvidersResponse {
+                environment_id: EnvironmentId::host(HostId::new("desktop-host")),
                 node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
                 is_local: true,
                 configured: true,
                 connection_status: PeerConnectionState::Connected,
                 summary: HostSummary {
+                    environment_id: EnvironmentId::host(HostId::new("desktop-host")),
                     node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
                     system: SystemInfo::default(),
                     inventory: ToolInventory::default(),

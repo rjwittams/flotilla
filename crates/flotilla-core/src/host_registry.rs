@@ -1,8 +1,8 @@
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use flotilla_protocol::{
-    DaemonEvent, HostListEntry, HostListResponse, HostProvidersResponse, HostSnapshot, HostStatusResponse, HostSummary, NodeId, NodeInfo,
-    PeerConnectionState, StreamKey, SystemInfo, ToolInventory, TopologyResponse, TopologyRoute,
+    DaemonEvent, EnvironmentId, HostListEntry, HostListResponse, HostProvidersResponse, HostSnapshot, HostStatusResponse, HostSummary,
+    NodeId, NodeInfo, PeerConnectionState, StreamKey, SystemInfo, ToolInventory, TopologyResponse, TopologyRoute,
 };
 use tokio::sync::RwLock;
 
@@ -14,6 +14,7 @@ pub(crate) struct HostCounts {
 
 #[derive(Debug, Clone)]
 struct HostState {
+    environment_id: EnvironmentId,
     connection_status: PeerConnectionState,
     summary: Option<HostSummary>,
     seq: u64,
@@ -32,6 +33,7 @@ impl HostRegistry {
     pub(crate) fn new(local_node: NodeInfo, local_host_summary: HostSummary) -> Self {
         let mut hosts = HashMap::new();
         hosts.insert(local_node.node_id.clone(), HostState {
+            environment_id: local_host_summary.environment_id.clone(),
             connection_status: PeerConnectionState::Connected,
             summary: Some(local_host_summary.clone()),
             seq: 1,
@@ -66,6 +68,7 @@ impl HostRegistry {
 
         let mut hosts = self.hosts.write().await;
         if let Some(state) = hosts.get_mut(&self.local_node.node_id) {
+            state.environment_id = summary.environment_id.clone();
             state.summary = Some(summary);
             state.seq += 1;
             state.removed = false;
@@ -149,14 +152,15 @@ impl HostRegistry {
         let configured = self.configured_peers.read().await.clone();
         let mut events = Vec::new();
         for (node_id, state) in self.hosts.read().await.iter() {
-            let stream_key = StreamKey::Host { node_id: node_id.clone() };
+            let environment_id = state.environment_id.clone();
+            let stream_key = StreamKey::Host { environment_id: environment_id.clone() };
             let up_to_date = last_seen.get(&stream_key).is_some_and(|seq| *seq == state.seq);
             if up_to_date {
                 continue;
             }
             if state.removed {
                 if last_seen.contains_key(&stream_key) {
-                    events.push(DaemonEvent::HostRemoved { node_id: node_id.clone(), seq: state.seq });
+                    events.push(DaemonEvent::HostRemoved { environment_id, seq: state.seq });
                 }
             } else {
                 events.push(DaemonEvent::HostSnapshot(Box::new(build_host_snapshot(&self.local_node, &configured, node_id, state))));
@@ -183,6 +187,7 @@ impl HostRegistry {
                 match hosts.entry(node_id.clone()) {
                     Entry::Vacant(entry) => {
                         let state = entry.insert(HostState {
+                            environment_id: EnvironmentId::new(node_id.as_str()),
                             connection_status: PeerConnectionState::Disconnected,
                             summary: None,
                             seq: 1,
@@ -210,8 +215,9 @@ impl HostRegistry {
             if should_present_host_state(&self.local_node.node_id, &configured, remote_counts, &node_id, state) {
                 continue;
             }
+            let environment_id = state.environment_id.clone();
             if let Some(seq) = mark_host_removed(&mut hosts, &node_id) {
-                emit(DaemonEvent::HostRemoved { node_id, seq });
+                emit(DaemonEvent::HostRemoved { environment_id, seq });
             }
         }
     }
@@ -310,12 +316,14 @@ impl HostRegistry {
                 if let Ok(mut hosts) = self.hosts.try_write() {
                     match hosts.get_mut(&snap.node.node_id) {
                         Some(state) if state.seq == snap.seq => {
+                            state.environment_id = snap.environment_id.clone();
                             state.connection_status = snap.connection_status.clone();
                             state.summary = Some(snap.summary.clone());
                             state.removed = false;
                         }
                         Some(state) if state.seq < snap.seq => {
                             *state = HostState {
+                                environment_id: snap.environment_id.clone(),
                                 connection_status: snap.connection_status.clone(),
                                 summary: Some(snap.summary.clone()),
                                 seq: snap.seq,
@@ -324,6 +332,7 @@ impl HostRegistry {
                         }
                         None => {
                             hosts.insert(snap.node.node_id.clone(), HostState {
+                                environment_id: snap.environment_id.clone(),
                                 connection_status: snap.connection_status.clone(),
                                 summary: Some(snap.summary.clone()),
                                 seq: snap.seq,
@@ -334,9 +343,9 @@ impl HostRegistry {
                     }
                 }
             }
-            DaemonEvent::HostRemoved { node_id, seq } => {
+            DaemonEvent::HostRemoved { environment_id, seq } => {
                 if let Ok(mut hosts) = self.hosts.try_write() {
-                    if let Some(state) = hosts.get_mut(node_id) {
+                    if let Some((_, state)) = hosts.iter_mut().find(|(_, state)| state.environment_id == *environment_id) {
                         if state.seq <= *seq {
                             state.connection_status = PeerConnectionState::Disconnected;
                             state.summary = None;
@@ -353,6 +362,7 @@ impl HostRegistry {
 
 fn default_host_summary(node: &NodeInfo) -> HostSummary {
     HostSummary {
+        environment_id: EnvironmentId::new(node.node_id.as_str()),
         node: node.clone(),
         system: SystemInfo::default(),
         inventory: ToolInventory::default(),
@@ -363,6 +373,7 @@ fn default_host_summary(node: &NodeInfo) -> HostSummary {
 
 fn ensure_remote_host_state<'a>(hosts: &'a mut HashMap<NodeId, HostState>, node_id: &NodeId) -> &'a mut HostState {
     hosts.entry(node_id.clone()).or_insert_with(|| HostState {
+        environment_id: EnvironmentId::new(node_id.as_str()),
         connection_status: PeerConnectionState::Disconnected,
         summary: None,
         seq: 1,
@@ -397,6 +408,7 @@ fn build_host_snapshot(local_node: &NodeInfo, configured: &HashMap<NodeId, Strin
         .unwrap_or_else(|| node_info_for(node_id, configured, None, Some(local_node)));
     HostSnapshot {
         seq: state.seq,
+        environment_id: state.environment_id.clone(),
         node: node.clone(),
         is_local: *node_id == local_node.node_id,
         connection_status: state.connection_status.clone(),
@@ -416,7 +428,9 @@ fn update_host_status(
         return None;
     }
     if state.summary.is_none() {
-        state.summary = Some(default_host_summary(node));
+        let default_summary = default_host_summary(node);
+        state.environment_id = default_summary.environment_id.clone();
+        state.summary = Some(default_summary);
     }
     state.connection_status = status;
     state.removed = false;
@@ -439,6 +453,7 @@ fn update_host_summary(
     if !state.removed && state.summary.as_ref() == Some(&summary) {
         return None;
     }
+    state.environment_id = summary.environment_id.clone();
     state.summary = Some(summary);
     state.removed = false;
     state.seq += 1;
@@ -538,6 +553,7 @@ fn build_host_list_entry(
     let counts = if is_local { local_counts } else { remote_counts.get(node_id).copied().unwrap_or_default() };
 
     HostListEntry {
+        environment_id: summaries.get(node_id).map(|summary| summary.environment_id.clone()).unwrap_or_else(|| EnvironmentId::new(node_id.as_str())),
         node: node_info_for(node_id, configured, Some(summaries), Some(local_node)),
         is_local,
         configured: !is_local && configured.contains_key(node_id),
@@ -562,6 +578,11 @@ fn build_host_status(node_id: &NodeId, summary: Option<HostSummary>, ctx: HostSt
     let counts = if is_local { ctx.local_counts } else { ctx.remote_counts.get(node_id).copied().unwrap_or_default() };
 
     HostStatusResponse {
+        environment_id: summary
+            .as_ref()
+            .map(|summary| summary.environment_id.clone())
+            .or_else(|| ctx.summaries.get(node_id).map(|summary| summary.environment_id.clone()))
+            .unwrap_or_else(|| EnvironmentId::new(node_id.as_str())),
         node: node_info_for(node_id, ctx.configured, Some(ctx.summaries), Some(ctx.local_node)),
         is_local,
         configured: !is_local && ctx.configured.contains_key(node_id),
@@ -582,6 +603,7 @@ fn build_host_providers(
     summary: HostSummary,
 ) -> HostProvidersResponse {
     HostProvidersResponse {
+        environment_id: summary.environment_id.clone(),
         node: node_info_for(node_id, configured, Some(summaries), Some(local_node)),
         is_local: node_id == &local_node.node_id,
         configured: node_id != &local_node.node_id && configured.contains_key(node_id),
@@ -612,7 +634,10 @@ fn build_topology(local_node: &NodeInfo, routes: &[TopologyRoute], configured_pe
 mod tests {
     use std::{cell::RefCell, collections::HashMap};
 
-    use flotilla_protocol::{DaemonEvent, HostSummary, NodeId, NodeInfo, PeerConnectionState, StreamKey, SystemInfo, ToolInventory};
+    use flotilla_protocol::{
+        qualified_path::HostId, DaemonEvent, EnvironmentId, HostSummary, NodeId, NodeInfo, PeerConnectionState, StreamKey, SystemInfo,
+        ToolInventory,
+    };
 
     use super::{HostCounts, HostRegistry};
 
@@ -626,6 +651,7 @@ mod tests {
 
     fn minimal_summary(node: &NodeInfo) -> HostSummary {
         HostSummary {
+            environment_id: EnvironmentId::host(HostId::new(format!("{}-host", node.node_id))),
             node: node.clone(),
             system: SystemInfo::default(),
             inventory: ToolInventory::default(),
@@ -652,16 +678,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_uses_node_id_stream_keys() {
+    async fn replay_uses_environment_id_stream_keys() {
         let registry = HostRegistry::new(local_node(), minimal_summary(&local_node()));
-        registry.publish_peer_connection_status(&peer_node(), PeerConnectionState::Connected, &HashMap::new(), &|_| {}).await;
+        registry.publish_peer_summary(minimal_summary(&peer_node()), &|_| {}).await;
 
         let replay = registry.replay_host_events(&HashMap::new()).await;
         assert!(replay
             .iter()
             .any(|event| matches!(event, DaemonEvent::HostSnapshot(snapshot) if snapshot.node.node_id == peer_node().node_id)));
 
-        let replay = registry.replay_host_events(&HashMap::from([(StreamKey::Host { node_id: peer_node().node_id.clone() }, 2)])).await;
+        let replay = registry
+            .replay_host_events(&HashMap::from([(StreamKey::Host { environment_id: EnvironmentId::host(HostId::new("peer-node-host")) }, 2)]))
+            .await;
         assert!(!replay
             .iter()
             .any(|event| matches!(event, DaemonEvent::HostSnapshot(snapshot) if snapshot.node.node_id == peer_node().node_id)));
@@ -689,6 +717,7 @@ mod tests {
         let registry = HostRegistry::new(local_node(), minimal_summary(&local_node()));
         let peer = NodeInfo::new(NodeId::new("peer-node-42"), "Build Box");
         let real_summary = HostSummary {
+            environment_id: EnvironmentId::host(HostId::new("peer-node-42-host")),
             node: peer.clone(),
             system: SystemInfo { os: Some("linux".into()), arch: Some("x86_64".into()), ..SystemInfo::default() },
             inventory: ToolInventory::default(),

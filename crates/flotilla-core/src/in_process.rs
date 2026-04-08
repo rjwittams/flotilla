@@ -522,6 +522,7 @@ impl InProcessDaemon {
         let local_host_summary = crate::host_summary::build_local_host_summary(
             &local_node_id,
             &host_name,
+            EnvironmentId::host(environment_manager.local_host_id().clone()),
             &environment_manager,
             crate::host_summary::provider_statuses_from_registries(
                 repos.values().map(|state| state.preferred_root().model.registry.as_ref()),
@@ -937,6 +938,7 @@ impl InProcessDaemon {
             self.host_registry
                 .publish_peer_summary(
                     HostSummary {
+                        environment_id: EnvironmentId::new(node.node_id.as_str()),
                         node: node.clone(),
                         system: SystemInfo::default(),
                         inventory: ToolInventory::default(),
@@ -1628,6 +1630,7 @@ impl InProcessDaemon {
         let summary = crate::host_summary::build_local_host_summary(
             &self.node_id,
             &self.host_name,
+            EnvironmentId::host(self.environment_manager.local_host_id().clone()),
             &self.environment_manager,
             crate::host_summary::provider_statuses_from_registries(
                 self.repos.read().await.values().map(|state| state.preferred_root().model.registry.as_ref()),

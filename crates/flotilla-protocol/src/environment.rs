@@ -5,23 +5,72 @@ use serde::{Deserialize, Serialize};
 use crate::qualified_path::HostId;
 
 /// Filesystem-safe identifier for a sandbox environment.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct EnvironmentId(String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EnvironmentId {
+    Host(HostId),
+    Provisioned(String),
+}
 
 impl EnvironmentId {
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        Self::Provisioned(id.into())
+    }
+
+    pub fn host(host_id: HostId) -> Self {
+        Self::Host(host_id)
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        match self {
+            Self::Host(host_id) => host_id.as_str(),
+            Self::Provisioned(id) => id,
+        }
+    }
+
+    pub fn is_host(&self) -> bool {
+        matches!(self, Self::Host(_))
+    }
+
+    pub fn host_id(&self) -> Option<&HostId> {
+        match self {
+            Self::Host(host_id) => Some(host_id),
+            Self::Provisioned(_) => None,
+        }
+    }
+
+    pub fn provisioned_id(&self) -> Option<&str> {
+        match self {
+            Self::Host(_) => None,
+            Self::Provisioned(id) => Some(id),
+        }
     }
 }
 
 impl fmt::Display for EnvironmentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for EnvironmentId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Host(host_id) => serializer.serialize_str(&format!("host:{host_id}")),
+            Self::Provisioned(id) => serializer.serialize_str(id),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EnvironmentId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        if let Some(host_id) = raw.strip_prefix("host:") {
+            if host_id.is_empty() {
+                return Err(serde::de::Error::custom("host environment id must not be empty"));
+            }
+            return Ok(Self::Host(HostId::new(host_id)));
+        }
+        Ok(Self::Provisioned(raw))
     }
 }
 
@@ -157,6 +206,12 @@ impl EnvironmentInfo {
         match self {
             Self::Direct { .. } => EnvironmentKind::Direct,
             Self::Provisioned { .. } => EnvironmentKind::Provisioned,
+        }
+    }
+
+    pub fn environment_id(&self) -> &EnvironmentId {
+        match self {
+            Self::Direct { id, .. } | Self::Provisioned { id, .. } => id,
         }
     }
 }

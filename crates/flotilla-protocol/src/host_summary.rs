@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{EnvironmentInfo, NodeId};
+use crate::{EnvironmentId, EnvironmentInfo, NodeId};
+
+#[cfg(test)]
+use crate::qualified_path::HostId;
 
 /// Mesh identity plus the human-readable label that should be shown in the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +22,7 @@ impl NodeInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostSummary {
+    pub environment_id: EnvironmentId,
     pub node: NodeInfo,
     pub system: SystemInfo,
     #[serde(default)]
@@ -90,6 +94,7 @@ pub struct HostProviderStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostSnapshot {
     pub seq: u64,
+    pub environment_id: EnvironmentId,
     pub node: NodeInfo,
     pub is_local: bool,
     pub connection_status: crate::PeerConnectionState,
@@ -104,6 +109,7 @@ mod tests {
     #[test]
     fn host_summary_roundtrips_with_direct_and_provisioned_environments() {
         let summary = HostSummary {
+            environment_id: EnvironmentId::host(HostId::new("desktop-host")),
             node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
             system: SystemInfo {
                 home_dir: Some(PathBuf::from("/home/dev")),
@@ -132,6 +138,7 @@ mod tests {
         };
 
         let json = serde_json::to_value(&summary).expect("serialize host summary");
+        assert_eq!(json["environment_id"], "host:desktop-host");
         assert_eq!(json["node"]["node_id"], "desktop");
         assert_eq!(json["node"]["display_name"], "Desktop");
         assert_roundtrip(&summary);
@@ -141,10 +148,12 @@ mod tests {
     fn host_snapshot_roundtrips() {
         let snapshot = HostSnapshot {
             seq: 1,
+            environment_id: EnvironmentId::host(HostId::new("desktop-host")),
             node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
             is_local: true,
             connection_status: crate::PeerConnectionState::Connected,
             summary: HostSummary {
+                environment_id: EnvironmentId::host(HostId::new("desktop-host")),
                 node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
                 system: SystemInfo {
                     home_dir: Some(PathBuf::from("/home/dev")),
@@ -160,6 +169,7 @@ mod tests {
             },
         };
         let json = serde_json::to_value(&snapshot).expect("serialize host snapshot");
+        assert_eq!(json["environment_id"], "host:desktop-host");
         assert_eq!(json["node"]["node_id"], "desktop");
         assert_eq!(json["summary"]["node"]["display_name"], "Desktop");
         assert_roundtrip(&snapshot);

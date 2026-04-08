@@ -349,6 +349,7 @@ impl Factory for EnvGatedTerminalPoolFactory {
 
 fn sample_remote_host_summary(name: &str) -> HostSummary {
     HostSummary {
+        environment_id: EnvironmentId::host(HostId::new(format!("{name}-host"))),
         node: test_node(name),
         system: SystemInfo {
             home_dir: Some(PathBuf::from(format!("/home/{name}"))),
@@ -822,7 +823,8 @@ display_name = "Build Box"
         .iter()
         .find_map(|environment| match environment {
             EnvironmentInfo::Direct { id, host_id, display_name, .. }
-                if id.as_str() == "buildbox-visible-id" && host_id.as_ref().map(HostId::as_str) == Some("buildbox-visible-host-id") =>
+                if id == &EnvironmentId::host(HostId::new("buildbox-visible-host-id"))
+                    && host_id.as_ref().map(HostId::as_str) == Some("buildbox-visible-host-id") =>
             {
                 Some(display_name.clone())
             }
@@ -1425,15 +1427,16 @@ async fn local_host_queries_include_visible_environments_without_changing_summar
         })
         .collect();
 
-    assert!(status_ids.contains(daemon.local_environment_id()));
-    assert!(status_ids.contains(&direct_environment_id));
+    let local_host_id = daemon.local_host_id().expect("local host id");
+    assert!(status_ids.contains(&EnvironmentId::host(local_host_id.clone())));
+    assert!(status_ids.contains(&EnvironmentId::host(direct_host_id.clone())));
     assert!(status_ids.contains(&provisioned_environment_id));
     assert_eq!(status_ids, provider_ids, "host status and provider queries should expose the same visible environments");
 
     let direct_visible = status
         .visible_environments
         .iter()
-        .find(|environment| matches!(environment, EnvironmentInfo::Direct { id, .. } if id == &direct_environment_id))
+        .find(|environment| matches!(environment, EnvironmentInfo::Direct { id, .. } if id == &EnvironmentId::host(direct_host_id.clone())))
         .expect("direct visible environment should be present");
     match direct_visible {
         EnvironmentInfo::Direct { host_id, .. } => assert_eq!(host_id.as_ref(), Some(&direct_host_id)),
@@ -1451,7 +1454,7 @@ async fn local_host_queries_include_visible_environments_without_changing_summar
     }));
     assert!(
         summary.environments.iter().all(|environment| match environment {
-            EnvironmentInfo::Direct { id, .. } => id != &direct_environment_id,
+            EnvironmentInfo::Direct { id, .. } => id != &EnvironmentId::host(direct_host_id.clone()),
             EnvironmentInfo::Provisioned { .. } => true,
         }),
         "direct environments must not leak into HostSummary.environments"
@@ -2039,13 +2042,13 @@ async fn replay_since_returns_no_host_event_when_host_cursor_is_current() {
     let local_seq = events
         .iter()
         .find_map(|event| match event {
-            DaemonEvent::HostSnapshot(snap) if snapshot_host(snap) == local_host => Some(snap.seq),
+            DaemonEvent::HostSnapshot(snap) if snapshot_host(snap) == local_host => Some((snap.environment_id.clone(), snap.seq)),
             _ => None,
         })
         .expect("initial replay should include local host snapshot");
 
     let events = daemon
-        .replay_since(&HashMap::from([(StreamKey::Host { node_id: daemon.node_id().clone() }, local_seq)]))
+        .replay_since(&HashMap::from([(StreamKey::Host { environment_id: local_seq.0 }, local_seq.1)]))
         .await
         .expect("host replay with current cursor");
 
@@ -2076,7 +2079,7 @@ async fn replay_since_returns_only_stale_host_snapshots() {
     let mut host_seqs = HashMap::new();
     for event in &events {
         if let DaemonEvent::HostSnapshot(snap) = event {
-            host_seqs.insert(snapshot_host(snap), snap.seq);
+            host_seqs.insert(snapshot_host(snap), (snap.environment_id.clone(), snap.seq));
         }
     }
 
@@ -2084,9 +2087,15 @@ async fn replay_since_returns_only_stale_host_snapshots() {
     let alpha = HostName::new("alpha");
     let beta = HostName::new("beta");
     let last_seen = HashMap::from([
-        (StreamKey::Host { node_id: daemon.node_id().clone() }, *host_seqs.get(&local_host).expect("local host seq")),
-        (StreamKey::Host { node_id: test_node("alpha").node_id }, *host_seqs.get(&alpha).expect("alpha seq")),
-        (StreamKey::Host { node_id: test_node("beta").node_id }, 0),
+        (
+            StreamKey::Host { environment_id: host_seqs.get(&local_host).expect("local host seq").0.clone() },
+            host_seqs.get(&local_host).expect("local host seq").1,
+        ),
+        (
+            StreamKey::Host { environment_id: host_seqs.get(&alpha).expect("alpha seq").0.clone() },
+            host_seqs.get(&alpha).expect("alpha seq").1,
+        ),
+        (StreamKey::Host { environment_id: EnvironmentId::host(HostId::new("beta-host")) }, 0),
     ]);
 
     let events = daemon.replay_since(&last_seen).await.expect("host replay with mixed cursors");
@@ -2133,6 +2142,7 @@ async fn publish_peer_summary_normalizes_host_name() {
     let peer_host = HostName::new("remote-host");
     daemon
         .publish_peer_summary(&peer_host, HostSummary {
+            environment_id: EnvironmentId::host(HostId::new("remote-host-host")),
             node: test_node("spoofed-host"),
             system: SystemInfo::default(),
             inventory: ToolInventory::default(),
@@ -2261,7 +2271,11 @@ async fn list_hosts_and_replay_drop_stale_non_configured_hosts() {
     let removed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             match rx.recv().await.expect("recv") {
-                DaemonEvent::HostRemoved { node_id, seq } if node_id == test_node(transient_host.as_str()).node_id => return seq,
+                DaemonEvent::HostRemoved { environment_id, seq }
+                    if environment_id == EnvironmentId::host(HostId::new(format!("{transient_host}-host"))) =>
+                {
+                    return seq
+                }
                 _ => continue,
             }
         }
