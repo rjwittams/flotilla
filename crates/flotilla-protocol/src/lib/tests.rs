@@ -380,7 +380,7 @@ fn stream_key_repo_roundtrip() {
 
 #[test]
 fn stream_key_host_roundtrip() {
-    let key = StreamKey::Host { node_id: NodeId::new("desktop") };
+    let key = StreamKey::Host { environment_id: EnvironmentId::host(qualified_path::HostId::new("desktop-host")) };
     test_helpers::assert_roundtrip(&key);
 }
 
@@ -388,10 +388,12 @@ fn stream_key_host_roundtrip() {
 fn daemon_event_host_snapshot_roundtrip() {
     let event = DaemonEvent::HostSnapshot(Box::new(HostSnapshot {
         seq: 1,
+        environment_id: EnvironmentId::host(qualified_path::HostId::new("desktop-host")),
         node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
         is_local: true,
         connection_status: PeerConnectionState::Connected,
         summary: HostSummary {
+            environment_id: EnvironmentId::host(qualified_path::HostId::new("desktop-host")),
             node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
             system: SystemInfo::default(),
             inventory: ToolInventory::default(),
@@ -406,13 +408,13 @@ fn daemon_event_host_snapshot_roundtrip() {
 
 #[test]
 fn daemon_event_host_removed_roundtrip() {
-    let event = DaemonEvent::HostRemoved { node_id: NodeId::new("desktop"), seq: 2 };
+    let event = DaemonEvent::HostRemoved { environment_id: EnvironmentId::host(qualified_path::HostId::new("desktop-host")), seq: 2 };
     test_helpers::assert_json_roundtrip(&event);
 }
 
 #[test]
 fn replay_cursor_with_stream_key_host_roundtrip() {
-    let cursor = ReplayCursor { stream: StreamKey::Host { node_id: NodeId::new("laptop") }, seq: 42 };
+    let cursor = ReplayCursor { stream: StreamKey::Host { environment_id: EnvironmentId::host(qualified_path::HostId::new("laptop-host")) }, seq: 42 };
     test_helpers::assert_roundtrip(&cursor);
 }
 
