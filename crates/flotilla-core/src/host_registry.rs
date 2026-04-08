@@ -303,6 +303,15 @@ impl HostRegistry {
             DaemonEvent::HostSnapshot(snap) => {
                 if let Ok(mut hosts) = self.hosts.try_write() {
                     if let Ok(mut node_environments) = self.node_environments.try_write() {
+                        let current_environment_id = node_environments.get(&snap.node.node_id).cloned();
+                        let stale = current_environment_id
+                            .as_ref()
+                            .and_then(|environment_id| hosts.get(environment_id))
+                            .is_some_and(|state| state.seq > snap.seq);
+                        if stale {
+                            return;
+                        }
+
                         let state = ensure_host_state(&mut hosts, &mut node_environments, &snap.node, snap.environment_id.clone());
                         if state.seq <= snap.seq {
                             state.environment_id = snap.environment_id.clone();
@@ -435,14 +444,21 @@ fn update_host_summary(
     node: &NodeInfo,
     summary: HostSummary,
 ) -> Option<HostSnapshot> {
+    let current_environment_id = node_environments.get(&node.node_id).cloned();
+    if let Some(current_environment_id) = current_environment_id {
+        if let Some(state) = hosts.get(&current_environment_id) {
+            if summary_is_overlay_placeholder(&summary)
+                && state.summary.as_ref().is_some_and(|existing| !summary_is_overlay_placeholder(existing))
+            {
+                return None;
+            }
+            if !state.removed && state.summary.as_ref() == Some(&summary) {
+                return None;
+            }
+        }
+    }
+
     let state = ensure_host_state(hosts, node_environments, node, summary.environment_id.clone());
-    if summary_is_overlay_placeholder(&summary) && state.summary.as_ref().is_some_and(|existing| !summary_is_overlay_placeholder(existing))
-    {
-        return None;
-    }
-    if !state.removed && state.summary.as_ref() == Some(&summary) {
-        return None;
-    }
     state.environment_id = summary.environment_id.clone();
     state.summary = Some(summary);
     state.removed = false;
@@ -600,8 +616,8 @@ mod tests {
     use std::{cell::RefCell, collections::HashMap};
 
     use flotilla_protocol::{
-        qualified_path::HostId, DaemonEvent, EnvironmentId, HostSummary, NodeId, NodeInfo, PeerConnectionState, StreamKey, SystemInfo,
-        ToolInventory,
+        qualified_path::HostId, DaemonEvent, EnvironmentId, HostSnapshot, HostSummary, NodeId, NodeInfo, PeerConnectionState, StreamKey,
+        SystemInfo, ToolInventory,
     };
 
     use super::{HostCounts, HostRegistry};
@@ -754,5 +770,53 @@ mod tests {
 
         assert_eq!(status_a.environment_id, first_summary.environment_id);
         assert_eq!(status_b.environment_id, second_summary.environment_id);
+    }
+
+    #[tokio::test]
+    async fn stale_host_snapshot_does_not_repoint_canonical_environment_mapping() {
+        let registry = HostRegistry::new(local_node(), minimal_summary(&local_node()));
+        let peer = peer_node();
+        let current_environment_id = EnvironmentId::host(HostId::new("peer-node-host-a"));
+        let stale_environment_id = EnvironmentId::host(HostId::new("peer-node-host-b"));
+
+        let current_summary = HostSummary {
+            environment_id: current_environment_id.clone(),
+            node: peer.clone(),
+            system: SystemInfo::default(),
+            inventory: ToolInventory::default(),
+            providers: vec![flotilla_protocol::HostProviderStatus {
+                category: "workspace".into(),
+                name: "cmux".into(),
+                implementation: "cmux".into(),
+                healthy: true,
+            }],
+            environments: vec![],
+        };
+        registry.publish_peer_summary(current_summary, &|_| {}).await;
+        assert_eq!(registry.environment_id_for_node(&peer.node_id).await, Some(current_environment_id.clone()));
+
+        let stale_snapshot = HostSnapshot {
+            seq: 1,
+            environment_id: stale_environment_id.clone(),
+            node: peer.clone(),
+            is_local: false,
+            connection_status: PeerConnectionState::Disconnected,
+            summary: HostSummary {
+                environment_id: stale_environment_id.clone(),
+                node: peer.clone(),
+                system: SystemInfo::default(),
+                inventory: ToolInventory::default(),
+                providers: vec![],
+                environments: vec![],
+            },
+        };
+
+        registry.apply_event(&DaemonEvent::HostSnapshot(Box::new(stale_snapshot)));
+
+        assert_eq!(
+            registry.environment_id_for_node(&peer.node_id).await,
+            Some(current_environment_id),
+            "stale snapshots must not move the canonical node-to-environment mapping"
+        );
     }
 }

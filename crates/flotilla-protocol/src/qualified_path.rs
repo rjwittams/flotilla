@@ -145,7 +145,7 @@ impl fmt::Display for QualifiedPath {
         match &self.qualifier {
             PathQualifier::Host(id) => write!(f, "host:{}:{}", id, self.path.display()),
             PathQualifier::HostName(name) => write!(f, "hn:{}:{}", name, self.path.display()),
-            PathQualifier::Environment(id) => write!(f, "env:{}:{}", id, self.path.display()),
+            PathQualifier::Environment(id) => write!(f, "env:{}:{}", id.qualified_path_component(), self.path.display()),
         }
     }
 }
@@ -165,7 +165,7 @@ impl FromStr for QualifiedPath {
         match prefix {
             "host" => Ok(Self::host(HostId::new(id), PathBuf::from(path))),
             "hn" => Ok(Self::from_host_name(&crate::HostName::new(id), PathBuf::from(path))),
-            "env" => Ok(Self::environment(EnvironmentId::new(id), PathBuf::from(path))),
+            "env" => Ok(Self::environment(EnvironmentId::from_qualified_path_component(id)?, PathBuf::from(path))),
             other => Err(format!("invalid QualifiedPath prefix: expected 'host', 'hn', or 'env', got '{other}'")),
         }
     }
@@ -375,7 +375,10 @@ mod tests {
     #[test]
     fn qualified_path_environment_display() {
         let qp = QualifiedPath::environment(EnvironmentId::new("sandbox-1"), "/workspace/repo");
-        assert_eq!(format!("{qp}"), "env:sandbox-1:/workspace/repo");
+        let rendered = format!("{qp}");
+        assert!(rendered.starts_with("env:prov~"), "environment paths should use an injective wire encoding");
+        assert!(rendered.ends_with(":/workspace/repo"));
+        assert_eq!(rendered.parse::<QualifiedPath>().expect("parse"), qp);
     }
 
     #[test]
@@ -384,6 +387,24 @@ mod tests {
         assert_eq!(qp.environment_id(), Some(&EnvironmentId::new("sandbox-1")));
         assert_eq!(qp.host_id(), None);
         assert_eq!(qp.host_name(), None);
+    }
+
+    #[test]
+    fn qualified_path_environment_roundtrips_host_variant() {
+        let qp = QualifiedPath::environment(EnvironmentId::host(HostId::new("desktop-host")), "/workspace/repo");
+
+        let parsed: QualifiedPath = qp.to_string().parse().expect("parse");
+        assert_eq!(parsed, qp);
+        assert!(parsed.environment_id().expect("environment id").is_host());
+    }
+
+    #[test]
+    fn qualified_path_environment_roundtrips_provisioned_value_with_reserved_prefix() {
+        let qp = QualifiedPath::environment(EnvironmentId::new("host:looks-like-a-host"), "/workspace/repo");
+
+        let parsed: QualifiedPath = qp.to_string().parse().expect("parse");
+        assert_eq!(parsed, qp);
+        assert_eq!(parsed.environment_id(), Some(&EnvironmentId::new("host:looks-like-a-host")));
     }
 
     // Equality across variants
