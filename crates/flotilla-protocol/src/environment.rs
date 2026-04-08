@@ -1,27 +1,152 @@
-use std::{fmt, path::PathBuf};
+use std::{fmt, path::PathBuf, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
 use crate::qualified_path::HostId;
 
 /// Filesystem-safe identifier for a sandbox environment.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct EnvironmentId(String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EnvironmentId {
+    Host(HostId),
+    Provisioned(String),
+}
 
 impl EnvironmentId {
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        Self::Provisioned(id.into())
+    }
+
+    pub fn host(host_id: HostId) -> Self {
+        Self::Host(host_id)
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        match self {
+            Self::Host(host_id) => host_id.as_str(),
+            Self::Provisioned(id) => id,
+        }
+    }
+
+    pub fn canonical_string(&self) -> String {
+        match self {
+            Self::Host(host_id) => format!("host:{host_id}"),
+            Self::Provisioned(id) => format!("prov:{id}"),
+        }
+    }
+
+    pub fn is_host(&self) -> bool {
+        matches!(self, Self::Host(_))
+    }
+
+    pub fn host_id(&self) -> Option<&HostId> {
+        match self {
+            Self::Host(host_id) => Some(host_id),
+            Self::Provisioned(_) => None,
+        }
+    }
+
+    pub fn provisioned_id(&self) -> Option<&str> {
+        match self {
+            Self::Host(_) => None,
+            Self::Provisioned(id) => Some(id),
+        }
+    }
+
+    pub(crate) fn qualified_path_component(&self) -> String {
+        fn encode(raw: &str) -> String {
+            let mut encoded = String::with_capacity(raw.len() * 2);
+            for byte in raw.as_bytes() {
+                use std::fmt::Write as _;
+                let _ = write!(&mut encoded, "{byte:02x}");
+            }
+            encoded
+        }
+
+        match self {
+            Self::Host(host_id) => format!("host~{}", encode(host_id.as_str())),
+            Self::Provisioned(id) => format!("prov~{}", encode(id)),
+        }
+    }
+
+    pub(crate) fn from_qualified_path_component(component: &str) -> Result<Self, String> {
+        fn decode(encoded: &str) -> Result<String, String> {
+            if !encoded.len().is_multiple_of(2) {
+                return Err(format!("invalid environment id encoding: expected an even number of hex digits, got '{encoded}'"));
+            }
+
+            let mut bytes = Vec::with_capacity(encoded.len() / 2);
+            for chunk in encoded.as_bytes().chunks_exact(2) {
+                let pair = std::str::from_utf8(chunk).map_err(|err| format!("invalid environment id encoding: {err}"))?;
+                let byte = u8::from_str_radix(pair, 16)
+                    .map_err(|err| format!("invalid environment id encoding: failed to decode '{pair}': {err}"))?;
+                bytes.push(byte);
+            }
+
+            String::from_utf8(bytes).map_err(|err| format!("invalid environment id encoding: {err}"))
+        }
+
+        if let Some((kind, encoded)) = component.split_once('~') {
+            let raw = decode(encoded)?;
+            match kind {
+                "host" => Ok(Self::Host(HostId::new(raw))),
+                "prov" => Ok(Self::Provisioned(raw)),
+                other => Err(format!("invalid environment id encoding: expected 'host' or 'prov', got '{other}'")),
+            }
+        } else {
+            Ok(Self::Provisioned(component.to_string()))
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        raw.parse()
     }
 }
 
 impl fmt::Display for EnvironmentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for EnvironmentId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Host(host_id) => serializer.serialize_str(&format!("host:{host_id}")),
+            Self::Provisioned(id) => serializer.serialize_str(&format!("prov:{id}")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EnvironmentId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        if let Some(host_id) = raw.strip_prefix("host:") {
+            if host_id.is_empty() {
+                return Err(serde::de::Error::custom("host environment id must not be empty"));
+            }
+            return Ok(Self::Host(HostId::new(host_id)));
+        }
+        if let Some(id) = raw.strip_prefix("prov:") {
+            return Ok(Self::Provisioned(id.to_string()));
+        }
+        Ok(Self::Provisioned(raw))
+    }
+}
+
+impl FromStr for EnvironmentId {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        if let Some(host_id) = raw.strip_prefix("host:") {
+            if host_id.is_empty() {
+                return Err("host environment id must not be empty".into());
+            }
+            return Ok(Self::Host(HostId::new(host_id)));
+        }
+        if let Some(id) = raw.strip_prefix("prov:") {
+            return Ok(Self::Provisioned(id.to_string()));
+        }
+        Ok(Self::Provisioned(raw.to_string()))
     }
 }
 
@@ -159,6 +284,18 @@ impl EnvironmentInfo {
             Self::Provisioned { .. } => EnvironmentKind::Provisioned,
         }
     }
+
+    pub fn environment_id(&self) -> &EnvironmentId {
+        match self {
+            Self::Direct { id, .. } | Self::Provisioned { id, .. } => id,
+        }
+    }
+
+    pub fn display_name(&self) -> Option<&str> {
+        match self {
+            Self::Direct { display_name, .. } | Self::Provisioned { display_name, .. } => display_name.as_deref(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,6 +410,44 @@ token_env_vars: []
         };
 
         assert_roundtrip(&info);
+    }
+
+    #[test]
+    fn environment_id_roundtrips_host_variant() {
+        let id = EnvironmentId::host(HostId::new("desktop-host"));
+
+        assert_roundtrip(&id);
+    }
+
+    #[test]
+    fn environment_id_roundtrips_provisioned_value_with_reserved_prefix() {
+        let id = EnvironmentId::new("host:looks-like-a-host");
+
+        let json = serde_json::to_string(&id).expect("serialize");
+        let decoded: EnvironmentId = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded, id);
+        assert!(!decoded.is_host(), "reserved host prefix must not flip a provisioned environment into a host environment");
+    }
+
+    #[test]
+    fn environment_id_roundtrips_provisioned_value_with_provisioned_prefix() {
+        let id = EnvironmentId::new("prov:foo");
+
+        assert_roundtrip(&id);
+    }
+
+    #[test]
+    fn environment_id_parse_recovers_host_variant_from_canonical_string() {
+        assert_eq!(
+            EnvironmentId::parse("host:desktop-host").expect("parse host environment id"),
+            EnvironmentId::host(HostId::new("desktop-host"))
+        );
+    }
+
+    #[test]
+    fn environment_id_parse_recovers_provisioned_variant_from_canonical_string() {
+        assert_eq!(EnvironmentId::parse("prov:builder-1").expect("parse provisioned environment id"), EnvironmentId::new("builder-1"));
     }
 
     #[test]

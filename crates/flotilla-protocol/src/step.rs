@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    path_context::ExecutionEnvironmentPath, qualified_path::QualifiedPath, AttachableSetId, CommandValue, HostName,
-    PreparedTerminalCommand, ResolvedPaneCommand,
+    path_context::ExecutionEnvironmentPath, qualified_path::QualifiedPath, AttachableSetId, CommandValue, NodeId, PreparedTerminalCommand,
+    ResolvedPaneCommand,
 };
 
 /// Whether a checkout command targets an existing branch or creates a fresh one.
@@ -17,14 +17,14 @@ pub enum CheckoutIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepExecutionContext {
     /// Run on a host daemon using the host's own providers.
-    Host(HostName),
+    Host(NodeId),
     /// Run on a host daemon but resolve against an environment's providers.
-    Environment(HostName, crate::EnvironmentId),
+    Environment(NodeId, crate::EnvironmentId),
 }
 
 impl StepExecutionContext {
     /// The daemon host that will execute this step (determines transport routing).
-    pub fn host_name(&self) -> &HostName {
+    pub fn node_id(&self) -> &NodeId {
         match self {
             Self::Host(h) | Self::Environment(h, _) => h,
         }
@@ -85,7 +85,7 @@ pub enum StepAction {
 
     // Workspace lifecycle (new)
     CreateWorkspaceFromPreparedTerminal {
-        target_host: HostName,
+        target_node_id: NodeId,
         branch: String,
         checkout_path: ExecutionEnvironmentPath,
         attachable_set_id: Option<AttachableSetId>,
@@ -94,6 +94,8 @@ pub enum StepAction {
     PrepareWorkspace {
         checkout_path: Option<ExecutionEnvironmentPath>,
         label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_host: Option<crate::HostName>,
     },
     AttachWorkspace,
     SelectWorkspace {

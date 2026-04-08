@@ -26,6 +26,14 @@ use crate::{
     },
 };
 
+fn node(name: &str) -> NodeInfo {
+    NodeInfo::new(NodeId::new(format!("{name}-node")), name)
+}
+
+fn local_node_id() -> NodeId {
+    NodeId::new("local-node")
+}
+
 fn test_environment_manager() -> &'static EnvironmentManager {
     static MANAGER: OnceLock<EnvironmentManager> = OnceLock::new();
     MANAGER.get_or_init(|| {
@@ -45,7 +53,7 @@ fn choose_event_uses_delta_for_non_initial_changes() {
         seq: 2,
         repo_identity: fallback_repo_identity(&repo),
         repo: Some(repo.clone()),
-        host_name: HostName::local(),
+        node_id: local_node_id(),
         work_items: vec![],
         providers: ProviderData::default(),
         provider_health: HashMap::new(),
@@ -69,7 +77,7 @@ fn choose_event_falls_back_to_full_when_delta_is_larger() {
         seq: 3,
         repo_identity: fallback_repo_identity(Path::new("/tmp/repo")),
         repo: Some(PathBuf::from("/tmp/repo")),
-        host_name: HostName::local(),
+        node_id: local_node_id(),
         work_items: vec![],
         providers: ProviderData::default(),
         provider_health: HashMap::new(),
@@ -95,6 +103,7 @@ fn build_repo_snapshot_basic() {
             local_providers: &default_snap.providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
+            node_id: &local_node_id(),
             host_name: &HostName::local(),
             environment_manager: test_environment_manager(),
             environment_id: None,
@@ -113,7 +122,7 @@ fn choose_event_sends_full_when_delta_has_empty_changes() {
         seq: 2,
         repo_identity: fallback_repo_identity(Path::new("/tmp/repo")),
         repo: Some(PathBuf::from("/tmp/repo")),
-        host_name: HostName::local(),
+        node_id: local_node_id(),
         work_items: vec![],
         providers: ProviderData::default(),
         provider_health: HashMap::new(),
@@ -147,7 +156,7 @@ fn build_repo_snapshot_with_peers_merges_peer_data() {
         environment_id: None,
     });
 
-    let peers = vec![(host_b, peer_data)];
+    let peers = vec![(node(host_b.as_str()), peer_data)];
     let default_snap = RefreshSnapshot::default();
     let snap = build_repo_snapshot_with_peers(
         SnapshotBuildContext {
@@ -156,6 +165,7 @@ fn build_repo_snapshot_with_peers_merges_peer_data() {
             local_providers: &default_snap.providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
+            node_id: &local_node_id(),
             host_name: &host_a,
             environment_manager: test_environment_manager(),
             environment_id: None,
@@ -210,7 +220,7 @@ fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
         host_name: None,
         environment_id: None,
     });
-    let peers = vec![(peer_host.clone(), peer_data.clone())];
+    let peers = vec![(node(peer_host.as_str()), peer_data.clone())];
     let default_snap = RefreshSnapshot::default();
 
     // First call — simulates the initial build (local-only base).
@@ -222,6 +232,7 @@ fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
             local_providers: &local_providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
+            node_id: &local_node_id(),
             host_name: &local_host,
             environment_manager: test_environment_manager(),
             environment_id: None,
@@ -245,6 +256,7 @@ fn build_repo_snapshot_with_peers_does_not_duplicate_from_merged_base() {
             local_providers: &local_providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
+            node_id: &local_node_id(),
             host_name: &local_host,
             environment_manager: test_environment_manager(),
             environment_id: None,
@@ -312,7 +324,7 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
         environment_id: None,
     });
 
-    let peers = vec![(remote_host.clone(), peer_data)];
+    let peers = vec![(node(remote_host.as_str()), peer_data)];
     let default_snap = RefreshSnapshot::default();
     let snapshot = build_repo_snapshot_with_peers(
         SnapshotBuildContext {
@@ -321,6 +333,7 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
             local_providers: &local_providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
+            node_id: &local_node_id(),
             host_name: &local_host,
             environment_manager: test_environment_manager(),
             environment_id: None,
@@ -335,7 +348,7 @@ fn build_repo_snapshot_with_peers_preserves_remote_attachable_set_for_local_work
 
     let set_item =
         snapshot.work_items.iter().find(|item| item.attachable_set_id.as_ref() == Some(&set_id)).expect("work item for attachable set");
-    assert_eq!(set_item.host, remote_host, "correlated work item should be anchored to feta");
+    assert_eq!(set_item.node_id, node(remote_host.as_str()).node_id, "correlated work item should be anchored to feta");
     assert_eq!(
         set_item.checkout.as_ref().and_then(|checkout| checkout.host_path()),
         Some(&remote_checkout),
@@ -484,6 +497,7 @@ fn snapshot_includes_linked_issues_when_populated() {
             local_providers: &providers,
             errors: &default_snap.errors,
             provider_health: &default_snap.provider_health,
+            node_id: &local_node_id(),
             host_name: &host,
             environment_manager: test_environment_manager(),
             environment_id: None,

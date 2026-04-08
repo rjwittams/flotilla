@@ -83,7 +83,7 @@ fn make_attachable_set(id: &str, path: &str) -> flotilla_protocol::AttachableSet
 
 // Convert CorrelationResult to protocol WorkItem for group_work_items tests
 fn to_proto(item: &CorrelationResult) -> flotilla_protocol::WorkItem {
-    crate::convert::correlation_result_to_work_item(item, &[], &flotilla_protocol::HostName::new("test-host"))
+    crate::convert::correlation_result_to_work_item(item, &[], flotilla_protocol::NodeId::new("test-node"))
 }
 
 fn new_providers() -> ProviderData {
@@ -221,8 +221,8 @@ fn host_falls_back_to_checkout_host_provenance_when_key_has_host_id() {
     let checkout = grouped.iter().find(|item| item.branch() == Some("feat-remote")).expect("correlated checkout");
 
     assert_eq!(checkout.host(&flotilla_protocol::HostName::new("leader")), flotilla_protocol::HostName::new("follower"));
-    let proto = crate::convert::correlation_result_to_work_item(checkout, &[], &flotilla_protocol::HostName::new("leader"));
-    assert_eq!(proto.host, flotilla_protocol::HostName::new("follower"));
+    let proto = crate::convert::correlation_result_to_work_item(checkout, &[], flotilla_protocol::NodeId::new("leader-node"));
+    assert_eq!(proto.node_id, flotilla_protocol::NodeId::new("leader-node"));
 }
 
 #[test]
@@ -749,7 +749,7 @@ fn test_session_work_item(id: &str) -> flotilla_protocol::WorkItem {
     flotilla_protocol::WorkItem {
         kind: WorkItemKind::Session,
         identity: WorkItemIdentity::Session(id.into()),
-        host: flotilla_protocol::HostName::local(),
+        node_id: flotilla_protocol::NodeId::new("local-node"),
         branch: None,
         description: format!("session {id}"),
         checkout: None,
@@ -932,7 +932,7 @@ fn test_attachable_set_work_item(id: &str) -> flotilla_protocol::WorkItem {
     flotilla_protocol::WorkItem {
         kind: WorkItemKind::AttachableSet,
         identity: WorkItemIdentity::AttachableSet(flotilla_protocol::AttachableSetId::new(id)),
-        host: flotilla_protocol::HostName::local(),
+        node_id: flotilla_protocol::NodeId::new("local-node"),
         branch: None,
         description: format!("attachable set {id}"),
         checkout: None,
@@ -953,7 +953,7 @@ fn test_agent_work_item(id: &str) -> flotilla_protocol::WorkItem {
     flotilla_protocol::WorkItem {
         kind: WorkItemKind::Agent,
         identity: WorkItemIdentity::Agent(id.into()),
-        host: flotilla_protocol::HostName::local(),
+        node_id: flotilla_protocol::NodeId::new("local-node"),
         branch: None,
         description: format!("agent {id}"),
         checkout: None,

@@ -6,8 +6,8 @@
 use std::{collections::HashMap, path::Path};
 
 use flotilla_protocol::{
-    DiscoveryEntry, DiscoveryFact, HostName, HostProviderStatus, ProviderError, RepoIdentity, RepoSnapshot, ToolInventory,
-    UnmetRequirementInfo, WorkItem,
+    DiscoveryEntry, DiscoveryFact, HostProviderStatus, NodeId, NodeInfo, ProviderData, ProviderError, RepoIdentity, RepoSnapshot,
+    ToolInventory, UnmetRequirementInfo, WorkItem,
 };
 
 use crate::{
@@ -62,11 +62,9 @@ pub fn assertion_to_discovery_entry(assertion: &EnvironmentAssertion) -> Discove
     DiscoveryEntry { kind: kind.into(), detail }
 }
 
-pub fn correlation_result_to_work_item(item: &CorrelationResult, groups: &[CorrelatedGroup], host_name: &HostName) -> WorkItem {
+pub fn correlation_result_to_work_item(item: &CorrelationResult, groups: &[CorrelatedGroup], node_id: NodeId) -> WorkItem {
     let kind = item.kind();
     let identity = item.identity();
-    let host = item.host(host_name);
-
     let checkout = item.checkout().cloned();
 
     let debug_group = item.correlation_group_idx().and_then(|idx| groups.get(idx)).map(format_debug_group).unwrap_or_default();
@@ -74,7 +72,7 @@ pub fn correlation_result_to_work_item(item: &CorrelationResult, groups: &[Corre
     WorkItem {
         kind,
         identity,
-        host,
+        node_id,
         branch: item.branch().map(|s| s.to_string()),
         description: item.description().to_string(),
         checkout,
@@ -89,6 +87,80 @@ pub fn correlation_result_to_work_item(item: &CorrelationResult, groups: &[Corre
         attachable_set_id: item.attachable_set_id().cloned(),
         agent_keys: item.agent_keys().to_vec(),
     }
+}
+
+fn work_item_matches_provider(item: &CorrelationResult, providers: &ProviderData) -> bool {
+    let has_mesh_anchor = item.checkout().is_some() || item.attachable_set_id().is_some() || !item.terminal_ids().is_empty();
+
+    if let Some(checkout) = item.checkout() {
+        if providers.checkouts.contains_key(&checkout.key) {
+            return true;
+        }
+    }
+    if let Some(set_id) = item.attachable_set_id() {
+        if providers.attachable_sets.contains_key(set_id) {
+            return true;
+        }
+    }
+    if let Some(change_request_key) = item.change_request_key() {
+        if providers.change_requests.contains_key(change_request_key) {
+            return true;
+        }
+    }
+    if let Some(session_key) = item.session_key() {
+        if providers.sessions.contains_key(session_key) {
+            return true;
+        }
+    }
+    if item.workspace_refs().iter().any(|ws_ref| providers.workspaces.contains_key(ws_ref)) {
+        return true;
+    }
+    if item.terminal_ids().iter().any(|terminal_id| providers.managed_terminals.contains_key(terminal_id)) {
+        return true;
+    }
+    if item.agent_keys().iter().any(|agent_key| providers.agents.contains_key(agent_key)) {
+        return true;
+    }
+    if !has_mesh_anchor && item.workspace_refs().iter().any(|ws_ref| providers.workspaces.contains_key(ws_ref)) {
+        return true;
+    }
+
+    match item {
+        CorrelationResult::Standalone(crate::data::StandaloneResult::Issue { key, .. }) => providers.issues.contains_key(key),
+        CorrelationResult::Standalone(crate::data::StandaloneResult::RemoteBranch { branch }) => providers.branches.contains_key(branch),
+        CorrelationResult::Correlated(_) => false,
+    }
+}
+
+fn resolve_work_item_node_id(
+    item: &CorrelationResult,
+    local_providers: &ProviderData,
+    peer_overlay: &[(NodeInfo, ProviderData)],
+    local_node_id: &NodeId,
+) -> NodeId {
+    let has_mesh_anchor = item.checkout().is_some() || item.attachable_set_id().is_some() || !item.terminal_ids().is_empty();
+
+    if has_mesh_anchor {
+        for (node, providers) in peer_overlay {
+            if work_item_matches_provider(item, providers) {
+                return node.node_id.clone();
+            }
+        }
+        if work_item_matches_provider(item, local_providers) {
+            return local_node_id.clone();
+        }
+    } else {
+        if work_item_matches_provider(item, local_providers) {
+            return local_node_id.clone();
+        }
+        for (node, providers) in peer_overlay {
+            if work_item_matches_provider(item, providers) {
+                return node.node_id.clone();
+            }
+        }
+    }
+
+    local_node_id.clone()
 }
 
 fn format_debug_group(group: &CorrelatedGroup) -> Vec<String> {
@@ -203,17 +275,25 @@ pub fn snapshot_to_proto(
     repo: &Path,
     seq: u64,
     refresh: &RefreshSnapshot,
-    host_name: &HostName,
+    local_providers: &ProviderData,
+    node_id: &NodeId,
+    peer_overlay: &[(NodeInfo, ProviderData)],
 ) -> RepoSnapshot {
     RepoSnapshot {
         seq,
         repo_identity,
         repo: Some(repo.to_path_buf()),
-        host_name: host_name.clone(),
+        node_id: node_id.clone(),
         work_items: refresh
             .work_items
             .iter()
-            .map(|item| correlation_result_to_work_item(item, &refresh.correlation_groups, host_name))
+            .map(|item| {
+                correlation_result_to_work_item(
+                    item,
+                    &refresh.correlation_groups,
+                    resolve_work_item_node_id(item, local_providers, peer_overlay, node_id),
+                )
+            })
             .collect(),
         providers: (*refresh.providers).clone(),
         provider_health: health_to_proto(&refresh.provider_health),
@@ -227,7 +307,7 @@ mod tests {
 
     use flotilla_protocol::{
         test_support::{hp, qp},
-        CheckoutRef, HostName, HostPath, HostProviderStatus, WorkItemIdentity, WorkItemKind,
+        CheckoutRef, HostName, HostPath, HostProviderStatus, NodeId, WorkItemIdentity, WorkItemKind,
     };
 
     use super::*;
@@ -325,6 +405,10 @@ mod tests {
         HostName::new("test-host")
     }
 
+    fn test_node_id() -> NodeId {
+        NodeId::new("test-node")
+    }
+
     #[test]
     fn convert_correlated_checkout() {
         let item = CorrelationResult::Correlated(CorrelatedWorkItem {
@@ -344,12 +428,12 @@ mod tests {
             agent_keys: vec![],
         });
 
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
 
         assert_eq!(proto.kind, WorkItemKind::Checkout);
         assert_eq!(proto.identity, WorkItemIdentity::Checkout(qp("/repos/my-project/wt-1")));
         // Checkout-anchored items derive host from HostPath
-        assert_eq!(proto.host, test_host());
+        assert_eq!(proto.node_id, test_node_id());
         assert_eq!(proto.branch.as_deref(), Some("feature-login"));
         assert_eq!(proto.description, "Implement login flow");
 
@@ -372,11 +456,11 @@ mod tests {
             source: String::new(),
         });
 
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
 
         assert_eq!(proto.kind, WorkItemKind::Issue);
         assert_eq!(proto.identity, WorkItemIdentity::Issue("42".to_string()));
-        assert_eq!(proto.host, test_host());
+        assert_eq!(proto.node_id, test_node_id());
         assert_eq!(proto.description, "Fix the login bug");
         assert_eq!(proto.issue_keys, vec!["42"]);
         assert!(proto.branch.is_none());
@@ -406,7 +490,7 @@ mod tests {
             terminal_ids: vec![],
             agent_keys: vec![],
         });
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
         assert_eq!(proto.source, Some(hostname));
     }
 
@@ -428,10 +512,10 @@ mod tests {
             terminal_ids: vec![],
             agent_keys: vec![],
         });
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
         assert_eq!(proto.source, Some("Claude".to_string()));
         // Session-anchored items use the provided local host name
-        assert_eq!(proto.host, test_host());
+        assert_eq!(proto.node_id, test_node_id());
     }
 
     #[test]
@@ -441,14 +525,14 @@ mod tests {
             description: "Fix the bug".to_string(),
             source: "GitHub".to_string(),
         });
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
         assert_eq!(proto.source, Some("GitHub".to_string()));
     }
 
     #[test]
     fn convert_standalone_remote_branch_has_git_source() {
         let item = CorrelationResult::Standalone(StandaloneResult::RemoteBranch { branch: "origin/feat".to_string() });
-        let proto = correlation_result_to_work_item(&item, &[], &test_host());
+        let proto = correlation_result_to_work_item(&item, &[], test_node_id());
         assert_eq!(proto.source, Some("git".to_string()));
     }
 
@@ -474,9 +558,7 @@ mod tests {
             host: Some(remote_host.clone()),
             source: None,
         });
-        let local = HostName::new("local-machine");
-        let proto = correlation_result_to_work_item(&item, &[], &local);
-        // Should use the checkout's HostPath host, not the local fallback
-        assert_eq!(proto.host, remote_host);
+        let proto = correlation_result_to_work_item(&item, &[], NodeId::new("local-machine-node"));
+        assert_eq!(proto.node_id, NodeId::new("local-machine-node"));
     }
 }

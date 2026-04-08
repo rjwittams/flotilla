@@ -11,7 +11,7 @@ use std::{
 use async_trait::async_trait;
 use flotilla_core::daemon::DaemonHandle;
 use flotilla_protocol::{
-    Command, ConnectionRole, DaemonEvent, HostName, Message, ReplayCursor, RepoIdentity, RepoInfo, RepoSnapshot, Request, Response,
+    Command, ConnectionRole, DaemonEvent, Message, NodeId, ReplayCursor, RepoIdentity, RepoInfo, RepoSnapshot, Request, Response,
     ResponseResult, StatusResponse, StreamKey, TopologyResponse, PROTOCOL_VERSION,
 };
 use flotilla_transport::message::{connect_unix_message_session, MessageSession};
@@ -60,10 +60,10 @@ async fn do_client_hello(session: &MessageSession) -> Result<(), String> {
     session
         .write(Message::Hello {
             protocol_version: PROTOCOL_VERSION,
-            host_name: HostName::new("client"),
+            node_id: NodeId::new("client"),
+            display_name: "client".into(),
             session_id,
             connection_role: Some(ConnectionRole::Client),
-            environment_id: None,
         })
         .await
         .map_err(|e| format!("failed to send Hello: {e}"))?;
@@ -522,12 +522,12 @@ fn handle_event(
             local_seqs.write().unwrap().remove(&StreamKey::Repo { identity: repo_identity.clone() });
             let _ = event_tx.send(event);
         }
-        DaemonEvent::HostRemoved { host, seq } => {
-            local_seqs.write().unwrap().insert(StreamKey::Host { host_name: host.clone() }, *seq);
+        DaemonEvent::HostRemoved { environment_id, seq } => {
+            local_seqs.write().unwrap().insert(StreamKey::Host { environment_id: environment_id.clone() }, *seq);
             let _ = event_tx.send(event);
         }
         DaemonEvent::HostSnapshot(snap) => {
-            let stream_key = StreamKey::Host { host_name: snap.host_name.clone() };
+            let stream_key = StreamKey::Host { environment_id: snap.environment_id.clone() };
             local_seqs.write().unwrap().insert(stream_key, snap.seq);
             let _ = event_tx.send(event);
         }
@@ -583,14 +583,14 @@ async fn recover_from_gap(
                                 }
                             }
                             DaemonEvent::HostSnapshot(snap) => {
-                                let key = StreamKey::Host { host_name: snap.host_name.clone() };
+                                let key = StreamKey::Host { environment_id: snap.environment_id.clone() };
                                 let current = seqs.get(&key).copied().unwrap_or(0);
                                 if snap.seq >= current {
                                     seqs.insert(key, snap.seq);
                                 }
                             }
-                            DaemonEvent::HostRemoved { host, seq } => {
-                                let key = StreamKey::Host { host_name: host.clone() };
+                            DaemonEvent::HostRemoved { environment_id, seq } => {
+                                let key = StreamKey::Host { environment_id: environment_id.clone() };
                                 let current = seqs.get(&key).copied().unwrap_or(0);
                                 if *seq >= current {
                                     seqs.insert(key, *seq);
@@ -688,8 +688,8 @@ impl DaemonHandle for SocketDaemon {
                 let (stream_key, seq) = match event {
                     DaemonEvent::RepoSnapshot(snap) => (StreamKey::Repo { identity: snap.repo_identity.clone() }, snap.seq),
                     DaemonEvent::RepoDelta(delta) => (StreamKey::Repo { identity: delta.repo_identity.clone() }, delta.seq),
-                    DaemonEvent::HostSnapshot(snap) => (StreamKey::Host { host_name: snap.host_name.clone() }, snap.seq),
-                    DaemonEvent::HostRemoved { host, seq } => (StreamKey::Host { host_name: host.clone() }, *seq),
+                    DaemonEvent::HostSnapshot(snap) => (StreamKey::Host { environment_id: snap.environment_id.clone() }, snap.seq),
+                    DaemonEvent::HostRemoved { environment_id, seq } => (StreamKey::Host { environment_id: environment_id.clone() }, *seq),
                     _ => continue,
                 };
                 seqs.entry(stream_key).and_modify(|s| *s = (*s).max(seq)).or_insert(seq);

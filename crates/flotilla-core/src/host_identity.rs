@@ -9,7 +9,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use flotilla_protocol::{qualified_path::HostId, EnvironmentId};
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use flotilla_protocol::{qualified_path::HostId, EnvironmentId, NodeId};
+use rand_core::OsRng;
+use sha2::{Digest, Sha256};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -85,16 +88,35 @@ fn machine_scoped_state_dir_or_base(base_state_dir: &Path, resolved: Result<Path
 ///
 /// This prefers a machine-scoped subdirectory, but falls back to the provided
 /// base state directory if machine identity probing fails.
-pub async fn resolve_local_environment_state_dir(base_state_dir: &Path, runner: &dyn CommandRunner) -> PathBuf {
-    let resolved = machine_scoped_state_dir(base_state_dir, None, runner).await;
+pub async fn resolve_local_environment_state_dir(
+    base_state_dir: &Path,
+    config_machine_id: Option<&str>,
+    runner: &dyn CommandRunner,
+) -> PathBuf {
+    let resolved = machine_scoped_state_dir(base_state_dir, config_machine_id, runner).await;
     machine_scoped_state_dir_or_base(base_state_dir, resolved)
 }
 
 /// Resolve or create a persisted local host id in the machine-scoped local
 /// state directory.
-pub async fn resolve_local_host_id(base_state_dir: &Path, runner: &dyn CommandRunner) -> Result<HostId, String> {
-    let state_dir = resolve_local_environment_state_dir(base_state_dir, runner).await;
+pub async fn resolve_local_host_id(
+    base_state_dir: &Path,
+    config_machine_id: Option<&str>,
+    runner: &dyn CommandRunner,
+) -> Result<HostId, String> {
+    let state_dir = resolve_local_environment_state_dir(base_state_dir, config_machine_id, runner).await;
     resolve_or_create_host_id(&state_dir)
+}
+
+/// Resolve or create a persisted local mesh node id in the machine-scoped
+/// local identity directory.
+pub async fn resolve_local_node_id(
+    base_config_dir: &Path,
+    config_machine_id: Option<&str>,
+    runner: &dyn CommandRunner,
+) -> Result<NodeId, String> {
+    let identity_dir = machine_scoped_state_dir(&base_config_dir.join("identity"), config_machine_id, runner).await?;
+    resolve_or_create_node_id(&identity_dir)
 }
 
 /// Resolve an existing `HostId` from `<state_dir>/host-id`, or generate and
@@ -148,6 +170,192 @@ pub fn resolve_or_create_host_id(state_dir: &Path) -> Result<HostId, String> {
         return Err("host-id file exists but is empty".to_owned());
     }
     Ok(HostId::new(trimmed))
+}
+
+fn node_id_from_public_key(public_key: &VerifyingKey) -> NodeId {
+    let fingerprint = Sha256::digest(public_key.to_bytes());
+    let mut truncated = String::with_capacity(32);
+    for byte in &fingerprint[..16] {
+        use std::fmt::Write as _;
+        let _ = write!(&mut truncated, "{byte:02x}");
+    }
+    NodeId::new(truncated)
+}
+
+fn read_signing_key(path: &Path) -> Result<SigningKey, String> {
+    let bytes = fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let secret: [u8; 32] =
+        bytes.try_into().map_err(|_| format!("invalid node private key length in {}: expected 32 bytes", path.display()))?;
+    Ok(SigningKey::from_bytes(&secret))
+}
+
+fn read_verifying_key(path: &Path) -> Result<VerifyingKey, String> {
+    let bytes = fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let verifying_array: [u8; 32] =
+        bytes.try_into().map_err(|_| format!("invalid node public key length in {}: expected 32 bytes", path.display()))?;
+    VerifyingKey::from_bytes(&verifying_array).map_err(|e| format!("invalid node public key in {}: {e}", path.display()))
+}
+
+fn read_or_repair_persisted_node_keypair(key_path: &Path, pub_path: &Path) -> Result<(SigningKey, VerifyingKey), String> {
+    let signing = read_signing_key(key_path)?;
+    let verifying = signing.verifying_key();
+    persist_public_key(pub_path, &verifying)?;
+    Ok((signing, verifying))
+}
+
+fn persist_public_key(path: &Path, verifying: &VerifyingKey) -> Result<(), String> {
+    if let Ok(existing) = read_verifying_key(path) {
+        if existing == *verifying {
+            return Ok(());
+        }
+        let _ = fs::remove_file(path);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("failed to create state dir {}: {e}", parent.display()))?;
+    }
+
+    for _ in 0..8 {
+        let temp = path.parent().unwrap_or_else(|| Path::new(".")).join(format!(".node.pub.{}", Uuid::new_v4()));
+        match fs::write(&temp, verifying.to_bytes()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("failed to write temp node.pub: {e}")),
+        }
+
+        let link_result = fs::hard_link(&temp, path);
+        let _ = fs::remove_file(&temp);
+
+        match link_result {
+            Ok(()) => return Ok(()),
+            Err(_) if path.exists() => {
+                let existing = read_verifying_key(path)?;
+                if existing == *verifying {
+                    return Ok(());
+                }
+                continue;
+            }
+            Err(_) => continue,
+        }
+    }
+
+    let existing = read_verifying_key(path)?;
+    if existing != *verifying {
+        return Err(format!("node keypair mismatch in {}", path.parent().unwrap_or(path).display()));
+    }
+    Ok(())
+}
+
+fn write_new_node_keypair(state_dir: &Path) -> Result<(SigningKey, VerifyingKey), String> {
+    fs::create_dir_all(state_dir).map_err(|e| format!("failed to create state dir {}: {e}", state_dir.display()))?;
+
+    let signing = SigningKey::generate(&mut OsRng);
+    let verifying = signing.verifying_key();
+    let key_path = state_dir.join("node.key");
+    let pub_path = state_dir.join("node.pub");
+
+    for _ in 0..8 {
+        let key_temp = state_dir.join(format!(".node.key.{}", Uuid::new_v4()));
+        let pub_temp = state_dir.join(format!(".node.pub.{}", Uuid::new_v4()));
+
+        write_private_key_temp(&key_temp, &signing.to_bytes())?;
+
+        match fs::write(&pub_temp, verifying.to_bytes()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&key_temp);
+                continue;
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&key_temp);
+                return Err(format!("failed to write temp node.pub: {e}"));
+            }
+        }
+
+        let _key_link = fs::hard_link(&key_temp, &key_path);
+        let _pub_link = fs::hard_link(&pub_temp, &pub_path);
+        let _ = fs::remove_file(&key_temp);
+        let _ = fs::remove_file(&pub_temp);
+
+        if key_path.exists() && pub_path.exists() {
+            set_restrictive_permissions(&key_path)?;
+            return read_or_repair_persisted_node_keypair(&key_path, &pub_path);
+        }
+    }
+
+    let signing = read_signing_key(&state_dir.join("node.key"))?;
+    let key_path = state_dir.join("node.key");
+    set_restrictive_permissions(&key_path)?;
+    let verifying = signing.verifying_key();
+    persist_public_key(&state_dir.join("node.pub"), &verifying)?;
+    Ok((signing, verifying))
+}
+
+fn write_private_key_temp(path: &Path, bytes: &[u8; 32]) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("failed to write temp node.key: {e}"))?;
+        file.write_all(bytes).map_err(|e| format!("failed to write temp node.key: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes).map_err(|e| format!("failed to write temp node.key: {e}"))?;
+        set_restrictive_permissions(path)?;
+        Ok(())
+    }
+}
+
+fn set_restrictive_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = fs::metadata(path).map_err(|e| format!("failed to stat {}: {e}", path.display()))?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions).map_err(|e| format!("failed to set permissions on {}: {e}", path.display()))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+
+    Ok(())
+}
+
+/// Resolve or create a persisted mesh node id in `<state_dir>/node.{key,pub}`.
+pub fn resolve_or_create_node_id(state_dir: &Path) -> Result<NodeId, String> {
+    let key_path = state_dir.join("node.key");
+    let pub_path = state_dir.join("node.pub");
+
+    if key_path.exists() {
+        set_restrictive_permissions(&key_path)?;
+        if pub_path.exists() {
+            let (_signing, persisted) = read_or_repair_persisted_node_keypair(&key_path, &pub_path)?;
+            return Ok(node_id_from_public_key(&persisted));
+        }
+        let signing = read_signing_key(&key_path)?;
+        let verifying = signing.verifying_key();
+        persist_public_key(&pub_path, &verifying)?;
+        return Ok(node_id_from_public_key(&verifying));
+    }
+
+    if pub_path.exists() {
+        return Err(format!("node private key missing for existing public key in {}", state_dir.display()));
+    }
+
+    let (_signing, verifying) = write_new_node_keypair(state_dir)?;
+    Ok(node_id_from_public_key(&verifying))
 }
 
 /// Resolve an existing direct-environment id from `<state_dir>/environment-id`,
@@ -352,8 +560,8 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let runner = crate::providers::discovery::test_support::DiscoveryMockRunner::builder().build();
 
-        let first = resolve_local_host_id(base.path(), &runner).await.expect("resolve local host id");
-        let second = resolve_local_host_id(base.path(), &runner).await.expect("resolve local host id again");
+        let first = resolve_local_host_id(base.path(), None, &runner).await.expect("resolve local host id");
+        let second = resolve_local_host_id(base.path(), None, &runner).await.expect("resolve local host id again");
 
         assert_eq!(first, second);
         assert!(!first.as_str().is_empty());
@@ -371,6 +579,64 @@ mod tests {
         let resolved = resolve_or_create_remote_host_id(&runner, &env).await.expect("resolve remote host id");
 
         assert_eq!(resolved.as_ref().map(HostId::as_str), Some("remote-host-id"));
+    }
+
+    #[test]
+    fn generates_and_persists_node_keypair_backed_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let node_id_1 = resolve_or_create_node_id(dir.path()).unwrap();
+        let node_id_2 = resolve_or_create_node_id(dir.path()).unwrap();
+
+        assert_eq!(node_id_1, node_id_2);
+        assert_eq!(node_id_1.as_str().len(), 32, "fingerprint should be 16 bytes / 32 hex chars");
+        assert!(dir.path().join("node.key").exists());
+        assert!(dir.path().join("node.pub").exists());
+        assert!(!dir.path().join("node-id").exists(), "legacy node-id file should not be used");
+    }
+
+    #[test]
+    fn node_id_is_derived_from_public_key_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let node_id = resolve_or_create_node_id(dir.path()).unwrap();
+        let pub_bytes = fs::read(dir.path().join("node.pub")).unwrap();
+        let pub_array: [u8; 32] = pub_bytes.try_into().unwrap();
+        let public_key = VerifyingKey::from_bytes(&pub_array).unwrap();
+        assert_eq!(node_id, node_id_from_public_key(&public_key));
+    }
+
+    #[test]
+    fn resolve_or_create_node_id_recovers_missing_public_key_from_private_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let signing = SigningKey::generate(&mut OsRng);
+        fs::create_dir_all(dir.path()).unwrap();
+        fs::write(dir.path().join("node.key"), signing.to_bytes()).unwrap();
+
+        let node_id = resolve_or_create_node_id(dir.path()).unwrap();
+
+        let pub_bytes = fs::read(dir.path().join("node.pub")).unwrap();
+        let pub_array: [u8; 32] = pub_bytes.try_into().unwrap();
+        let public_key = VerifyingKey::from_bytes(&pub_array).unwrap();
+        assert_eq!(public_key, signing.verifying_key());
+        assert_eq!(node_id, node_id_from_public_key(&public_key));
+    }
+
+    #[test]
+    fn resolve_or_create_node_id_recovers_mismatched_persisted_keypair() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path()).unwrap();
+
+        let signing = SigningKey::generate(&mut OsRng);
+        let other_signing = SigningKey::generate(&mut OsRng);
+        fs::write(dir.path().join("node.key"), signing.to_bytes()).unwrap();
+        fs::write(dir.path().join("node.pub"), other_signing.verifying_key().to_bytes()).unwrap();
+
+        let node_id = resolve_or_create_node_id(dir.path()).unwrap();
+
+        let pub_bytes = fs::read(dir.path().join("node.pub")).unwrap();
+        let pub_array: [u8; 32] = pub_bytes.try_into().unwrap();
+        let public_key = VerifyingKey::from_bytes(&pub_array).unwrap();
+        assert_eq!(public_key, signing.verifying_key());
+        assert_eq!(node_id, node_id_from_public_key(&public_key));
     }
 
     #[test]
@@ -498,5 +764,56 @@ mod tests {
         assert_ne!(first.as_str(), "static-ssh-fallback");
         let file = fs::read_to_string(temp.path().join("flotilla/environment-id")).expect("environment-id file");
         assert_eq!(file.trim(), first.as_str());
+    }
+
+    #[tokio::test]
+    async fn resolve_local_node_id_uses_machine_scoped_identity_dir() {
+        let base = tempfile::tempdir().unwrap();
+        let machine_runner = crate::providers::discovery::test_support::DiscoveryMockRunner::builder()
+            .on_run("ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"], Ok("\"IOPlatformUUID\" = \"machine-uuid\"\n".into()))
+            .build();
+
+        let node_id_1 = resolve_local_node_id(base.path(), None, &machine_runner).await.unwrap();
+        let node_id_2 = resolve_local_node_id(base.path(), None, &machine_runner).await.unwrap();
+
+        assert_eq!(node_id_1, node_id_2);
+        let identity_dir = machine_scoped_state_dir(&base.path().join("identity"), None, &machine_runner).await.unwrap();
+        assert!(identity_dir.join("node.key").exists());
+        assert!(identity_dir.join("node.pub").exists());
+    }
+
+    #[tokio::test]
+    async fn resolve_local_node_id_errors_when_machine_identity_is_unavailable() {
+        let base = tempfile::tempdir().unwrap();
+        let runner = crate::providers::discovery::test_support::DiscoveryMockRunner::builder().build();
+        if read_etc_machine_id().is_none() {
+            let err = resolve_local_node_id(base.path(), None, &runner).await.unwrap_err();
+            assert!(err.contains("Cannot determine machine identity"));
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_local_node_id_uses_config_machine_id_override() {
+        let base = tempfile::tempdir().unwrap();
+        let runner = crate::providers::discovery::test_support::DiscoveryMockRunner::builder().build();
+
+        let node_id_1 = resolve_local_node_id(base.path(), Some("override-machine"), &runner).await.unwrap();
+        let node_id_2 = resolve_local_node_id(base.path(), Some("override-machine"), &runner).await.unwrap();
+
+        assert_eq!(node_id_1, node_id_2);
+        let identity_dir = base.path().join("identity/override-machine");
+        assert!(identity_dir.join("node.key").exists());
+        assert!(identity_dir.join("node.pub").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_key_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let _ = resolve_or_create_node_id(dir.path()).unwrap();
+        let mode = fs::metadata(dir.path().join("node.key")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

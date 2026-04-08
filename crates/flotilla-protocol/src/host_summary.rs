@@ -2,11 +2,29 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{EnvironmentInfo, HostName};
+#[cfg(test)]
+use crate::qualified_path::HostId;
+use crate::{EnvironmentId, EnvironmentInfo, HostName, NodeId};
+
+/// Mesh identity plus the human-readable label that should be shown in the UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInfo {
+    pub node_id: NodeId,
+    pub display_name: String,
+}
+
+impl NodeInfo {
+    pub fn new(node_id: NodeId, display_name: impl Into<String>) -> Self {
+        Self { node_id, display_name: display_name.into() }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostSummary {
-    pub host_name: HostName,
+    pub environment_id: EnvironmentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_name: Option<HostName>,
+    pub node: NodeInfo,
     pub system: SystemInfo,
     #[serde(default)]
     pub inventory: ToolInventory,
@@ -73,11 +91,12 @@ pub struct HostProviderStatus {
     pub healthy: bool,
 }
 
-/// Full snapshot of one host's state — system info, inventory, provider health.
+/// Full snapshot of one node's state — system info, inventory, provider health.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostSnapshot {
     pub seq: u64,
-    pub host_name: HostName,
+    pub environment_id: EnvironmentId,
+    pub node: NodeInfo,
     pub is_local: bool,
     pub connection_status: crate::PeerConnectionState,
     pub summary: HostSummary,
@@ -86,12 +105,14 @@ pub struct HostSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_helpers::assert_roundtrip, EnvironmentId, EnvironmentInfo, EnvironmentStatus, HostName, ImageId};
+    use crate::{test_helpers::assert_roundtrip, EnvironmentId, EnvironmentInfo, EnvironmentStatus, ImageId, NodeId};
 
     #[test]
     fn host_summary_roundtrips_with_direct_and_provisioned_environments() {
         let summary = HostSummary {
-            host_name: HostName::new("desktop"),
+            environment_id: EnvironmentId::host(HostId::new("desktop-host")),
+            host_name: Some(HostName::new("desktop")),
+            node: NodeInfo::new(NodeId::new("node-desktop"), "Desktop"),
             system: SystemInfo {
                 home_dir: Some(PathBuf::from("/home/dev")),
                 os: Some("linux".into()),
@@ -118,6 +139,10 @@ mod tests {
             ],
         };
 
+        let json = serde_json::to_value(&summary).expect("serialize host summary");
+        assert_eq!(json["environment_id"], "host:desktop-host");
+        assert_eq!(json["node"]["node_id"], "node-desktop");
+        assert_eq!(json["node"]["display_name"], "Desktop");
         assert_roundtrip(&summary);
     }
 
@@ -125,11 +150,14 @@ mod tests {
     fn host_snapshot_roundtrips() {
         let snapshot = HostSnapshot {
             seq: 1,
-            host_name: HostName::new("desktop"),
+            environment_id: EnvironmentId::host(HostId::new("desktop-host")),
+            node: NodeInfo::new(NodeId::new("node-desktop"), "Desktop"),
             is_local: true,
             connection_status: crate::PeerConnectionState::Connected,
             summary: HostSummary {
-                host_name: HostName::new("desktop"),
+                environment_id: EnvironmentId::host(HostId::new("desktop-host")),
+                host_name: Some(HostName::new("desktop")),
+                node: NodeInfo::new(NodeId::new("node-desktop"), "Desktop"),
                 system: SystemInfo {
                     home_dir: Some(PathBuf::from("/home/dev")),
                     os: Some("linux".into()),
@@ -143,6 +171,10 @@ mod tests {
                 environments: vec![],
             },
         };
+        let json = serde_json::to_value(&snapshot).expect("serialize host snapshot");
+        assert_eq!(json["environment_id"], "host:desktop-host");
+        assert_eq!(json["node"]["node_id"], "node-desktop");
+        assert_eq!(json["summary"]["node"]["display_name"], "Desktop");
         assert_roundtrip(&snapshot);
     }
 

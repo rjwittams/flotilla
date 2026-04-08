@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use flotilla_protocol::{CheckoutSelector, CheckoutStatus, Command, CommandAction, HostName, RepoSelector, WorkItemIdentity};
+use flotilla_protocol::{CheckoutSelector, CheckoutStatus, Command, CommandAction, NodeId, RepoSelector, WorkItemIdentity};
 use ratatui::{
     layout::Rect,
     style::Style,
@@ -22,13 +22,14 @@ pub struct DeleteConfirmWidget {
     pub info: Option<CheckoutStatus>,
     pub loading: bool,
     pub identity: WorkItemIdentity,
-    pub remote_host: Option<HostName>,
+    pub remote_node_id: Option<NodeId>,
     pub checkout_path: Option<PathBuf>,
 }
 
 impl DeleteConfirmWidget {
-    pub fn new(identity: WorkItemIdentity, remote_host: Option<HostName>, checkout_path: Option<PathBuf>) -> Self {
-        Self { info: None, loading: true, identity, remote_host, checkout_path }
+    pub fn new(identity: WorkItemIdentity, remote_node_id: Option<NodeId>, checkout_path: Option<PathBuf>) -> Self {
+        let checkout_path = if remote_node_id.is_some() { None } else { checkout_path };
+        Self { info: None, loading: true, identity, remote_node_id, checkout_path }
     }
 
     /// Update the checkout status info after the async fetch completes.
@@ -57,7 +58,7 @@ impl InteractiveWidget for DeleteConfirmWidget {
                     };
                     let action = CommandAction::RemoveCheckout { checkout };
                     let command = Command {
-                        host: self.remote_host.clone(),
+                        node_id: self.remote_node_id.clone(),
                         provisioning_target: None,
                         context_repo: Some(RepoSelector::Identity(ctx.model.active_repo_identity().clone())),
                         action,
@@ -151,8 +152,8 @@ impl InteractiveWidget for DeleteConfirmWidget {
             lines.push(Line::from(Span::styled("y/Enter: confirm    n/Esc: cancel", Style::default().fg(theme.muted))));
         }
 
-        let title = match &self.remote_host {
-            Some(host) => format!(" Remove {} on {} ", ctx.model.active_labels().checkouts.noun_capitalized(), host),
+        let title = match &self.remote_node_id {
+            Some(node_id) => format!(" Remove {} on {} ", ctx.model.active_labels().checkouts.noun_capitalized(), node_id),
             None => format!(" Remove {} ", ctx.model.active_labels().checkouts.noun_capitalized()),
         };
         let paragraph = Paragraph::new(lines).block(Block::bordered().style(theme.block_style()).title(title)).wrap(Wrap { trim: true });
@@ -178,7 +179,7 @@ impl InteractiveWidget for DeleteConfirmWidget {
 
 #[cfg(test)]
 mod tests {
-    use flotilla_protocol::{CheckoutStatus, CommandAction, HostName, WorkItemIdentity};
+    use flotilla_protocol::{CheckoutStatus, CommandAction, NodeId, WorkItemIdentity};
 
     use super::*;
     use crate::app::test_support::TestWidgetHarness;
@@ -268,8 +269,8 @@ mod tests {
 
     #[test]
     fn delete_confirm_routes_to_remote_host_when_set() {
-        let hostname = HostName::new("feta");
-        let mut widget = DeleteConfirmWidget::new(WorkItemIdentity::Session("test".into()), Some(hostname.clone()), None);
+        let node_id = NodeId::new("feta");
+        let mut widget = DeleteConfirmWidget::new(WorkItemIdentity::Session("test".into()), Some(node_id.clone()), None);
         widget.update_info(CheckoutStatus {
             branch: "feat/x".into(),
             change_request_status: None,
@@ -285,7 +286,7 @@ mod tests {
         widget.handle_action(Action::Confirm, &mut ctx);
 
         let (cmd, _) = harness.commands.take_next().expect("command");
-        assert_eq!(cmd.host, Some(hostname));
+        assert_eq!(cmd.node_id, Some(node_id));
         assert!(matches!(cmd.action, CommandAction::RemoveCheckout { .. }));
     }
 
@@ -356,6 +357,35 @@ mod tests {
         match cmd {
             Command { action: CommandAction::RemoveCheckout { checkout, .. }, .. } => {
                 assert_eq!(checkout, CheckoutSelector::Path(PathBuf::from("/tmp/feat-x")));
+            }
+            other => panic!("expected RemoveCheckout, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn delete_confirm_remote_node_uses_query_selector_even_with_checkout_path() {
+        let node_id = NodeId::new("node-sha256:remote");
+        let mut widget =
+            DeleteConfirmWidget::new(WorkItemIdentity::Session("test".into()), Some(node_id.clone()), Some(PathBuf::from("/tmp/feat-x")));
+        widget.update_info(CheckoutStatus {
+            branch: "feat/x".into(),
+            change_request_status: None,
+            merge_commit_sha: None,
+            unpushed_commits: vec![],
+            has_uncommitted: false,
+            uncommitted_files: vec![],
+            base_detection_warning: None,
+        });
+        let mut harness = TestWidgetHarness::new();
+        let mut ctx = harness.ctx();
+
+        widget.handle_action(Action::Confirm, &mut ctx);
+
+        let (cmd, _) = harness.commands.take_next().expect("expected command");
+        match cmd {
+            Command { action: CommandAction::RemoveCheckout { checkout, .. }, node_id: actual_node_id, .. } => {
+                assert_eq!(actual_node_id, Some(node_id));
+                assert_eq!(checkout, CheckoutSelector::Query("feat/x".into()));
             }
             other => panic!("expected RemoveCheckout, got {:?}", other),
         }

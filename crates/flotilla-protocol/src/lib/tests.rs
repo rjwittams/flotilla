@@ -5,7 +5,7 @@ use crate::test_support::{hp, qp};
 
 fn sample_command() -> Command {
     Command {
-        host: None,
+        node_id: None,
         provisioning_target: None,
         context_repo: None,
         action: CommandAction::TrackRepoPath { path: PathBuf::from("/tmp/my-repo") },
@@ -109,11 +109,11 @@ fn message_event_snapshot_roundtrip() {
         seq: 7,
         repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/my-repo".into() },
         repo: Some(PathBuf::from("/tmp/my-repo")),
-        host_name: HostName::new("test-host"),
+        node_id: NodeId::new("test-node"),
         work_items: vec![WorkItem {
             kind: WorkItemKind::Checkout,
             identity: WorkItemIdentity::Checkout(qp("/tmp/my-repo/wt")),
-            host: HostName::new("test-host"),
+            node_id: NodeId::new("test-node"),
             branch: Some("feature-x".to_string()),
             description: "Feature X".to_string(),
             checkout: Some(CheckoutRef::from_host_path(hp("/tmp/my-repo/wt"), false)),
@@ -174,7 +174,7 @@ fn snapshot_delta_event_roundtrip() {
                 op: EntryOp::Added(WorkItem {
                     kind: WorkItemKind::Issue,
                     identity: WorkItemIdentity::Issue("42".into()),
-                    host: HostName::new("test-host"),
+                    node_id: NodeId::new("test-node"),
                     branch: None,
                     description: "Bug 42".into(),
                     checkout: None,
@@ -270,7 +270,7 @@ fn error_response_builds_with_error_message() {
 fn daemon_event_command_started_roundtrip() {
     let event = DaemonEvent::CommandStarted {
         command_id: 42,
-        host: HostName::new("desktop"),
+        node_id: NodeId::new("desktop"),
         repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
         repo: Some(PathBuf::from("/tmp/repo")),
         description: "Creating checkout...".to_string(),
@@ -278,9 +278,9 @@ fn daemon_event_command_started_roundtrip() {
     let json = serde_json::to_string(&event).expect("serialize");
     let decoded: DaemonEvent = serde_json::from_str(&json).expect("deserialize");
     match decoded {
-        DaemonEvent::CommandStarted { command_id, host, repo_identity, repo, description } => {
+        DaemonEvent::CommandStarted { command_id, node_id, repo_identity, repo, description } => {
             assert_eq!(command_id, 42);
-            assert_eq!(host, HostName::new("desktop"));
+            assert_eq!(node_id, NodeId::new("desktop"));
             assert_eq!(repo_identity, RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() });
             assert_eq!(repo, Some(PathBuf::from("/tmp/repo")));
             assert_eq!(description, "Creating checkout...");
@@ -293,7 +293,7 @@ fn daemon_event_command_started_roundtrip() {
 fn daemon_event_command_finished_roundtrip() {
     let event = DaemonEvent::CommandFinished {
         command_id: 42,
-        host: HostName::new("desktop"),
+        node_id: NodeId::new("desktop"),
         repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
         repo: Some(PathBuf::from("/tmp/repo")),
         result: CommandValue::CheckoutCreated { branch: "feat-x".into(), path: PathBuf::from("/tmp/repo/feat-x") },
@@ -301,9 +301,9 @@ fn daemon_event_command_finished_roundtrip() {
     let json = serde_json::to_string(&event).expect("serialize");
     let decoded: DaemonEvent = serde_json::from_str(&json).expect("deserialize");
     match decoded {
-        DaemonEvent::CommandFinished { command_id, host, repo_identity, repo, result } => {
+        DaemonEvent::CommandFinished { command_id, node_id, repo_identity, repo, result } => {
             assert_eq!(command_id, 42);
-            assert_eq!(host, HostName::new("desktop"));
+            assert_eq!(node_id, NodeId::new("desktop"));
             assert_eq!(repo_identity, RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() });
             assert_eq!(repo, Some(PathBuf::from("/tmp/repo")));
             match result {
@@ -339,7 +339,7 @@ fn snapshot_delta_roundtrip_preserves_repo_identity() {
 fn daemon_events_and_repo_delta_allow_missing_repo_path_metadata() {
     let started = DaemonEvent::CommandStarted {
         command_id: 1,
-        host: HostName::new("desktop"),
+        node_id: NodeId::new("desktop"),
         repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
         repo: None,
         description: "query".into(),
@@ -380,7 +380,7 @@ fn stream_key_repo_roundtrip() {
 
 #[test]
 fn stream_key_host_roundtrip() {
-    let key = StreamKey::Host { host_name: HostName::new("desktop") };
+    let key = StreamKey::Host { environment_id: EnvironmentId::host(qualified_path::HostId::new("desktop-host")) };
     test_helpers::assert_roundtrip(&key);
 }
 
@@ -388,11 +388,14 @@ fn stream_key_host_roundtrip() {
 fn daemon_event_host_snapshot_roundtrip() {
     let event = DaemonEvent::HostSnapshot(Box::new(HostSnapshot {
         seq: 1,
-        host_name: HostName::new("desktop"),
+        environment_id: EnvironmentId::host(qualified_path::HostId::new("desktop-host")),
+        node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
         is_local: true,
         connection_status: PeerConnectionState::Connected,
         summary: HostSummary {
-            host_name: HostName::new("desktop"),
+            environment_id: EnvironmentId::host(qualified_path::HostId::new("desktop-host")),
+            host_name: Some(HostName::new("desktop")),
+            node: NodeInfo::new(NodeId::new("desktop"), "Desktop"),
             system: SystemInfo::default(),
             inventory: ToolInventory::default(),
             providers: vec![],
@@ -406,13 +409,16 @@ fn daemon_event_host_snapshot_roundtrip() {
 
 #[test]
 fn daemon_event_host_removed_roundtrip() {
-    let event = DaemonEvent::HostRemoved { host: HostName::new("desktop"), seq: 2 };
+    let event = DaemonEvent::HostRemoved { environment_id: EnvironmentId::host(qualified_path::HostId::new("desktop-host")), seq: 2 };
     test_helpers::assert_json_roundtrip(&event);
 }
 
 #[test]
 fn replay_cursor_with_stream_key_host_roundtrip() {
-    let cursor = ReplayCursor { stream: StreamKey::Host { host_name: HostName::new("laptop") }, seq: 42 };
+    let cursor = ReplayCursor {
+        stream: StreamKey::Host { environment_id: EnvironmentId::host(qualified_path::HostId::new("laptop-host")) },
+        seq: 42,
+    };
     test_helpers::assert_roundtrip(&cursor);
 }
 
@@ -420,10 +426,10 @@ fn replay_cursor_with_stream_key_host_roundtrip() {
 fn message_hello_roundtrip() {
     let msg = Message::Hello {
         protocol_version: PROTOCOL_VERSION,
-        host_name: HostName::new("desktop"),
+        node_id: NodeId::new("node-desktop-1"),
+        display_name: "Desktop Workstation".into(),
         session_id: uuid::Uuid::nil(),
         connection_role: None,
-        environment_id: None,
     };
 
     test_helpers::assert_json_roundtrip(&msg);
@@ -432,7 +438,7 @@ fn message_hello_roundtrip() {
 #[test]
 fn message_peer_data_roundtrip() {
     let msg = Message::Peer(Box::new(PeerWireMessage::Data(PeerDataMessage {
-        origin_host: HostName::new("desktop"),
+        origin_node_id: NodeId::new("desktop"),
         repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
         host_repo_root: Some(PathBuf::from("/tmp/repo")),
         clock: VectorClock::default(),
@@ -446,8 +452,8 @@ fn message_peer_data_roundtrip() {
 fn message_peer_routed_request_resync_roundtrip() {
     let msg = Message::Peer(Box::new(PeerWireMessage::Routed(RoutedPeerMessage::RequestResync {
         request_id: 5,
-        requester_host: HostName::new("laptop"),
-        target_host: HostName::new("desktop"),
+        requester_node_id: NodeId::new("laptop"),
+        target_node_id: NodeId::new("desktop"),
         remaining_hops: 4,
         repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
         since_seq: 12,
@@ -460,8 +466,8 @@ fn message_peer_routed_request_resync_roundtrip() {
 fn message_peer_routed_resync_snapshot_roundtrip() {
     let msg = Message::Peer(Box::new(PeerWireMessage::Routed(RoutedPeerMessage::ResyncSnapshot {
         request_id: 6,
-        requester_host: HostName::new("laptop"),
-        responder_host: HostName::new("desktop"),
+        requester_node_id: NodeId::new("laptop"),
+        responder_node_id: NodeId::new("desktop"),
         remaining_hops: 4,
         repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
         host_repo_root: Some(PathBuf::from("/tmp/repo")),
@@ -484,9 +490,9 @@ fn message_peer_goodbye_roundtrip() {
 fn step_roundtrip_covers_command_values() {
     let step = Step {
         description: "Create workspace".to_string(),
-        host: StepExecutionContext::Host(HostName::new("feta")),
+        host: StepExecutionContext::Host(NodeId::new("feta")),
         action: StepAction::CreateWorkspaceFromPreparedTerminal {
-            target_host: HostName::new("feta"),
+            target_node_id: NodeId::new("feta"),
             branch: "feat/x".to_string(),
             checkout_path: ExecutionEnvironmentPath::new("/repo/wt-feat-x"),
             attachable_set_id: Some(AttachableSetId::new("attachable-set")),
@@ -503,7 +509,8 @@ fn step_roundtrip_covers_command_values() {
 fn step_roundtrip_covers_prepare_and_attach_workspace_actions() {
     let prepared = PreparedWorkspace {
         label: "feat/x".into(),
-        target_host: HostName::new("feta"),
+        target_node_id: NodeId::new("feta"),
+        display_host: Some(HostName::new("feta")),
         checkout_path: PathBuf::from("/repo/wt-feat-x"),
         checkout_key: None,
         attachable_set_id: Some(AttachableSetId::new("attachable-set")),
@@ -515,10 +522,11 @@ fn step_roundtrip_covers_prepare_and_attach_workspace_actions() {
 
     let prepare = Step {
         description: "Prepare workspace".to_string(),
-        host: StepExecutionContext::Host(HostName::new("feta")),
+        host: StepExecutionContext::Host(NodeId::new("feta")),
         action: StepAction::PrepareWorkspace {
             checkout_path: Some(ExecutionEnvironmentPath::new("/repo/wt-feat-x")),
             label: "feat/x".into(),
+            display_host: Some(HostName::new("feta")),
         },
     };
     test_helpers::assert_roundtrip(&prepare);
@@ -528,7 +536,7 @@ fn step_roundtrip_covers_prepare_and_attach_workspace_actions() {
 
     let attach = Step {
         description: "Attach workspace".to_string(),
-        host: StepExecutionContext::Host(HostName::local()),
+        host: StepExecutionContext::Host(NodeId::new("local")),
         action: StepAction::AttachWorkspace,
     };
     test_helpers::assert_roundtrip(&attach);

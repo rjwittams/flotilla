@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use flotilla_core::config::RemoteHostConfig;
-use flotilla_protocol::{ConfigLabel, GoodbyeReason, HostName, Message, PeerWireMessage, PROTOCOL_VERSION};
+use flotilla_protocol::{ConfigLabel, GoodbyeReason, HostName, Message, NodeId, NodeInfo, PeerWireMessage, PROTOCOL_VERSION};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     net::UnixStream,
@@ -59,10 +59,12 @@ impl PeerSender for ChannelPeerSender {
 /// JSON-line `Message` values. Only `Message::Peer` payloads are forwarded;
 /// other message types on the wire are silently discarded.
 pub struct SshTransport {
-    local_host: HostName,
+    local_node_id: NodeId,
+    local_display_name: String,
     config: RemoteHostConfig,
     config_label: ConfigLabel,
     expected_host_name: HostName,
+    expected_node_id: Option<NodeId>,
     local_socket_path: PathBuf,
     ssh_process: Option<tokio::process::Child>,
     status: PeerConnectionStatus,
@@ -77,6 +79,8 @@ pub struct SshTransport {
     local_session_id: uuid::Uuid,
     /// Session ID received from the remote peer during handshake.
     remote_session_id: Option<uuid::Uuid>,
+    /// Remote node identity learned from the last successful hello handshake.
+    remote_node_info: Option<NodeInfo>,
 }
 
 impl SshTransport {
@@ -85,9 +89,11 @@ impl SshTransport {
     /// The local forwarded socket will be placed at
     /// `~/.config/flotilla/peers/<host-name>.sock`.
     pub fn new(
-        local_host: HostName,
+        local_node_id: NodeId,
+        local_display_name: String,
         config_label: ConfigLabel,
         config: RemoteHostConfig,
+        expected_node_id: Option<NodeId>,
         local_session_id: uuid::Uuid,
         state_dir: &Path,
     ) -> Result<Self, String> {
@@ -101,10 +107,12 @@ impl SshTransport {
         let expected_host_name = HostName::new(&config.expected_host_name);
 
         Ok(Self {
-            local_host,
+            local_node_id,
+            local_display_name,
             config,
             config_label,
             expected_host_name,
+            expected_node_id,
             local_socket_path,
             ssh_process: None,
             status: PeerConnectionStatus::Disconnected,
@@ -113,6 +121,7 @@ impl SshTransport {
             task_handles: Vec::new(),
             local_session_id,
             remote_session_id: None,
+            remote_node_info: None,
         })
     }
 
@@ -134,7 +143,7 @@ impl SshTransport {
         };
 
         info!(
-            peer = %self.expected_host_name,
+            expected_host = %self.expected_host_name,
             label = %self.config_label.0,
             %destination,
             forward = %forward_spec,
@@ -204,10 +213,10 @@ impl SshTransport {
 
         flotilla_protocol::framing::write_message_line(&mut stream, &Message::Hello {
             protocol_version: PROTOCOL_VERSION,
-            host_name: self.local_host.clone(),
+            node_id: self.local_node_id.clone(),
+            display_name: self.local_display_name.clone(),
             session_id: self.local_session_id,
             connection_role: None,
-            environment_id: None,
         })
         .await?;
 
@@ -219,7 +228,9 @@ impl SshTransport {
             .map_err(|e| format!("failed to read peer hello: {e}"))?
             .ok_or_else(|| "peer closed before sending hello".to_string())?;
         let hello = serde_json::from_str(&line).map_err(|e| format!("failed to parse peer hello: {e}"))?;
-        let remote_session_id = Self::validate_remote_hello(&self.expected_host_name, hello)?;
+        let (remote_node_info, remote_session_id) =
+            Self::validate_remote_hello(&self.expected_host_name, self.expected_node_id.as_ref(), hello)?;
+        self.remote_node_info = Some(remote_node_info.clone());
         self.remote_session_id = Some(remote_session_id);
 
         // Inbound: reader task → inbound channel → subscriber
@@ -230,7 +241,7 @@ impl SshTransport {
         self.outbound_tx = Some(outbound_tx);
 
         // Spawn reader task
-        let host_name = self.expected_host_name.clone();
+        let node_id = remote_node_info.node_id.clone();
         let reader_handle = tokio::spawn(async move {
             loop {
                 match lines.next_line().await {
@@ -239,7 +250,7 @@ impl SshTransport {
                             Ok(m) => m,
                             Err(e) => {
                                 debug!(
-                                    host = %host_name,
+                                    node = %node_id,
                                     err = %e,
                                     "skipping unparseable message from peer"
                                 );
@@ -251,7 +262,7 @@ impl SshTransport {
                             Message::Peer(peer_msg) => {
                                 if inbound_tx.send(*peer_msg).await.is_err() {
                                     debug!(
-                                        host = %host_name,
+                                        node = %node_id,
                                         "inbound channel closed, stopping reader"
                                     );
                                     break;
@@ -260,18 +271,18 @@ impl SshTransport {
                             _ => {
                                 // Silently ignore non-peer messages after handshake.
                                 debug!(
-                                    host = %host_name,
+                                    node = %node_id,
                                     "ignoring non-peer message from peer"
                                 );
                             }
                         }
                     }
                     Ok(None) => {
-                        info!(host = %host_name, "peer socket EOF");
+                        info!(node = %node_id, "peer socket EOF");
                         break;
                     }
                     Err(e) => {
-                        error!(host = %host_name, err = %e, "error reading from peer socket");
+                        error!(node = %node_id, err = %e, "error reading from peer socket");
                         break;
                     }
                 }
@@ -279,7 +290,7 @@ impl SshTransport {
         });
 
         // Spawn writer task
-        let host_name_w = self.expected_host_name.clone();
+        let node_id_w = remote_node_info.node_id.clone();
         let writer_handle = tokio::spawn(async move {
             let mut outbound_rx = outbound_rx;
             let mut writer = write_half;
@@ -287,7 +298,7 @@ impl SshTransport {
             while let Some(peer_msg) = outbound_rx.recv().await {
                 let msg = Message::Peer(Box::new(peer_msg));
                 if let Err(e) = flotilla_protocol::framing::write_message_line(&mut writer, &msg).await {
-                    error!(host = %host_name_w, err = %e, "failed to write to peer socket");
+                    error!(node = %node_id_w, err = %e, "failed to write to peer socket");
                     break;
                 }
             }
@@ -315,7 +326,7 @@ impl SshTransport {
     /// Kill the SSH child process if running.
     async fn kill_ssh(&mut self) {
         if let Some(ref mut child) = self.ssh_process {
-            debug!(peer = %self.expected_host_name, "killing SSH process");
+            debug!(expected_host = %self.expected_host_name, "killing SSH process");
             // kill_on_drop is set, but explicitly kill for clean shutdown
             let _ = child.kill().await;
             let _ = child.wait().await;
@@ -338,16 +349,31 @@ impl SshTransport {
         std::cmp::min(delay, MAX_BACKOFF)
     }
 
-    fn validate_remote_hello(expected_host_name: &HostName, hello: Message) -> Result<uuid::Uuid, String> {
+    fn validate_remote_hello(
+        expected_host_name: &HostName,
+        expected_node_id: Option<&NodeId>,
+        hello: Message,
+    ) -> Result<(NodeInfo, uuid::Uuid), String> {
         match hello {
-            Message::Hello { protocol_version, host_name, session_id, .. } => {
+            Message::Hello { protocol_version, node_id, display_name, session_id, .. } => {
                 if protocol_version != PROTOCOL_VERSION {
                     return Err(format!("peer protocol version mismatch: expected {}, got {}", PROTOCOL_VERSION, protocol_version));
                 }
-                if host_name != *expected_host_name {
-                    return Err(format!("peer host mismatch: expected {}, got {}", expected_host_name, host_name));
+                match expected_node_id {
+                    Some(expected_node_id) if &node_id != expected_node_id => {
+                        return Err(format!("peer node id mismatch: expected {expected_node_id}, got {node_id}"));
+                    }
+                    _ => {}
                 }
-                Ok(session_id)
+                if display_name != expected_host_name.as_str() {
+                    debug!(
+                        expected_host = %expected_host_name,
+                        remote_node = %node_id,
+                        remote_display = %display_name,
+                        "configured host name did not match remote hello display name"
+                    );
+                }
+                Ok((NodeInfo::new(node_id, display_name), session_id))
             }
             other => Err(format!("expected peer hello, got {:?}", other)),
         }
@@ -371,12 +397,15 @@ impl PeerTransport for SshTransport {
         self.inbound_rx = Some(rx);
 
         self.status = PeerConnectionStatus::Connected;
-        info!(peer = %self.expected_host_name, "peer connection established");
+        let peer =
+            self.remote_node_info.as_ref().map(|node| node.node_id.clone()).unwrap_or_else(|| NodeId::new(self.config_label.0.clone()));
+        info!(%peer, expected_host = %self.expected_host_name, "peer connection established");
         Ok(())
     }
 
     async fn disconnect(&mut self) -> Result<(), String> {
-        info!(peer = %self.expected_host_name, "disconnecting peer transport");
+        let peer = self.remote_node_info.as_ref().map(|node| node.node_id.to_string()).unwrap_or_else(|| self.config_label.0.clone());
+        info!(peer, expected_host = %self.expected_host_name, "disconnecting peer transport");
 
         self.abort_tasks();
 
@@ -384,6 +413,7 @@ impl PeerTransport for SshTransport {
         self.inbound_rx = None;
         self.outbound_tx = None;
         self.remote_session_id = None;
+        self.remote_node_info = None;
 
         self.kill_ssh().await;
         self.cleanup_socket();
@@ -414,6 +444,10 @@ impl PeerTransport for SshTransport {
 
     fn remote_session_id(&self) -> Option<uuid::Uuid> {
         self.remote_session_id
+    }
+
+    fn remote_node_info(&self) -> Option<NodeInfo> {
+        self.remote_node_info.clone()
     }
 }
 
@@ -455,14 +489,17 @@ mod tests {
         let config = RemoteHostConfig {
             hostname: "10.0.0.5".to_string(),
             expected_host_name: "my-server".to_string(),
+            expected_node_id: None,
             user: Some("dev".to_string()),
             daemon_socket: "/run/user/1000/flotilla.sock".to_string(),
             ssh_multiplex: None,
         };
         let transport = SshTransport::new(
-            HostName::new("local"),
+            NodeId::new("local"),
+            "local-display".into(),
             ConfigLabel("my-server".to_string()),
             config,
+            None,
             uuid::Uuid::nil(),
             Path::new("/tmp/flotilla-test"),
         )
@@ -475,14 +512,17 @@ mod tests {
         let config = RemoteHostConfig {
             hostname: "10.0.0.5".to_string(),
             expected_host_name: "remote".to_string(),
+            expected_node_id: None,
             user: None,
             daemon_socket: "/tmp/daemon.sock".to_string(),
             ssh_multiplex: None,
         };
         match SshTransport::new(
-            HostName::new("local"),
+            NodeId::new("local"),
+            "local-display".into(),
             ConfigLabel("../evil".to_string()),
             config,
+            None,
             uuid::Uuid::nil(),
             Path::new("/tmp/flotilla-test"),
         ) {
@@ -496,14 +536,17 @@ mod tests {
         let config = RemoteHostConfig {
             hostname: "example.com".to_string(),
             expected_host_name: "remote".to_string(),
+            expected_node_id: None,
             user: None,
             daemon_socket: "/tmp/daemon.sock".to_string(),
             ssh_multiplex: None,
         };
         let transport = SshTransport::new(
-            HostName::new("local"),
+            NodeId::new("local"),
+            "local-display".into(),
             ConfigLabel("remote".to_string()),
             config,
+            None,
             uuid::Uuid::nil(),
             Path::new("/tmp/flotilla-test"),
         )
@@ -512,46 +555,79 @@ mod tests {
     }
 
     #[test]
-    fn validate_remote_hello_accepts_matching_protocol_and_host() {
+    fn validate_remote_hello_returns_remote_identity_from_hello() {
         let hello = Message::Hello {
             protocol_version: flotilla_protocol::PROTOCOL_VERSION,
-            host_name: HostName::new("remote"),
+            node_id: NodeId::new("remote-node-1"),
+            display_name: "remote-host".into(),
             session_id: uuid::Uuid::nil(),
             connection_role: None,
-            environment_id: None,
         };
 
-        SshTransport::validate_remote_hello(&HostName::new("remote"), hello).expect("matching hello should be accepted");
+        let (node, session_id) =
+            SshTransport::validate_remote_hello(&HostName::new("expected-host"), None, hello).expect("hello should be accepted");
+        assert_eq!(node, NodeInfo::new(NodeId::new("remote-node-1"), "remote-host"));
+        assert_eq!(session_id, uuid::Uuid::nil());
     }
 
     #[test]
     fn validate_remote_hello_rejects_wrong_protocol_version() {
         let hello = Message::Hello {
             protocol_version: flotilla_protocol::PROTOCOL_VERSION + 1,
-            host_name: HostName::new("remote"),
+            node_id: NodeId::new("remote"),
+            display_name: "remote".into(),
             session_id: uuid::Uuid::nil(),
             connection_role: None,
-            environment_id: None,
         };
 
-        let err = SshTransport::validate_remote_hello(&HostName::new("remote"), hello)
+        let err = SshTransport::validate_remote_hello(&HostName::new("expected-host"), None, hello)
             .expect_err("unexpected protocol version should be rejected");
         assert!(err.contains("protocol"));
     }
 
     #[test]
-    fn validate_remote_hello_rejects_unexpected_host_name() {
+    fn validate_remote_hello_accepts_matching_expected_node_id() {
         let hello = Message::Hello {
             protocol_version: flotilla_protocol::PROTOCOL_VERSION,
-            host_name: HostName::new("someone-else"),
+            node_id: NodeId::new("expected-node"),
+            display_name: "different-display".into(),
             session_id: uuid::Uuid::nil(),
             connection_role: None,
-            environment_id: None,
         };
 
-        let err =
-            SshTransport::validate_remote_hello(&HostName::new("remote"), hello).expect_err("unexpected host name should be rejected");
-        assert!(err.contains("host"));
+        let (node, _) = SshTransport::validate_remote_hello(&HostName::new("expected-host"), Some(&NodeId::new("expected-node")), hello)
+            .expect("hello should be accepted");
+        assert_eq!(node, NodeInfo::new(NodeId::new("expected-node"), "different-display"));
+    }
+
+    #[test]
+    fn validate_remote_hello_rejects_mismatched_expected_node_id() {
+        let hello = Message::Hello {
+            protocol_version: flotilla_protocol::PROTOCOL_VERSION,
+            node_id: NodeId::new("actual-node"),
+            display_name: "different-display".into(),
+            session_id: uuid::Uuid::nil(),
+            connection_role: None,
+        };
+
+        let err = SshTransport::validate_remote_hello(&HostName::new("expected-host"), Some(&NodeId::new("expected-node")), hello)
+            .expect_err("mismatched expected node id should be rejected");
+        assert!(err.contains("node id"));
+    }
+
+    #[test]
+    fn validate_remote_hello_allows_absent_expected_node_id() {
+        let hello = Message::Hello {
+            protocol_version: flotilla_protocol::PROTOCOL_VERSION,
+            node_id: NodeId::new("someone-else"),
+            display_name: "different-display".into(),
+            session_id: uuid::Uuid::nil(),
+            connection_role: None,
+        };
+
+        let (node, _) =
+            SshTransport::validate_remote_hello(&HostName::new("expected-host"), None, hello).expect("hello should be accepted");
+        assert_eq!(node, NodeInfo::new(NodeId::new("someone-else"), "different-display"));
     }
 
     #[tokio::test]
@@ -559,14 +635,17 @@ mod tests {
         let config = RemoteHostConfig {
             hostname: "example.com".to_string(),
             expected_host_name: "remote".to_string(),
+            expected_node_id: None,
             user: None,
             daemon_socket: "/tmp/daemon.sock".to_string(),
             ssh_multiplex: None,
         };
         let transport = SshTransport::new(
-            HostName::new("local"),
+            NodeId::new("local"),
+            "local-display".into(),
             ConfigLabel("remote".to_string()),
             config,
+            None,
             uuid::Uuid::nil(),
             Path::new("/tmp/flotilla-test"),
         )
@@ -579,14 +658,17 @@ mod tests {
         let config = RemoteHostConfig {
             hostname: "example.com".to_string(),
             expected_host_name: "remote".to_string(),
+            expected_node_id: None,
             user: None,
             daemon_socket: "/tmp/daemon.sock".to_string(),
             ssh_multiplex: None,
         };
         let mut transport = SshTransport::new(
-            HostName::new("local"),
+            NodeId::new("local"),
+            "local-display".into(),
             ConfigLabel("remote".to_string()),
             config,
+            None,
             uuid::Uuid::nil(),
             Path::new("/tmp/flotilla-test"),
         )
@@ -607,14 +689,17 @@ mod tests {
         let config = RemoteHostConfig {
             hostname: "example.com".to_string(),
             expected_host_name: "remote".to_string(),
+            expected_node_id: None,
             user: None,
             daemon_socket: "/tmp/daemon.sock".to_string(),
             ssh_multiplex: None,
         };
         let mut transport = SshTransport::new(
-            HostName::new("local"),
+            NodeId::new("local"),
+            "local-display".into(),
             ConfigLabel("remote".to_string()),
             config,
+            None,
             uuid::Uuid::nil(),
             Path::new("/tmp/flotilla-test"),
         )
@@ -628,14 +713,14 @@ mod tests {
             reader.read_line(&mut line).await.expect("read hello");
             let hello = serde_json::to_string(&Message::Hello {
                 protocol_version: PROTOCOL_VERSION,
-                host_name: HostName::new("remote"),
+                node_id: NodeId::new("remote"),
+                display_name: "remote".into(),
                 session_id: uuid::Uuid::nil(),
                 connection_role: None,
-                environment_id: None,
             })
             .expect("serialize hello");
             let peer = serde_json::to_string(&Message::Peer(Box::new(PeerWireMessage::Data(PeerDataMessage {
-                origin_host: HostName::new("remote"),
+                origin_node_id: NodeId::new("remote"),
                 repo_identity: flotilla_protocol::RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
                 host_repo_root: Some(PathBuf::from("/home/remote/repo")),
                 clock: flotilla_protocol::VectorClock::default(),
@@ -649,12 +734,12 @@ mod tests {
         let msg = inbound.recv().await.expect("first peer message");
         match msg {
             PeerWireMessage::Data(PeerDataMessage {
-                origin_host,
+                origin_node_id,
                 host_repo_root,
                 kind: flotilla_protocol::PeerDataKind::Snapshot { seq, .. },
                 ..
             }) => {
-                assert_eq!(origin_host, HostName::new("remote"));
+                assert_eq!(origin_node_id, NodeId::new("remote"));
                 assert_eq!(host_repo_root, Some(PathBuf::from("/home/remote/repo")));
                 assert_eq!(seq, 1);
             }
@@ -673,14 +758,17 @@ mod tests {
         let config = RemoteHostConfig {
             hostname: "localhost".to_string(),
             expected_host_name: "localhost-test".to_string(),
+            expected_node_id: None,
             user: None,
             daemon_socket: "/tmp/flotilla-test-daemon.sock".to_string(),
             ssh_multiplex: None,
         };
         let mut transport = SshTransport::new(
-            HostName::new("local-test"),
+            NodeId::new("local-test"),
+            "local-display".into(),
             ConfigLabel("localhost-test".to_string()),
             config,
+            None,
             uuid::Uuid::nil(),
             Path::new("/tmp/flotilla-test"),
         )

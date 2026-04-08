@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flotilla_protocol::{GoodbyeReason, HostName, PeerWireMessage};
+use flotilla_protocol::{GoodbyeReason, HostName, NodeId, NodeInfo, PeerWireMessage};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -33,6 +33,7 @@ enum ChannelEnvelope {
 pub struct ChannelTransport {
     local_name: HostName,
     remote_name: HostName,
+    remote_node: NodeInfo,
     status: Arc<std::sync::Mutex<PeerConnectionStatus>>,
     // Backbone — persistent for the lifetime of the pair (control + fallback data)
     backbone_tx: mpsc::Sender<ChannelEnvelope>,
@@ -276,11 +277,23 @@ impl PeerTransport for ChannelTransport {
             remote_session_tx_slot: Arc::clone(&self.remote_session_tx_slot),
         }) as Arc<dyn PeerSender>)
     }
+
+    fn remote_node_info(&self) -> Option<NodeInfo> {
+        Some(self.remote_node.clone())
+    }
 }
 
 /// Create a paired set of in-process transports. A's outbound backbone is B's
 /// inbound backbone and vice versa. Both start in `Disconnected` state.
 pub fn channel_transport_pair(local_name: HostName, remote_name: HostName) -> (ChannelTransport, ChannelTransport) {
+    channel_transport_pair_with_nodes(
+        NodeInfo::new(NodeId::new(local_name.as_str()), local_name.to_string()),
+        NodeInfo::new(NodeId::new(remote_name.as_str()), remote_name.to_string()),
+    )
+}
+
+/// Create a paired set of in-process transports with explicit remote node identities.
+pub fn channel_transport_pair_with_nodes(local_node: NodeInfo, remote_node: NodeInfo) -> (ChannelTransport, ChannelTransport) {
     let (a_to_b_tx, a_to_b_rx) = mpsc::channel(CHANNEL_BUFFER);
     let (b_to_a_tx, b_to_a_rx) = mpsc::channel(CHANNEL_BUFFER);
 
@@ -290,8 +303,9 @@ pub fn channel_transport_pair(local_name: HostName, remote_name: HostName) -> (C
     let b_session_slot: Arc<std::sync::Mutex<Option<mpsc::Sender<PeerWireMessage>>>> = Arc::new(std::sync::Mutex::new(None));
 
     let transport_a = ChannelTransport {
-        local_name: local_name.clone(),
-        remote_name: remote_name.clone(),
+        local_name: HostName::new(local_node.display_name.clone()),
+        remote_name: HostName::new(remote_node.display_name.clone()),
+        remote_node: remote_node.clone(),
         status: Arc::new(std::sync::Mutex::new(PeerConnectionStatus::Disconnected)),
         backbone_tx: a_to_b_tx,
         backbone_rx: Arc::new(std::sync::Mutex::new(Some(b_to_a_rx))),
@@ -303,8 +317,9 @@ pub fn channel_transport_pair(local_name: HostName, remote_name: HostName) -> (C
     };
 
     let transport_b = ChannelTransport {
-        local_name: remote_name,
-        remote_name: local_name,
+        local_name: HostName::new(remote_node.display_name.clone()),
+        remote_name: HostName::new(local_node.display_name.clone()),
+        remote_node: local_node,
         status: Arc::new(std::sync::Mutex::new(PeerConnectionStatus::Disconnected)),
         backbone_tx: b_to_a_tx,
         backbone_rx: Arc::new(std::sync::Mutex::new(Some(a_to_b_rx))),
@@ -322,13 +337,13 @@ pub fn channel_transport_pair(local_name: HostName, remote_name: HostName) -> (C
 mod tests {
     use std::path::PathBuf;
 
-    use flotilla_protocol::{PeerDataKind, PeerDataMessage, ProviderData, RepoIdentity, VectorClock};
+    use flotilla_protocol::{NodeId, PeerDataKind, PeerDataMessage, ProviderData, RepoIdentity, VectorClock};
 
     use super::*;
 
     fn test_snapshot_msg(origin: &str, seq: u64) -> PeerWireMessage {
         PeerWireMessage::Data(PeerDataMessage {
-            origin_host: HostName::new(origin),
+            origin_node_id: NodeId::new(origin),
             repo_identity: RepoIdentity { authority: "github.com".into(), path: "owner/repo".into() },
             host_repo_root: Some(PathBuf::from("/repo")),
             clock: VectorClock::default(),
@@ -420,8 +435,8 @@ mod tests {
         sender_a.send(test_snapshot_msg("alpha", 1)).await.expect("A send");
         let msg = rx_b.recv().await.expect("B should receive message from A");
         match msg {
-            PeerWireMessage::Data(PeerDataMessage { origin_host, kind: PeerDataKind::Snapshot { seq, .. }, .. }) => {
-                assert_eq!(origin_host, HostName::new("alpha"));
+            PeerWireMessage::Data(PeerDataMessage { origin_node_id, kind: PeerDataKind::Snapshot { seq, .. }, .. }) => {
+                assert_eq!(origin_node_id, NodeId::new("alpha"));
                 assert_eq!(seq, 1);
             }
             other => panic!("unexpected message: {other:?}"),
@@ -431,8 +446,8 @@ mod tests {
         sender_b.send(test_snapshot_msg("beta", 2)).await.expect("B send");
         let msg = rx_a.recv().await.expect("A should receive message from B");
         match msg {
-            PeerWireMessage::Data(PeerDataMessage { origin_host, kind: PeerDataKind::Snapshot { seq, .. }, .. }) => {
-                assert_eq!(origin_host, HostName::new("beta"));
+            PeerWireMessage::Data(PeerDataMessage { origin_node_id, kind: PeerDataKind::Snapshot { seq, .. }, .. }) => {
+                assert_eq!(origin_node_id, NodeId::new("beta"));
                 assert_eq!(seq, 2);
             }
             other => panic!("unexpected message: {other:?}"),

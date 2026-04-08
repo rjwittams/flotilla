@@ -1,8 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use flotilla_protocol::{
-    CategoryLabels, ChangeRequest, ChangeRequestStatus, Checkout, CheckoutRef, CorrelationKey, HostName, HostPath, ProvisioningTarget,
-    RepoLabels, RepoSelector,
+    qualified_path::HostId, CategoryLabels, ChangeRequest, ChangeRequestStatus, Checkout, CheckoutRef, CorrelationKey, EnvironmentId,
+    HostName, HostPath, NodeId, NodeInfo, ProvisioningTarget, RepoLabels, RepoSelector,
 };
 
 use super::*;
@@ -15,12 +15,36 @@ use crate::app::{
 
 fn insert_local_host(model: &mut super::super::TuiModel, name: &str) {
     let host_name = HostName::new(name);
-    model.hosts.insert(host_name.clone(), TuiHostState {
+    let environment_id = EnvironmentId::host(HostId::new(format!("{name}-env")));
+    model.hosts.insert(environment_id.clone(), TuiHostState {
+        environment_id: environment_id.clone(),
         host_name: host_name.clone(),
         is_local: true,
         status: PeerStatus::Connected,
         summary: flotilla_protocol::HostSummary {
-            host_name,
+            environment_id,
+            host_name: Some(host_name.clone()),
+            node: NodeInfo::new(NodeId::new(name), name),
+            system: flotilla_protocol::SystemInfo::default(),
+            inventory: flotilla_protocol::ToolInventory::default(),
+            providers: vec![],
+            environments: vec![],
+        },
+    });
+}
+
+fn insert_remote_host(model: &mut super::super::TuiModel, host_name: &str, node_id: &str) {
+    let host_name = HostName::new(host_name);
+    let environment_id = EnvironmentId::host(HostId::new(format!("{node_id}-env")));
+    model.hosts.insert(environment_id.clone(), TuiHostState {
+        environment_id: environment_id.clone(),
+        host_name: host_name.clone(),
+        is_local: false,
+        status: PeerStatus::Connected,
+        summary: flotilla_protocol::HostSummary {
+            environment_id,
+            host_name: Some(host_name.clone()),
+            node: NodeInfo::new(NodeId::new(node_id), host_name.to_string()),
             system: flotilla_protocol::SystemInfo::default(),
             inventory: flotilla_protocol::ToolInventory::default(),
             providers: vec![],
@@ -371,8 +395,8 @@ fn resolve_create_workspace() {
     let cmd = Intent::CreateWorkspace.resolve(&item, &app);
     assert!(cmd.is_some());
     match cmd.unwrap() {
-        Command { host, action: CommandAction::CreateWorkspaceForCheckout { checkout_path, label }, .. } => {
-            assert_eq!(host, None);
+        Command { node_id, action: CommandAction::CreateWorkspaceForCheckout { checkout_path, label }, .. } => {
+            assert_eq!(node_id, None);
             assert_eq!(checkout_path, PathBuf::from("/tmp/feat-x"));
             assert_eq!(label, "feat/x");
         }
@@ -385,14 +409,14 @@ fn resolve_create_workspace_on_remote_checkout_routes_single_command_to_remote_h
     let mut app = stub_app();
     insert_local_host(&mut app.model, &HostName::local().to_string());
     let mut item = checkout_item("feat/x", "/tmp/feat-x", false);
-    item.host = HostName::new("remote-a");
+    item.node_id = NodeId::new("remote-a");
     item.checkout = Some(CheckoutRef::from_host_path(HostPath::new(HostName::new("remote-a"), PathBuf::from("/remote/feat-x")), false));
 
     let cmd = Intent::CreateWorkspace.resolve(&item, &app).unwrap();
 
     match cmd {
-        Command { host, action: CommandAction::CreateWorkspaceForCheckout { checkout_path, label }, .. } => {
-            assert_eq!(host, Some(HostName::new("remote-a")));
+        Command { node_id, action: CommandAction::CreateWorkspaceForCheckout { checkout_path, label }, .. } => {
+            assert_eq!(node_id, Some(NodeId::new("remote-a")));
             assert_eq!(checkout_path, PathBuf::from("/remote/feat-x"));
             assert_eq!(label, "feat/x");
         }
@@ -495,12 +519,13 @@ fn resolve_create_worktree_and_workspace_pr_item() {
 #[test]
 fn resolve_create_worktree_and_workspace_uses_selected_target_host() {
     let mut app = stub_app();
+    insert_remote_host(&mut app.model, "remote-a", "remote-a");
     app.ui.provisioning_target = ProvisioningTarget::Host { host: HostName::new("remote-a") };
     let item = remote_branch_item("feat/remote");
 
     let cmd = Intent::CreateCheckout.resolve(&item, &app).unwrap();
 
-    assert_eq!(cmd.host, Some(HostName::new("remote-a")));
+    assert_eq!(cmd.node_id, Some(NodeId::new("remote-a")));
 }
 
 #[test]
@@ -553,12 +578,12 @@ fn resolve_open_pr() {
     insert_local_host(&mut app.model, &HostName::local().to_string());
     app.ui.provisioning_target = ProvisioningTarget::Host { host: HostName::new("remote-a") };
     let mut item = pr_item("123");
-    item.host = HostName::new("remote-b");
+    item.node_id = NodeId::new("remote-b");
     let cmd = Intent::OpenChangeRequest.resolve(&item, &app);
     assert!(cmd.is_some());
     match cmd.unwrap() {
-        Command { host, action: CommandAction::OpenChangeRequest { id }, .. } => {
-            assert_eq!(host, None);
+        Command { node_id, action: CommandAction::OpenChangeRequest { id }, .. } => {
+            assert_eq!(node_id, None);
             assert_eq!(id, "123");
         }
         other => panic!("expected OpenChangeRequest, got {other:?}"),
@@ -569,11 +594,11 @@ fn resolve_open_pr() {
 fn resolve_open_pr_on_remote_only_repo_routes_to_remote_host_by_identity() {
     let app = remote_only_app();
     let mut item = pr_item("123");
-    item.host = HostName::new("desktop");
+    item.node_id = NodeId::new("desktop");
     let cmd = Intent::OpenChangeRequest.resolve(&item, &app).expect("command");
     match cmd {
-        Command { host, context_repo, action: CommandAction::OpenChangeRequest { id }, .. } => {
-            assert_eq!(host, Some(HostName::new("desktop")));
+        Command { node_id, context_repo, action: CommandAction::OpenChangeRequest { id }, .. } => {
+            assert_eq!(node_id, Some(NodeId::new("desktop")));
             assert_eq!(context_repo, Some(RepoSelector::Identity(app.model.active_repo_identity().clone())));
             assert_eq!(id, "123");
         }
@@ -608,12 +633,12 @@ fn resolve_open_issue() {
 fn resolve_open_issue_on_remote_only_repo_routes_to_remote_host_by_identity() {
     let app = remote_only_app();
     let mut item = bare_item();
-    item.host = HostName::new("desktop");
+    item.node_id = NodeId::new("desktop");
     item.issue_keys = vec!["7".into(), "8".into()];
     let cmd = Intent::OpenIssue.resolve(&item, &app).expect("command");
     match cmd {
-        Command { host, context_repo, action: CommandAction::OpenIssue { id }, .. } => {
-            assert_eq!(host, Some(HostName::new("desktop")));
+        Command { node_id, context_repo, action: CommandAction::OpenIssue { id }, .. } => {
+            assert_eq!(node_id, Some(NodeId::new("desktop")));
             assert_eq!(context_repo, Some(RepoSelector::Identity(app.model.active_repo_identity().clone())));
             assert_eq!(id, "7");
         }
@@ -672,8 +697,8 @@ fn resolve_archive_session() {
     let cmd = Intent::ArchiveSession.resolve(&item, &app);
     assert!(cmd.is_some());
     match cmd.unwrap() {
-        Command { host, action: CommandAction::ArchiveSession { session_id }, .. } => {
-            assert_eq!(host, None);
+        Command { node_id, action: CommandAction::ArchiveSession { session_id }, .. } => {
+            assert_eq!(node_id, None);
             assert_eq!(session_id, "sess-99");
         }
         other => panic!("expected ArchiveSession, got {other:?}"),
@@ -684,11 +709,11 @@ fn resolve_archive_session() {
 fn resolve_archive_session_on_remote_only_repo_routes_to_remote_host_by_identity() {
     let app = remote_only_app();
     let mut item = session_item("sess-99");
-    item.host = HostName::new("desktop");
+    item.node_id = NodeId::new("desktop");
     let cmd = Intent::ArchiveSession.resolve(&item, &app).expect("command");
     match cmd {
-        Command { host, context_repo, action: CommandAction::ArchiveSession { session_id }, .. } => {
-            assert_eq!(host, Some(HostName::new("desktop")));
+        Command { node_id, context_repo, action: CommandAction::ArchiveSession { session_id }, .. } => {
+            assert_eq!(node_id, Some(NodeId::new("desktop")));
             assert_eq!(context_repo, Some(RepoSelector::Identity(app.model.active_repo_identity().clone())));
             assert_eq!(session_id, "sess-99");
         }
@@ -841,15 +866,15 @@ fn resolve_link_issues_to_pr_on_remote_only_repo_routes_to_remote_host_by_identi
     let app = remote_only_app_with_providers();
 
     let mut item = checkout_item("feat/x", "/srv/repo.feat-x", false);
-    item.host = HostName::new("desktop");
+    item.node_id = NodeId::new("desktop");
     item.checkout = Some(CheckoutRef::from_host_path(HostPath::new(HostName::new("desktop"), PathBuf::from("/srv/repo.feat-x")), false));
     item.change_request_key = Some("42".into());
     item.issue_keys = vec!["10".into(), "20".into()];
 
     let cmd = Intent::LinkIssuesToChangeRequest.resolve(&item, &app).expect("command");
     match cmd {
-        Command { host, context_repo, action: CommandAction::LinkIssuesToChangeRequest { change_request_id, issue_ids }, .. } => {
-            assert_eq!(host, Some(HostName::new("desktop")));
+        Command { node_id, context_repo, action: CommandAction::LinkIssuesToChangeRequest { change_request_id, issue_ids }, .. } => {
+            assert_eq!(node_id, Some(NodeId::new("desktop")));
             assert_eq!(context_repo, Some(RepoSelector::Identity(app.model.active_repo_identity().clone())));
             assert_eq!(change_request_id, "42");
             assert_eq!(issue_ids, vec!["20".to_string()]);
@@ -876,12 +901,12 @@ fn resolve_link_issues_to_pr_none_when_all_issues_already_linked() {
 fn resolve_close_change_request_on_remote_only_repo_routes_to_remote_host_by_identity() {
     let app = remote_only_app_with_providers();
     let mut item = pr_item("42");
-    item.host = HostName::new("desktop");
+    item.node_id = NodeId::new("desktop");
 
     let cmd = Intent::CloseChangeRequest.resolve(&item, &app).expect("command");
     match cmd {
-        Command { host, context_repo, action: CommandAction::CloseChangeRequest { id }, .. } => {
-            assert_eq!(host, Some(HostName::new("desktop")));
+        Command { node_id, context_repo, action: CommandAction::CloseChangeRequest { id }, .. } => {
+            assert_eq!(node_id, Some(NodeId::new("desktop")));
             assert_eq!(context_repo, Some(RepoSelector::Identity(app.model.active_repo_identity().clone())));
             assert_eq!(id, "42");
         }
@@ -1065,44 +1090,44 @@ fn requires_local_host_false_for_non_filesystem_intents() {
 #[test]
 fn allowed_for_host_local_item_with_known_host() {
     let item = checkout_item("feat/x", "/tmp/feat-x", false);
-    let my_host = Some(HostName::local());
+    let my_node_id = Some(item.node_id.clone());
     // Local item, local host -> all intents allowed
     for intent in Intent::all_in_menu_order() {
-        assert!(intent.is_allowed_for_host(&item, &my_host), "{intent:?} should be allowed for local item");
+        assert!(intent.is_allowed_for_host(&item, &my_node_id), "{intent:?} should be allowed for local item");
     }
 }
 
 #[test]
 fn allowed_for_host_remote_item_blocks_filesystem_intents() {
     let mut item = checkout_item("feat/x", "/tmp/feat-x", false);
-    item.host = HostName::new("remote-host");
-    let my_host = Some(HostName::local());
+    item.node_id = NodeId::new("remote-host");
+    let my_node_id = Some(NodeId::new("node-local-test"));
 
     // Local-only filesystem intents should be blocked
-    assert!(!Intent::SwitchToWorkspace.is_allowed_for_host(&item, &my_host));
-    assert!(!Intent::TeleportSession.is_allowed_for_host(&item, &my_host));
+    assert!(!Intent::SwitchToWorkspace.is_allowed_for_host(&item, &my_node_id));
+    assert!(!Intent::TeleportSession.is_allowed_for_host(&item, &my_node_id));
 
     // Remote-executable intents should remain allowed
-    assert!(Intent::RemoveCheckout.is_allowed_for_host(&item, &my_host));
-    assert!(Intent::CreateWorkspace.is_allowed_for_host(&item, &my_host));
-    assert!(Intent::CreateCheckout.is_allowed_for_host(&item, &my_host));
-    assert!(Intent::OpenChangeRequest.is_allowed_for_host(&item, &my_host));
-    assert!(Intent::OpenIssue.is_allowed_for_host(&item, &my_host));
-    assert!(Intent::GenerateBranchName.is_allowed_for_host(&item, &my_host));
-    assert!(Intent::LinkIssuesToChangeRequest.is_allowed_for_host(&item, &my_host));
-    assert!(Intent::ArchiveSession.is_allowed_for_host(&item, &my_host));
-    assert!(Intent::CloseChangeRequest.is_allowed_for_host(&item, &my_host));
+    assert!(Intent::RemoveCheckout.is_allowed_for_host(&item, &my_node_id));
+    assert!(Intent::CreateWorkspace.is_allowed_for_host(&item, &my_node_id));
+    assert!(Intent::CreateCheckout.is_allowed_for_host(&item, &my_node_id));
+    assert!(Intent::OpenChangeRequest.is_allowed_for_host(&item, &my_node_id));
+    assert!(Intent::OpenIssue.is_allowed_for_host(&item, &my_node_id));
+    assert!(Intent::GenerateBranchName.is_allowed_for_host(&item, &my_node_id));
+    assert!(Intent::LinkIssuesToChangeRequest.is_allowed_for_host(&item, &my_node_id));
+    assert!(Intent::ArchiveSession.is_allowed_for_host(&item, &my_node_id));
+    assert!(Intent::CloseChangeRequest.is_allowed_for_host(&item, &my_node_id));
 }
 
 #[test]
 fn allowed_for_host_unknown_host_treats_all_as_local() {
     let mut item = checkout_item("feat/x", "/tmp/feat-x", false);
-    item.host = HostName::new("remote-host");
-    let my_host: Option<HostName> = None;
+    item.node_id = NodeId::new("remote-host");
+    let my_node_id: Option<NodeId> = None;
 
     // When my_host is unknown, treat everything as local
     for intent in Intent::all_in_menu_order() {
-        assert!(intent.is_allowed_for_host(&item, &my_host), "{intent:?} should be allowed when my_host is unknown");
+        assert!(intent.is_allowed_for_host(&item, &my_node_id), "{intent:?} should be allowed when my_host is unknown");
     }
 }
 
@@ -1110,16 +1135,16 @@ fn allowed_for_host_unknown_host_treats_all_as_local() {
 fn remote_item_action_menu_excludes_local_only_intents() {
     // A rich remote item that would normally have many intents
     let mut item = checkout_item("feat/x", "/tmp/feat-x", false);
-    item.host = HostName::new("remote-host");
+    item.node_id = NodeId::new("remote-host");
     item.change_request_key = Some("42".into());
     item.session_key = Some("sess-1".into());
     item.issue_keys = vec!["7".into()];
     item.workspace_refs = vec!["ws-1".into()];
 
-    let my_host = Some(HostName::local());
+    let my_node_id = Some(NodeId::new("node-local-test"));
 
     let available: Vec<_> =
-        Intent::all_in_menu_order().iter().filter(|i| i.is_available(&item) && i.is_allowed_for_host(&item, &my_host)).collect();
+        Intent::all_in_menu_order().iter().filter(|i| i.is_available(&item) && i.is_allowed_for_host(&item, &my_node_id)).collect();
 
     // Local-only intents should be excluded
     assert!(!available.contains(&&Intent::SwitchToWorkspace));

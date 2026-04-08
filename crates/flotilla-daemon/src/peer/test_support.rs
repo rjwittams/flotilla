@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use flotilla_protocol::{GoodbyeReason, HostName, PeerDataMessage, PeerWireMessage};
+use flotilla_protocol::{ConfigLabel, GoodbyeReason, HostName, NodeId, NodeInfo, PeerDataMessage, PeerWireMessage};
 use tokio::sync::Notify;
 
 use crate::peer::{
@@ -11,7 +11,7 @@ use crate::peer::{
 };
 
 #[doc(hidden)]
-pub fn ensure_test_connection_generation<F>(mgr: &mut PeerManager, origin: &HostName, mut make_sender: F) -> u64
+pub fn ensure_test_connection_generation<F>(mgr: &mut PeerManager, origin: &NodeId, mut make_sender: F) -> u64
 where
     F: FnMut() -> Arc<dyn PeerSender>,
 {
@@ -39,16 +39,16 @@ pub async fn handle_test_peer_data<F>(mgr: &mut PeerManager, msg: PeerDataMessag
 where
     F: FnMut() -> Arc<dyn PeerSender>,
 {
-    let origin = msg.origin_host.clone();
+    let origin = msg.origin_node_id.clone();
     let generation = ensure_test_connection_generation(mgr, &origin, make_sender);
     mgr.handle_inbound(InboundPeerEnvelope { msg: PeerWireMessage::Data(msg), connection_generation: generation, connection_peer: origin })
         .await
 }
 
 pub struct TestPeer {
-    pub name: HostName,
+    pub name: NodeId,
     pub manager: PeerManager,
-    receivers: Vec<(HostName, u64, tokio::sync::mpsc::Receiver<PeerWireMessage>)>,
+    receivers: Vec<(NodeId, u64, tokio::sync::mpsc::Receiver<PeerWireMessage>)>,
 }
 
 pub struct TestNetwork {
@@ -67,31 +67,42 @@ impl TestNetwork {
     }
 
     pub fn add_peer(&mut self, name: &str) -> usize {
-        let host = HostName::new(name);
-        let manager = PeerManager::new(host.clone());
+        let node = NodeId::new(name);
+        let manager = PeerManager::new(node.clone());
         let idx = self.peers.len();
-        self.peers.push(TestPeer { name: host, manager, receivers: Vec::new() });
+        self.peers.push(TestPeer { name: node, manager, receivers: Vec::new() });
         idx
     }
 
     pub fn connect(&mut self, a: usize, b: usize) {
         let name_a = self.peers[a].name.clone();
         let name_b = self.peers[b].name.clone();
-        let (transport_a, transport_b) = channel_transport_pair(name_a.clone(), name_b.clone());
-        self.peers[a].manager.add_peer(name_b, Box::new(transport_a));
-        self.peers[b].manager.add_peer(name_a, Box::new(transport_b));
+        let (transport_a, transport_b) = channel_transport_pair(HostName::new(name_a.as_str()), HostName::new(name_b.as_str()));
+        self.peers[a].manager.add_configured_target(
+            ConfigLabel(format!("to-{}", name_b)),
+            HostName::new(name_b.as_str()),
+            None,
+            Box::new(transport_a),
+        );
+        self.peers[b].manager.add_configured_target(
+            ConfigLabel(format!("to-{}", name_a)),
+            HostName::new(name_a.as_str()),
+            None,
+            Box::new(transport_b),
+        );
     }
 
     pub async fn start(&mut self) {
         for peer in &mut self.peers {
             let connections = peer.manager.connect_all().await;
-            peer.receivers = connections;
+            peer.receivers =
+                connections.into_iter().map(|connection| (connection.node.node_id, connection.generation, connection.inbound_rx)).collect();
         }
     }
 
     /// Inject a local data message into a peer's outbound path.
     /// Calls relay() to forward to connected peers via their senders.
-    /// The msg.origin_host should match the peer's name.
+    /// The msg.origin_node_id should match the peer's name.
     pub async fn inject_local_data(&mut self, peer_idx: usize, msg: PeerDataMessage) {
         let peer = &self.peers[peer_idx];
         peer.manager.relay(&peer.name, &msg).await;
@@ -118,9 +129,9 @@ impl TestNetwork {
 
         for (connection_peer, generation, msg) in messages {
             if let PeerWireMessage::Data(ref data_msg) = msg {
-                // Use origin_host (not connection_peer) to match production
+                // Use origin_node_id (not connection_peer) to match production
                 // semantics in server.rs — relay skips the original author.
-                peer.manager.relay(&data_msg.origin_host, data_msg).await;
+                peer.manager.relay(&data_msg.origin_node_id, data_msg).await;
             }
 
             let env = InboundPeerEnvelope { msg, connection_generation: generation, connection_peer };
@@ -218,6 +229,7 @@ impl PeerSender for BlockingPeerSender {
 pub struct MockTransport {
     pub status: PeerConnectionStatus,
     sender: Option<Arc<dyn PeerSender>>,
+    remote_node: Option<NodeInfo>,
 }
 
 impl Default for MockTransport {
@@ -228,13 +240,18 @@ impl Default for MockTransport {
 
 impl MockTransport {
     pub fn new() -> Self {
-        Self { status: PeerConnectionStatus::Connected, sender: None }
+        Self { status: PeerConnectionStatus::Connected, sender: None, remote_node: None }
     }
 
     pub fn with_sender() -> (Self, Arc<Mutex<Vec<PeerWireMessage>>>) {
         let (mock_sender, sent) = MockPeerSender::new();
         let sender: Arc<dyn PeerSender> = Arc::new(mock_sender);
-        (Self { status: PeerConnectionStatus::Connected, sender: Some(sender) }, sent)
+        (Self { status: PeerConnectionStatus::Connected, sender: Some(sender), remote_node: None }, sent)
+    }
+
+    pub fn with_remote_node(mut self, node: NodeInfo) -> Self {
+        self.remote_node = Some(node);
+        self
     }
 }
 
@@ -261,6 +278,10 @@ impl PeerTransport for MockTransport {
 
     fn sender(&self) -> Option<Arc<dyn PeerSender>> {
         self.sender.clone()
+    }
+
+    fn remote_node_info(&self) -> Option<NodeInfo> {
+        self.remote_node.clone()
     }
 }
 

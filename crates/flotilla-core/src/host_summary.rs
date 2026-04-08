@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, fs, path::Path};
 
-use flotilla_protocol::{HostEnvironment, HostName, HostProviderStatus, HostSummary, SystemInfo};
+use flotilla_protocol::{EnvironmentId, HostEnvironment, HostName, HostProviderStatus, HostSummary, NodeId, NodeInfo, SystemInfo};
 use sysinfo::System;
 
 use crate::{
@@ -11,7 +11,9 @@ use crate::{
 };
 
 pub async fn build_local_host_summary(
+    node_id: &NodeId,
     host_name: &HostName,
+    environment_id: EnvironmentId,
     environment_manager: &EnvironmentManager,
     providers: Vec<HostProviderStatus>,
     env: &dyn EnvVars,
@@ -20,7 +22,9 @@ pub async fn build_local_host_summary(
     let environments = environment_manager.host_summary_environments().await;
 
     HostSummary {
-        host_name: host_name.clone(),
+        environment_id,
+        host_name: Some(host_name.clone()),
+        node: NodeInfo::new(node_id.clone(), host_name.to_string()),
         system: collect_system_info(env),
         inventory: inventory_from_bag(&host_bag),
         providers,
@@ -180,7 +184,15 @@ mod tests {
         );
         let env = TestEnvVars;
 
-        let summary = build_local_host_summary(&host_name, &manager, vec![], &env).await;
+        let summary = build_local_host_summary(
+            &NodeId::new("test-node"),
+            &host_name,
+            EnvironmentId::host(HostId::new("test-local-host-id")),
+            &manager,
+            vec![],
+            &env,
+        )
+        .await;
 
         assert_eq!(summary.inventory.binaries.len(), 1);
         assert_eq!(summary.inventory.binaries[0].name, "git");
@@ -209,7 +221,15 @@ mod tests {
             .register_provisioned_environment(EnvironmentId::new("env-1"), handle, EnvironmentBag::new(), None)
             .expect("register provisioned environment");
 
-        let summary = build_local_host_summary(&host_name, &manager, vec![], &env).await;
+        let summary = build_local_host_summary(
+            &NodeId::new("test-node"),
+            &host_name,
+            EnvironmentId::host(HostId::new("test-local-host-id")),
+            &manager,
+            vec![],
+            &env,
+        )
+        .await;
 
         assert_eq!(summary.environments.len(), 1);
 
@@ -258,7 +278,15 @@ mod tests {
             .register_provisioned_environment(EnvironmentId::new("env-1"), handle, EnvironmentBag::new(), None)
             .expect("register provisioned environment");
 
-        let summary = build_local_host_summary(&host_name, &manager, vec![], &env).await;
+        let summary = build_local_host_summary(
+            &NodeId::new("test-node"),
+            &host_name,
+            EnvironmentId::host(HostId::new("test-local-host-id")),
+            &manager,
+            vec![],
+            &env,
+        )
+        .await;
 
         assert_eq!(summary.environments.len(), 1);
         match &summary.environments[0] {

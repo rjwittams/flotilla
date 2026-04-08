@@ -1,3 +1,4 @@
+use flotilla_protocol::NodeId;
 use tempfile::tempdir;
 
 use super::*;
@@ -336,6 +337,7 @@ fn parse_hosts_config() {
 [hosts.desktop]
 hostname = "desktop.local"
 expected_host_name = "desktop"
+expected_node_id = "1b4d1d6b-f7b5-4c1c-8f61-6f2d8e4c91ab"
 user = "robert"
 daemon_socket = "/run/user/1000/flotilla/daemon.sock"
 
@@ -348,6 +350,7 @@ daemon_socket = "/home/robert/.config/flotilla/daemon.sock"
     assert_eq!(config.hosts.len(), 2);
     assert_eq!(config.hosts["desktop"].hostname, "desktop.local");
     assert_eq!(config.hosts["desktop"].expected_host_name, "desktop");
+    assert_eq!(config.hosts["desktop"].expected_node_id, Some(NodeId::new("1b4d1d6b-f7b5-4c1c-8f61-6f2d8e4c91ab")));
     assert_eq!(config.hosts["desktop"].user, Some("robert".into()));
     assert_eq!(config.hosts["cloud"].expected_host_name, "cloud");
     assert_eq!(config.hosts["cloud"].user, None);
@@ -364,16 +367,19 @@ daemon_socket = "/run/user/1000/flotilla/daemon.sock"
     assert_eq!(config.hosts.len(), 1);
     assert_eq!(config.hosts["desktop"].hostname, "desktop.local");
     assert_eq!(config.hosts["desktop"].expected_host_name, "desktop");
+    assert_eq!(config.hosts["desktop"].expected_node_id, None);
 }
 
 #[test]
 fn parse_daemon_config_follower() {
     let toml = r#"
 follower = true
+machine_id = "my-machine"
 host_name = "my-desktop"
 "#;
     let config: DaemonConfig = toml::from_str(toml).unwrap();
     assert!(config.follower);
+    assert_eq!(config.machine_id, Some("my-machine".into()));
     assert_eq!(config.host_name, Some("my-desktop".into()));
     assert!(config.environments.is_empty());
 }
@@ -382,6 +388,7 @@ host_name = "my-desktop"
 fn parse_daemon_config_defaults() {
     let config: DaemonConfig = toml::from_str("").unwrap();
     assert!(!config.follower);
+    assert_eq!(config.machine_id, None);
     assert_eq!(config.host_name, None);
     assert!(config.environments.is_empty());
 }
@@ -432,7 +439,7 @@ fn load_hosts_from_file() {
     let base = dir.path();
     std::fs::write(
         base.join("hosts.toml"),
-        "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\ndaemon_socket = \"/tmp/d.sock\"\n",
+        "[hosts.desktop]\nhostname = \"desktop.local\"\nexpected_host_name = \"desktop\"\nexpected_node_id = \"1b4d1d6b-f7b5-4c1c-8f61-6f2d8e4c91ab\"\ndaemon_socket = \"/tmp/d.sock\"\n",
     )
     .unwrap();
     let store = ConfigStore::with_base(base);
@@ -440,6 +447,7 @@ fn load_hosts_from_file() {
     assert_eq!(config.hosts.len(), 1);
     assert_eq!(config.hosts["desktop"].hostname, "desktop.local");
     assert_eq!(config.hosts["desktop"].expected_host_name, "desktop");
+    assert_eq!(config.hosts["desktop"].expected_node_id, Some(NodeId::new("1b4d1d6b-f7b5-4c1c-8f61-6f2d8e4c91ab")));
 }
 
 #[test]
@@ -469,10 +477,11 @@ fn load_daemon_config_missing_file_returns_default() {
 fn load_daemon_config_from_file() {
     let dir = tempdir().unwrap();
     let base = dir.path();
-    std::fs::write(base.join("daemon.toml"), "follower = true\nhost_name = \"my-host\"\n").unwrap();
+    std::fs::write(base.join("daemon.toml"), "follower = true\nmachine_id = \"my-machine\"\nhost_name = \"my-host\"\n").unwrap();
     let store = ConfigStore::with_base(base);
     let config = store.load_daemon_config().unwrap();
     assert!(config.follower);
+    assert_eq!(config.machine_id, Some("my-machine".into()));
     assert_eq!(config.host_name, Some("my-host".into()));
 }
 

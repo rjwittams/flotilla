@@ -92,6 +92,10 @@ impl EnvironmentManager {
         &self.local_environment_id
     }
 
+    pub fn local_host_id(&self) -> &HostId {
+        &self.local_host_id
+    }
+
     pub fn local_environment_bag(&self) -> EnvironmentBag {
         self.environment_bag(&self.local_environment_id).expect("local direct environment must be registered in EnvironmentManager")
     }
@@ -224,7 +228,7 @@ impl EnvironmentManager {
             match state {
                 ManagedEnvironmentKind::Direct(state) => {
                     environments.push(EnvironmentInfo::Direct {
-                        id: env_id,
+                        id: state.host_id.as_ref().map(|host_id| EnvironmentId::host(host_id.clone())).unwrap_or(env_id),
                         host_id: state.host_id.clone(),
                         display_name: state.display_name.clone(),
                         status: EnvironmentStatus::Running,
@@ -728,13 +732,17 @@ mod tests {
 
         assert_eq!(
             ids,
-            vec![local_environment_id.clone(), provisioned_environment_id.clone(), ssh_environment_id.clone()],
-            "visible environments should be sorted deterministically by id (with direct environments ordered before provisioned only when ids match)",
+            vec![
+                EnvironmentId::host(HostId::new("local-host-id")),
+                EnvironmentId::host(HostId::new("ssh-host-id")),
+                provisioned_environment_id.clone(),
+            ],
+            "visible environments should be sorted deterministically by canonical environment id",
         );
 
         match &visible[0] {
             EnvironmentInfo::Direct { id, host_id, display_name, status } => {
-                assert_eq!(id, &local_environment_id);
+                assert_eq!(id, &EnvironmentId::host(HostId::new("local-host-id")));
                 assert_eq!(host_id.as_ref().map(HostId::as_str), Some("local-host-id"));
                 assert_eq!(display_name.as_deref(), Some("local-dev"));
                 assert_eq!(status, &EnvironmentStatus::Running);
@@ -743,6 +751,16 @@ mod tests {
         }
 
         match &visible[1] {
+            EnvironmentInfo::Direct { id, host_id, display_name, status } => {
+                assert_eq!(id, &EnvironmentId::host(HostId::new("ssh-host-id")));
+                assert_eq!(host_id.as_ref().map(HostId::as_str), Some("ssh-host-id"));
+                assert_eq!(display_name.as_deref(), Some("ssh-dev"));
+                assert_eq!(status, &EnvironmentStatus::Running);
+            }
+            other => panic!("expected ssh direct environment, got {other:?}"),
+        }
+
+        match &visible[2] {
             EnvironmentInfo::Provisioned { id, display_name, image, status } => {
                 assert_eq!(id, &provisioned_environment_id);
                 assert_eq!(display_name.as_deref(), Some("container-dev"));
@@ -751,22 +769,12 @@ mod tests {
             }
             other => panic!("expected provisioned environment, got {other:?}"),
         }
-
-        match &visible[2] {
-            EnvironmentInfo::Direct { id, host_id, display_name, status } => {
-                assert_eq!(id, &ssh_environment_id);
-                assert_eq!(host_id.as_ref().map(HostId::as_str), Some("ssh-host-id"));
-                assert_eq!(display_name.as_deref(), Some("ssh-dev"));
-                assert_eq!(status, &EnvironmentStatus::Running);
-            }
-            other => panic!("expected ssh direct environment, got {other:?}"),
-        }
     }
 
     #[test]
     fn direct_environment_serialization_omits_image_metadata() {
         let info = EnvironmentInfo::Direct {
-            id: EnvironmentId::new("direct-env"),
+            id: EnvironmentId::host(HostId::new("direct-host-id")),
             host_id: Some(HostId::new("direct-host-id")),
             display_name: Some("ssh-dev".to_string()),
             status: EnvironmentStatus::Running,
@@ -776,7 +784,7 @@ mod tests {
         let obj = json.as_object().expect("direct environment should serialize as a JSON object");
 
         assert_eq!(obj.get("kind").and_then(|value| value.as_str()), Some("direct"));
-        assert_eq!(obj.get("id").and_then(|value| value.as_str()), Some("direct-env"));
+        assert_eq!(obj.get("id").and_then(|value| value.as_str()), Some("host:direct-host-id"));
         assert_eq!(obj.get("host_id").and_then(|value| value.as_str()), Some("direct-host-id"));
         assert!(obj.get("image").is_none(), "direct environments must not publish image metadata");
     }

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use flotilla_protocol::{HostName, RepoDelta, RepoIdentity, RepoSnapshot};
+use flotilla_protocol::{qualified_path::HostId, EnvironmentId, NodeId, NodeInfo, RepoDelta, RepoIdentity, RepoSnapshot};
 use flotilla_transport::message::{message_session_pair, MessageSession};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -33,7 +33,7 @@ fn make_snapshot(repo: &Path, seq: u64) -> RepoSnapshot {
         seq,
         repo_identity: repo_identity(),
         repo: Some(repo.to_path_buf()),
-        host_name: flotilla_protocol::HostName::new("test-host"),
+        node_id: NodeId::new("test-node"),
         work_items: vec![],
         providers: flotilla_protocol::ProviderData::default(),
         provider_health: HashMap::new(),
@@ -96,7 +96,10 @@ async fn session_backed_daemon_sends_requests_and_receives_responses() {
         .write(Message::Response {
             id,
             response: Box::new(ResponseResult::Ok {
-                response: Box::new(Response::GetTopology(TopologyResponse { local_host: HostName::new("local"), routes: vec![] })),
+                response: Box::new(Response::GetTopology(TopologyResponse {
+                    local_node: NodeInfo::new(NodeId::new("local"), "Local"),
+                    routes: vec![],
+                })),
             }),
         })
         .await
@@ -118,7 +121,7 @@ async fn session_backed_daemon_streams_events_to_subscribers() {
         .write(Message::Event {
             event: Box::new(DaemonEvent::CommandStarted {
                 command_id: 99,
-                host: HostName::new("remote"),
+                node_id: NodeId::new("remote-node"),
                 repo_identity: repo_identity.clone(),
                 repo: Some(repo.clone()),
                 description: "from session".into(),
@@ -469,7 +472,7 @@ async fn handle_event_forwards_command_started() {
     handle_event(
         DaemonEvent::CommandStarted {
             command_id: 42,
-            host: flotilla_protocol::HostName::new("test"),
+            node_id: NodeId::new("test-node"),
             repo: Some(PathBuf::from("/tmp/repo")),
             repo_identity: repo_identity(),
             description: "testing".into(),
@@ -496,7 +499,7 @@ async fn handle_event_forwards_command_finished() {
     handle_event(
         DaemonEvent::CommandFinished {
             command_id: 7,
-            host: flotilla_protocol::HostName::new("host"),
+            node_id: NodeId::new("host-node"),
             repo: Some(PathBuf::from("/tmp/repo")),
             repo_identity: repo_identity(),
             result: flotilla_protocol::commands::CommandValue::Ok,
@@ -523,7 +526,7 @@ async fn handle_event_forwards_command_step_update() {
     handle_event(
         DaemonEvent::CommandStepUpdate {
             command_id: 3,
-            host: flotilla_protocol::HostName::new("host"),
+            node_id: NodeId::new("host-node"),
             repo: Some(PathBuf::from("/tmp/repo")),
             repo_identity: repo_identity(),
             step_index: 1,
@@ -551,10 +554,7 @@ async fn handle_event_forwards_peer_status_changed() {
     let (session, pending, next_id, _server) = event_harness();
 
     handle_event(
-        DaemonEvent::PeerStatusChanged {
-            host: flotilla_protocol::HostName::new("peer-1"),
-            status: flotilla_protocol::PeerConnectionState::Connected,
-        },
+        DaemonEvent::PeerStatusChanged { node_id: NodeId::new("peer-1"), status: flotilla_protocol::PeerConnectionState::Connected },
         &local_seqs,
         &recovering,
         &event_tx,
@@ -573,10 +573,10 @@ async fn handle_event_forwards_host_removed_and_tracks_seq() {
     let recovering: Arc<std::sync::Mutex<HashMap<RepoIdentity, Vec<DaemonEvent>>>> = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let (event_tx, mut event_rx) = broadcast::channel(16);
     let (session, pending, next_id, _server) = event_harness();
-    let host = flotilla_protocol::HostName::new("peer-1");
+    let environment_id = EnvironmentId::host(HostId::new("peer-host"));
 
     handle_event(
-        DaemonEvent::HostRemoved { host: host.clone(), seq: 9 },
+        DaemonEvent::HostRemoved { environment_id: environment_id.clone(), seq: 9 },
         &local_seqs,
         &recovering,
         &event_tx,
@@ -587,7 +587,7 @@ async fn handle_event_forwards_host_removed_and_tracks_seq() {
 
     let event = event_rx.try_recv().expect("should receive HostRemoved");
     assert!(matches!(event, DaemonEvent::HostRemoved { seq: 9, .. }));
-    assert_eq!(local_seqs.read().expect("local_seqs read lock").get(&StreamKey::Host { host_name: host }).copied(), Some(9));
+    assert_eq!(local_seqs.read().expect("local_seqs read lock").get(&StreamKey::Host { environment_id }).copied(), Some(9));
 }
 
 // --- RepoRemoved evicts seq and forwards ---
@@ -797,7 +797,7 @@ async fn recover_from_gap_forwards_non_snapshot_replay_events() {
     // Replay includes a non-snapshot event — it should still be forwarded.
     let replay_events = vec![DaemonEvent::CommandStarted {
         command_id: 99,
-        host: flotilla_protocol::HostName::new("test"),
+        node_id: NodeId::new("test-node"),
         repo: Some(repo.clone()),
         repo_identity: repo_identity(),
         description: "replayed".into(),
@@ -859,7 +859,10 @@ fn into_success_response_returns_error_for_protocol_error() {
 #[test]
 fn into_success_response_returns_response_for_success() {
     let response = into_success_response(ResponseResult::Ok {
-        response: Box::new(Response::GetTopology(TopologyResponse { local_host: HostName::new("local"), routes: vec![] })),
+        response: Box::new(Response::GetTopology(TopologyResponse {
+            local_node: NodeInfo::new(NodeId::new("local"), "Local"),
+            routes: vec![],
+        })),
     })
     .expect("should succeed");
     assert!(matches!(response, Response::GetTopology(TopologyResponse { routes, .. }) if routes.is_empty()));

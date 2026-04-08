@@ -22,8 +22,8 @@ use flotilla_daemon::peer::{
     HandleResult, PeerManager, PeerTransport,
 };
 use flotilla_protocol::{
-    qualified_path::QualifiedPath, test_support::TestCheckout, CheckoutTarget, Command, CommandAction, CommandValue, HostName, HostPath,
-    PeerDataKind, PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RepoSelector, VectorClock,
+    qualified_path::QualifiedPath, test_support::TestCheckout, CheckoutTarget, Command, CommandAction, CommandValue, ConfigLabel, HostName,
+    HostPath, NodeId, NodeInfo, PeerDataKind, PeerDataMessage, PeerWireMessage, ProviderData, RepoIdentity, RepoSelector, VectorClock,
 };
 use indexmap::IndexMap;
 
@@ -42,15 +42,27 @@ fn qpath(host: &HostName, path: impl Into<PathBuf>) -> QualifiedPath {
 fn snapshot_msg(origin: &str, seq: u64, data: ProviderData) -> PeerDataMessage {
     let mut clock = VectorClock::default();
     for _ in 0..seq {
-        clock.tick(&HostName::new(origin));
+        clock.tick(&node(origin));
     }
     PeerDataMessage {
-        origin_host: HostName::new(origin),
+        origin_node_id: node(origin),
         repo_identity: test_repo(),
         host_repo_root: Some(PathBuf::from("/home/dev/repo")),
         clock,
         kind: PeerDataKind::Snapshot { data: Box::new(data), seq },
     }
+}
+
+fn node(name: &str) -> NodeId {
+    NodeId::new(format!("node-{name}"))
+}
+
+fn node_info(name: &str) -> NodeInfo {
+    NodeInfo::new(node(name), name)
+}
+
+fn add_configured_transport(mgr: &mut PeerManager, label: &str, expected_host_name: &str, transport: MockTransport) {
+    mgr.add_configured_target(ConfigLabel(label.into()), HostName::new(expected_host_name), None, Box::new(transport));
 }
 
 async fn wait_for_local_checkout(daemon: &Arc<InProcessDaemon>, repo: &std::path::Path, branch: &str) -> ProviderData {
@@ -78,7 +90,7 @@ async fn empty_daemon_with_host(temp: &tempfile::TempDir, host: &str) -> Arc<InP
 
 #[tokio::test]
 async fn peer_manager_stores_snapshot_and_returns_updated() {
-    let mut mgr = PeerManager::new(HostName::new("leader"));
+    let mut mgr = PeerManager::new(node("leader"));
 
     // Build provider data with a checkout from the follower
     let mut follower_data = ProviderData::default();
@@ -94,10 +106,10 @@ async fn peer_manager_stores_snapshot_and_returns_updated() {
 
     // Verify stored data is accessible
     let peer_data = mgr.get_peer_data();
-    let follower_host = HostName::new("follower");
-    assert!(peer_data.contains_key(&follower_host), "peer data should contain follower host");
+    let follower_node = node("follower");
+    assert!(peer_data.contains_key(&follower_node), "peer data should contain follower node");
 
-    let repo_state = &peer_data[&follower_host][&test_repo()];
+    let repo_state = &peer_data[&follower_node][&test_repo()];
     assert_eq!(repo_state.seq, 1);
     assert_eq!(repo_state.host_repo_root, Some(PathBuf::from("/home/dev/repo")));
 
@@ -122,6 +134,7 @@ fn merge_combines_checkouts_from_leader_and_follower() {
 
     // Follower has a checkout on "desktop"
     let peer_host = HostName::new("desktop");
+    let peer_node = node("desktop");
     let peer_data = ProviderData {
         checkouts: IndexMap::from([(
             HostPath::new(peer_host.clone(), "/home/dev/repo/feature").into(),
@@ -130,7 +143,7 @@ fn merge_combines_checkouts_from_leader_and_follower() {
         ..Default::default()
     };
 
-    let merged = merge_provider_data(&local, &local_host, &[(peer_host.clone(), &peer_data)]);
+    let merged = merge_provider_data(&local, &local_host, &node("laptop"), &[(NodeInfo::new(peer_node, peer_host.as_str()), &peer_data)]);
 
     // Both checkouts should be present
     assert_eq!(merged.checkouts.len(), 2);
@@ -155,7 +168,8 @@ async fn peer_manager_to_merge_end_to_end() {
     // merge combines it with leader's local data.
 
     let leader_host = HostName::new("leader");
-    let mut mgr = PeerManager::new(leader_host.clone());
+    let leader_node = node("leader");
+    let mut mgr = PeerManager::new(leader_node.clone());
 
     // Follower sends its checkout data
     let mut follower_data = ProviderData::default();
@@ -173,10 +187,23 @@ async fn peer_manager_to_merge_end_to_end() {
 
     // Collect peer data in the format merge_provider_data expects
     let peer_data = mgr.get_peer_data();
-    let peers: Vec<(HostName, &ProviderData)> =
-        peer_data.iter().flat_map(|(host, repos)| repos.values().map(move |state| (host.clone(), &state.provider_data))).collect();
+    let peers: Vec<(NodeInfo, &ProviderData)> = peer_data
+        .iter()
+        .flat_map(|(node_id, repos)| {
+            repos.values().map(move |state| {
+                let display_name = state
+                    .provider_data
+                    .checkouts
+                    .keys()
+                    .find_map(|path| path.host_name())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| node_id.to_string());
+                (NodeInfo::new(node_id.clone(), display_name), &state.provider_data)
+            })
+        })
+        .collect();
 
-    let merged = merge_provider_data(&local_data, &leader_host, &peers);
+    let merged = merge_provider_data(&local_data, &leader_host, &leader_node, &peers);
 
     // Should contain checkouts from both hosts
     assert_eq!(merged.checkouts.len(), 2);
@@ -217,13 +244,13 @@ async fn daemon_snapshot_has_correct_host_attribution() {
     .await
     .expect("timeout waiting for snapshot");
 
-    // The snapshot should carry the local machine's host name
-    assert_eq!(snapshot.host_name, HostName::local(), "snapshot host_name should be the local machine's hostname");
+    // The snapshot should carry the daemon's actual node identity, not its display label.
+    assert_eq!(snapshot.node_id, *daemon.node_id(), "snapshot node id should be the local daemon node id");
 
     // If there are work items (there should be at least a main checkout),
     // they should all carry the local host name.
     for item in &snapshot.work_items {
-        assert_eq!(item.host, HostName::local(), "work item {:?} should have local host attribution", item.identity);
+        assert_eq!(item.node_id, *daemon.node_id(), "work item {:?} should have local node attribution", item.identity);
     }
 }
 
@@ -255,7 +282,7 @@ async fn remote_checkout_replication_attributes_checkout_to_follower_host() {
     let mut follower_rx = follower.subscribe();
     let command_id = follower
         .execute(Command {
-            host: None,
+            node_id: None,
             provisioning_target: None,
             context_repo: None,
             action: CommandAction::Checkout {
@@ -275,7 +302,7 @@ async fn remote_checkout_replication_attributes_checkout_to_follower_host() {
 
     let follower_providers = wait_for_local_checkout(&follower, &follower_repo, "feat-remote").await;
 
-    leader.set_peer_providers(&leader_repo, vec![(HostName::new("follower"), follower_providers)], 0).await;
+    leader.set_peer_providers(&leader_repo, vec![(node_info("follower"), follower_providers)], 0).await;
 
     let snapshot = leader.get_state(&RepoSelector::Path(leader_repo.clone())).await.expect("leader state");
     assert!(
@@ -286,7 +313,7 @@ async fn remote_checkout_replication_attributes_checkout_to_follower_host() {
         snapshot.work_items.iter().find(|item| item.branch.as_deref() == Some("feat-remote")).expect("replicated remote checkout");
 
     assert_eq!(checkout_item.branch.as_deref(), Some("feat-remote"));
-    assert_eq!(checkout_item.host, HostName::new("follower"));
+    assert_eq!(checkout_item.node_id, node("follower"));
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +344,7 @@ async fn daemon_snapshot_includes_follower_checkout_overlay() {
 
     // `set_peer_providers` updates the overlay and rebuilds the snapshot synchronously,
     // so `get_state` can assert on the merged view immediately.
-    daemon.set_peer_providers(&repo, vec![(follower_host.clone(), follower_data)], 0).await;
+    daemon.set_peer_providers(&repo, vec![(NodeInfo::new(node("follower"), follower_host.as_str()), follower_data)], 0).await;
 
     let snapshot = daemon.get_state(&RepoSelector::Path(repo.clone())).await.expect("get_state");
 
@@ -337,7 +364,7 @@ async fn daemon_snapshot_includes_follower_checkout_overlay() {
         .iter()
         .find_map(|(item, key)| (*key == &qpath(&follower_host, "/remote/repo")).then_some(*item))
         .expect("follower checkout item");
-    assert_eq!(item.host, follower_host);
+    assert_eq!(item.node_id, node("follower"));
 }
 
 // ---------------------------------------------------------------------------
@@ -351,17 +378,21 @@ async fn host_summary_round_trip_between_connected_peers() {
     let follower_daemon = empty_daemon_with_host(&temp, "follower").await;
 
     let (leader_transport, follower_transport) = channel_transport_pair(HostName::new("leader"), HostName::new("follower"));
-    let mut leader_mgr = PeerManager::new(HostName::new("leader"));
-    let mut follower_mgr = PeerManager::new(HostName::new("follower"));
-    leader_mgr.add_peer(HostName::new("follower"), Box::new(leader_transport));
-    follower_mgr.add_peer(HostName::new("leader"), Box::new(follower_transport));
+    let mut leader_mgr = PeerManager::new(node("leader"));
+    let mut follower_mgr = PeerManager::new(node("follower"));
+    leader_mgr.add_configured_target(ConfigLabel("follower".into()), HostName::new("follower"), None, Box::new(leader_transport));
+    follower_mgr.add_configured_target(ConfigLabel("leader".into()), HostName::new("leader"), None, Box::new(follower_transport));
 
     let mut leader_receivers = leader_mgr.connect_all().await;
-    let _follower_receivers = follower_mgr.connect_all().await;
-    let (_peer, generation, mut leader_rx) = leader_receivers.pop().expect("leader receiver");
+    let mut follower_receivers = follower_mgr.connect_all().await;
+    let leader_connection = leader_receivers.pop().expect("leader receiver");
+    let follower_connection = follower_receivers.pop().expect("follower receiver");
+    let generation = leader_connection.generation;
+    let mut leader_rx = leader_connection.inbound_rx;
 
+    let sent_summary = follower_daemon.local_host_summary().await;
     follower_mgr
-        .send_to(&HostName::new("leader"), PeerWireMessage::HostSummary(follower_daemon.local_host_summary().await))
+        .send_to(&follower_connection.node.node_id, PeerWireMessage::HostSummary(sent_summary.clone()))
         .await
         .expect("send host summary");
 
@@ -374,19 +405,21 @@ async fn host_summary_round_trip_between_connected_peers() {
         .handle_inbound(flotilla_daemon::peer::InboundPeerEnvelope {
             msg: inbound,
             connection_generation: generation,
-            connection_peer: HostName::new("follower"),
+            connection_peer: leader_connection.node.node_id.clone(),
         })
         .await;
 
     assert_eq!(result, HandleResult::Ignored);
-    let stored = leader_mgr.get_peer_host_summaries().get(&HostName::new("follower")).expect("leader stored follower summary");
-    assert_eq!(stored.host_name, HostName::new("follower"));
-    assert_eq!(stored, &follower_daemon.local_host_summary().await);
+    let stored = leader_mgr.get_peer_host_summaries().get(&sent_summary.environment_id).expect("leader stored follower summary");
+    assert_eq!(stored.node.node_id, leader_connection.node.node_id);
+    let mut expected = sent_summary;
+    expected.node.node_id = leader_connection.node.node_id.clone();
+    assert_eq!(stored, &expected);
 
-    let plan = leader_mgr.disconnect_peer(&HostName::new("follower"), generation);
+    let plan = leader_mgr.disconnect_peer(&leader_connection.node.node_id, generation);
     assert!(plan.was_active, "disconnect should clear active peer state");
     assert!(
-        !leader_mgr.get_peer_host_summaries().contains_key(&HostName::new("follower")),
+        !leader_mgr.get_peer_host_summaries().contains_key(&expected.environment_id),
         "disconnect should clear the stored host summary"
     );
 
@@ -395,7 +428,7 @@ async fn host_summary_round_trip_between_connected_peers() {
 
 #[tokio::test]
 async fn relay_excludes_origin_and_sends_to_other_peers() {
-    let mut mgr = PeerManager::new(HostName::new("leader"));
+    let mut mgr = PeerManager::new(node("leader"));
 
     let (transport_a, sent_a) = MockTransport::with_sender();
     let (transport_b, sent_b) = MockTransport::with_sender();
@@ -404,12 +437,12 @@ async fn relay_excludes_origin_and_sends_to_other_peers() {
     let sender_b = transport_b.sender().expect("sender");
     let sender_c = transport_c.sender().expect("sender");
 
-    mgr.add_peer(HostName::new("follower-a"), Box::new(transport_a));
-    mgr.add_peer(HostName::new("follower-b"), Box::new(transport_b));
-    mgr.add_peer(HostName::new("follower-c"), Box::new(transport_c));
-    mgr.register_sender(HostName::new("follower-a"), sender_a);
-    mgr.register_sender(HostName::new("follower-b"), sender_b);
-    mgr.register_sender(HostName::new("follower-c"), sender_c);
+    add_configured_transport(&mut mgr, "follower-a", "follower-a", transport_a);
+    add_configured_transport(&mut mgr, "follower-b", "follower-b", transport_b);
+    add_configured_transport(&mut mgr, "follower-c", "follower-c", transport_c);
+    mgr.register_sender(node("follower-a"), sender_a);
+    mgr.register_sender(node("follower-b"), sender_b);
+    mgr.register_sender(node("follower-c"), sender_c);
 
     // Data arrives from follower-a
     let mut data = ProviderData::default();
@@ -417,7 +450,7 @@ async fn relay_excludes_origin_and_sends_to_other_peers() {
     let msg = snapshot_msg("follower-a", 1, data);
 
     // prepare_relay should return targets for b and c, but not a
-    let targets = mgr.prepare_relay(&HostName::new("follower-a"), &msg);
+    let targets = mgr.prepare_relay(&node("follower-a"), &msg);
     for (name, sender, relayed_msg) in targets {
         sender.send(PeerWireMessage::Data(relayed_msg)).await.unwrap_or_else(|e| panic!("send to {name} failed: {e}"));
     }
@@ -433,7 +466,7 @@ async fn relay_excludes_origin_and_sends_to_other_peers() {
 
 #[tokio::test]
 async fn relay_excludes_self_even_if_registered_as_peer() {
-    let mut mgr = PeerManager::new(HostName::new("leader"));
+    let mut mgr = PeerManager::new(node("leader"));
 
     // Register self as a peer (shouldn't happen in practice, but test the guard)
     let (self_transport, sent_self) = MockTransport::with_sender();
@@ -441,13 +474,13 @@ async fn relay_excludes_self_even_if_registered_as_peer() {
     let self_sender = self_transport.sender().expect("sender");
     let other_sender = other_transport.sender().expect("sender");
 
-    mgr.add_peer(HostName::new("leader"), Box::new(self_transport));
-    mgr.add_peer(HostName::new("follower"), Box::new(other_transport));
-    mgr.register_sender(HostName::new("leader"), self_sender);
-    mgr.register_sender(HostName::new("follower"), other_sender);
+    add_configured_transport(&mut mgr, "leader", "leader", self_transport);
+    add_configured_transport(&mut mgr, "follower", "follower", other_transport);
+    mgr.register_sender(node("leader"), self_sender);
+    mgr.register_sender(node("follower"), other_sender);
 
     let msg = snapshot_msg("remote", 1, ProviderData::default());
-    let targets = mgr.prepare_relay(&HostName::new("remote"), &msg);
+    let targets = mgr.prepare_relay(&node("remote"), &msg);
     for (name, sender, relayed_msg) in targets {
         sender.send(PeerWireMessage::Data(relayed_msg)).await.unwrap_or_else(|e| panic!("send to {name} failed: {e}"));
     }
@@ -462,7 +495,7 @@ async fn relay_excludes_self_even_if_registered_as_peer() {
 
 #[tokio::test]
 async fn peer_manager_ignores_messages_from_self() {
-    let mut mgr = PeerManager::new(HostName::new("leader"));
+    let mut mgr = PeerManager::new(node("leader"));
 
     let msg = snapshot_msg("leader", 1, ProviderData::default());
     let result = handle_test_peer_data(&mut mgr, msg, MockPeerSender::discard).await;
@@ -477,7 +510,7 @@ async fn peer_manager_ignores_messages_from_self() {
 
 #[tokio::test]
 async fn peer_manager_handles_multiple_peers_and_repos() {
-    let mut mgr = PeerManager::new(HostName::new("leader"));
+    let mut mgr = PeerManager::new(node("leader"));
 
     // Follower A sends data
     let mut data_a = ProviderData::default();
@@ -496,10 +529,10 @@ async fn peer_manager_handles_multiple_peers_and_repos() {
     assert_eq!(peer_data.len(), 2, "should have data from two peers");
 
     // Verify each peer's checkout is accessible
-    let a_data = &peer_data[&HostName::new("follower-a")][&test_repo()].provider_data;
+    let a_data = &peer_data[&node("follower-a")][&test_repo()].provider_data;
     assert_eq!(a_data.checkouts[&qpath(&HostName::new("follower-a"), "/home/a/repo")].branch, "branch-a");
 
-    let b_data = &peer_data[&HostName::new("follower-b")][&test_repo()].provider_data;
+    let b_data = &peer_data[&node("follower-b")][&test_repo()].provider_data;
     assert_eq!(b_data.checkouts[&qpath(&HostName::new("follower-b"), "/home/b/repo")].branch, "branch-b");
 }
 
@@ -532,7 +565,8 @@ fn merge_preserves_local_service_data_with_peer_checkouts() {
         ..Default::default()
     };
 
-    let merged = merge_provider_data(&local, &local_host, &[(peer_host, &peer_data)]);
+    let merged =
+        merge_provider_data(&local, &local_host, &node("leader"), &[(NodeInfo::new(node("follower"), peer_host.as_str()), &peer_data)]);
 
     // Both checkouts present
     assert_eq!(merged.checkouts.len(), 2);
@@ -552,10 +586,10 @@ async fn delta_message_returns_needs_resync() {
         Change,
     };
 
-    let mut mgr = PeerManager::new(HostName::new("leader"));
+    let mut mgr = PeerManager::new(node("leader"));
 
     let msg = PeerDataMessage {
-        origin_host: HostName::new("follower"),
+        origin_node_id: node("follower"),
         repo_identity: test_repo(),
         host_repo_root: Some(PathBuf::from("/home/dev/repo")),
         clock: VectorClock::default(),
@@ -569,7 +603,7 @@ async fn delta_message_returns_needs_resync() {
     let result = handle_test_peer_data(&mut mgr, msg, MockPeerSender::discard).await;
     assert_eq!(
         result,
-        HandleResult::NeedsResync { from: HostName::new("follower"), repo: test_repo() },
+        HandleResult::NeedsResync { from: node("follower"), repo: test_repo() },
         "Phase 1: deltas should trigger NeedsResync"
     );
 }
@@ -611,7 +645,7 @@ async fn follower_mode_has_only_local_providers() {
 
 #[tokio::test]
 async fn peer_snapshot_update_overwrites_previous() {
-    let mut mgr = PeerManager::new(HostName::new("leader"));
+    let mut mgr = PeerManager::new(node("leader"));
 
     // First snapshot from follower with branch "old-branch"
     let mut data1 = ProviderData::default();
@@ -626,7 +660,7 @@ async fn peer_snapshot_update_overwrites_previous() {
 
     // Verify the data was updated
     let peer_data = mgr.get_peer_data();
-    let state = &peer_data[&HostName::new("follower")][&test_repo()];
+    let state = &peer_data[&node("follower")][&test_repo()];
     assert_eq!(state.seq, 2);
     assert_eq!(
         state.provider_data.checkouts[&qpath(&HostName::new("follower"), "/repo")].branch,
