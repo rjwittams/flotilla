@@ -1555,6 +1555,43 @@ async fn daemon_uses_persisted_local_environment_id() {
 }
 
 #[tokio::test]
+async fn daemon_uses_persisted_fingerprint_backed_node_id() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let config_dir = temp.path().join("config");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    let discovery = fake_discovery(false);
+    let daemon = InProcessDaemon::new(
+        vec![repo.clone()],
+        Arc::new(ConfigStore::with_base(config_dir.clone())),
+        discovery,
+        HostName::new("display-host"),
+    )
+    .await;
+
+    let first_node_id = daemon.node_id().clone();
+    assert_eq!(first_node_id.as_str().len(), 32, "node id should be a 16-byte hex fingerprint");
+    assert_ne!(first_node_id.as_str(), "display-host", "display name must remain separate from node identity");
+
+    drop(daemon);
+
+    let restarted = InProcessDaemon::new(
+        vec![repo],
+        Arc::new(ConfigStore::with_base(config_dir.clone())),
+        fake_discovery(false),
+        HostName::new("renamed-display-host"),
+    )
+    .await;
+
+    assert_eq!(*restarted.node_id(), first_node_id, "restarting should reuse the persisted node keypair");
+    assert_eq!(restarted.host_name().as_str(), "renamed-display-host", "display name should not affect node identity");
+    let identity_dir = config_dir.join("identity");
+    assert!(identity_dir.exists(), "node identity storage should live under the config identity dir");
+}
+
+#[tokio::test]
 async fn local_direct_repo_refresh_stamps_discovered_checkout_environment_id() {
     let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
     let mut rx = daemon.subscribe();
@@ -2268,7 +2305,6 @@ async fn list_hosts_uses_environment_scoped_counts_for_multiple_hosts_on_same_no
 #[tokio::test]
 async fn set_peer_providers_keeps_multiple_host_environments_visible_for_one_node() {
     let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
-    let peer = test_node("overlay-peer");
     let env_a = EnvironmentId::host(HostId::new("overlay-peer-host-a"));
     let env_b = EnvironmentId::host(HostId::new("overlay-peer-host-b"));
 
@@ -2301,11 +2337,47 @@ async fn set_peer_providers_keeps_multiple_host_environments_visible_for_one_nod
     daemon.set_peer_providers(&repo, vec![(HostName::new("overlay-peer"), peer_data)], 0).await;
 
     let hosts = daemon.list_hosts_internal().await.expect("list hosts");
-    let peer_entries: Vec<_> = hosts.hosts.iter().filter(|entry| entry.node == peer).collect();
+    let peer_entries: Vec<_> = hosts.hosts.iter().filter(|entry| entry.node == test_node("overlay-peer")).collect();
 
     assert_eq!(peer_entries.len(), 2);
+    assert_eq!(peer_entries.iter().find(|entry| entry.environment_id == env_a).expect("host a").host_name, HostName::new("overlay-peer-a"));
+    assert_eq!(peer_entries.iter().find(|entry| entry.environment_id == env_b).expect("host b").host_name, HostName::new("overlay-peer-b"));
     assert!(peer_entries.iter().any(|entry| entry.environment_id == env_a));
     assert!(peer_entries.iter().any(|entry| entry.environment_id == env_b));
+}
+
+#[tokio::test]
+async fn set_peer_providers_without_canonical_host_name_does_not_emit_placeholder_host_state() {
+    let (_temp, repo, daemon, _identity) = daemon_for_fake_repo().await;
+    let env = EnvironmentId::host(HostId::new("overlay-peer-host"));
+
+    let mut peer_data = ProviderData::default();
+    peer_data.checkouts.insert(QualifiedPath::environment(env.clone(), PathBuf::from("/srv/overlay/repo")), Checkout {
+        branch: "overlay-branch".into(),
+        is_main: false,
+        trunk_ahead_behind: None,
+        remote_ahead_behind: None,
+        working_tree: None,
+        last_commit: None,
+        correlation_keys: vec![],
+        association_keys: vec![],
+        host_name: None,
+        environment_id: Some(env.clone()),
+    });
+
+    daemon.set_peer_providers(&repo, vec![(HostName::new("overlay-peer"), peer_data)], 0).await;
+
+    let hosts = daemon.list_hosts_internal().await.expect("list hosts");
+    assert!(
+        hosts.hosts.iter().all(|entry| entry.environment_id != env),
+        "placeholder overlay data without a canonical host-facing name should not materialize a host entry"
+    );
+
+    let events = daemon.replay_since(&HashMap::new()).await.expect("host replay");
+    assert!(
+        !events.iter().any(|event| matches!(event, DaemonEvent::HostSnapshot(snap) if snap.environment_id == env)),
+        "placeholder overlay data without a canonical host-facing name should not replay as a host snapshot"
+    );
 }
 
 #[tokio::test]

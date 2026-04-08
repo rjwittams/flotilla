@@ -62,6 +62,23 @@ fn host_environment_ids_in_provider_data(providers: &ProviderData) -> Vec<Enviro
     environment_ids
 }
 
+fn host_name_for_provider_environment(providers: &ProviderData, environment_id: &EnvironmentId) -> Option<HostName> {
+    let mut candidates: Vec<_> = providers
+        .checkouts
+        .iter()
+        .filter_map(|(path, checkout)| {
+            checkout
+                .environment_id
+                .as_ref()
+                .filter(|checkout_environment_id| *checkout_environment_id == environment_id)
+                .and_then(|_| checkout.host_name.clone().or_else(|| path.host_name().cloned()))
+        })
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    candidates.into_iter().next()
+}
+
 fn static_ssh_environment_id(config_key: &str) -> EnvironmentId {
     let mut encoded = String::with_capacity(config_key.len() * 2);
     for byte in config_key.as_bytes() {
@@ -487,7 +504,7 @@ impl InProcessDaemon {
 
         let local_environment_state_dir = resolve_local_environment_state_dir(config.state_dir().as_path(), &*discovery.runner).await;
         let local_node_id =
-            resolve_local_node_id(config.state_dir().as_path(), &*discovery.runner).await.expect("failed to resolve local node id");
+            resolve_local_node_id(config.base_path().as_path(), &*discovery.runner).await.expect("failed to resolve local node id");
         let local_environment_id =
             resolve_or_create_environment_id(&local_environment_state_dir).expect("failed to resolve local direct environment id");
         let local_host_id =
@@ -963,11 +980,14 @@ impl InProcessDaemon {
         }
         for (node, providers) in self.peer_providers.read().await.get(&identity).cloned().unwrap_or_default() {
             for environment_id in host_environment_ids_in_provider_data(&providers) {
+                let Some(host_name) = host_name_for_provider_environment(&providers, &environment_id) else {
+                    continue;
+                };
                 self.host_registry
                     .publish_peer_summary(
                         HostSummary {
                             environment_id,
-                            host_name: Some(HostName::new(node.display_name.clone())),
+                            host_name: Some(host_name),
                             node: node.clone(),
                             system: SystemInfo::default(),
                             inventory: ToolInventory::default(),
