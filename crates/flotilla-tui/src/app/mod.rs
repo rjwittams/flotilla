@@ -223,7 +223,12 @@ impl TuiModel {
 
     pub fn resolve_environment_target(&self, environment_id: &EnvironmentId) -> Result<(NodeId, ProvisioningTarget), String> {
         if let Some(host) = self.hosts.get(environment_id) {
-            return Ok((host.summary.node.node_id.clone(), ProvisioningTarget::Host { host: host.host_name.clone() }));
+            let target = if environment_id.is_host() {
+                ProvisioningTarget::Host { host: host.host_name.clone() }
+            } else {
+                ProvisioningTarget::ExistingEnvironment { host: host.host_name.clone(), env_id: environment_id.clone() }
+            };
+            return Ok((host.summary.node.node_id.clone(), target));
         }
 
         for host in self.hosts.values() {

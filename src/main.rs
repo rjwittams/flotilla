@@ -422,7 +422,7 @@ async fn resolve_environment_target(
 
     for entry in response.hosts {
         if entry.environment_id == *target_environment_id {
-            return Ok((flotilla_protocol::ProvisioningTarget::Host { host: entry.host_name }, entry.node.node_id));
+            return Ok((provisioning_target_for_environment(&entry.host_name, &entry.environment_id), entry.node.node_id));
         }
 
         let status = daemon
@@ -465,6 +465,14 @@ async fn resolve_environment_target(
     }
 
     Err(color_eyre::eyre::eyre!("unknown environment: {target_environment_id}"))
+}
+
+fn provisioning_target_for_environment(host: &HostName, environment_id: &EnvironmentId) -> flotilla_protocol::ProvisioningTarget {
+    if environment_id.is_host() {
+        flotilla_protocol::ProvisioningTarget::Host { host: host.clone() }
+    } else {
+        flotilla_protocol::ProvisioningTarget::ExistingEnvironment { host: host.clone(), env_id: environment_id.clone() }
+    }
 }
 
 fn resolve_repo_from_env(cli: &Cli) -> Option<RepoSelector> {
@@ -824,9 +832,11 @@ fn uninstall_claude_code_hooks(path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use flotilla_protocol::{qualified_path::HostId, EnvironmentId, HostListEntry, HostName, NodeId, NodeInfo, PeerConnectionState};
+    use flotilla_protocol::{
+        qualified_path::HostId, EnvironmentId, HostListEntry, HostName, NodeId, NodeInfo, PeerConnectionState, ProvisioningTarget,
+    };
 
-    use super::{select_host_target, Cli, SubCommand};
+    use super::{provisioning_target_for_environment, select_host_target, Cli, SubCommand};
 
     #[test]
     fn cli_parses_topology_subcommand() {
@@ -981,5 +991,23 @@ mod tests {
         assert!(message.contains("ambiguous host: desktop"), "unexpected error: {message}");
         assert!(message.contains("desktop-a"), "unexpected error: {message}");
         assert!(message.contains("desktop-b"), "unexpected error: {message}");
+    }
+
+    #[test]
+    fn provisioning_target_for_host_environment_uses_host_target() {
+        let host = HostName::new("desktop");
+        let environment_id = EnvironmentId::host(HostId::new("desktop-a"));
+
+        let target = provisioning_target_for_environment(&host, &environment_id);
+        assert_eq!(target, ProvisioningTarget::Host { host });
+    }
+
+    #[test]
+    fn provisioning_target_for_non_host_environment_preserves_environment_identity() {
+        let host = HostName::new("desktop");
+        let environment_id = EnvironmentId::new("builder-1");
+
+        let target = provisioning_target_for_environment(&host, &environment_id);
+        assert_eq!(target, ProvisioningTarget::ExistingEnvironment { host, env_id: environment_id });
     }
 }

@@ -126,6 +126,9 @@ impl HostRegistry {
         let node_connectivity = self.node_connectivity.read().await.clone();
         let hosts = self.hosts.read().await;
         let state = hosts.get(environment_id).ok_or_else(|| format!("host not found: {environment_id}"))?;
+        if state.removed {
+            return Err(format!("host not found: {environment_id}"));
+        }
         let summary = state.summary.clone();
 
         Ok(build_host_status(environment_id, state, summary, HostStatusContext {
@@ -145,6 +148,9 @@ impl HostRegistry {
         let node_connectivity = self.node_connectivity.read().await.clone();
         let hosts = self.hosts.read().await;
         let state = hosts.get(environment_id).ok_or_else(|| format!("host not found: {environment_id}"))?;
+        if state.removed {
+            return Err(format!("host not found: {environment_id}"));
+        }
         let summary = state.summary.clone().ok_or_else(|| format!("no summary available for host: {environment_id}"))?;
 
         Ok(build_host_providers(environment_id, state, &self.local_node, &configured, &node_connectivity, summary))
@@ -1312,5 +1318,46 @@ mod tests {
             registry.get_host_status(&newer_remaining_environment_id, &HashMap::new()).await.expect("status for remaining environment");
         assert_eq!(status.environment_id, newer_remaining_environment_id);
         assert!(status.summary.is_some());
+    }
+
+    #[tokio::test]
+    async fn removed_environment_status_lookup_returns_not_found() {
+        let registry = HostRegistry::new(local_node(), minimal_summary(&local_node()));
+        let peer_summary = HostSummary {
+            environment_id: EnvironmentId::host(HostId::new("peer-node-host-a")),
+            host_name: Some(HostName::new("peer-host-a")),
+            node: peer_node(),
+            system: SystemInfo::default(),
+            inventory: ToolInventory::default(),
+            providers: vec![],
+            environments: vec![],
+        };
+
+        registry.publish_peer_summary(peer_summary.clone(), &|_| {}).await;
+        registry.apply_event(&DaemonEvent::HostRemoved { environment_id: peer_summary.environment_id.clone(), seq: 2 });
+
+        let err = registry.get_host_status(&peer_summary.environment_id, &HashMap::new()).await.expect_err("removed host should be absent");
+        assert!(err.contains("host not found"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn removed_environment_providers_lookup_returns_not_found() {
+        let registry = HostRegistry::new(local_node(), minimal_summary(&local_node()));
+        let peer_summary = HostSummary {
+            environment_id: EnvironmentId::host(HostId::new("peer-node-host-b")),
+            host_name: Some(HostName::new("peer-host-b")),
+            node: peer_node(),
+            system: SystemInfo::default(),
+            inventory: ToolInventory::default(),
+            providers: vec![],
+            environments: vec![],
+        };
+
+        registry.publish_peer_summary(peer_summary.clone(), &|_| {}).await;
+        registry.apply_event(&DaemonEvent::HostRemoved { environment_id: peer_summary.environment_id.clone(), seq: 2 });
+
+        let err =
+            registry.get_host_providers(&peer_summary.environment_id, &HashMap::new()).await.expect_err("removed host should be absent");
+        assert!(err.contains("host not found"), "unexpected error: {err}");
     }
 }

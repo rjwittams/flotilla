@@ -1224,6 +1224,32 @@ fn resolve_environment_target_accepts_host_environment_identity_directly() {
 }
 
 #[test]
+fn resolve_environment_target_direct_non_host_environment_keeps_existing_environment_target() {
+    let mut app = stub_app();
+    let host_name = HostName::new("alpha");
+    let environment_id = EnvironmentId::new("builder-1");
+    app.model.hosts.insert(environment_id.clone(), TuiHostState {
+        environment_id: environment_id.clone(),
+        host_name: host_name.clone(),
+        is_local: false,
+        status: PeerStatus::Connected,
+        summary: HostSummary {
+            environment_id: environment_id.clone(),
+            host_name: Some(host_name.clone()),
+            node: NodeInfo::new(NodeId::new("node-alpha"), "Desktop"),
+            system: flotilla_protocol::SystemInfo::default(),
+            inventory: flotilla_protocol::ToolInventory::default(),
+            providers: vec![],
+            environments: vec![],
+        },
+    });
+
+    let (node_id, target) = app.model.resolve_environment_target(&environment_id).expect("resolve target");
+    assert_eq!(node_id, NodeId::new("node-alpha"));
+    assert_eq!(target, ProvisioningTarget::ExistingEnvironment { host: host_name, env_id: environment_id });
+}
+
+#[test]
 fn resolve_environment_target_accepts_non_host_environment_identity_directly() {
     let mut app = stub_app();
     let host_name = HostName::new("alpha");
