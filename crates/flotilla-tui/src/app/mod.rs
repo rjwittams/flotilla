@@ -530,6 +530,8 @@ impl App {
         WorkItem {
             kind: flotilla_protocol::WorkItemKind::Issue,
             identity: WorkItemIdentity::Issue(row.id.clone()),
+            // Issue rows are synthesized from the local repo view, so the local
+            // node id should already be known; this fallback is only a safety net.
             node_id: self.model.my_node_id().cloned().unwrap_or_else(|| NodeId::new("issue-row")),
             branch: None,
             description: row.issue.title.clone(),
