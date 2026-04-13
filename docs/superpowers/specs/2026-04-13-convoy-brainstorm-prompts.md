@@ -51,7 +51,7 @@ Convoy data feeds into the existing provider data / correlation engine as just a
 
 **Context:** Flotilla's convoy system needs a k8s-style resource API (get/list/watch/create/update/delete with resourceVersion). Controllers are written against a trait so they can run against k8s REST (prototyping), a future TillerHTTP backend, or InProcessTiller (zero-dependency laptop case). See the Tiller design doc for the full vision.
 
-This should be prototyped as a **standalone project** outside the flotilla codebase — a minimal Rust binary that registers CRDs and does CRUD + watch against a local k8s cluster (kind/k3s).
+This should be prototyped as a **standalone project** outside the flotilla codebase — a minimal Rust binary that registers CRDs and does CRUD + watch against a local k8s cluster (minikube). k3s is not viable (Linux-only); Go's goroutine stack model prevents embedding any Go-based k8s API server as a library, so the production in-process resource server will be a Rust/SQLite reimplementation of the required subset.
 
 **Key questions:**
 - What's the minimal trait surface that convoy controllers actually need? Start from usage, not from "what k8s has."

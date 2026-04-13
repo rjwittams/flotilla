@@ -303,4 +303,5 @@ In k8s terms: Argo makes each task its own resource (a Pod), giving independent 
 - **Node agent liveness**: Heartbeat model, timeout policy, disconnect behavior.
 - **Dynamic vs static type registration**: CRD-like runtime registration vs compiled-in types?
 - **Label/field selector query language**: How much of k8s selector syntax to support?
-- **Prototyping strategy**: Start with real k8s (raw REST, standalone prototype) to validate the resource model, then build InProcessTiller once the API surface is known from actual usage.
+- **Prototyping strategy**: Start with real k8s via minikube (raw REST, standalone prototype) to validate the resource model, then build the in-process Rust/SQLite resource server once the API surface is known from actual usage. k3s is Linux-only (no macOS support), and Go's goroutine stack model prevents embedding any Go-based k8s components as a library — the in-process resource server must be a Rust reimplementation of the required k8s API subset.
+- **Naming**: The in-process resource server is a flotilla subsystem, not a separate project. Use `flotilla-resources` or a `resources` module rather than a branded name. "Tiller" collides with Helm 2's deprecated in-cluster component.
