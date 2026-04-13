@@ -130,7 +130,7 @@ impl<T: Resource> TypedResolver<T> {
     async fn list(&self) -> Result<ResourceList<T>, ResourceError>;
     async fn create(&self, meta: &InputMeta, spec: &T::Spec) -> Result<ResourceObject<T>, ResourceError>;
     async fn update(&self, meta: &InputMeta, resource_version: &str, spec: &T::Spec) -> Result<ResourceObject<T>, ResourceError>;
-    async fn update_status(&self, meta: &InputMeta, resource_version: &str, status: &T::Status) -> Result<ResourceObject<T>, ResourceError>;
+    async fn update_status(&self, name: &str, resource_version: &str, status: &T::Status) -> Result<ResourceObject<T>, ResourceError>;
     async fn delete(&self, name: &str) -> Result<(), ResourceError>;
     async fn watch(
         &self,
@@ -152,32 +152,15 @@ struct ResourceList<T: Resource> {
 
 The standard controller pattern is: `list()` to get current state + collection resourceVersion, then `watch(WatchStart::FromVersion(v))` to receive all changes from that point forward. No gap, no missed updates.
 
-### DynamicResolver
+### DynamicResolver (deferred)
 
-The escape hatch for operating on resources without a compile-time Rust type. Separate type from `TypedResolver` — no pretending that `Value` is a `Resource`:
-
-```rust
-struct DynamicResolver { /* owned clone of backend handle + owned String namespace + ApiPaths */ }
-
-impl DynamicResolver {
-    async fn get(&self, name: &str) -> Result<serde_json::Value, ResourceError>;
-    async fn list(&self) -> Result<DynamicResourceList, ResourceError>;
-    async fn create(&self, value: &serde_json::Value) -> Result<serde_json::Value, ResourceError>;
-    async fn update(&self, value: &serde_json::Value) -> Result<serde_json::Value, ResourceError>;
-    async fn update_status(&self, value: &serde_json::Value) -> Result<serde_json::Value, ResourceError>;
-    async fn delete(&self, name: &str) -> Result<(), ResourceError>;
-    async fn watch(
-        &self,
-        start: WatchStart,
-    ) -> Result<BoxStream<'static, Result<DynWatchEvent, ResourceError>>, ResourceError>;
-}
-```
+The escape hatch for operating on resources without a compile-time Rust type. Will be a separate type from `TypedResolver`, operating on `serde_json::Value`. The `paths()` method on `ResourceBackend` is reserved for this. The exact API shape — including how it handles the input/output split, namespace, and resourceVersion contracts — will be designed when a concrete use case arises. No stage 1 deliverable.
 
 ### Notes on Resolver API
 
 - `create` takes `InputMeta` + spec. Returns the created object with full server-populated `ObjectMeta` (namespace, resourceVersion, creationTimestamp).
 - `update` takes `InputMeta` + `resource_version` + spec. The resourceVersion is a required `&str` — not optional, can't forget it. Stale version returns `ResourceError::Conflict`.
-- `update_status` takes `InputMeta` + `resource_version` + status. Same concurrency semantics as `update`. Separate method because spec and status are written by different actors (user writes spec, controller writes status). Mirrors k8s's `/status` subresource.
+- `update_status` takes `name` + `resource_version` + status. No `InputMeta` — the controller writing status should not touch labels/annotations. Same concurrency semantics as `update`. Separate method because spec and status are written by different actors (user writes spec, controller writes status). Mirrors k8s's `/status` subresource.
 - Labels and annotations on `InputMeta` are full-replace — the complete maps are sent on every update. Optimistic concurrency via resourceVersion prevents silent overwrites.
 - `watch` takes a `WatchStart` enum and returns a stream. Outer `Result` for connection failure, inner `Result` per event for parse/stream errors.
 
