@@ -22,7 +22,16 @@ We prefer **raw REST calls** (reqwest + serde) over kube-rs for the k8s backend.
 - kube-rs is a heavy dependency with opinions about async runtime
 - The `ResourceClient` trait should reflect plain REST semantics (what Tiller would eventually expose), not kube-rs's `Api<T>` abstractions
 - For prototyping a single-node controller loop, a simple `loop { watch, react }` is clearer than kube-rs's reconciler framework
+- kube-rs doesn't provide leader election (community crate, no fencing) — not needed for single-node anyway
 - We already have reqwest and serde
+
+### Hand-written CRD YAML over macro generation
+
+CRD specs are written as plain YAML, not generated from Rust derive macros (e.g. kube-rs `#[derive(CustomResource)]`). Reasons:
+- CRD YAML diffs are readable — you see exactly what changed in the schema
+- Macro-generated CRD output is opaque — derive attribute changes don't show the actual schema effect
+- k8s CRD specs are full of `x-kubernetes-*` annotations and structural schema requirements that fight macro generation
+- Hand-written YAML is debuggable with `kubectl apply --dry-run` and standard k8s tooling
 
 ### Pure k8s prototype (stages 1-4)
 
