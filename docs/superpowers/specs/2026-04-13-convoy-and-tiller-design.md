@@ -1,4 +1,4 @@
-# Convoy, Workflow, and Tiller Control Plane Design
+# Convoy, Workflow, and Control Plane Design
 
 ## Context
 
@@ -8,13 +8,13 @@ This document captures the design direction for three interrelated concepts:
 
 1. **Convoy** — the new primary unit of work, replacing AttachableSet
 2. **Workflow** — a DAG of tasks that a convoy executes
-3. **Tiller** — a minimal k8s-style control plane that manages these as resources
+3. **flotilla-cp** — a minimal k8s-style control plane that manages these as resources
 
-## Tiller: Micro Control Plane
+## flotilla-cp: Micro Control Plane
 
 ### What It Is
 
-Tiller is a minimal control plane implementing a subset of the Kubernetes API model: named objects, declared desired state, observed status, labels, reconciliation loops. It is not a k8s fork — it's a small server that speaks enough of the same language that k8s tooling and client libraries work where practical.
+flotilla-cp is a minimal control plane implementing a subset of the Kubernetes API model: named objects, declared desired state, observed status, labels, reconciliation loops. It is not a k8s fork — it's a small server that speaks enough of the same language that k8s tooling and client libraries work where practical.
 
 ### Design Goals
 
@@ -35,18 +35,18 @@ ConvoyController, EnvironmentController, etc.
          |
     +----+----------------+------------------+
     |                     |                  |
-InProcessTiller      TillerHTTP         K8sREST
+InProcess             flotilla-cp-http       K8sREST
 (SQLite, same       (UDS/TCP to        (raw REST calls,
  process)            tiller server)      real k8s cluster)
 ```
 
-- **InProcessTiller**: Zero-dependency laptop case. Runs inside the flotilla daemon. SQLite-backed.
-- **TillerHTTP**: Standalone tiller server, REST over UDS/SSH/TCP.
+- **InProcess**: Zero-dependency laptop case. Runs inside the flotilla daemon. SQLite-backed.
+- **flotilla-cp-http**: Standalone flotilla-cp server, REST over UDS/SSH/TCP.
 - **K8sREST**: Real k8s cluster via raw REST calls (reqwest + serde). Teams or power users.
 
-We prefer raw REST over kube-rs for the k8s backend. The `ResourceClient` trait should reflect plain REST semantics (what Tiller would eventually expose), not kube-rs's `Api<T>` abstractions. For prototyping a single-node controller loop, a simple watch-and-react loop is clearer than kube-rs's reconciler framework. We already have reqwest and serde.
+We prefer raw REST over kube-rs for the k8s backend. The `ResourceClient` trait should reflect plain REST semantics (what flotilla-cp would eventually expose), not kube-rs's `Api<T>` abstractions. For prototyping a single-node controller loop, a simple watch-and-react loop is clearer than kube-rs's reconciler framework. We already have reqwest and serde.
 
-This means prototyping on real k8s is viable — raw REST is the first `ResourceClient` implementation, InProcessTiller comes later with scope defined by actual usage rather than speculation.
+This means prototyping on real k8s is viable — raw REST is the first `ResourceClient` implementation, in-process flotilla-cp comes later with scope defined by actual usage rather than speculation.
 
 ### Transport
 
@@ -61,15 +61,17 @@ SQLite. resourceVersion derived from rowid. Atomic multi-resource updates via tr
 
 ### API Shape
 
-Standard k8s URL structure:
+Standard k8s namespaced URL structure:
 
 ```
-/apis/{group}/{version}/{resource}
-/apis/{group}/{version}/{resource}/{name}
-/apis/{group}/{version}/{resource}/{name}/status
+/apis/{group}/{version}/namespaces/{namespace}/{resource}
+/apis/{group}/{version}/namespaces/{namespace}/{resource}/{name}
+/apis/{group}/{version}/namespaces/{namespace}/{resource}/{name}/status
 ```
 
-Watch via SSE or chunked transfer. resourceVersion maps to SQLite rowid.
+All resources are namespaced. Single-user/laptop case uses a default namespace (`flotilla`). Scales to per-user or per-team namespaces on shared clusters.
+
+Watch via chunked HTTP transfer with newline-delimited JSON events (matching k8s watch semantics, required for kubectl compatibility). resourceVersion maps to SQLite rowid. Watches are scoped to a single resource type — per-table rowids are not globally monotonic across types, which is acceptable since clients typically watch one resource type at a time. A global sequence table can be added later if cross-type watch is needed.
 
 ### kubectl Compatibility
 
@@ -77,7 +79,7 @@ A basic subset: `get`, `apply`, `describe`, `delete`, `logs`. Requires discovery
 
 Open question: how much unnecessary discovery/negotiation kubectl does per invocation.
 
-### What Tiller Skips
+### What flotilla-cp Skips
 
 - Full k8s API compatibility (admission webhooks, version conversion, aggregation)
 - RBAC (auth at transport layer)
@@ -94,6 +96,12 @@ Open question: how much unnecessary discovery/negotiation kubectl does per invoc
 **After:** Convoy -> (creates branches, checkouts, environments, agents as needed) -> work happens
 
 The convoy is the intent. Everything else is infrastructure it provisions. This is the spec/status split — the convoy spec says what to achieve, a controller reconciles reality toward it.
+
+### Impact on Commands and Execution
+
+Today's command executor does imperative orchestration: create environment, then create checkout, then start terminals, then bind workspace — multi-step sequences with error handling at each point. In the controller model, a command becomes a single resource write (create/update a Convoy, Task, or sub-resource), and controllers reconcile the desired state into reality. The orchestration complexity moves from the executor into controller reconciliation loops, where it's easier to reason about (watch resource, compare desired vs actual, take one action, repeat).
+
+The existing `StepPlan` DAG pattern is not replaced — the same DAG progression model applies to both step plans and convoy workflows. What simplifies is the *executor layer*: instead of commands encoding multi-step procedures, they become thin resource mutations.
 
 ### Convoy Resource
 
@@ -125,7 +133,7 @@ The critical difference: **host, checkout, and environment are Task-level proper
 
 ### Migration Path
 
-Build Convoy as the first Tiller resource (option B). The current `AttachableSet` and `AttachableStoreApi` continue working during transition. Once convoys subsume all AttachableSet functionality, the old store is removed. No "two models" period for new work — convoys are born on the new model.
+Build Convoy as the first flotilla-cp resource (option B). The current `AttachableSet` and `AttachableStoreApi` continue working during transition. Once convoys subsume all AttachableSet functionality, the old store is removed. No "two models" period for new work — convoys are born on the new model.
 
 ## Workflow: The DAG Shape
 
@@ -185,16 +193,37 @@ Pending -> Ready -> Launching -> Running -> Completed
 - **Running**: processes active, user can interact
 - **Completed/Failed/Cancelled**: terminal states
 
-For now, task completion is explicit — the user marks it done in the TUI, or process exit triggers a status change. Eventually agents will be able to mark their own task complete via a CLI command.
+**Failure policy (v1):** Fail fast — any task failure halts the convoy. Running sibling tasks are cancelled. No retries. Supervision strategies (retry, continue siblings, escalate) are future work.
+
+Task completion is always explicit — via TUI action or CLI command. Process exits do not automatically complete or fail a task (a crashed process can be restarted without affecting task state). Eventually agents will be able to mark their own task complete via a CLI command.
 
 ### Process: What Actually Runs
 
+Processes come in two kinds:
+
+**Agent processes** — resolved via a selector. The template declares what capability is needed; policy resolves it to a concrete agent + options at launch time.
+
+```yaml
+processes:
+  - role: coding-agent
+    selector:
+      capability: code
+  - role: reviewer
+    selector:
+      capability: code-review
 ```
-ProcessDefinition {
-    role: String,                    // "coding-agent", "dev-server", "reviewer"
-    command: String,                 // template-resolved command
-}
+
+**Tool processes** — literal commands, no resolution needed.
+
+```yaml
+processes:
+  - role: build
+    command: "cargo watch -x check"
+  - role: dev-server
+    command: "cargo run --example server"
 ```
+
+**Selector resolution (v1):** A simple lookup from capability to concrete command, configured in repo config or global defaults. E.g. `capability: code → claude`, `capability: code-review → claude --review`. Future: a policy agent (Quartermaster) resolves selectors using environment context — remaining credits/allowances, known caches, off-peak scheduling, provisioning target capabilities (sandbox quality, platform tools).
 
 A process is the logical thing ("coding agent on this checkout"). A terminal is how it's presented and interacted with. The process definition is resolved at launch time through the terminal pool and presentation manager.
 
@@ -207,7 +236,7 @@ Today's `WorkspaceTemplate` conflates two things:
 - **Content** (roles + commands) = process definitions for a single task
 - **Layout** (pane arrangement) = presentation manager configuration
 
-In convoy terms: content moves into `WorkflowTemplate` task definitions, layout moves to `PresentationManager` config. A single-task workflow with a layout section is backwards-compatible with today's workspace templates.
+In convoy terms: content moves into `WorkflowTemplate` task definitions, layout moves to `PresentationManager` config. A single-task workflow with a layout section is backwards-compatible with today's workspace templates. Template variable substitution (`{main_command}`) is replaced by the selector model — templates declare capabilities, resolution is external.
 
 ## Presentation Flow
 
@@ -304,4 +333,4 @@ In k8s terms: Argo makes each task its own resource (a Pod), giving independent 
 - **Dynamic vs static type registration**: CRD-like runtime registration vs compiled-in types?
 - **Label/field selector query language**: How much of k8s selector syntax to support?
 - **Prototyping strategy**: Start with real k8s via minikube (raw REST, standalone prototype) to validate the resource model, then build the in-process Rust/SQLite resource server once the API surface is known from actual usage. k3s is Linux-only (no macOS support), and Go's goroutine stack model prevents embedding any Go-based k8s components as a library — the in-process resource server must be a Rust reimplementation of the required k8s API subset.
-- **Naming**: The in-process resource server is a flotilla subsystem, not a separate project. Use `flotilla-resources` or a `resources` module rather than a branded name. "Tiller" collides with Helm 2's deprecated in-cluster component.
+- **Naming**: The control plane is `flotilla-cp`. The in-process resource server is a flotilla subsystem (`flotilla-resources` crate or `resources` module).

@@ -20,7 +20,7 @@ These are self-contained prompts for future brainstorm sessions, ordered by depe
 
 We prefer **raw REST calls** (reqwest + serde) over kube-rs for the k8s backend. Reasons:
 - kube-rs is a heavy dependency with opinions about async runtime
-- The `ResourceClient` trait should reflect plain REST semantics (what Tiller would eventually expose), not kube-rs's `Api<T>` abstractions
+- The `ResourceClient` trait should reflect plain REST semantics (what flotilla-cp would eventually expose), not kube-rs's `Api<T>` abstractions
 - For prototyping a single-node controller loop, a simple `loop { watch, react }` is clearer than kube-rs's reconciler framework
 - kube-rs doesn't provide leader election (community crate, no fencing) — not needed for single-node anyway
 - We already have reqwest and serde
@@ -49,7 +49,7 @@ Convoy data feeds into the existing provider data / correlation engine as just a
 
 **Goal:** Define the `ResourceClient` trait that convoy controllers use, and implement it against real k8s via raw REST calls.
 
-**Context:** Flotilla's convoy system needs a k8s-style resource API (get/list/watch/create/update/delete with resourceVersion). Controllers are written against a trait so they can run against k8s REST (prototyping), a future TillerHTTP backend, or InProcessTiller (zero-dependency laptop case). See the Tiller design doc for the full vision.
+**Context:** Flotilla's convoy system needs a k8s-style resource API (get/list/watch/create/update/delete with resourceVersion). Controllers are written against a trait so they can run against k8s REST (prototyping), a future flotilla-cpHTTP backend, or InProcessflotilla-cp (zero-dependency laptop case). See the flotilla-cp design doc for the full vision.
 
 This should be prototyped as a **standalone project** outside the flotilla codebase — a minimal Rust binary that registers CRDs and does CRUD + watch against a local k8s cluster (minikube). k3s is not viable (Linux-only); Go's goroutine stack model prevents embedding any Go-based k8s API server as a library, so the production in-process resource server will be a Rust/SQLite reimplementation of the required subset.
 
