@@ -22,7 +22,7 @@ impl Resource for ConvoyResource {
     type Spec = ConvoySpec;
     type Status = ConvoyStatus;
 
-    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.io", version: "v1", plural: "convoys", kind: "Convoy" };
+    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "convoys", kind: "Convoy" };
 }
 
 fn kubeconfig_path() -> PathBuf {

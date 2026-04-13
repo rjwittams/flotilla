@@ -127,7 +127,7 @@ This task makes `TypedResolver<T>` real: it dispatches to backend-specific imple
   - `TestResource`
   - `TestSpec`
   - `TestStatus`
-  - `ApiPaths { group: "flotilla.io", version: "v1", plural: "tests", kind: "Test" }`
+  - `ApiPaths { group: "flotilla.work", version: "v1", plural: "tests", kind: "Test" }`
   This avoids blocking stage 1 on the later convoy/workflow resource definitions.
 
 - [ ] **Step 6:** Run `cargo test -p flotilla-resources --locked` and fix compile/serde issues before proceeding.

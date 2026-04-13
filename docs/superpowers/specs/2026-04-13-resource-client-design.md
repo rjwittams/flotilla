@@ -18,7 +18,7 @@ Packages the k8s API coordinates for a resource type:
 
 ```rust
 struct ApiPaths {
-    pub group: &'static str,   // e.g. "flotilla.io"
+    pub group: &'static str,   // e.g. "flotilla.work"
     pub version: &'static str, // e.g. "v1"
     pub plural: &'static str,  // e.g. "convoys"
     pub kind: &'static str,    // e.g. "Convoy"

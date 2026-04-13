@@ -63,7 +63,7 @@ async fn list_decodes_collection_resource_version() {
     let body = serde_json::json!({
         "metadata": { "resourceVersion": "7" },
         "items": [{
-            "apiVersion": "flotilla.io/v1",
+            "apiVersion": "flotilla.work/v1",
             "kind": "Convoy",
             "metadata": {
                 "name": "alpha",
@@ -92,7 +92,7 @@ async fn list_decodes_collection_resource_version() {
 #[tokio::test]
 async fn update_status_uses_status_subresource_path_and_body() {
     let body = serde_json::json!({
-        "apiVersion": "flotilla.io/v1",
+        "apiVersion": "flotilla.work/v1",
         "kind": "Convoy",
         "metadata": {
             "name": "alpha",
@@ -114,7 +114,7 @@ async fn update_status_uses_status_subresource_path_and_body() {
     assert_eq!(updated.metadata.resource_version, "8");
 
     let request = request_rx.await.expect("captured request");
-    assert!(request.starts_with("PUT /apis/flotilla.io/v1/namespaces/flotilla/convoys/alpha/status HTTP/1.1"));
+    assert!(request.starts_with("PUT /apis/flotilla.work/v1/namespaces/flotilla/convoys/alpha/status HTTP/1.1"));
     assert!(request.contains("\"resourceVersion\":\"7\""));
     assert!(request.contains("\"phase\":\"Running\""));
 }
@@ -122,8 +122,8 @@ async fn update_status_uses_status_subresource_path_and_body() {
 #[tokio::test]
 async fn watch_decodes_kubernetes_watch_events() {
     let body = concat!(
-        "{\"type\":\"ADDED\",\"object\":{\"apiVersion\":\"flotilla.io/v1\",\"kind\":\"Convoy\",\"metadata\":{\"name\":\"alpha\",\"namespace\":\"flotilla\",\"resourceVersion\":\"7\",\"labels\":{},\"annotations\":{},\"creationTimestamp\":\"2026-04-13T12:00:00Z\"},\"spec\":{\"template\":\"review\"},\"status\":{\"phase\":\"Pending\"}}}\n",
-        "{\"type\":\"DELETED\",\"object\":{\"apiVersion\":\"flotilla.io/v1\",\"kind\":\"Convoy\",\"metadata\":{\"name\":\"alpha\",\"namespace\":\"flotilla\",\"resourceVersion\":\"8\",\"labels\":{},\"annotations\":{},\"creationTimestamp\":\"2026-04-13T12:00:00Z\"},\"spec\":{\"template\":\"review\"},\"status\":{\"phase\":\"Pending\"}}}\n"
+        "{\"type\":\"ADDED\",\"object\":{\"apiVersion\":\"flotilla.work/v1\",\"kind\":\"Convoy\",\"metadata\":{\"name\":\"alpha\",\"namespace\":\"flotilla\",\"resourceVersion\":\"7\",\"labels\":{},\"annotations\":{},\"creationTimestamp\":\"2026-04-13T12:00:00Z\"},\"spec\":{\"template\":\"review\"},\"status\":{\"phase\":\"Pending\"}}}\n",
+        "{\"type\":\"DELETED\",\"object\":{\"apiVersion\":\"flotilla.work/v1\",\"kind\":\"Convoy\",\"metadata\":{\"name\":\"alpha\",\"namespace\":\"flotilla\",\"resourceVersion\":\"8\",\"labels\":{},\"annotations\":{},\"creationTimestamp\":\"2026-04-13T12:00:00Z\"},\"spec\":{\"template\":\"review\"},\"status\":{\"phase\":\"Pending\"}}}\n"
     );
     let (base_url, request_rx) = spawn_one_shot_server(response("200 OK", body)).await;
     let backend = ResourceBackend::Http(HttpBackend::new(reqwest::Client::new(), base_url));
@@ -150,7 +150,7 @@ async fn watch_decodes_kubernetes_watch_events() {
     }
 
     let request = request_rx.await.expect("captured request");
-    assert!(request.starts_with("GET /apis/flotilla.io/v1/namespaces/flotilla/convoys?watch=true&resourceVersion=6 HTTP/1.1"));
+    assert!(request.starts_with("GET /apis/flotilla.work/v1/namespaces/flotilla/convoys?watch=true&resourceVersion=6 HTTP/1.1"));
 }
 
 #[tokio::test]
@@ -172,7 +172,7 @@ async fn status_errors_map_to_resource_errors() {
 
 #[tokio::test]
 async fn not_found_errors_preserve_requested_name() {
-    let body = serde_json::json!({ "message": "convoys.flotilla.io \"alpha\" not found" }).to_string();
+    let body = serde_json::json!({ "message": "convoys.flotilla.work \"alpha\" not found" }).to_string();
     let (base_url, _request_rx) = spawn_one_shot_server(response("404 Not Found", &body)).await;
     let backend = ResourceBackend::Http(HttpBackend::new(reqwest::Client::new(), base_url));
     let resolver = backend.using::<ConvoyResource>("flotilla");
