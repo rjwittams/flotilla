@@ -40,9 +40,9 @@ trait Resource: Send + Sync + 'static {
 
 `Resource` itself has no serde bounds — it is a marker type that associates API coordinates with spec/status types. Only `Spec` and `Status` are serialized.
 
-### ResourceObject
+### ResourceObject (output)
 
-The k8s-style resource envelope. Every resource has metadata, a spec (desired state), and an optional status (observed state, written by controllers):
+The k8s-style resource envelope returned by the backend. Every resource has full server-populated metadata, a spec (desired state), and an optional status (observed state, written by controllers):
 
 ```rust
 struct ResourceObject<T: Resource> {
@@ -52,26 +52,38 @@ struct ResourceObject<T: Resource> {
 }
 ```
 
-### ObjectMeta
+### ObjectMeta (output)
 
-Standard resource metadata, compatible with k8s conventions:
+Full resource metadata as returned by the server. All fields are server-populated:
 
 ```rust
 struct ObjectMeta {
     pub name: String,
     pub namespace: String,
-    pub resource_version: Option<String>,
+    pub resource_version: String,
     pub labels: BTreeMap<String, String>,
     pub annotations: BTreeMap<String, String>,
-    pub creation_timestamp: Option<DateTime<Utc>>,
+    pub creation_timestamp: DateTime<Utc>,
 }
 ```
 
-Fields included: name, namespace, resourceVersion (optimistic concurrency), labels (selection/filtering), annotations (arbitrary metadata), creationTimestamp (display/debugging).
-
-**Namespace on input objects is ignored.** The resolver's namespace is the source of truth for all operations. On create/update, the backend disregards `metadata.namespace` and uses the resolver's bound namespace. On returned objects, `metadata.namespace` is set by the backend to the resolver's namespace. This avoids contradictions between the resolver and the object.
+Fields included: name, namespace (set from resolver), resourceVersion (optimistic concurrency), labels, annotations, creationTimestamp.
 
 Fields deferred: generation/observedGeneration, finalizers, ownerReferences.
+
+### InputMeta (input)
+
+Caller-supplied metadata for create and update. Server-owned fields (namespace, resourceVersion, creationTimestamp) are absent — namespace comes from the resolver, resourceVersion is a separate parameter on update methods, and creationTimestamp is server-assigned:
+
+```rust
+struct InputMeta {
+    pub name: String,
+    pub labels: BTreeMap<String, String>,
+    pub annotations: BTreeMap<String, String>,
+}
+```
+
+Labels and annotations are full-replace on update — the caller sends the complete maps. The optimistic concurrency check (via resourceVersion) ensures no silent overwrites between concurrent actors.
 
 ## ResourceBackend and Resolvers
 
@@ -104,7 +116,7 @@ impl ResourceBackend {
 
 ### Namespace Scoping
 
-Namespace is a parameter when creating a resolver, not a field on the backend or on request objects. The resolver is bound to a single namespace. Objects returned carry namespace in their `ObjectMeta` (set by the server/backend), but callers don't supply a potentially conflicting namespace in requests. One source of truth: the resolver.
+Namespace is a parameter when creating a resolver. The resolver is bound to a single namespace and uses it for all URL construction. Callers never supply namespace — it is absent from `InputMeta` and present only in server-returned `ObjectMeta`. One source of truth: the resolver.
 
 ### TypedResolver
 
@@ -116,13 +128,13 @@ struct TypedResolver<T: Resource> { /* owned clone of backend handle + owned Str
 impl<T: Resource> TypedResolver<T> {
     async fn get(&self, name: &str) -> Result<ResourceObject<T>, ResourceError>;
     async fn list(&self) -> Result<ResourceList<T>, ResourceError>;
-    async fn create(&self, obj: &ResourceObject<T>) -> Result<ResourceObject<T>, ResourceError>;
-    async fn update(&self, obj: &ResourceObject<T>) -> Result<ResourceObject<T>, ResourceError>;
-    async fn update_status(&self, obj: &ResourceObject<T>) -> Result<ResourceObject<T>, ResourceError>;
+    async fn create(&self, meta: &InputMeta, spec: &T::Spec) -> Result<ResourceObject<T>, ResourceError>;
+    async fn update(&self, meta: &InputMeta, resource_version: &str, spec: &T::Spec) -> Result<ResourceObject<T>, ResourceError>;
+    async fn update_status(&self, meta: &InputMeta, resource_version: &str, status: &T::Status) -> Result<ResourceObject<T>, ResourceError>;
     async fn delete(&self, name: &str) -> Result<(), ResourceError>;
     async fn watch(
         &self,
-        resource_version: Option<&str>,
+        params: &WatchParams,
     ) -> Result<impl Stream<Item = Result<WatchEvent<T>, ResourceError>>, ResourceError>;
 }
 ```
@@ -138,7 +150,7 @@ struct ResourceList<T: Resource> {
 }
 ```
 
-The standard controller pattern is: `list()` to get current state + collection resourceVersion, then `watch(Some(&resource_version))` to receive all changes from that point forward. No gap, no missed updates.
+The standard controller pattern is: `list()` to get current state + collection resourceVersion, then `watch(&WatchParams { resource_version: Some(v) })` to receive all changes from that point forward. No gap, no missed updates.
 
 ### DynamicResolver
 
@@ -156,20 +168,33 @@ impl DynamicResolver {
     async fn delete(&self, name: &str) -> Result<(), ResourceError>;
     async fn watch(
         &self,
-        resource_version: Option<&str>,
+        params: &WatchParams,
     ) -> Result<BoxStream<'static, Result<DynWatchEvent, ResourceError>>, ResourceError>;
 }
 ```
 
 ### Notes on Resolver API
 
-- `update` and `update_status` are separate — spec and status are written by different actors (user writes spec, controller writes status). Mirrors k8s's `/status` subresource.
-- `create` returns the created object with server-assigned resourceVersion and creationTimestamp.
-- `update` requires the object to carry a resourceVersion. Stale version returns `ResourceError::Conflict`.
-- `watch` accepts an optional `resource_version` — pass the value from `list()` for race-free list-then-watch, or `None` to start from current state.
-- `watch` returns a stream — outer `Result` for connection failure, inner `Result` per event for parse/stream errors.
+- `create` takes `InputMeta` + spec. Returns the created object with full server-populated `ObjectMeta` (namespace, resourceVersion, creationTimestamp).
+- `update` takes `InputMeta` + `resource_version` + spec. The resourceVersion is a required `&str` — not optional, can't forget it. Stale version returns `ResourceError::Conflict`.
+- `update_status` takes `InputMeta` + `resource_version` + status. Same concurrency semantics as `update`. Separate method because spec and status are written by different actors (user writes spec, controller writes status). Mirrors k8s's `/status` subresource.
+- Labels and annotations on `InputMeta` are full-replace — the complete maps are sent on every update. Optimistic concurrency via resourceVersion prevents silent overwrites.
+- `watch` takes `WatchParams` and returns a stream. Outer `Result` for connection failure, inner `Result` per event for parse/stream errors.
 
-## Watch and Error Types
+## Watch, Params, and Error Types
+
+### WatchParams
+
+```rust
+struct WatchParams {
+    pub resource_version: Option<String>,
+}
+```
+
+- `resource_version: None` — deliver future events only. No replay of current state.
+- `resource_version: Some(v)` — resume from version `v`, delivering all events since that point. Used with the collection resourceVersion from `list()` for race-free list-then-watch.
+
+`WatchParams` is a struct rather than a bare `Option` so that additional start-point modes (e.g. state-of-world replay, as in newer k8s `SendInitialEvents`) can be added later without changing method signatures.
 
 ### WatchEvent
 
@@ -283,10 +308,10 @@ crates/flotilla-resources/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs              -- re-exports
-│   ├── resource.rs          -- Resource trait, ApiPaths, ResourceObject, ObjectMeta
+│   ├── resource.rs          -- Resource trait, ApiPaths, ResourceObject, ObjectMeta, InputMeta
 │   ├── backend.rs           -- ResourceBackend enum, TypedResolver, DynamicResolver
 │   ├── error.rs             -- ResourceError
-│   ├── watch.rs             -- WatchEvent, ResourceList
+│   ├── watch.rs             -- WatchEvent, WatchParams, ResourceList
 │   ├── http/
 │   │   ├── mod.rs           -- HttpBackend
 │   │   ├── kubeconfig.rs    -- ~/.kube/config parsing, client cert auth
@@ -350,9 +375,13 @@ The primary path is fully generic (`T: Resource`). Controllers know their types 
 
 Mirrors k8s's status subresource convention. Users/CLI write spec, controllers write status. Separate update methods prevent accidental cross-contamination and reduce conflict surface.
 
-### Namespace on resolver, not on backend or objects
+### Input/output type split
 
-Namespace is a parameter when creating a resolver. The resolver is bound to a single namespace. This avoids contradictions between a client-level namespace, request-level namespace, and object metadata namespace. One source of truth.
+Create and update methods take `InputMeta` (name, labels, annotations) — no server-owned fields. The server returns `ResourceObject<T>` with full `ObjectMeta` (namespace, resourceVersion, creationTimestamp populated). resourceVersion is a separate required parameter on update methods. This eliminates dummy fields on input and makes the concurrency contract explicit in the type signature.
+
+### Namespace on resolver, not on input objects
+
+Namespace is a parameter when creating a resolver. The resolver is bound to a single namespace. `InputMeta` has no namespace field — it comes only from the resolver. Returned `ObjectMeta` carries namespace (set by the backend). One source of truth, no contradictions.
 
 ### CRD bootstrap as separate utilities
 
