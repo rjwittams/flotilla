@@ -147,8 +147,9 @@ name: review-and-fix
 tasks:
   - name: implement
     processes:
-      - role: agent
-        command: "{main_command}"
+      - role: coding-agent
+        selector:
+          capability: code
       - role: build
         command: "cargo watch -x check"
 
@@ -156,7 +157,8 @@ tasks:
     depends_on: [implement]
     processes:
       - role: reviewer
-        command: "claude --review"
+        selector:
+          capability: code-review
       - role: tests
         command: "cargo test --watch"
 ```
@@ -293,6 +295,8 @@ A convoy stage might reference external state ("wait for PR status = merged") by
 ## Correlation
 
 Convoy data feeds into the existing provider data / correlation engine as just another data source. The convoy controller doesn't need to know about correlation — it emits items with the right keys (Branch, CheckoutPath, etc.), and the correlation engine groups them with independently-discovered PRs, branches, and other items downstream. This means convoy integration with the current model is thin: convoys produce `ProviderData` items, correlation handles the rest. The exact long-term shape of correlation is a separate concern.
+
+**Key emission timing:** Correlation keys like `CheckoutPath` aren't known until task provisioning completes. During provisioning, the convoy item and the checkout item may appear as separate work items. They merge on the next refresh cycle once the checkout exists and its keys are visible. This is the same pattern as existing provider discovery — providers report what currently exists, refresh cycles update correlation. No special incremental-update mechanism is needed.
 
 ## Deferred Design Questions
 

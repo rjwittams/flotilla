@@ -1,18 +1,20 @@
 # Convoy Implementation — Brainstorm Prompts
 
-These are self-contained prompts for future brainstorm sessions, ordered by dependency. Reference the design doc at `docs/superpowers/specs/2026-04-13-convoy-and-tiller-design.md` for full context.
+These are self-contained prompts for future brainstorm sessions, ordered by dependency. Reference the design doc at `docs/superpowers/specs/2026-04-13-convoy-and-control-plane-design.md` for full context.
 
 ## Dependency Graph
 
 ```
 1. ResourceClient trait + k8s REST prototype
-   2. WorkflowTemplate resource (depends on 1)
-3. Convoy resource + controller (depends on 1, 2)
-4. Task provisioning / policy (depends on 3)
-5. Presentation integration + PresentationManager rename (depends on 3)
-6. TUI convoy view (depends on 3)
-7. AttachableSet migration (depends on 3-6)
+2. WorkflowTemplate resource                   depends on: 1
+3. Convoy resource + controller                 depends on: 1, 2
+4. Task provisioning / policy                   depends on: 3
+5. Presentation integration + rename            depends on: 3
+6. TUI convoy view                              depends on: 3
+7. AttachableSet migration                      depends on: 3, 4, 5, 6
 ```
+
+Stages 4, 5, and 6 can run in parallel once 3 is complete.
 
 ## Design Decisions
 
