@@ -45,6 +45,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         labels: [("app".to_string(), "flotilla".to_string())].into_iter().collect(),
         annotations: Default::default(),
     };
+    if let Err(err) = resolver.delete(&meta.name).await {
+        if !matches!(err, flotilla_resources::ResourceError::NotFound { .. }) {
+            return Err(err.into());
+        }
+    }
 
     println!("creating resource");
     let created = resolver.create(&meta, &ConvoySpec { template: "review-and-fix".to_string() }).await?;

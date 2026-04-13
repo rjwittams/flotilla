@@ -82,13 +82,15 @@ pub fn from_kubeconfig(path: impl AsRef<Path>) -> Result<HttpBackend, ResourceEr
         .find(|user| user.name == context.context.user)
         .ok_or_else(|| ResourceError::invalid(format!("user '{}' not found", context.context.user)))?;
 
-    let mut builder = Client::builder();
+    let mut builder = Client::builder().tls_backend_rustls();
     if let Some(ca_bytes) =
         read_pem_bytes(path, cluster.cluster.certificate_authority.as_deref(), cluster.cluster.certificate_authority_data.as_deref())?
     {
-        builder = builder.add_root_certificate(
-            Certificate::from_pem(&ca_bytes).map_err(|err| ResourceError::invalid(format!("load kubeconfig CA certificate: {err}")))?,
-        );
+        let ca =
+            Certificate::from_pem(&ca_bytes).map_err(|err| ResourceError::invalid(format!("load kubeconfig CA certificate: {err}")))?;
+        // Kubeconfig-provided CAs should be authoritative for the cluster endpoint rather than
+        // treated as "extra" platform roots.
+        builder = builder.tls_certs_only([ca]);
     }
     let cert_bytes = read_pem_bytes(path, user.user.client_certificate.as_deref(), user.user.client_certificate_data.as_deref())?
         .ok_or_else(|| ResourceError::invalid("kubeconfig user missing client certificate"))?;
