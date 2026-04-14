@@ -35,11 +35,15 @@ pub trait StatusPatch<S>: Send + Sync {
 No new resolver method. Writers use the existing `update_status(name, rv, new_status)`, plus this read-modify-write helper that every controller loop needs anyway:
 
 ```rust
-pub async fn apply_status_patch<T: Resource>(
+pub async fn apply_status_patch<T>(
     resolver: &TypedResolver<T>,
     name: &str,
     patch: &T::StatusPatch,
-) -> Result<ResourceObject<T>, ResourceError> {
+) -> Result<ResourceObject<T>, ResourceError>
+where
+    T: Resource,
+    T::Status: Default,
+{
     for _ in 0..MAX_RETRIES {
         let current = resolver.get(name).await?;
         let mut new_status = current.status.clone().unwrap_or_default();
@@ -56,6 +60,8 @@ pub async fn apply_status_patch<T: Resource>(
     Err(ResourceError::Conflict { /* retry budget exhausted */ })
 }
 ```
+
+The `T::Status: Default` bound is placed on the helper only, not on the `Resource` trait. This keeps the trait unchanged and leaves the door open for resources that can't or don't want to implement `Default` (they can still use `update_status` directly). `ConvoyStatus` derives `Default` (see the type definition below); `WorkflowTemplate::Status = ()` trivially has `Default` but also cannot be patched (`NoStatusPatch` is uninhabited).
 
 ### Why this shape
 
