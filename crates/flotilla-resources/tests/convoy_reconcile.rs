@@ -189,6 +189,117 @@ fn all_completed_rolls_up_to_completed() {
 }
 
 #[test]
+fn terminal_completed_convoy_reconciles_to_noop() {
+    let mut status = bootstrapped_convoy_status();
+    status.phase = ConvoyPhase::Completed;
+    status.finished_at = Some(timestamp(40));
+    for task in status.tasks.values_mut() {
+        task.phase = TaskPhase::Completed;
+        task.finished_at = Some(timestamp(12));
+    }
+    let convoy = convoy_object("convoy-a", valid_convoy_spec(), Some(status));
+
+    let outcome = reconcile(&convoy, None, timestamp(41));
+
+    assert_eq!(outcome.patch, None);
+    assert!(outcome.events.is_empty());
+}
+
+#[test]
+fn terminal_failed_convoy_reconciles_to_noop() {
+    let mut status = bootstrapped_convoy_status();
+    status.phase = ConvoyPhase::Failed;
+    status.finished_at = Some(timestamp(30));
+    status.tasks.get_mut("implement").expect("implement").phase = TaskPhase::Failed;
+    status.tasks.get_mut("implement").expect("implement").finished_at = Some(timestamp(12));
+    status.tasks.get_mut("review").expect("review").phase = TaskPhase::Cancelled;
+    status.tasks.get_mut("review").expect("review").finished_at = Some(timestamp(30));
+    let convoy = convoy_object("convoy-a", valid_convoy_spec(), Some(status));
+
+    let outcome = reconcile(&convoy, None, timestamp(31));
+
+    assert_eq!(outcome.patch, None);
+    assert!(outcome.events.is_empty());
+}
+
+#[test]
+fn terminal_failed_init_convoy_reconciles_to_noop() {
+    let mut status = common::convoy_status(ConvoyPhase::Failed);
+    status.message = Some("missing input 'branch'".to_string());
+    status.finished_at = Some(timestamp(30));
+    let convoy = convoy_object("convoy-a", valid_convoy_spec(), Some(status));
+
+    let outcome = reconcile(&convoy, Some(&valid_workflow_template_object("review-and-fix")), timestamp(31));
+
+    assert_eq!(outcome.patch, None);
+    assert!(outcome.events.is_empty());
+}
+
+#[test]
+fn advancing_ready_tasks_emits_task_phase_change_events() {
+    let spec = valid_convoy_spec();
+    let mut status = bootstrapped_convoy_status();
+    status.workflow_snapshot = Some(flotilla_resources::WorkflowSnapshot {
+        tasks: vec![
+            flotilla_resources::SnapshotTask { name: "a".to_string(), depends_on: Vec::new(), processes: Vec::new() },
+            flotilla_resources::SnapshotTask { name: "b".to_string(), depends_on: Vec::new(), processes: Vec::new() },
+            flotilla_resources::SnapshotTask { name: "c".to_string(), depends_on: Vec::new(), processes: Vec::new() },
+        ],
+    });
+    status.tasks =
+        [("a".to_string(), pending_task_state()), ("b".to_string(), pending_task_state()), ("c".to_string(), pending_task_state())]
+            .into_iter()
+            .collect();
+
+    let convoy = convoy_object("convoy-a", spec, Some(status));
+    let outcome = reconcile(&convoy, None, timestamp(20));
+
+    assert!(matches!(
+        outcome.events.as_slice(),
+        [
+            ConvoyEvent::TaskPhaseChanged { task: a, from: TaskPhase::Pending, to: TaskPhase::Ready },
+            ConvoyEvent::TaskPhaseChanged { task: b, from: TaskPhase::Pending, to: TaskPhase::Ready },
+            ConvoyEvent::TaskPhaseChanged { task: c, from: TaskPhase::Pending, to: TaskPhase::Ready },
+        ] if a == "a" && b == "b" && c == "c"
+    ));
+}
+
+#[test]
+fn fail_fast_emits_phase_and_task_phase_change_events() {
+    let mut status = bootstrapped_convoy_status();
+    status.phase = ConvoyPhase::Active;
+    status.tasks.get_mut("implement").expect("implement").phase = TaskPhase::Failed;
+    status.tasks.get_mut("implement").expect("implement").finished_at = Some(timestamp(12));
+    status.tasks.get_mut("review").expect("review").phase = TaskPhase::Running;
+    status.tasks.get_mut("review").expect("review").started_at = Some(timestamp(11));
+    let convoy = convoy_object("convoy-a", valid_convoy_spec(), Some(status));
+
+    let outcome = reconcile(&convoy, None, timestamp(30));
+
+    assert!(matches!(
+        outcome.events.as_slice(),
+        [
+            ConvoyEvent::PhaseChanged { from: ConvoyPhase::Active, to: ConvoyPhase::Failed },
+            ConvoyEvent::TaskPhaseChanged { task, from: TaskPhase::Running, to: TaskPhase::Cancelled },
+        ] if task == "review"
+    ));
+}
+
+#[test]
+fn roll_up_to_active_emits_phase_change_event() {
+    let mut status = bootstrapped_convoy_status();
+    status.tasks.get_mut("implement").expect("implement").phase = TaskPhase::Completed;
+    status.tasks.get_mut("implement").expect("implement").finished_at = Some(timestamp(8));
+    status.tasks.get_mut("review").expect("review").phase = TaskPhase::Running;
+    status.tasks.get_mut("review").expect("review").started_at = Some(timestamp(9));
+    let convoy = convoy_object("convoy-a", valid_convoy_spec(), Some(status));
+
+    let outcome = reconcile(&convoy, None, timestamp(20));
+
+    assert!(matches!(outcome.events.as_slice(), [ConvoyEvent::PhaseChanged { from: ConvoyPhase::Pending, to: ConvoyPhase::Active }]));
+}
+
+#[test]
 fn workflow_ref_change_after_init_fails_defensively() {
     let mut spec = valid_convoy_spec();
     spec.workflow_ref = "new-template".to_string();

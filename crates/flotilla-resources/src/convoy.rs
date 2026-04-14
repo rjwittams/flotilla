@@ -36,6 +36,8 @@ pub struct ConvoySpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum InputValue {
+    // Keep inputs untagged so today's plain strings serialize naturally while leaving room
+    // for future structured input sources without changing the field shape.
     String(String),
 }
 

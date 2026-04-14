@@ -31,6 +31,10 @@ pub fn reconcile(
 ) -> ReconcileOutcome {
     let status = convoy.status.clone().unwrap_or_default();
 
+    if matches!(status.phase, ConvoyPhase::Completed | ConvoyPhase::Failed | ConvoyPhase::Cancelled) {
+        return ReconcileOutcome { patch: None, events: Vec::new() };
+    }
+
     if let Some(observed) = status.observed_workflow_ref.as_ref() {
         if observed != &convoy.spec.workflow_ref {
             return ReconcileOutcome {
@@ -48,16 +52,16 @@ pub fn reconcile(
         return bootstrap_outcome(convoy, template, now);
     }
 
-    if let Some(patch) = fail_fast_patch(&status.tasks, now) {
-        return ReconcileOutcome { patch: Some(patch), events: Vec::new() };
+    if let Some(outcome) = fail_fast_outcome(&status, now) {
+        return outcome;
     }
 
-    if let Some(patch) = advance_ready_patch(&status, now) {
-        return ReconcileOutcome { patch: Some(patch), events: Vec::new() };
+    if let Some(outcome) = advance_ready_outcome(&status, now) {
+        return outcome;
     }
 
-    if let Some(patch) = roll_up_phase_patch(&status, now) {
-        return ReconcileOutcome { patch: Some(patch), events: Vec::new() };
+    if let Some(outcome) = roll_up_phase_outcome(&status, now) {
+        return outcome;
     }
 
     ReconcileOutcome { patch: None, events: Vec::new() }
@@ -136,24 +140,38 @@ fn bootstrap_outcome(
     }
 }
 
-fn fail_fast_patch(tasks: &BTreeMap<String, TaskState>, now: DateTime<Utc>) -> Option<ConvoyStatusPatch> {
-    let any_failed = tasks.values().any(|task| task.phase == TaskPhase::Failed);
+fn fail_fast_outcome(status: &super::ConvoyStatus, now: DateTime<Utc>) -> Option<ReconcileOutcome> {
+    let any_failed = status.tasks.values().any(|task| task.phase == TaskPhase::Failed);
     if !any_failed {
         return None;
     }
 
-    let cancelled_tasks = tasks
+    let cancelled_tasks = status
+        .tasks
         .iter()
         .filter_map(|(name, task)| match task.phase {
             TaskPhase::Completed | TaskPhase::Failed | TaskPhase::Cancelled => None,
             _ => Some((name.clone(), now)),
         })
-        .collect();
+        .collect::<BTreeMap<_, _>>();
 
-    Some(controller_patches::fail_convoy(cancelled_tasks, now, Some("task failure detected".to_string())))
+    let mut events = Vec::new();
+    if status.phase != ConvoyPhase::Failed {
+        events.push(ConvoyEvent::PhaseChanged { from: status.phase, to: ConvoyPhase::Failed });
+    }
+    for task in cancelled_tasks.keys() {
+        if let Some(state) = status.tasks.get(task) {
+            events.push(ConvoyEvent::TaskPhaseChanged { task: task.clone(), from: state.phase, to: TaskPhase::Cancelled });
+        }
+    }
+
+    Some(ReconcileOutcome {
+        patch: Some(controller_patches::fail_convoy(cancelled_tasks, now, Some("task failure detected".to_string()))),
+        events,
+    })
 }
 
-fn advance_ready_patch(status: &super::ConvoyStatus, now: DateTime<Utc>) -> Option<ConvoyStatusPatch> {
+fn advance_ready_outcome(status: &super::ConvoyStatus, now: DateTime<Utc>) -> Option<ReconcileOutcome> {
     let snapshot = status.workflow_snapshot.as_ref()?;
     let ready = snapshot
         .tasks
@@ -171,17 +189,30 @@ fn advance_ready_patch(status: &super::ConvoyStatus, now: DateTime<Utc>) -> Opti
         })
         .collect::<BTreeMap<_, _>>();
 
-    (!ready.is_empty()).then(|| controller_patches::advance_tasks_to_ready(ready))
+    if ready.is_empty() {
+        return None;
+    }
+
+    let events =
+        ready.keys().cloned().map(|task| ConvoyEvent::TaskPhaseChanged { task, from: TaskPhase::Pending, to: TaskPhase::Ready }).collect();
+
+    Some(ReconcileOutcome { patch: Some(controller_patches::advance_tasks_to_ready(ready)), events })
 }
 
-fn roll_up_phase_patch(status: &super::ConvoyStatus, now: DateTime<Utc>) -> Option<ConvoyStatusPatch> {
+fn roll_up_phase_outcome(status: &super::ConvoyStatus, now: DateTime<Utc>) -> Option<ReconcileOutcome> {
     if !status.tasks.is_empty() && status.tasks.values().all(|task| task.phase == TaskPhase::Completed) {
-        return Some(controller_patches::roll_up_phase(ConvoyPhase::Completed, None, Some(now)));
+        return Some(ReconcileOutcome {
+            patch: Some(controller_patches::roll_up_phase(ConvoyPhase::Completed, None, Some(now))),
+            events: vec![ConvoyEvent::PhaseChanged { from: status.phase, to: ConvoyPhase::Completed }],
+        });
     }
 
     let any_progressed = status.tasks.values().any(|task| task.phase != TaskPhase::Pending);
     if any_progressed && status.phase == ConvoyPhase::Pending {
-        return Some(controller_patches::roll_up_phase(ConvoyPhase::Active, Some(now), None));
+        return Some(ReconcileOutcome {
+            patch: Some(controller_patches::roll_up_phase(ConvoyPhase::Active, Some(now), None)),
+            events: vec![ConvoyEvent::PhaseChanged { from: ConvoyPhase::Pending, to: ConvoyPhase::Active }],
+        });
     }
 
     None
