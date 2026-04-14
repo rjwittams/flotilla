@@ -52,6 +52,29 @@ pub fn status(phase: &str) -> ConvoyStatus {
     ConvoyStatus { phase: phase.to_string() }
 }
 
+pub fn convoy_meta(name: &str) -> InputMeta {
+    input_meta(name)
+}
+
+pub fn convoy_spec(workflow_ref: &str) -> RealConvoySpec {
+    let mut spec = valid_convoy_spec();
+    spec.workflow_ref = workflow_ref.to_string();
+    spec
+}
+
+pub fn convoy_status(phase: flotilla_resources::ConvoyPhase) -> RealConvoyStatus {
+    RealConvoyStatus {
+        phase,
+        workflow_snapshot: None,
+        tasks: Default::default(),
+        message: None,
+        started_at: None,
+        finished_at: None,
+        observed_workflow_ref: None,
+        observed_workflows: None,
+    }
+}
+
 pub fn workflow_template_meta(name: &str) -> InputMeta {
     InputMeta {
         name: name.to_string(),
