@@ -24,7 +24,7 @@ Lives in the existing `crates/flotilla-resources` crate alongside the convoy CRD
 ### Out of scope (for this stage)
 
 - Convoy controller or any controller at all.
-- Selector resolution, prompt rendering, variable *substitution*. (Interpolation *syntax and reference validation* is in scope — resolving the values isn't.)
+- Selector resolution, prompt rendering, variable *substitution*. (Interpolation *syntax and reference validation* is in scope — resolving the values at task launch isn't.)
 - Status subresource, admission webhooks, server-side validation.
 - Presentation/layout configuration.
 - Compatibility with today's `WorkspaceTemplate` (`.flotilla/workspace.yaml`). We are in a no-backwards-compatibility phase; new workflows are authored fresh.
@@ -133,7 +133,7 @@ spec:
 - **`status: ()`** because WorkflowTemplate has no observed state. If that changes later (validity tracking, reference-counting), widen the type.
 - **`#[serde(flatten, untagged)]`** on `ProcessSource` gives the verbatim YAML shape — `selector` present → `Agent`, `command` present → `Tool`. No explicit `kind:` discriminator is required.
 - **Task list order** is an authoring convenience; execution order comes from `depends_on` alone.
-- **Commands and prompts both support `{{...}}` interpolation.** Collision with kubectl/Helm/Go-template snippets (`{{.metadata.name}}`, `{{ .Release.Name }}`) is avoided by a prefix allowlist: only tokens starting with a known scope (`inputs.`, `workflow.`) are recognized; any other token is left alone verbatim for downstream tooling to handle. Matches Argo's approach. Substitution happens at convoy launch (Stage 3); Stage 2 only validates that *recognized* references resolve.
+- **Commands and prompts both support `{{...}}` interpolation.** Collision with kubectl/Helm/Go-template snippets (`{{.metadata.name}}`, `{{ .Release.Name }}`) is avoided by a prefix allowlist: only tokens starting with a known scope (`inputs.`, `workflow.`) are recognized; any other token is left alone verbatim for downstream tooling to handle. Matches Argo's approach. Stage 2 validates statically that recognized references resolve against the declared spec; actual substitution happens at **task launch** (Stage 3 and later), because future scopes like `{{tasks.<name>.outputs.<field>}}` only acquire concrete values as upstream tasks complete.
 - **`role` uniqueness is per-task, not per-workflow.** Two tasks can each have a `coder`; they are different process instances at different times.
 - **`deny_unknown_fields` on `ProcessSource`.** Without it, serde's untagged decode silently drops unknown fields — a `prompt:` alongside `command:` would deserialise as a tool process and discard the prompt. `deny_unknown_fields` surfaces the mismatch as a parse error, which authoring agents can act on.
 
@@ -271,7 +271,7 @@ pub enum InterpolationField { Prompt, Command }
 
 ## Interpolation
 
-Prompts and commands may contain `{{path}}` tokens that are resolved at convoy launch. Stage 2 only parses them and validates that the ones we recognize resolve.
+Prompts and commands may contain `{{path}}` tokens. Substitution happens at **task launch** (Stage 3 onwards) — not at convoy launch — because future scopes like `{{tasks.<name>.outputs.<field>}}` only acquire concrete values as upstream tasks complete. Stage 2 parses the tokens statically and validates that the ones whose prefix we recognize point at real declarations.
 
 ### Syntax
 
@@ -291,7 +291,7 @@ Only tokens whose first segment is one of these scopes are subject to validation
 
 ### Foreign-token passthrough
 
-Tokens whose first segment is **not** in the allowlist are left in place verbatim. The validator does not inspect them; convoy launch does not substitute them. They are assumed to be downstream-tool templates. Examples that pass through unchanged:
+Tokens whose first segment is **not** in the allowlist are left in place verbatim. The validator does not inspect them; the task-launch interpolator will not substitute them. They are assumed to be downstream-tool templates. Examples that pass through unchanged:
 
 - `kubectl get pod -o go-template='{{.metadata.name}}'` (Go template — leading `.`)
 - `helm template . --set name={{ .Release.Name }}` (Helm template)
@@ -305,7 +305,7 @@ Tokens like `{{inptus.branch}}` (typo of `inputs.`) are treated as foreign and p
 
 ### Absent values
 
-All declared inputs in v1 are required — convoy launch must supply a value. Optional inputs and the "absent ⇒ empty string" semantics that Argo uses for skipped-task outputs are deferred (see "Optional / multi-valued inputs" in the deferred list).
+All declared inputs in v1 are required — the convoy that instantiates a WorkflowTemplate must supply a value for each before any task launches. Optional inputs and the "absent ⇒ empty string" semantics that Argo uses for skipped-task outputs are deferred (see "Optional / multi-valued inputs" in the deferred list).
 
 ## Tests
 
