@@ -523,7 +523,9 @@ Per-task logic on every reconcile pass — first looks up the TaskWorkspace by d
 - **`Pending`**, deps satisfied → emit `MarkTaskReady` patch (Stage 3 unchanged).
 - **`Ready`**:
   - If TaskWorkspace doesn't exist → emit `CreateTaskWorkspace` actuation (idempotent; AlreadyExists is success).
-  - If TaskWorkspace exists → emit `MarkTaskLaunching` patch.
+  - If TaskWorkspace exists with `status.phase == Failed` → emit `MarkTaskFailed` patch with the workspace's failure message. A task is not considered launched just because the TaskWorkspace object exists.
+  - If TaskWorkspace exists with `status.phase == Ready` → emit `MarkTaskLaunching` patch. This is the point where `started_at` and placement metadata become true for the convoy task.
+  - Otherwise → no work; wait for next reconcile.
 - **`Launching`**:
   - If TaskWorkspace doesn't exist → emit `CreateTaskWorkspace` (recovers from prior actuation failure or lost watch event).
   - If TaskWorkspace exists with `status.phase == Ready` → emit `MarkTaskRunning` patch (the observation-driven propagation that replaces the old `PatchConvoyTask` actuation).
@@ -626,9 +628,10 @@ For each resource that carries a finalizer: verify cleanup runs, finalizer entry
 9. Daemon startup logic: self-register as Host, create host-direct Environment, discover existing Repositories from flotilla-core registry, create default PlacementPolicies, spawn the heartbeat task and all controller loops.
 10. **CLI completion path** (touches several crates, extending the existing `Command`/`CommandAction` vocabulary):
     - `flotilla-protocol` — new `CommandAction::MarkConvoyTaskComplete { namespace, convoy, task }` variant on the existing `CommandAction` enum (sent through the existing `Request::Execute { command }` flow). Matching success/error shape on the existing result type.
-    - `flotilla-client` — `mark_convoy_task_complete(namespace, convoy, task)` method on the daemon-handle surface, building a `Command` with the new `CommandAction` and sending via `Request::Execute`.
-    - `flotilla-daemon` — extend the existing command dispatcher with a handler for the new `CommandAction` that validates the request and calls `apply_status_patch::<Convoy>(...)` with `ConvoyStatusPatch::MarkTaskCompleted`.
-    - `flotilla` binary — CLI subcommand `flotilla convoy <name> task <task> complete [--namespace <ns>]` invoking the client method.
+    - `flotilla-core` — extend the daemon-level command handling path so `CommandAction::MarkConvoyTaskComplete` is recognized as a daemon-scoped action rather than a per-repo executor plan step. `InProcessDaemon` / the core executor boundary needs to route it to the resource patching path cleanly.
+    - `flotilla-daemon` — extend the existing command dispatcher / daemon-scoped command handling with a handler for the new `CommandAction` that validates the request and calls `apply_status_patch::<Convoy>(...)` with `ConvoyStatusPatch::MarkTaskCompleted`.
+    - `flotilla-client` — no new protocol shape is required beyond the existing `execute()` path. The CLI can build a `Command` with the new `CommandAction` and send it via `Request::Execute`; a small convenience helper is optional but not required at the `DaemonHandle` trait boundary.
+    - `flotilla` binary — CLI subcommand `flotilla convoy <name> task <task> complete [--namespace <ns>]` building the new `CommandAction` and invoking `execute()`.
     Future short-form (`flotilla complete` driven by env-var context) is deferred.
 11. New `flotillad` binary target in `flotilla-daemon`.
 12. `flotilla` TUI binary's embedded-daemon mode removed entirely (Stage 4a cuts the cord).
