@@ -771,6 +771,8 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let machine_runner = crate::providers::discovery::test_support::DiscoveryMockRunner::builder()
             .on_run("ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"], Ok("\"IOPlatformUUID\" = \"machine-uuid\"\n".into()))
+            .on_run("ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"], Ok("\"IOPlatformUUID\" = \"machine-uuid\"\n".into()))
+            .on_run("ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"], Ok("\"IOPlatformUUID\" = \"machine-uuid\"\n".into()))
             .build();
 
         let node_id_1 = resolve_local_node_id(base.path(), None, &machine_runner).await.unwrap();
