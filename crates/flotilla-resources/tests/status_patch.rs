@@ -62,3 +62,17 @@ async fn apply_status_patch_updates_existing_status() {
     assert_eq!(updated.metadata.resource_version, "3");
     assert_eq!(current.metadata.resource_version, "2");
 }
+
+#[tokio::test]
+async fn apply_status_patch_initializes_missing_status_from_default() {
+    let resolver = ResourceBackend::InMemory(InMemoryBackend::default()).using::<CounterResource>("flotilla");
+    let created = resolver.create(&counter_meta("beta"), &counter_spec("beta")).await.expect("create should succeed");
+
+    let updated = flotilla_resources::apply_status_patch(&resolver, "beta", &CounterPatch::SetNote("ready"))
+        .await
+        .expect("status patch should succeed");
+
+    assert_eq!(created.status, None);
+    assert_eq!(updated.status.expect("status"), CounterStatus { value: 0, note: Some("ready".to_string()) });
+    assert_eq!(updated.metadata.resource_version, "2");
+}
