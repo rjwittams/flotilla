@@ -12,9 +12,9 @@ Lives in the existing `crates/flotilla-resources` crate alongside `WorkflowTempl
 
 Stage 3 also makes a small revision to the Stage 1 resource-client surface — see "Resource-client revision: typed status patches" below.
 
-## Resource-client revision: typed status patches
+## Resource-client revision: typed status mutations via `StatusPatch`
 
-To let multiple actors (convoy controller, future provisioning controller, external CLI/TUI) mutate disjoint parts of a convoy's status without overwriting each other, full-status replacement (`update_status`) is insufficient. Stage 3 adds a typed patch primitive to the Stage 1 API:
+Multi-writer safety on `/status` needs documented optimistic-concurrency guarantees. Partial-patch transport on top of k8s is subtle: `application/merge-patch+json` has no documented precondition mechanism, `application/json-patch+json` needs an explicit `test` op, and Server-Side Apply brings its own managed-fields model. For Stage 3 we keep the transport simple — full-status replacement via `update_status`, which **is** documented to reject stale `resourceVersion` with 409 Conflict — and add a small layer above it that keeps mutations typed:
 
 ```rust
 pub trait Resource: Send + Sync + 'static {
@@ -25,32 +25,45 @@ pub trait Resource: Send + Sync + 'static {
 }
 
 pub trait StatusPatch<S>: Send + Sync {
-    /// Apply the patch directly to an in-memory status value.
-    /// Used by the in-memory backend and by a future in-process
-    /// flotilla-cp that keeps state in Rust structures, not JSON.
+    /// Apply the patch directly to a status value.
+    /// Used by every backend; the HTTP backend then calls update_status
+    /// with the resulting full status.
     fn apply(&self, status: &mut S);
-
-    /// Serialise to a JSON merge-patch (RFC 7396) body.
-    /// Used by the HTTP backend against real k8s.
-    fn to_merge_patch(&self) -> serde_json::Value;
-}
-
-// New resolver method:
-impl<T: Resource> TypedResolver<T> {
-    async fn patch_status(
-        &self,
-        name: &str,
-        resource_version: &str,
-        patch: &T::StatusPatch,
-    ) -> Result<ResourceObject<T>, ResourceError>;
 }
 ```
 
-### Dispatch
+No new resolver method. Writers use the existing `update_status(name, rv, new_status)`, plus this read-modify-write helper that every controller loop needs anyway:
 
-- **HTTP backend**: `PATCH /apis/.../<kind>/<name>/status` with `Content-Type: application/merge-patch+json`, body from `patch.to_merge_patch()`, and `resourceVersion` as an optimistic-concurrency precondition (`?resourceVersion=...` query — k8s honors this for PATCH).
-- **In-memory backend**: look up the stored status under the resource lock, check `resource_version`, call `patch.apply(&mut status)`, bump the stored version.
-- **Full `update_status` stays.** It's still the right tool for create-time and bootstrap paths where "the whole status is new" is the shape.
+```rust
+pub async fn apply_status_patch<T: Resource>(
+    resolver: &TypedResolver<T>,
+    name: &str,
+    patch: &T::StatusPatch,
+) -> Result<ResourceObject<T>, ResourceError> {
+    for _ in 0..MAX_RETRIES {
+        let current = resolver.get(name).await?;
+        let mut new_status = current.status.clone().unwrap_or_default();
+        patch.apply(&mut new_status);
+        match resolver
+            .update_status(name, &current.metadata.resource_version, &new_status)
+            .await
+        {
+            Ok(updated) => return Ok(updated),
+            Err(ResourceError::Conflict { .. }) => continue,   // re-read, re-apply
+            Err(other) => return Err(other),
+        }
+    }
+    Err(ResourceError::Conflict { /* retry budget exhausted */ })
+}
+```
+
+### Why this shape
+
+- **Documented concurrency guarantees.** PUT with `resourceVersion` is k8s's explicit lost-update protection mechanism (API Concepts §"HTTP PUT to replace existing resource"). 409-on-stale-rv is part of the contract.
+- **Typed vocabulary still runs the show.** `StatusPatch` variants name legitimate mutations; owner-scoped constructor modules gate who can build which variant; `apply(&mut status)` is the single authoritative mutator. The transport just carries the resulting full status.
+- **Concurrent disjoint writers still compose correctly.** Two writers constructing different variants both read state, apply their patch, try to update; one wins, the other gets 409, re-reads, re-applies, writes. Because each variant's `apply` touches disjoint fields, the re-applied patch on the newer state is still semantically correct.
+- **Concurrent same-field writers collide loudly.** Two external actors each marking a task Completed: one wins, the other retries on updated state (which now shows the task Completed) and either no-ops or reconciles its view.
+- **One backend contract, no new transport primitives.** `update_status` and `get` already exist. The in-memory backend works out of the box; the HTTP backend doesn't need to learn any new verbs. Stage 1 revision is limited to adding the associated type + trait; no HTTP or in-memory changes.
 
 ### Resources with no status
 
@@ -61,7 +74,6 @@ pub enum NoStatusPatch {}
 
 impl StatusPatch<()> for NoStatusPatch {
     fn apply(&self, _: &mut ()) { match *self {} }
-    fn to_merge_patch(&self) -> Value { match *self {} }
 }
 
 impl Resource for WorkflowTemplate {
@@ -70,15 +82,15 @@ impl Resource for WorkflowTemplate {
 }
 ```
 
-`patch_status` exists on the resolver for every `T`, but no caller can construct a `NoStatusPatch` — the method is compile-time unreachable for status-less resources. Stronger than a runtime "not supported" error.
+Since `NoStatusPatch` has no variants, no caller can construct one, and `apply_status_patch::<WorkflowTemplate>` is compile-time unreachable. Stronger than a runtime "not supported" error.
 
 ### Why this over `serde_json::Value` patches
 
-A call-site-constructed `Value` lets any caller write any status field. An associated enum makes the legitimate mutations a declared vocabulary: unknown mutations are compile errors. Ownership partitioning can be further enforced by gating variant construction behind owner-scoped constructor modules with private variant fields. The in-memory backend avoids implementing JSON merge-patch semantics (subtle: null-as-remove, array replacement, nested merging).
+A call-site `Value` lets any caller write any status field. An associated enum makes the legitimate mutations a declared vocabulary: unknown mutations are compile errors. Ownership partitioning is enforced by owner-scoped constructor modules with private variant fields.
 
-### Parity test
+### Cost we accept
 
-Every `StatusPatch` variant gets a round-trip test: apply the patch via `apply(&mut status)`, serialise a clone of the starting status to JSON, apply `to_merge_patch()` via a JSON merge-patch library (`json-patch` crate, RFC 7396), assert the resulting states match. Keeps the two serialisers provably in sync.
+Full status replacement per write — every writer serialises and sends the whole `ConvoyStatus` back. At Stage 3 scale (low-write-rate controllers and small status bodies, a few KB), the wire overhead is immaterial. When/if it becomes a problem (Stage 7+ with AttachableSet migration and many external writers), we can upgrade to `application/json-patch+json` with an explicit `test` op on `/metadata/resourceVersion` — the typed `StatusPatch` vocabulary is already in place to back that transport. Server-Side Apply (`application/apply-patch+yaml` with managed-fields) is a further future option for much-larger-scale coordination.
 
 ## Scope
 
@@ -456,7 +468,7 @@ pub enum ConvoyStatusPatch {
 }
 ```
 
-`impl StatusPatch<ConvoyStatus> for ConvoyStatusPatch` implements both `apply(&mut status)` and `to_merge_patch()`. Ownership partitioning is enforced by owner-scoped constructor modules (details in implementation); Stage 3 code only constructs `Bootstrap`, `FailInit`, `AdvanceTasksToReady`, `FailConvoy`, `RollUpPhase`.
+`impl StatusPatch<ConvoyStatus> for ConvoyStatusPatch` implements `apply(&mut status)`. Writers then call `apply_status_patch(resolver, name, &patch)`, which reads the current object, applies the patch to a clone, and writes via `update_status` with `resourceVersion` as precondition (retrying on 409). Ownership partitioning is enforced by owner-scoped constructor modules (details in implementation); Stage 3 code only constructs `Bootstrap`, `FailInit`, `AdvanceTasksToReady`, `FailConvoy`, `RollUpPhase`.
 
 ### Pure reconcile function
 
@@ -484,7 +496,7 @@ pub enum ConvoyEvent {
 
 `ConvoyEvent` is observability only — the watch loop logs via `tracing`; events are not persisted in the resource. Future addition may emit k8s `Event` resources.
 
-Pure, no I/O. The watch loop reads the convoy (and the live template on first resolve only), calls `reconcile`, applies the returned patch via `patch_status`. Tests drive it directly.
+Pure, no I/O. The watch loop reads the convoy (and the live template on first resolve only), calls `reconcile`, applies the returned patch via `apply_status_patch`. Tests drive it directly.
 
 ### Reconcile steps (single pass)
 
@@ -512,9 +524,22 @@ Reconcile is a pure decision function: given the current convoy (and template on
    - Any task past `Pending` but no terminal convoy state, and current `phase` is still `Pending` → produce `RollUpPhase { phase: Active, started_at: Some(now), finished_at: None }`.
    - Otherwise no phase roll-up.
 
-**Patch aggregation.** At most one `ConvoyStatusPatch` is returned per reconcile. In the common case (e.g. a task just completed, unblocking two dependents, and that was the last work so convoy rolls to Completed), the patch is a composite — typically `AdvanceTasksToReady` combined with `RollUpPhase`. Rather than chain multiple patches, the variants themselves contain enough information to express a single-pass transition, and the watch loop gets one atomic status update per reconcile.
+**One patch per reconcile — priority-driven, multi-pass convergence.**
 
-In practice this is implemented as: produce the structurally most "outer" variant (e.g. `FailConvoy` dominates `RollUpPhase`), and let the next reconcile run handle anything that requires observing the previous patch's effect. K8s-style controllers converge via multiple passes; we don't need one-shot atomicity.
+Each reconcile returns at most one `ConvoyStatusPatch`. When multiple transitions are eligible in a single pass, pick the one highest in this priority order:
+
+1. `FailConvoy` — fail-fast dominates everything else.
+2. `FailInit` — init-time failures are terminal and take precedence over advancement.
+3. `Bootstrap` — init before any advancement.
+4. `AdvanceTasksToReady` — DAG advancement before phase roll-up.
+5. `RollUpPhase` — lowest priority; only when no structural change is pending.
+
+Each successful patch write bumps the convoy's `resourceVersion`, which produces a watch event that triggers the next reconcile; the controller converges in multiple passes. Two common cases:
+
+- *Last task completes, convoy should now roll to Completed.* Reconcile sees all tasks terminal, emits `RollUpPhase { phase: Completed, finished_at }`. One patch.
+- *Root tasks become Ready immediately after bootstrap.* Two reconciles: first emits `Bootstrap`, second (triggered by the bootstrap status write) emits `AdvanceTasksToReady`.
+
+This is standard k8s controller-loop behavior. No composite variants; no claims of single-atomic-multi-transition updates.
 
 ### Post-init behavior and user edits
 
@@ -550,7 +575,7 @@ async fn run(backend: &ResourceBackend, namespace: &str) -> Result<()> {
 
 ### Conflict handling
 
-`patch_status` returns `ResourceError::Conflict` if `resourceVersion` is stale. The controller re-fetches the convoy and retries up to a bounded number of times (3). If still conflicting, drop — the next watch event or resync tick will re-reconcile.
+`update_status` returns `ResourceError::Conflict` if `resourceVersion` is stale. `apply_status_patch` re-reads the object, re-applies the patch to the new state, and retries (bounded at 3 attempts). If the retry budget is exhausted, the helper returns `Conflict` — the next watch event or resync tick will produce a fresh reconcile.
 
 ### Ownership contract — enforced by the patch vocabulary
 
@@ -562,7 +587,7 @@ Ownership is expressed in the `ConvoyStatusPatch` enum, not in prose. Each write
 | Provisioning controller (Stage 4) | `TaskLaunching`, `TaskRunning` |
 | External actors (CLI, TUI, agent-side CLI) | `MarkTaskCompleted`, `MarkTaskFailed`, `MarkTaskCancelled` |
 
-Each variant's `apply(&mut ConvoyStatus)` touches a disjoint subset of fields — the partition is visible in code, not just documented. Two concurrent writers constructing different variants produce non-overlapping mutations and compose cleanly under merge-patch. Concurrent writers constructing variants that touch the same field (e.g. two external actors both marking a task Completed) collide on `resourceVersion` and retry.
+Each variant's `apply(&mut ConvoyStatus)` touches a disjoint subset of fields — the partition is visible in code, not just documented. Two concurrent writers constructing different variants collide on `resourceVersion` in `update_status`; the loser retries by re-reading the updated base and re-applying its patch. Because the two variants touch disjoint fields, the re-applied patch on the newer state is still semantically correct and the writers compose. Concurrent writers constructing variants that touch the same field (e.g. two external actors both marking a task Completed) also collide on `resourceVersion`; the retry sees the task already in the terminal state and the second write is either a no-op or converges to the same value.
 
 ## Tests
 
@@ -581,21 +606,19 @@ Each variant's `apply(&mut ConvoyStatus)` touches a disjoint subset of fields �
 - `spec.workflow_ref` changed after init (defensive, post-CEL) → returns `FailInit` with the "workflow_ref changed" message.
 - Template refetch does not happen after init (verify by passing `None` for template on second call after snapshot; reconcile returns a DAG-advancement patch from status alone).
 
-### StatusPatch apply/merge-patch parity
+### `StatusPatch::apply` unit tests
 
-For every `ConvoyStatusPatch` variant:
+For every `ConvoyStatusPatch` variant: construct a representative starting `ConvoyStatus`, apply the patch, assert the resulting fields match expectation. No cross-serialiser parity test needed — since there is only one serialiser path (`apply` → full status → `update_status`), there is no second implementation to disagree with.
 
-1. Construct a representative starting `ConvoyStatus`.
-2. Apply the patch via `apply(&mut status_a)`.
-3. Serialise a clone of the starting status to JSON, apply `patch.to_merge_patch()` using the `json-patch` crate's RFC 7396 merge-patch implementation, deserialise back into `ConvoyStatus`.
-4. Assert `status_a == status_b`.
+### `apply_status_patch` retry behavior
 
-Keeps the in-memory and HTTP serialisers provably in sync.
+- Simulated conflict: resolver returns `Conflict` on first write; helper re-reads and retries; second attempt succeeds. Assert the final state reflects the patch applied to the updated base.
+- Retry budget exhausted: resolver returns `Conflict` repeatedly; helper returns `ResourceError::Conflict` after `MAX_RETRIES`. Assert the caller sees the error (and can back off / wait for the next watch tick).
 
 ### In-memory backend end-to-end
 
 - Create `WorkflowTemplate` + `Convoy` in the in-memory backend.
-- Run the controller loop against simulated `MarkTaskCompleted` patches that drive tasks through completion.
+- Run the controller loop against simulated `MarkTaskCompleted` patches (applied via `apply_status_patch`) that drive tasks through completion.
 - Assert the observed sequence of convoy phases and task phases matches expectation.
 
 ### HTTP backend integration (minikube, gated)
@@ -604,23 +627,8 @@ Keeps the in-memory and HTTP serialisers provably in sync.
 - Create a WorkflowTemplate with a two-task DAG (`implement` → `review`).
 - Create a Convoy referencing it.
 - Run the example controller binary in a background task.
-- Patch `tasks.implement.phase = Completed` via `patch_status(MarkTaskCompleted)`; assert `review` moves to Ready.
-- Patch `tasks.review.phase = Completed`; assert convoy `phase = Completed`.
-
-### In-memory backend end-to-end
-
-- Create `WorkflowTemplate` + `Convoy` in the in-memory backend.
-- Run the controller loop against simulated status patches that advance tasks through Ready → Running → Completed.
-- Assert sequence of convoy phase transitions and task-phase transitions.
-
-### HTTP backend integration (minikube, gated)
-
-- Apply both CRDs.
-- Create a WorkflowTemplate with a two-task DAG (`implement` → `review`).
-- Create a Convoy referencing it.
-- Run the example controller binary in a background task.
-- Patch `tasks.implement.phase = Completed` via `/status`; assert `review` moves to Ready.
-- Patch `tasks.review.phase = Completed`; assert convoy `phase = Completed`.
+- Drive `tasks.implement.phase = Completed` via `apply_status_patch(MarkTaskCompleted)`; assert `review` moves to Ready.
+- Drive `tasks.review.phase = Completed`; assert convoy `phase = Completed`.
 
 ## Example Binary
 
@@ -636,27 +644,27 @@ Keeps the in-memory and HTTP serialisers provably in sync.
 
 ### Stage 1 revision (as part of Stage 3 work)
 
-1. `Resource::StatusPatch` associated type and `StatusPatch` trait (`apply` + `to_merge_patch`).
-2. `TypedResolver::patch_status(name, rv, patch)` method.
-3. HTTP backend: `PATCH` against `/status` subresource with merge-patch content-type and resourceVersion precondition.
-4. In-memory backend: implement `patch_status` via `StatusPatch::apply` under the store lock.
-5. `NoStatusPatch` uninhabited enum; `WorkflowTemplate` adopts it (trivial existing-crate revision).
-6. Parity tests for `WorkflowTemplate::StatusPatch` (trivially pass since uninhabited) and for the Convoy variants (detailed above).
+1. `Resource::StatusPatch` associated type and `StatusPatch` trait (`apply(&mut Status)` only — no transport method).
+2. `NoStatusPatch` uninhabited enum; `WorkflowTemplate` adopts it (trivial existing-crate revision).
+3. `apply_status_patch::<T>(resolver, name, patch)` helper function implementing read-modify-write + conflict retry on top of the existing `get` + `update_status`.
+
+No HTTP or in-memory backend changes are required — the transport primitives stay as-is.
 
 ### Stage 3 proper
 
-7. `Convoy` Rust type and `Resource` impl.
-8. `ConvoySpec`, `ConvoyStatus`, `ConvoyPhase`, `TaskState`, `TaskPhase`, `InputValue`, `PlacementStatus`, `WorkflowSnapshot`, `SnapshotTask` types.
-9. `ConvoyStatusPatch` enum and its `StatusPatch<ConvoyStatus>` impl.
-10. Owner-scoped constructor modules (`controller_patches`, `provisioning_patches`, `external_patches`) gating variant construction by visibility.
-11. Pure `reconcile(convoy, template, now) -> ReconcileOutcome` function.
-12. `ReconcileOutcome`, `ConvoyEvent` types.
-13. Convoy CRD YAML with CEL immutability validations (replaces the stub).
-14. Table tests for reconcile.
-15. StatusPatch apply/merge-patch parity tests.
-16. In-memory backend end-to-end test.
-17. HTTP backend integration test against minikube, including CEL-rejection checks.
-18. `examples/convoy_controller.rs` — runnable controller binary.
+4. `Convoy` Rust type and `Resource` impl.
+5. `ConvoySpec`, `ConvoyStatus`, `ConvoyPhase`, `TaskState`, `TaskPhase`, `InputValue`, `PlacementStatus`, `WorkflowSnapshot`, `SnapshotTask` types.
+6. `ConvoyStatusPatch` enum and its `StatusPatch<ConvoyStatus>` impl.
+7. Owner-scoped constructor modules (`controller_patches`, `provisioning_patches`, `external_patches`) gating variant construction by visibility.
+8. Pure `reconcile(convoy, template, now) -> ReconcileOutcome` function.
+9. `ReconcileOutcome`, `ConvoyEvent` types.
+10. Convoy CRD YAML with CEL immutability validations (replaces the stub).
+11. Table tests for reconcile.
+12. `StatusPatch::apply` unit tests per variant.
+13. `apply_status_patch` retry-behavior tests.
+14. In-memory backend end-to-end test.
+15. HTTP backend integration test against minikube, including CEL-rejection checks.
+16. `examples/convoy_controller.rs` — runnable controller binary.
 
 No provisioning, no policy resolution, no presentation, no CLI surface beyond what the example needs.
 
@@ -680,15 +688,15 @@ Re-running a convoy with a newer template version is a future primitive (copy co
 
 Single-entry today (root → resourceVersion). When workflow composition (`includes`) lands, every snapshotted template — root plus includes — gets an entry. Naming the field as a map now avoids a schema change later.
 
-### Typed status patches (`StatusPatch` associated type)
+### Typed status mutations (`StatusPatch` associated type), full-status transport
 
-Multi-writer safety on `/status` needs either full-status replacement with optimistic concurrency retry, or partial patches. Full replacement forces every writer to round-trip the entire status to mutate one field — noisy, and susceptible to "I replaced the whole thing but forgot to preserve the field you just wrote" bugs. Partial patches, expressed as typed `ConvoyStatusPatch` variants, scope each mutation to exactly its owned fields.
+Multi-writer safety on `/status` needs optimistic-concurrency guarantees. K8s documents precondition behavior for PUT-with-resourceVersion (409 on stale); for PATCH, the merge-patch content type has no documented precondition, json-patch requires an explicit `test` op, and Server-Side Apply has its own managed-fields model. For Stage 3 we keep the transport simple and stay on documented ground — every writer does a full `update_status` with the current resourceVersion as precondition. The "I forgot to preserve the field you just wrote" risk is avoided by structure rather than by wire protocol: writers read the current status, call `StatusPatch::apply(&mut cloned_status)` to mutate only their owned fields, then `update_status` with the result. Two concurrent disjoint writers re-read each other's writes on conflict-retry and compose correctly.
 
-The associated type (`Resource::StatusPatch`) makes the legitimate mutations a declared vocabulary per resource. Owner-scoped constructor modules gate variant construction so "only the convoy controller can advance tasks to Ready" becomes a compile-time property, not a comment.
+`Resource::StatusPatch` makes legitimate mutations a declared vocabulary; owner-scoped constructor modules gate variant construction so "only the convoy controller can advance tasks to Ready" is a compile-time property, not a comment.
 
-The in-memory backend's `StatusPatch::apply(&mut status)` avoids re-implementing JSON merge-patch semantics (null-as-remove, nested merge, array replacement); the HTTP backend's `to_merge_patch()` handles wire serialisation. The two are kept in sync by an exhaustive parity test per variant.
+Trade-off accepted: every status write serialises the full status body. At Stage 3 scale this is fine. When it isn't, we can upgrade to json-patch with `test` op (the `StatusPatch` vocabulary survives the transport change), or Server-Side Apply for much larger scale.
 
-The alternative of a spec-side command queue (`spec.task_actions: [{task, action: Complete}]`) was rejected: controllers normally don't mutate their own spec, "mark complete" is an event not desired state, and there's no real gain over typed status patches.
+The alternative of a spec-side command queue (`spec.task_actions: [{task, action: Complete}]`) was rejected: controllers normally don't mutate their own spec, "mark complete" is an event not desired state, and there's no real gain over typed status patches applied via `update_status`.
 
 ### List-then-watch on the controller
 
