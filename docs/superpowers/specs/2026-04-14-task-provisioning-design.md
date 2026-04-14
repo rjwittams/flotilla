@@ -34,12 +34,15 @@ The scoping is honest about the work involved: a "productive" k8s Pod backend ne
 ### Out of scope (Stage 4a)
 
 - K8s cluster-native placement backend (Stage 4k).
-- Selector resolution: agent processes still cannot run end-to-end. Tool processes work fine.
-- Agent-side task completion CLI.
+- Selector resolution: agent processes still cannot run end-to-end.
 - Per-tool config preparation in environments.
 - AttachableSet migration / deletion of legacy state stores.
 - Presentation manager integration (Stage 5).
 - Lease-based leader election.
+
+### Completion in Stage 4a
+
+Tool processes provision and run; some are designed never to complete (test runners, dev servers — *watchers*) and that's fine. Task completion is always **external** in Stage 4a, consistent with Stage 3: a human (or future agent) issues `MarkTaskCompleted` via a CLI subcommand. Auto-completion based on inner-process exit is deferred — it requires extending the `TerminalPool` API to surface inner-command events, plus an opt-in policy field on tasks that have a designated "progress-bearing" process. Stage 4a ships the small CLI affordance (`flotilla convoy <name> task <task> complete`) so end-users can drive completion without writing test scripts.
 
 ## Crate and binary topology
 
@@ -139,7 +142,7 @@ status:
   message: null
 ```
 
-- **Mounts live on `Environment.spec`** as static fields, written at creation by the provisioning controller. The Environment controller never touches them; it reads its own spec and actuates.
+- **Mounts live on `Environment.spec`** as static fields, written at creation by the `TaskWorkspaceReconciler` (which is the only thing that creates per-task Environments). The Environment controller never touches them; it reads its own spec and actuates.
 - **Mount `source_path` is implicit "from the env's host's filesystem"** in Stage 4a — the docker env's `host_ref` tells you which host. A future cross-env mount story would add an explicit `from_env` field; the name `source_path` (vs `host_path`) keeps it forward-compatible. Joined-up summary views (TUI, CLI) show the resolved mount picture; the spec stays minimal.
 - **`host_direct` Environments are auto-created by the daemon** (one per host, at startup). Not owned by any TaskWorkspace; persist for the daemon's life. The `repo_default_dir` here governs where new Repositories clone to on this host.
 - **`docker_per_task` Environments** are owned by their TaskWorkspace via `ownerReferences` and GC-cascade on TaskWorkspace deletion.
@@ -259,7 +262,7 @@ status:
 
 ### `TaskWorkspace`
 
-The per-task bundle. Created by the provisioning controller when a Convoy task transitions to `Ready`. Owned by the parent Convoy.
+The per-task bundle. **Created by the Convoy reconciler** when a task transitions to `Ready` — the convoy reconciler already owns task-state transitions, so emitting a `CreateTaskWorkspace` actuation alongside the `MarkTaskLaunching` patch is the natural place. Owned by the parent Convoy. The `TaskWorkspaceReconciler` then takes over to provision children.
 
 ```yaml
 apiVersion: flotilla.work/v1
@@ -324,20 +327,20 @@ spec:
 - Two variants in Stage 4a: `host_direct` and `docker_per_task`. Future variants (`docker_shared`, `k8s_pod`, `runpod`, `meta_policy` delegating to a Quartermaster) are deferred.
 - **`host_ref` lives per-variant**, not at top level — some future variants (RunPod, meta-policy) don't bind to a specific host.
 - **`pool` is at top level** because it applies uniformly to anything that creates terminal sessions.
-- **No status, no controller for PlacementPolicy itself** — pure data, like WorkflowTemplate. The provisioning controller consults it during reconciliation.
+- **No status, no controller for PlacementPolicy itself** — pure data, like WorkflowTemplate. The `TaskWorkspaceReconciler` consults it during reconciliation.
 - **Daemon-created defaults** at startup (see Daemon Startup section): one `host-direct-<host>` policy and (if docker is available) one `docker-on-<host>` policy. User can edit, replace, or add custom ones.
 
 ### Resource interactions and ownership summary
 
 | Resource | Owned by | Finalizer | Created by |
 |----------|----------|-----------|------------|
-| Host | nobody | none | daemon (self) |
+| Host | nobody | none | daemon (self via heartbeat task) |
 | Environment (host_direct) | nobody | none | daemon (auto-created at startup) |
-| Environment (docker_per_task) | TaskWorkspace | docker-teardown | TaskWorkspace controller |
-| Repository | nobody | repository-cleanup (rare; explicit delete only) | daemon (discovery) or user or TaskWorkspace controller (auto-clone) |
-| Checkout | TaskWorkspace | checkout-cleanup | TaskWorkspace controller |
-| TerminalSession | TaskWorkspace | terminal-teardown | TaskWorkspace controller |
-| TaskWorkspace | Convoy | none (children carry finalizers) | Convoy reconciler |
+| Environment (docker_per_task) | TaskWorkspace | docker-teardown | TaskWorkspaceReconciler |
+| Repository | nobody | repository-cleanup (rare; explicit delete only) | daemon (discovery) or user or TaskWorkspaceReconciler (auto-clone) |
+| Checkout | TaskWorkspace | checkout-cleanup | TaskWorkspaceReconciler |
+| TerminalSession | TaskWorkspace | terminal-teardown | TaskWorkspaceReconciler |
+| TaskWorkspace | Convoy | none (children carry finalizers) | Convoy reconciler (extended in Stage 4a) |
 | PlacementPolicy | nobody | none | daemon (defaults) or user (custom) |
 
 ## Controller framework (Stage 1 layer addition)
@@ -378,6 +381,7 @@ pub struct ReconcileOutcome<T: Resource> {
 
 pub enum Actuation {
     CreateEnvironment    { spec: EnvironmentSpec, owner_ref: ResourceRef, name: String },
+    CreateRepository     { spec: RepositorySpec,  owner_ref: Option<ResourceRef>, name: String },
     CreateCheckout       { spec: CheckoutSpec,    owner_ref: ResourceRef, name: String },
     CreateTerminalSession { spec: TerminalSessionSpec, owner_ref: ResourceRef, name: String },
     CreateTaskWorkspace  { spec: TaskWorkspaceSpec, owner_ref: ResourceRef, name: String },
@@ -441,9 +445,15 @@ Mechanical: implement `Reconciler` for `ConvoyReconciler`, instantiate `Controll
 
 One reconciler per resource type. All run in the daemon. Each uses `ControllerLoop` from the framework.
 
-### `HostReconciler`
+### `HostHeartbeatTask` (not a `Reconciler`)
 
-Watches Host resources (primary). No secondaries. Mostly self-modifies — refreshes `heartbeat_at`, recomputes `ready`, updates capabilities snapshot. No finalizer.
+Host doesn't really need a reconciler — there's no useful "reconcile other daemons' Hosts" work. A `Reconciler` watching Host resources would race: every daemon would try to reconcile every Host, including ones owned by other daemons, corrupting heartbeat / capabilities.
+
+Instead, each daemon spawns a simple `HostHeartbeatTask`: a periodic background task (every ~30s) that updates *only the daemon's own* `Host` record (`name = local_host_id`). It refreshes `heartbeat_at`, recomputes `ready`, and writes the current capability snapshot. Other daemons' Host records are never written by this task.
+
+Other daemons' Host records get *read* by consumers (notably `TaskWorkspaceReconciler` checking host staleness before placing work), but never written. Single-writer per Host record by construction.
+
+No finalizer. When a daemon stops, the heartbeat just stops updating; the staleness check at consumers handles the consequence.
 
 ### `EnvironmentReconciler`
 
@@ -481,7 +491,7 @@ Finalizer: `flotilla.work/terminal-teardown`. Stops the session and releases the
 
 ### `TaskWorkspaceReconciler`
 
-Watches TaskWorkspace (primary) plus Environment, Checkout, TerminalSession as secondaries (each mapping back to its `flotilla.work/task_workspace` label).
+Watches TaskWorkspace (primary) plus Environment, Repository, Checkout, TerminalSession as secondaries. Each child secondary maps back to its `flotilla.work/task_workspace` label. Repository is a special case: it is *not* owned by TaskWorkspace, but a TaskWorkspace that auto-cloned a Repository labels it `flotilla.work/auto_clone_for: <task_workspace>` so the secondary watch can map back during cloning. Once a Repository is `Ready`, subsequent Checkouts referencing it don't need this label.
 
 Reconcile flow:
 
@@ -509,16 +519,18 @@ The daemon at startup, after connecting to the resource backend:
 4. **Create default PlacementPolicies**:
    - Always: `host-direct-<host-id>` (variant: `host_direct`).
    - If `Host.status.capabilities.docker == true`: `docker-on-<host-id>` (variant: `docker_per_task`, with a sensible default image).
-5. **Spawn all controller loops**: HostReconciler, EnvironmentReconciler, RepositoryReconciler, CheckoutReconciler, TerminalSessionReconciler, TaskWorkspaceReconciler, ConvoyReconciler (refactored from Stage 3).
+5. **Spawn the `HostHeartbeatTask`** (per-daemon background task; not a controller).
+6. **Spawn all controller loops**: EnvironmentReconciler, RepositoryReconciler, CheckoutReconciler, TerminalSessionReconciler, TaskWorkspaceReconciler, ConvoyReconciler (refactored from Stage 3, extended to emit `CreateTaskWorkspace` actuations on task `Pending → Ready` transitions).
 
 This is the "discovered resources" pattern in its simplest form: the daemon creates the resources that describe its own capabilities, and they lifecycle out of band from user interaction. User can edit or replace any of them; the daemon doesn't keep regenerating.
 
 ## Failure handling
 
 - **Reconcile failure** within a reconciler → `phase = Failed` + message + propagation to the next layer up. TaskWorkspace failures propagate to Convoy via `MarkTaskFailed`.
-- **No automatic retry** within Stage 4a. The user retries by deleting the failed resource (TaskWorkspace, etc.); the controllers will create fresh ones from scratch on the next reconcile pass if the upstream resource is still in a state that wants provisioning.
-- **Heartbeat staleness on Host**: the provisioning controller refuses to place new TaskWorkspaces on a Host whose `ready: false` or `heartbeat_at` is older than ~60s. TaskWorkspaces already provisioned on a now-stale host are eventually marked `Failed` after extended staleness; full "host comes back, what do we do" is a future Bosun-style concern.
-- **Cancellation cascades** from Stage 3's convoy controller: when a task is patched to `Cancelled` (fail-fast), TerminalSessions for that task stay alive until TaskWorkspace cascades. Auto-cleanup-on-cancellation is a future policy.
+- **Stage 3's fail-fast applies.** Once any task is `Failed`, the parent Convoy goes `Failed` (Stage 3 reconciler), siblings get cancelled, and the convoy stops reconciling — terminal phase. There is **no per-task retry** in Stage 4a. Recovery means creating a new Convoy. Per-task restart policies / explicit retry UX are deferred (already in the deferred list).
+- **No automatic in-reconciler retry** either. A Failed Environment / Checkout / TerminalSession stays Failed; the TaskWorkspace fails; the Convoy fails. User intervention is creating a fresh Convoy from the same WorkflowTemplate.
+- **Heartbeat staleness on Host**: the `TaskWorkspaceReconciler` refuses to place new children on a Host whose `ready: false` or `heartbeat_at` is older than ~60s. TaskWorkspaces already provisioned on a now-stale host are eventually marked `Failed` after extended staleness; full "host comes back, what do we do" is a future Bosun-style concern.
+- **Cancellation cascades** from Stage 3's convoy controller: when a task is patched to `Cancelled` (fail-fast), TerminalSessions for that task stay alive until TaskWorkspace cascades on Convoy deletion. Auto-cleanup-on-cancellation is a future policy.
 
 ## Tests
 
@@ -581,12 +593,13 @@ For each resource that carries a finalizer: verify cleanup runs, finalizer entry
 
 4. New crate `flotilla-controllers`.
 5. Seven new CRDs: `Host`, `Environment`, `Repository`, `Checkout`, `TerminalSession`, `TaskWorkspace`, `PlacementPolicy`. CEL immutability where applicable.
-6. Rust types for each + `StatusPatch` enums + per-resource reconcilers.
+6. Rust types for each + `StatusPatch` enums + per-resource reconcilers (five reconcilers: Environment, Repository, Checkout, TerminalSession, TaskWorkspace) plus a `HostHeartbeatTask` (not a reconciler).
 7. Three actuators wrapping existing flotilla-core providers: Docker (Environment), CheckoutManager (Repository + Checkout), TerminalPool (TerminalSession).
-8. Daemon startup logic: self-register as Host, create host-direct Environment, discover existing Repositories from flotilla-core registry, create default PlacementPolicies, spawn all controller loops.
-9. Heartbeat task: periodic Host status updates.
-10. New `flotillad` binary target in `flotilla-daemon`.
-11. `flotilla` TUI binary's embedded-daemon mode removed entirely (Stage 4a cuts the cord).
+8. **Convoy reconciler extension** (Plan A2 or A3): emit `CreateTaskWorkspace` actuation when a task transitions Pending → Ready, alongside the existing `MarkTaskLaunching` patch. Grow the `Actuation` enum with `CreateRepository` + `CreateTaskWorkspace`.
+9. Daemon startup logic: self-register as Host, create host-direct Environment, discover existing Repositories from flotilla-core registry, create default PlacementPolicies, spawn the heartbeat task and all controller loops.
+10. **CLI subcommand**: `flotilla convoy <name> task <task> complete` issues `MarkTaskCompleted` against the convoy's status. Future shortcuts (env-var-derived context like `FLOTILLA_CONVOY` / `FLOTILLA_TASK` enabling `flotilla complete`) are deferred.
+11. New `flotillad` binary target in `flotilla-daemon`.
+12. `flotilla` TUI binary's embedded-daemon mode removed entirely (Stage 4a cuts the cord).
 12. Tests at every layer (pure reconcile, StatusPatch::apply, framework, actuator, in-memory end-to-end, minikube integration, docker actuator integration, finalizer behavior).
 13. CRD bootstrap via `ensure_crd` for example/integration paths.
 
@@ -612,7 +625,7 @@ Environment is one CRD with `host_direct` / `docker` / future variants distingui
 
 ### Mounts on Environment.spec, written at creation
 
-Mounts are static fields on Environment, populated by the provisioning controller when it creates a per-task Environment. The Environment controller never touches them; it reads its own spec and actuates. Path-coordination across resources happens in one place (the TaskWorkspace controller) at one time (creation), not via cross-controller patching.
+Mounts are static fields on Environment, populated by the `TaskWorkspaceReconciler` when it creates a per-task Environment. The Environment controller never touches them; it reads its own spec and actuates. Path-coordination across resources happens in one place (the TaskWorkspaceReconciler) at one time (creation), not via cross-controller patching.
 
 ### PlacementPolicy is referenced data, not just a name
 
@@ -662,6 +675,9 @@ To capture in the brainstorm-prompts master deferred list under "From Stage 4a":
 - **Auto-cleanup of stopped sessions on terminal task transitions** — opt-in policy field.
 - **Vessel / Crew / Shipment naming pass** — convoy-themed renames once the abstractions settle (TaskWorkspace → Vessel, processes → Crew, artifacts → Shipment).
 - **VCS abstraction in resource shape** — Repository and Checkout are git-shaped in v1; future `vcs:` discriminator for hg / fossil / etc.
+- **Exit-code-as-completion opt-in** — for tasks whose configured "progress-bearing" process should drive task completion (e.g. a one-shot `cargo test`). Requires extending `TerminalPool` to surface inner-command exit events plus a per-task / per-process opt-in flag. Watcher-kind processes (test runners, dev servers, log tails) explicitly opt out — they're informational and never complete by design.
+- **CLI shortcutting for task completion** — env-var-derived context (`FLOTILLA_CONVOY`, `FLOTILLA_TASK`, `FLOTILLA_ROLE`) propagated into terminal sessions so a process can call `flotilla complete` without the long form. Part of a wider story about how `flotilla` CLI infers context from the calling environment.
+- **Per-task retry / convoy-task reset** — once richer workflows are in flight, we'll want to mark a failed task for retry without recreating the whole convoy. Today's Stage 3 fail-fast + Stage 4a's "no in-place retry" forces convoy recreation. Likely needs a new convoy-controller patch variant (`ResetTaskToPending` or similar) plus a corresponding CLI affordance.
 
 ## Plan structure
 
