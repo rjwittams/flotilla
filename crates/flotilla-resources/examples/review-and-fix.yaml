@@ -1,0 +1,32 @@
+apiVersion: flotilla.work/v1
+kind: WorkflowTemplate
+metadata:
+  name: review-and-fix
+  namespace: flotilla
+spec:
+  inputs:
+    - name: feature
+      description: Brief description of the feature to implement
+    - name: branch
+      description: Target git branch
+  tasks:
+    - name: implement
+      processes:
+        - role: coder
+          selector:
+            capability: code
+          prompt: |
+            Convoy {{workflow.name}} - implement {{inputs.feature}} on
+            branch {{inputs.branch}}. Push commits as you go.
+        - role: build
+          command: cargo watch -x check
+    - name: review
+      depends_on:
+        - implement
+      processes:
+        - role: reviewer
+          selector:
+            capability: code-review
+          prompt: Review branch {{inputs.branch}} for correctness and style.
+        - role: tests
+          command: cargo test --watch
