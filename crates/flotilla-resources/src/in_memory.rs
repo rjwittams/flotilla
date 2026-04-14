@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use chrono::Utc;
 use futures::{stream, StreamExt};
@@ -135,6 +138,30 @@ impl InMemoryBackend {
         .await
     }
 
+    pub(crate) async fn list_typed_matching_labels<T: Resource>(
+        &self,
+        namespace: &str,
+        required: &BTreeMap<String, String>,
+    ) -> Result<ResourceList<T>, ResourceError> {
+        if required.is_empty() {
+            return self.list_typed::<T>(namespace).await;
+        }
+
+        self.with_store::<T, _>(namespace, |store| {
+            let mut items = Vec::new();
+            for value in store.objects.values().cloned() {
+                let object = Self::decode_object::<T>(value)?;
+                let matches = required.iter().all(|(key, expected)| object.metadata.labels.get(key) == Some(expected));
+                if matches {
+                    items.push(object);
+                }
+            }
+            items.sort_by(|left, right| left.metadata.name.cmp(&right.metadata.name));
+            Ok(ResourceList { items, resource_version: store.current_version().to_string() })
+        })
+        .await
+    }
+
     pub(crate) async fn create_typed<T: Resource>(
         &self,
         namespace: &str,
@@ -154,6 +181,9 @@ impl InMemoryBackend {
                     resource_version: version.to_string(),
                     labels: meta.labels.clone(),
                     annotations: meta.annotations.clone(),
+                    owner_references: meta.owner_references.clone(),
+                    finalizers: meta.finalizers.clone(),
+                    deletion_timestamp: meta.deletion_timestamp,
                     creation_timestamp: Utc::now(),
                 },
                 spec: Self::clone_through_serde(spec)?,
@@ -186,6 +216,9 @@ impl InMemoryBackend {
             object.metadata.resource_version = version.to_string();
             object.metadata.labels = meta.labels.clone();
             object.metadata.annotations = meta.annotations.clone();
+            object.metadata.owner_references = meta.owner_references.clone();
+            object.metadata.finalizers = meta.finalizers.clone();
+            object.metadata.deletion_timestamp = meta.deletion_timestamp;
             object.spec = Self::clone_through_serde(spec)?;
 
             let encoded = Self::encode_object(&object)?;

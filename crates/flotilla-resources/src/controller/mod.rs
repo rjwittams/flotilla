@@ -1,0 +1,366 @@
+use std::{
+    collections::{BTreeMap, VecDeque},
+    future::Future,
+    marker::PhantomData,
+    pin::Pin,
+    time::Duration,
+};
+
+use chrono::{DateTime, Utc};
+use futures::StreamExt;
+use tokio::{sync::mpsc, task::JoinHandle};
+
+use crate::{
+    apply_status_patch,
+    backend::{ResourceBackend, TypedResolver},
+    checkout::CheckoutSpec,
+    clone::CloneSpec,
+    environment::EnvironmentSpec,
+    error::ResourceError,
+    resource::{InputMeta, Resource, ResourceObject},
+    task_workspace::TaskWorkspaceSpec,
+    terminal_session::TerminalSessionSpec,
+    watch::{WatchEvent, WatchStart},
+};
+
+pub type Event = String;
+
+#[allow(async_fn_in_trait)]
+pub trait Reconciler: Send + Sync + 'static {
+    type Resource: Resource;
+    type Dependencies;
+
+    async fn fetch_dependencies(&self, obj: &ResourceObject<Self::Resource>) -> Result<Self::Dependencies, ResourceError>;
+
+    fn reconcile(
+        &self,
+        obj: &ResourceObject<Self::Resource>,
+        deps: &Self::Dependencies,
+        now: DateTime<Utc>,
+    ) -> ReconcileOutcome<Self::Resource>;
+
+    async fn run_finalizer(&self, obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError>;
+
+    fn finalizer_name(&self) -> Option<&'static str>;
+}
+
+pub struct ReconcileOutcome<T: Resource> {
+    pub patch: Option<T::StatusPatch>,
+    pub actuations: Vec<Actuation>,
+    pub events: Vec<Event>,
+    pub requeue_after: Option<Duration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ControllerObjectMeta {
+    pub name: String,
+    pub labels: BTreeMap<String, String>,
+    pub annotations: BTreeMap<String, String>,
+    pub owner_references: Vec<crate::resource::OwnerReference>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Actuation {
+    CreateEnvironment { meta: ControllerObjectMeta, spec: EnvironmentSpec },
+    CreateClone { meta: ControllerObjectMeta, spec: CloneSpec },
+    CreateCheckout { meta: ControllerObjectMeta, spec: CheckoutSpec },
+    CreateTerminalSession { meta: ControllerObjectMeta, spec: TerminalSessionSpec },
+    CreateTaskWorkspace { meta: ControllerObjectMeta, spec: TaskWorkspaceSpec },
+}
+
+pub trait SecondaryWatch: Send + Sync {
+    type Primary: Resource;
+
+    fn spawn(
+        self: Box<Self>,
+        backend: ResourceBackend,
+        namespace: String,
+        sender: mpsc::Sender<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ResourceError>> + Send>>;
+}
+
+pub struct LabelMappedWatch<W: Resource, P: Resource> {
+    pub label_key: &'static str,
+    pub _marker: PhantomData<(W, P)>,
+}
+
+impl<W: Resource, P: Resource> LabelMappedWatch<W, P> {
+    async fn enqueue_from_object(
+        label_key: &'static str,
+        sender: &mpsc::Sender<String>,
+        object: &ResourceObject<W>,
+    ) -> Result<(), ResourceError> {
+        if let Some(primary) = object.metadata.labels.get(label_key) {
+            sender
+                .send(primary.clone())
+                .await
+                .map_err(|_| ResourceError::other("controller queue closed while forwarding secondary event"))?;
+        }
+        Ok(())
+    }
+}
+
+impl<W: Resource, P: Resource> SecondaryWatch for LabelMappedWatch<W, P> {
+    type Primary = P;
+
+    fn spawn(
+        self: Box<Self>,
+        backend: ResourceBackend,
+        namespace: String,
+        sender: mpsc::Sender<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ResourceError>> + Send>> {
+        Box::pin(async move {
+            let resolver = backend.using::<W>(&namespace);
+            let listed = resolver.list().await?;
+            for object in &listed.items {
+                Self::enqueue_from_object(self.label_key, &sender, object).await?;
+            }
+
+            let mut watch = resolver.watch(WatchStart::FromVersion(listed.resource_version)).await?;
+            while let Some(event) = watch.next().await {
+                match event? {
+                    WatchEvent::Added(object) | WatchEvent::Modified(object) | WatchEvent::Deleted(object) => {
+                        Self::enqueue_from_object(self.label_key, &sender, &object).await?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+pub struct LabelJoinWatch<W: Resource, P: Resource> {
+    pub label_key: &'static str,
+    pub _marker: PhantomData<(W, P)>,
+}
+
+impl<W: Resource, P: Resource> LabelJoinWatch<W, P> {
+    async fn enqueue_matching_primaries(
+        label_key: &'static str,
+        sender: &mpsc::Sender<String>,
+        watched: &ResourceObject<W>,
+        primaries: &TypedResolver<P>,
+    ) -> Result<(), ResourceError> {
+        let Some(value) = watched.metadata.labels.get(label_key) else {
+            return Ok(());
+        };
+        let selector = BTreeMap::from([(label_key.to_string(), value.clone())]);
+        let listed = primaries.list_matching_labels(&selector).await?;
+        for object in listed.items {
+            sender
+                .send(object.metadata.name)
+                .await
+                .map_err(|_| ResourceError::other("controller queue closed while forwarding joined secondary event"))?;
+        }
+        Ok(())
+    }
+}
+
+impl<W: Resource, P: Resource> SecondaryWatch for LabelJoinWatch<W, P> {
+    type Primary = P;
+
+    fn spawn(
+        self: Box<Self>,
+        backend: ResourceBackend,
+        namespace: String,
+        sender: mpsc::Sender<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ResourceError>> + Send>> {
+        Box::pin(async move {
+            let watched = backend.clone().using::<W>(&namespace);
+            let primaries = backend.using::<P>(&namespace);
+            let listed = watched.list().await?;
+            for object in &listed.items {
+                Self::enqueue_matching_primaries(self.label_key, &sender, object, &primaries).await?;
+            }
+
+            let mut watch = watched.watch(WatchStart::FromVersion(listed.resource_version)).await?;
+            while let Some(event) = watch.next().await {
+                match event? {
+                    WatchEvent::Added(object) | WatchEvent::Modified(object) | WatchEvent::Deleted(object) => {
+                        Self::enqueue_matching_primaries(self.label_key, &sender, &object, &primaries).await?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+pub struct ControllerLoop<R: Reconciler> {
+    pub primary: TypedResolver<R::Resource>,
+    pub secondaries: Vec<Box<dyn SecondaryWatch<Primary = R::Resource>>>,
+    pub reconciler: R,
+    pub resync_interval: Duration,
+    pub backend: ResourceBackend,
+}
+
+impl<R: Reconciler> ControllerLoop<R> {
+    async fn apply_actuation(backend: &ResourceBackend, namespace: &str, actuation: Actuation) -> Result<(), ResourceError> {
+        match actuation {
+            Actuation::CreateEnvironment { meta, spec } => {
+                let resolver = backend.using::<crate::Environment>(namespace);
+                Self::create_if_missing(&resolver, meta, spec).await
+            }
+            Actuation::CreateClone { meta, spec } => {
+                let resolver = backend.using::<crate::Clone>(namespace);
+                Self::create_if_missing(&resolver, meta, spec).await
+            }
+            Actuation::CreateCheckout { meta, spec } => {
+                let resolver = backend.using::<crate::Checkout>(namespace);
+                Self::create_if_missing(&resolver, meta, spec).await
+            }
+            Actuation::CreateTerminalSession { meta, spec } => {
+                let resolver = backend.using::<crate::TerminalSession>(namespace);
+                Self::create_if_missing(&resolver, meta, spec).await
+            }
+            Actuation::CreateTaskWorkspace { meta, spec } => {
+                let resolver = backend.using::<crate::TaskWorkspace>(namespace);
+                Self::create_if_missing(&resolver, meta, spec).await
+            }
+        }
+    }
+
+    async fn create_if_missing<T: Resource>(
+        resolver: &TypedResolver<T>,
+        meta: ControllerObjectMeta,
+        spec: T::Spec,
+    ) -> Result<(), ResourceError> {
+        let input = InputMeta {
+            name: meta.name,
+            labels: meta.labels,
+            annotations: meta.annotations,
+            owner_references: meta.owner_references,
+            finalizers: Vec::new(),
+            deletion_timestamp: None,
+        };
+        match resolver.create(&input, &spec).await {
+            Ok(_) | Err(ResourceError::Conflict { .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn spawn_primary_watch(primary: TypedResolver<R::Resource>, sender: mpsc::Sender<String>) -> JoinHandle<Result<(), ResourceError>> {
+        tokio::spawn(async move {
+            let listed = primary.list().await?;
+            for object in &listed.items {
+                sender
+                    .send(object.metadata.name.clone())
+                    .await
+                    .map_err(|_| ResourceError::other("controller queue closed while forwarding initial primary list"))?;
+            }
+
+            let mut watch = primary.watch(WatchStart::FromVersion(listed.resource_version)).await?;
+            while let Some(event) = watch.next().await {
+                match event? {
+                    WatchEvent::Added(object) | WatchEvent::Modified(object) | WatchEvent::Deleted(object) => {
+                        sender
+                            .send(object.metadata.name)
+                            .await
+                            .map_err(|_| ResourceError::other("controller queue closed while forwarding primary watch event"))?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn spawn_secondary_watches(
+        secondaries: Vec<Box<dyn SecondaryWatch<Primary = R::Resource>>>,
+        backend: ResourceBackend,
+        namespace: String,
+        sender: mpsc::Sender<String>,
+    ) -> Vec<JoinHandle<Result<(), ResourceError>>> {
+        secondaries
+            .into_iter()
+            .map(|watch| {
+                let backend = backend.clone();
+                let namespace = namespace.clone();
+                let sender = sender.clone();
+                tokio::spawn(async move { watch.spawn(backend, namespace, sender).await })
+            })
+            .collect()
+    }
+
+    async fn resync_all(primary: &TypedResolver<R::Resource>, sender: &mpsc::Sender<String>) -> Result<(), ResourceError> {
+        let listed = primary.list().await?;
+        for object in listed.items {
+            sender
+                .send(object.metadata.name)
+                .await
+                .map_err(|_| ResourceError::other("controller queue closed while forwarding resync item"))?;
+        }
+        Ok(())
+    }
+
+    pub async fn run(self) -> Result<(), ResourceError>
+    where
+        <R::Resource as Resource>::Status: Default,
+    {
+        let ControllerLoop { primary, secondaries, reconciler, resync_interval, backend } = self;
+        let (sender, mut receiver) = mpsc::channel::<String>(128);
+        let _primary_watch = Self::spawn_primary_watch(primary.clone(), sender.clone());
+        let _secondary_watches = Self::spawn_secondary_watches(secondaries, backend, primary.namespace.clone(), sender.clone());
+        let mut resync = tokio::time::interval(resync_interval);
+        resync.tick().await;
+        let mut pending: VecDeque<String> = VecDeque::new();
+
+        loop {
+            if let Some(name) = pending.pop_front() {
+                let object = match primary.get(&name).await {
+                    Ok(object) => object,
+                    Err(ResourceError::NotFound { .. }) => continue,
+                    Err(err) => return Err(err),
+                };
+                if let Some(finalizer_name) = reconciler.finalizer_name() {
+                    if object.metadata.deletion_timestamp.is_some()
+                        && object.metadata.finalizers.iter().any(|finalizer| finalizer == finalizer_name)
+                    {
+                        reconciler.run_finalizer(&object).await?;
+                        let meta = InputMeta {
+                            name: object.metadata.name.clone(),
+                            labels: object.metadata.labels.clone(),
+                            annotations: object.metadata.annotations.clone(),
+                            owner_references: object.metadata.owner_references.clone(),
+                            finalizers: object
+                                .metadata
+                                .finalizers
+                                .iter()
+                                .filter(|finalizer| finalizer.as_str() != finalizer_name)
+                                .cloned()
+                                .collect(),
+                            deletion_timestamp: object.metadata.deletion_timestamp,
+                        };
+                        primary.update(&meta, &object.metadata.resource_version, &object.spec).await?;
+                        continue;
+                    }
+                }
+                let deps = reconciler.fetch_dependencies(&object).await?;
+                let outcome = reconciler.reconcile(&object, &deps, Utc::now());
+                for actuation in outcome.actuations {
+                    Self::apply_actuation(&primary.backend, &primary.namespace, actuation).await?;
+                }
+                if let Some(patch) = outcome.patch {
+                    apply_status_patch(&primary, &name, &patch).await?;
+                }
+                continue;
+            }
+
+            tokio::select! {
+                maybe_name = receiver.recv() => {
+                    let Some(name) = maybe_name else {
+                        return Ok(());
+                    };
+                    while let Ok(next) = receiver.try_recv() {
+                        if next != name {
+                            pending.push_back(next);
+                        }
+                    }
+                    pending.push_front(name);
+                }
+                _ = resync.tick() => {
+                    Self::resync_all(&primary, &sender).await?;
+                }
+            }
+        }
+    }
+}

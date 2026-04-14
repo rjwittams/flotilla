@@ -1199,6 +1199,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "flotilla-controllers"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "flotilla-core",
+ "flotilla-protocol",
+ "flotilla-resources",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "flotilla-core"
 version = "0.1.0"
 dependencies = [
@@ -1209,6 +1222,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "flotilla-protocol",
+ "flotilla-resources",
  "futures",
  "gethostname",
  "http",
@@ -1237,10 +1251,14 @@ name = "flotilla-daemon"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "clap",
  "flotilla-client",
+ "flotilla-controllers",
  "flotilla-core",
  "flotilla-daemon",
  "flotilla-protocol",
+ "flotilla-resources",
  "flotilla-transport",
  "futures",
  "indexmap",
@@ -1283,6 +1301,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yml",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",

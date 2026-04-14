@@ -1,0 +1,427 @@
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use flotilla_resources::{
+    controller::{ControllerLoop, LabelJoinWatch, LabelMappedWatch, ReconcileOutcome, Reconciler},
+    ApiPaths, InMemoryBackend, InputMeta, NoStatusPatch, Resource, ResourceBackend, ResourceError, ResourceObject,
+};
+use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrimaryResource;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PrimarySpec {
+    value: String,
+}
+
+impl Resource for PrimaryResource {
+    type Spec = PrimarySpec;
+    type Status = ();
+    type StatusPatch = NoStatusPatch;
+
+    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "test-primaries", kind: "TestPrimary" };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SecondaryResource;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SecondarySpec {
+    value: String,
+}
+
+impl Resource for SecondaryResource {
+    type Spec = SecondarySpec;
+    type Status = ();
+    type StatusPatch = NoStatusPatch;
+
+    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "test-secondaries", kind: "TestSecondary" };
+}
+
+#[derive(Clone)]
+struct RecordingReconciler {
+    reconciled: Arc<Mutex<Vec<String>>>,
+}
+
+impl Reconciler for RecordingReconciler {
+    type Resource = PrimaryResource;
+    type Dependencies = ();
+
+    async fn fetch_dependencies(&self, _obj: &ResourceObject<Self::Resource>) -> Result<Self::Dependencies, ResourceError> {
+        Ok(())
+    }
+
+    fn reconcile(
+        &self,
+        obj: &ResourceObject<Self::Resource>,
+        _deps: &Self::Dependencies,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> ReconcileOutcome<Self::Resource> {
+        self.reconciled.lock().expect("reconciled lock").push(obj.metadata.name.clone());
+        ReconcileOutcome { patch: None, actuations: Vec::new(), events: Vec::new(), requeue_after: None }
+    }
+
+    async fn run_finalizer(&self, _obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {
+        Ok(())
+    }
+
+    fn finalizer_name(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+#[derive(Clone)]
+struct FinalizingReconciler {
+    finalized: Arc<Mutex<Vec<String>>>,
+}
+
+impl Reconciler for FinalizingReconciler {
+    type Resource = PrimaryResource;
+    type Dependencies = ();
+
+    async fn fetch_dependencies(&self, _obj: &ResourceObject<Self::Resource>) -> Result<Self::Dependencies, ResourceError> {
+        Ok(())
+    }
+
+    fn reconcile(
+        &self,
+        _obj: &ResourceObject<Self::Resource>,
+        _deps: &Self::Dependencies,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> ReconcileOutcome<Self::Resource> {
+        ReconcileOutcome { patch: None, actuations: Vec::new(), events: Vec::new(), requeue_after: None }
+    }
+
+    async fn run_finalizer(&self, obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {
+        self.finalized.lock().expect("finalized lock").push(obj.metadata.name.clone());
+        Ok(())
+    }
+
+    fn finalizer_name(&self) -> Option<&'static str> {
+        Some("flotilla.work/test-finalizer")
+    }
+}
+
+fn primary_meta(name: &str) -> InputMeta {
+    InputMeta {
+        name: name.to_string(),
+        labels: BTreeMap::new(),
+        annotations: BTreeMap::new(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
+    }
+}
+
+fn secondary_meta(name: &str, primary: &str) -> InputMeta {
+    InputMeta {
+        name: name.to_string(),
+        labels: [("flotilla.work/primary".to_string(), primary.to_string())].into_iter().collect(),
+        annotations: BTreeMap::new(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
+    }
+}
+
+fn grouped_primary_meta(name: &str, group: &str) -> InputMeta {
+    InputMeta {
+        name: name.to_string(),
+        labels: [("flotilla.work/group".to_string(), group.to_string())].into_iter().collect(),
+        annotations: BTreeMap::new(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
+    }
+}
+
+fn grouped_secondary_meta(name: &str, group: &str) -> InputMeta {
+    InputMeta {
+        name: name.to_string(),
+        labels: [("flotilla.work/group".to_string(), group.to_string())].into_iter().collect(),
+        annotations: BTreeMap::new(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
+    }
+}
+
+#[tokio::test]
+async fn controller_loop_reconciles_existing_primary_objects_from_initial_list() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let primaries = backend.clone().using::<PrimaryResource>("flotilla");
+    primaries.create(&primary_meta("alpha"), &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
+
+    let reconciled = Arc::new(Mutex::new(Vec::new()));
+    let loop_task = tokio::spawn(
+        ControllerLoop {
+            primary: primaries,
+            secondaries: Vec::new(),
+            reconciler: RecordingReconciler { reconciled: Arc::clone(&reconciled) },
+            resync_interval: Duration::from_secs(60),
+            backend,
+        }
+        .run(),
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if reconciled.lock().expect("reconciled lock").iter().any(|name| name == "alpha") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial list should reconcile alpha");
+
+    loop_task.abort();
+}
+
+#[tokio::test]
+async fn label_mapped_watch_enqueues_primary_named_in_secondary_label() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let primaries = backend.clone().using::<PrimaryResource>("flotilla");
+    let secondaries = backend.clone().using::<SecondaryResource>("flotilla");
+    primaries.create(&primary_meta("alpha"), &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
+
+    let reconciled = Arc::new(Mutex::new(Vec::new()));
+    let loop_task = tokio::spawn(
+        ControllerLoop {
+            primary: primaries,
+            secondaries: vec![Box::new(LabelMappedWatch::<SecondaryResource, PrimaryResource> {
+                label_key: "flotilla.work/primary",
+                _marker: std::marker::PhantomData,
+            })],
+            reconciler: RecordingReconciler { reconciled: Arc::clone(&reconciled) },
+            resync_interval: Duration::from_secs(60),
+            backend: backend.clone(),
+        }
+        .run(),
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if reconciled.lock().expect("reconciled lock").iter().filter(|name| *name == "alpha").count() >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial list should reconcile alpha once");
+
+    {
+        let mut reconciled = reconciled.lock().expect("reconciled lock");
+        reconciled.clear();
+    }
+
+    secondaries
+        .create(&secondary_meta("secondary-a", "alpha"), &SecondarySpec { value: "wake".to_string() })
+        .await
+        .expect("secondary create should succeed");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let hits = reconciled.lock().expect("reconciled lock").iter().filter(|name| *name == "alpha").count();
+            if hits >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("secondary watch should enqueue alpha");
+
+    loop_task.abort();
+}
+
+#[tokio::test]
+async fn label_join_watch_enqueues_each_primary_sharing_the_label_value() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let primaries = backend.clone().using::<PrimaryResource>("flotilla");
+    let secondaries = backend.clone().using::<SecondaryResource>("flotilla");
+    primaries
+        .create(&grouped_primary_meta("alpha", "convoy-a"), &PrimarySpec { value: "one".to_string() })
+        .await
+        .expect("alpha create should succeed");
+    primaries
+        .create(&grouped_primary_meta("beta", "convoy-a"), &PrimarySpec { value: "two".to_string() })
+        .await
+        .expect("beta create should succeed");
+    primaries
+        .create(&grouped_primary_meta("gamma", "convoy-b"), &PrimarySpec { value: "three".to_string() })
+        .await
+        .expect("gamma create should succeed");
+
+    let reconciled = Arc::new(Mutex::new(Vec::new()));
+    let loop_task = tokio::spawn(
+        ControllerLoop {
+            primary: primaries,
+            secondaries: vec![Box::new(LabelJoinWatch::<SecondaryResource, PrimaryResource> {
+                label_key: "flotilla.work/group",
+                _marker: std::marker::PhantomData,
+            })],
+            reconciler: RecordingReconciler { reconciled: Arc::clone(&reconciled) },
+            resync_interval: Duration::from_secs(60),
+            backend: backend.clone(),
+        }
+        .run(),
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let reconciled = reconciled.lock().expect("reconciled lock").clone();
+            let alpha_hits = reconciled.iter().filter(|name| *name == "alpha").count();
+            let beta_hits = reconciled.iter().filter(|name| *name == "beta").count();
+            let gamma_hits = reconciled.iter().filter(|name| *name == "gamma").count();
+            if alpha_hits >= 1 && beta_hits >= 1 && gamma_hits >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial list should reconcile each primary once");
+
+    {
+        let mut reconciled = reconciled.lock().expect("reconciled lock");
+        reconciled.clear();
+    }
+
+    secondaries
+        .create(&grouped_secondary_meta("secondary-a", "convoy-a"), &SecondarySpec { value: "wake".to_string() })
+        .await
+        .expect("secondary create should succeed");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let reconciled = reconciled.lock().expect("reconciled lock").clone();
+            let alpha_hits = reconciled.iter().filter(|name| *name == "alpha").count();
+            let beta_hits = reconciled.iter().filter(|name| *name == "beta").count();
+            let gamma_hits = reconciled.iter().filter(|name| *name == "gamma").count();
+            if alpha_hits >= 1 && beta_hits >= 1 && gamma_hits == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("join watch should wake both matching primaries and no non-matches");
+
+    loop_task.abort();
+}
+
+#[tokio::test]
+async fn duplicate_secondary_events_for_the_same_primary_are_deduped_per_burst() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let primaries = backend.clone().using::<PrimaryResource>("flotilla");
+    let secondaries = backend.clone().using::<SecondaryResource>("flotilla");
+    primaries.create(&primary_meta("alpha"), &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
+
+    let reconciled = Arc::new(Mutex::new(Vec::new()));
+    let loop_task = tokio::spawn(
+        ControllerLoop {
+            primary: primaries,
+            secondaries: vec![Box::new(LabelMappedWatch::<SecondaryResource, PrimaryResource> {
+                label_key: "flotilla.work/primary",
+                _marker: std::marker::PhantomData,
+            })],
+            reconciler: RecordingReconciler { reconciled: Arc::clone(&reconciled) },
+            resync_interval: Duration::from_secs(60),
+            backend: backend.clone(),
+        }
+        .run(),
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if reconciled.lock().expect("reconciled lock").iter().filter(|name| *name == "alpha").count() >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial list should reconcile alpha once");
+
+    {
+        let mut reconciled = reconciled.lock().expect("reconciled lock");
+        reconciled.clear();
+    }
+
+    let secondary_a_meta = secondary_meta("secondary-a", "alpha");
+    let secondary_b_meta = secondary_meta("secondary-b", "alpha");
+    let secondary_a_spec = SecondarySpec { value: "wake-a".to_string() };
+    let secondary_b_spec = SecondarySpec { value: "wake-b".to_string() };
+    let create_a = secondaries.create(&secondary_a_meta, &secondary_a_spec);
+    let create_b = secondaries.create(&secondary_b_meta, &secondary_b_spec);
+    let (_a, _b) = tokio::join!(create_a, create_b);
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if !reconciled.lock().expect("reconciled lock").is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("secondary burst should wake alpha");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(reconciled.lock().expect("reconciled lock").as_slice(), &["alpha".to_string()]);
+
+    loop_task.abort();
+}
+
+#[tokio::test]
+async fn controller_loop_runs_finalizer_and_removes_it_from_metadata() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let primaries = backend.clone().using::<PrimaryResource>("flotilla");
+    let meta = InputMeta {
+        name: "alpha".to_string(),
+        labels: BTreeMap::new(),
+        annotations: BTreeMap::new(),
+        owner_references: Vec::new(),
+        finalizers: vec!["flotilla.work/test-finalizer".to_string()],
+        deletion_timestamp: Some(chrono::Utc::now()),
+    };
+    primaries.create(&meta, &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
+
+    let finalized = Arc::new(Mutex::new(Vec::new()));
+    let loop_task = tokio::spawn(
+        ControllerLoop {
+            primary: primaries.clone(),
+            secondaries: Vec::new(),
+            reconciler: FinalizingReconciler { finalized: Arc::clone(&finalized) },
+            resync_interval: Duration::from_secs(60),
+            backend,
+        }
+        .run(),
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let object = primaries.get("alpha").await.expect("primary get should succeed");
+            let finalized_hits = finalized.lock().expect("finalized lock").iter().filter(|name| *name == "alpha").count();
+            if finalized_hits >= 1 && object.metadata.finalizers.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("finalizer should run and then be removed from metadata");
+
+    let object = primaries.get("alpha").await.expect("primary get should succeed");
+    assert!(object.metadata.finalizers.is_empty());
+    assert!(object.metadata.deletion_timestamp.is_some());
+
+    loop_task.abort();
+}

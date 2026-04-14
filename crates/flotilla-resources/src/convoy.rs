@@ -11,7 +11,7 @@ use crate::{
 
 mod reconcile;
 
-pub use reconcile::{reconcile, ConvoyEvent, ReconcileOutcome};
+pub use reconcile::{reconcile, ConvoyEvent, ConvoyReconciler, ReconcileOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Convoy;
@@ -31,6 +31,15 @@ pub struct ConvoySpec {
     pub inputs: BTreeMap<String, InputValue>,
     #[serde(default)]
     pub placement_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<ConvoyRepositorySpec>,
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConvoyRepositorySpec {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

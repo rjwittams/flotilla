@@ -1,12 +1,14 @@
 pub mod clone;
 pub mod git;
 pub mod git_worktree;
+pub mod provisioning;
 pub mod wt;
 
 use std::path::Path;
 
 use async_trait::async_trait;
 use flotilla_protocol::CheckoutIntent;
+pub use provisioning::{CloneInspection, CloneProvisioner, GitCloneProvisioner};
 use tracing::warn;
 
 use crate::{

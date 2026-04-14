@@ -1,6 +1,6 @@
 mod common;
 
-use std::{net::SocketAddr, time::Duration};
+use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 
 use common::{convoy_meta, convoy_spec, convoy_status};
 use flotilla_resources::{Convoy, ConvoyPhase, HttpBackend, ResourceBackend, ResourceError, WatchEvent, WatchStart};
@@ -219,4 +219,29 @@ async fn server_disconnect_ends_watch_stream_cleanly() {
     let mut watch = resolver.watch(WatchStart::Now).await.expect("watch should succeed");
     let next = timeout(Duration::from_millis(200), watch.next()).await.expect("watch poll should finish");
     assert!(next.is_none(), "watch stream should end when server closes with no events");
+}
+
+#[tokio::test]
+async fn filtered_list_encodes_exact_match_label_selector() {
+    let body = serde_json::json!({
+        "metadata": { "resourceVersion": "9" },
+        "items": []
+    })
+    .to_string();
+    let (base_url, request_rx) = spawn_one_shot_server(response("200 OK", &body)).await;
+    let backend = ResourceBackend::Http(HttpBackend::new(reqwest::Client::new(), base_url));
+    let resolver = backend.using::<Convoy>("flotilla");
+    let selector = BTreeMap::from([
+        ("flotilla.work/convoy".to_string(), "convoy-a".to_string()),
+        ("flotilla.work/task".to_string(), "implement".to_string()),
+    ]);
+
+    let listed = resolver.list_matching_labels(&selector).await.expect("filtered list should succeed");
+
+    assert!(listed.items.is_empty());
+    let request = request_rx.await.expect("captured request");
+    assert!(
+        request.contains("/apis/flotilla.work/v1/namespaces/flotilla/convoys?labelSelector=flotilla.work%2Fconvoy%3Dconvoy-a%2Cflotilla.work%2Ftask%3Dimplement"),
+        "unexpected request: {request}"
+    );
 }

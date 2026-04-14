@@ -35,6 +35,8 @@ fn convoy_spec(workflow_ref: &str) -> ConvoySpec {
         .into_iter()
         .collect(),
         placement_policy: Some("laptop-docker".to_string()),
+        repository: None,
+        r#ref: None,
     }
 }
 
@@ -80,13 +82,22 @@ async fn convoy_controller_roundtrip_and_cel_validation() -> Result<(), Box<dyn 
         name: format!("workflow-template-{}", std::process::id()),
         labels: Default::default(),
         annotations: Default::default(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
     };
     let workflow_spec = workflow_template_spec();
     validate(&workflow_spec).map_err(|errors| format!("fixture workflow failed validation: {errors:?}"))?;
     let _workflow = templates.create(&workflow_meta, &workflow_spec).await?;
 
-    let convoy_meta =
-        InputMeta { name: format!("convoy-{}", std::process::id()), labels: Default::default(), annotations: Default::default() };
+    let convoy_meta = InputMeta {
+        name: format!("convoy-{}", std::process::id()),
+        labels: Default::default(),
+        annotations: Default::default(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
+    };
     let created = convoys.create(&convoy_meta, &convoy_spec(&workflow_meta.name)).await?;
 
     let mut changed_workflow = convoy_spec(&workflow_meta.name);

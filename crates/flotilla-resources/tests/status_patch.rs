@@ -38,7 +38,14 @@ impl StatusPatch<CounterStatus> for CounterPatch {
 }
 
 fn counter_meta(name: &str) -> InputMeta {
-    InputMeta { name: name.to_string(), labels: Default::default(), annotations: Default::default() }
+    InputMeta {
+        name: name.to_string(),
+        labels: Default::default(),
+        annotations: Default::default(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
+    }
 }
 
 fn counter_spec(name: &str) -> CounterSpec {

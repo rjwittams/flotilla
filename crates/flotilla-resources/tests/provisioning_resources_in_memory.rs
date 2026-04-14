@@ -1,0 +1,155 @@
+use std::collections::BTreeMap;
+
+use chrono::Utc;
+use flotilla_resources::{
+    Checkout, CheckoutSpec, DockerCheckoutStrategy, DockerEnvironmentSpec, DockerPerTaskPlacementPolicySpec, Environment, EnvironmentMount,
+    EnvironmentMountMode, EnvironmentSpec, FreshCloneCheckoutSpec, Host, HostDirectEnvironmentSpec, HostDirectPlacementPolicyCheckout,
+    HostDirectPlacementPolicySpec, InMemoryBackend, InputMeta, OwnerReference, PlacementPolicy, PlacementPolicySpec, ResourceBackend,
+    TaskWorkspace, TaskWorkspacePhase, TaskWorkspaceSpec, TaskWorkspaceStatus,
+};
+
+fn owner_reference(name: &str, kind: &str) -> OwnerReference {
+    OwnerReference { api_version: "flotilla.work/v1".to_string(), kind: kind.to_string(), name: name.to_string(), controller: true }
+}
+
+fn placement_meta(name: &str) -> InputMeta {
+    InputMeta {
+        name: name.to_string(),
+        labels: BTreeMap::new(),
+        annotations: BTreeMap::new(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
+    }
+}
+
+fn task_workspace_meta(name: &str) -> InputMeta {
+    InputMeta {
+        name: name.to_string(),
+        labels: [
+            ("flotilla.work/convoy".to_string(), "fix-bug-123".to_string()),
+            ("flotilla.work/task".to_string(), "implement".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        annotations: BTreeMap::new(),
+        owner_references: vec![owner_reference("fix-bug-123", "Convoy")],
+        finalizers: vec!["flotilla.work/example".to_string()],
+        deletion_timestamp: Some(Utc::now()),
+    }
+}
+
+fn docker_environment_meta(name: &str) -> InputMeta {
+    InputMeta {
+        name: name.to_string(),
+        labels: [("flotilla.work/host".to_string(), "01HXYZ".to_string())].into_iter().collect(),
+        annotations: BTreeMap::new(),
+        owner_references: vec![owner_reference("convoy-fix-bug-123-implement", "TaskWorkspace")],
+        finalizers: vec!["flotilla.work/environment-teardown".to_string()],
+        deletion_timestamp: None,
+    }
+}
+
+#[tokio::test]
+async fn placement_policy_roundtrips_without_status() {
+    let resolver = ResourceBackend::InMemory(InMemoryBackend::default()).using::<PlacementPolicy>("flotilla");
+    let spec = PlacementPolicySpec {
+        pool: "cleat".to_string(),
+        host_direct: Some(HostDirectPlacementPolicySpec {
+            host_ref: "01HXYZ".to_string(),
+            checkout: HostDirectPlacementPolicyCheckout::Worktree,
+        }),
+        docker_per_task: None,
+    };
+
+    let created = resolver.create(&placement_meta("host-direct-01HXYZ"), &spec).await.expect("create should succeed");
+    let fetched = resolver.get("host-direct-01HXYZ").await.expect("get should succeed");
+
+    assert_eq!(created.metadata.name, "host-direct-01HXYZ");
+    assert_eq!(created.status, None);
+    assert_eq!(fetched.spec.pool, "cleat");
+    assert!(fetched.spec.host_direct.is_some());
+}
+
+#[tokio::test]
+async fn task_workspace_metadata_and_status_roundtrip() {
+    let resolver = ResourceBackend::InMemory(InMemoryBackend::default()).using::<TaskWorkspace>("flotilla");
+    let spec = TaskWorkspaceSpec {
+        convoy_ref: "fix-bug-123".to_string(),
+        task: "implement".to_string(),
+        placement_policy_ref: "docker-on-01HXYZ".to_string(),
+    };
+    let created = resolver.create(&task_workspace_meta("convoy-fix-bug-123-implement"), &spec).await.expect("create should succeed");
+    let updated = resolver
+        .update_status("convoy-fix-bug-123-implement", &created.metadata.resource_version, &TaskWorkspaceStatus {
+            phase: TaskWorkspacePhase::Ready,
+            message: None,
+            observed_policy_ref: Some("docker-on-01HXYZ".to_string()),
+            observed_policy_version: Some("12".to_string()),
+            environment_ref: Some("env-a".to_string()),
+            checkout_ref: Some("checkout-a".to_string()),
+            terminal_session_refs: vec!["term-a".to_string()],
+            started_at: Some(Utc::now()),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .expect("status update should succeed");
+
+    assert_eq!(updated.metadata.owner_references, vec![owner_reference("fix-bug-123", "Convoy")]);
+    assert_eq!(updated.metadata.finalizers, vec!["flotilla.work/example".to_string()]);
+    assert!(updated.metadata.deletion_timestamp.is_some());
+    assert_eq!(updated.status.expect("status").environment_ref.as_deref(), Some("env-a"));
+}
+
+#[tokio::test]
+async fn environment_and_checkout_specs_serialize_through_in_memory_backend() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let environments = backend.clone().using::<Environment>("flotilla");
+    let checkouts = backend.using::<Checkout>("flotilla");
+
+    let env_spec = EnvironmentSpec {
+        host_direct: None,
+        docker: Some(DockerEnvironmentSpec {
+            host_ref: "01HXYZ".to_string(),
+            image: "ghcr.io/flotilla/dev:latest".to_string(),
+            mounts: vec![EnvironmentMount {
+                source_path: "/Users/alice/dev/flotilla.fix-bug-123".to_string(),
+                target_path: "/workspace".to_string(),
+                mode: EnvironmentMountMode::Rw,
+            }],
+            env: [("FOO".to_string(), "bar".to_string())].into_iter().collect(),
+        }),
+    };
+    let checkout_spec = CheckoutSpec {
+        env_ref: "env-a".to_string(),
+        r#ref: "feat/convoy-resource".to_string(),
+        target_path: "/workspace".to_string(),
+        worktree: None,
+        fresh_clone: Some(FreshCloneCheckoutSpec { url: "git@github.com:flotilla-org/flotilla.git".to_string() }),
+    };
+
+    let env = environments.create(&docker_environment_meta("env-a"), &env_spec).await.expect("env create should succeed");
+    let checkout = checkouts.create(&docker_environment_meta("checkout-a"), &checkout_spec).await.expect("checkout create should succeed");
+
+    assert_eq!(env.spec.docker.expect("docker spec").mounts[0].target_path, "/workspace");
+    assert_eq!(checkout.spec.fresh_clone.expect("fresh clone").url, "git@github.com:flotilla-org/flotilla.git");
+}
+
+#[test]
+fn host_direct_environment_spec_is_constructible() {
+    let _ = Host;
+    let _ = HostDirectEnvironmentSpec { host_ref: "01HXYZ".to_string(), repo_default_dir: "/Users/alice/dev/flotilla-repos".to_string() };
+}
+
+#[test]
+fn docker_per_task_policy_spec_is_constructible() {
+    let spec = DockerPerTaskPlacementPolicySpec {
+        host_ref: "01HXYZ".to_string(),
+        image: "ghcr.io/flotilla/dev:latest".to_string(),
+        default_cwd: Some("/workspace".to_string()),
+        env: [("FOO".to_string(), "bar".to_string())].into_iter().collect(),
+        checkout: DockerCheckoutStrategy::FreshCloneInContainer { clone_path: "/workspace".to_string() },
+    };
+
+    assert_eq!(spec.default_cwd.as_deref(), Some("/workspace"));
+}

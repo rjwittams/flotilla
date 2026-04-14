@@ -1,9 +1,13 @@
 mod common;
 
-use common::{convoy_meta, timestamp, valid_convoy_spec, valid_workflow_template_object, workflow_template_meta};
-use flotilla_resources::{
-    apply_status_patch, external_patches, reconcile, Convoy, ConvoyPhase, InMemoryBackend, ResourceBackend, ResourceError, WorkflowTemplate,
+use common::{
+    convoy_meta, task_provisioning_convoy_spec, timestamp, tool_only_workflow_template_object, valid_convoy_spec, workflow_template_meta,
 };
+use flotilla_resources::{
+    apply_status_patch, controller::ControllerLoop, external_patches, reconcile, Convoy, ConvoyPhase, ConvoyReconciler, InMemoryBackend,
+    ResourceBackend, ResourceError, TaskWorkspace, TaskWorkspacePhase, TaskWorkspaceStatus, WorkflowTemplate,
+};
+use tokio::time::{timeout, Duration};
 
 async fn reconcile_once(
     convoys: &flotilla_resources::TypedResolver<Convoy>,
@@ -37,7 +41,7 @@ async fn in_memory_controller_loop_drives_convoy_to_completion() {
     let templates = backend.clone().using::<WorkflowTemplate>("flotilla");
     let convoys = backend.using::<Convoy>("flotilla");
 
-    let template = valid_workflow_template_object("review-and-fix");
+    let template = tool_only_workflow_template_object("review-and-fix");
     templates.create(&workflow_template_meta(&template.metadata.name), &template.spec).await.expect("template create should succeed");
     convoys.create(&convoy_meta("convoy-a"), &valid_convoy_spec()).await.expect("convoy create should succeed");
 
@@ -91,4 +95,154 @@ async fn missing_template_transitions_convoy_to_failed() {
     let status = convoy.status.expect("convoy status");
     assert_eq!(status.phase, ConvoyPhase::Failed);
     assert!(status.message.as_deref().is_some_and(|message| message.contains("not found")));
+}
+
+#[tokio::test]
+async fn controller_loop_drives_convoy_progression_without_manual_reconcile_calls() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let templates = backend.clone().using::<WorkflowTemplate>("flotilla");
+    let convoys = backend.clone().using::<Convoy>("flotilla");
+
+    let template = tool_only_workflow_template_object("review-and-fix");
+    templates.create(&workflow_template_meta(&template.metadata.name), &template.spec).await.expect("template create should succeed");
+    convoys.create(&convoy_meta("convoy-loop"), &valid_convoy_spec()).await.expect("convoy create should succeed");
+
+    let loop_task = tokio::spawn(
+        ControllerLoop {
+            primary: convoys.clone(),
+            secondaries: Vec::new(),
+            reconciler: ConvoyReconciler::new(templates.clone()).with_task_workspaces(backend.clone().using::<TaskWorkspace>("flotilla")),
+            resync_interval: Duration::from_secs(60),
+            backend: backend.clone(),
+        }
+        .run(),
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let convoy = convoys.get("convoy-loop").await.expect("convoy get should succeed");
+            let Some(status) = convoy.status else {
+                tokio::task::yield_now().await;
+                continue;
+            };
+            if status.tasks.get("implement").is_some_and(|task| task.phase == flotilla_resources::TaskPhase::Ready) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("controller loop should bootstrap and advance implement");
+
+    apply_status_patch(
+        &convoys,
+        "convoy-loop",
+        &external_patches::mark_task_completed("implement".to_string(), timestamp(12), Some("implemented".to_string())),
+    )
+    .await
+    .expect("implement completion should succeed");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let convoy = convoys.get("convoy-loop").await.expect("convoy get should succeed");
+            let status = convoy.status.expect("convoy status");
+            if status.tasks.get("review").is_some_and(|task| task.phase == flotilla_resources::TaskPhase::Ready) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("controller loop should advance review after implement completion");
+
+    apply_status_patch(
+        &convoys,
+        "convoy-loop",
+        &external_patches::mark_task_completed("review".to_string(), timestamp(14), Some("reviewed".to_string())),
+    )
+    .await
+    .expect("review completion should succeed");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let convoy = convoys.get("convoy-loop").await.expect("convoy get should succeed");
+            let status = convoy.status.expect("convoy status");
+            if status.phase == ConvoyPhase::Completed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("controller loop should roll convoy up to completed");
+
+    loop_task.abort();
+}
+
+#[tokio::test]
+async fn controller_loop_advances_task_via_task_workspace_secondary_watch() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let templates = backend.clone().using::<WorkflowTemplate>("flotilla");
+    let convoys = backend.clone().using::<Convoy>("flotilla");
+    let workspaces = backend.clone().using::<TaskWorkspace>("flotilla");
+
+    let template = tool_only_workflow_template_object("review-and-fix");
+    templates.create(&workflow_template_meta(&template.metadata.name), &template.spec).await.expect("template create should succeed");
+    convoys.create(&convoy_meta("convoy-stage4a"), &task_provisioning_convoy_spec()).await.expect("convoy create should succeed");
+
+    let loop_task = tokio::spawn(
+        ControllerLoop {
+            primary: convoys.clone(),
+            secondaries: ConvoyReconciler::secondary_watches(),
+            reconciler: ConvoyReconciler::new(templates.clone()).with_task_workspaces(workspaces.clone()),
+            resync_interval: Duration::from_millis(50),
+            backend: backend.clone(),
+        }
+        .run(),
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if workspaces.get("convoy-stage4a-implement").await.is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("controller loop should create a task workspace for the ready task");
+
+    let workspace = workspaces.get("convoy-stage4a-implement").await.expect("workspace get should succeed");
+    workspaces
+        .update_status("convoy-stage4a-implement", &workspace.metadata.resource_version, &TaskWorkspaceStatus {
+            phase: TaskWorkspacePhase::Ready,
+            message: None,
+            observed_policy_ref: Some("laptop-docker".to_string()),
+            observed_policy_version: Some("17".to_string()),
+            environment_ref: Some("env-implement".to_string()),
+            checkout_ref: Some("checkout-implement".to_string()),
+            terminal_session_refs: vec!["terminal-implement-coder".to_string()],
+            started_at: Some(timestamp(18)),
+            ready_at: Some(timestamp(19)),
+        })
+        .await
+        .expect("workspace status update should succeed");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let convoy = convoys.get("convoy-stage4a").await.expect("convoy get should succeed");
+            let Some(status) = convoy.status else {
+                tokio::task::yield_now().await;
+                continue;
+            };
+            if status.tasks.get("implement").is_some_and(|task| task.phase == flotilla_resources::TaskPhase::Running) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("controller loop should advance the task to running after the workspace becomes ready");
+
+    loop_task.abort();
 }

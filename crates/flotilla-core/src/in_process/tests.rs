@@ -1,13 +1,15 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, OnceLock},
 };
 
 use async_trait::async_trait;
 use flotilla_protocol::{
     qualified_path::{HostId, QualifiedPath},
-    AssociationKey, ChangeRequest, ChangeRequestStatus, Checkout, EnvironmentId, EnvironmentStatus, HostPath, ImageId, Issue, RepoSelector,
+    AssociationKey, ChangeRequest, ChangeRequestStatus, Checkout, Command, CommandAction, CommandValue, DaemonEvent, EnvironmentId,
+    EnvironmentStatus, HostPath, ImageId, Issue, RepoSelector,
 };
+use flotilla_resources::{Convoy, ConvoyPhase, ConvoySpec, ConvoyStatus, InputMeta, TaskPhase, TaskState};
 
 use super::*;
 use crate::{
@@ -44,6 +46,17 @@ fn test_environment_manager() -> &'static EnvironmentManager {
             EnvironmentBag::new(),
         )
     })
+}
+
+fn empty_input_meta(name: &str) -> InputMeta {
+    InputMeta {
+        name: name.to_string(),
+        labels: BTreeMap::new(),
+        annotations: BTreeMap::new(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
+    }
 }
 
 #[test]
@@ -585,6 +598,83 @@ async fn get_repo_providers_uses_preferred_root_environment_host_discovery_for_n
             .any(|entry| entry.kind == "env_var_set" && entry.detail.get("key").map(String::as_str) == Some("LOCAL_MARKER")),
         "host discovery should not fall back to the daemon-local environment bag"
     );
+}
+
+#[tokio::test]
+async fn convoy_completion_command_updates_convoy_task_status() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let config_base = temp.path().join("config");
+    std::fs::create_dir_all(&config_base).expect("create config dir");
+    std::fs::write(config_base.join("daemon.toml"), "machine_id = \"test-machine\"\n").expect("write daemon config");
+
+    let daemon =
+        InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(&config_base)), fake_discovery(false), HostName::local()).await;
+    let convoys = daemon.resource_backend_for_test().using::<Convoy>("flotilla");
+    let created = convoys
+        .create(&empty_input_meta("convoy-a"), &ConvoySpec {
+            workflow_ref: "review-and-fix".to_string(),
+            inputs: BTreeMap::new(),
+            placement_policy: Some("laptop-docker".to_string()),
+            repository: None,
+            r#ref: None,
+        })
+        .await
+        .expect("convoy create should succeed");
+    convoys
+        .update_status("convoy-a", &created.metadata.resource_version, &ConvoyStatus {
+            phase: ConvoyPhase::Active,
+            workflow_snapshot: None,
+            tasks: [("implement".to_string(), TaskState {
+                phase: TaskPhase::Running,
+                ready_at: None,
+                started_at: None,
+                finished_at: None,
+                message: None,
+                placement: None,
+            })]
+            .into_iter()
+            .collect(),
+            message: None,
+            started_at: None,
+            finished_at: None,
+            observed_workflow_ref: Some("review-and-fix".to_string()),
+            observed_workflows: None,
+        })
+        .await
+        .expect("convoy status update should succeed");
+
+    let mut events = daemon.subscribe();
+    let command_id = daemon
+        .execute(Command {
+            node_id: None,
+            provisioning_target: None,
+            context_repo: None,
+            action: CommandAction::ConvoyTaskComplete {
+                convoy: "convoy-a".to_string(),
+                task: "implement".to_string(),
+                message: Some("done".to_string()),
+            },
+        })
+        .await
+        .expect("execute should return a command id");
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match events.recv().await {
+                Ok(DaemonEvent::CommandFinished { command_id: id, result, .. }) if id == command_id => break result,
+                Ok(_) => {}
+                Err(err) => panic!("unexpected event error: {err}"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for command result");
+
+    assert_eq!(result, CommandValue::Ok);
+    let convoy = convoys.get("convoy-a").await.expect("convoy get should succeed");
+    let status = convoy.status.expect("convoy status should exist");
+    assert_eq!(status.tasks["implement"].phase, TaskPhase::Completed);
+    assert_eq!(status.tasks["implement"].message.as_deref(), Some("done"));
 }
 
 #[tokio::test]

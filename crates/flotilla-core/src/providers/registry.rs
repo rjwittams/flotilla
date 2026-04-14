@@ -10,7 +10,7 @@ use crate::providers::{
     issue_query::IssueQueryService,
     issue_tracker::IssueProvider,
     terminal::TerminalPool,
-    vcs::{CheckoutManager, Vcs},
+    vcs::{CheckoutManager, CloneProvisioner, Vcs},
     workspace::WorkspaceManager,
 };
 
@@ -153,6 +153,7 @@ impl<D, T: ?Sized> Default for TypedSet<D, T> {
 
 pub struct ProviderRegistry {
     pub vcs: ProviderSet<dyn Vcs>,
+    pub clone_provisioners: ProviderSet<dyn CloneProvisioner>,
     pub checkout_managers: ProviderSet<dyn CheckoutManager>,
     pub change_requests: ProviderSet<dyn ChangeRequestTracker>,
     pub issue_trackers: ProviderSet<dyn IssueProvider>,
@@ -168,6 +169,7 @@ impl ProviderRegistry {
     pub fn new() -> Self {
         Self {
             vcs: ProviderSet::new(),
+            clone_provisioners: ProviderSet::new(),
             checkout_managers: ProviderSet::new(),
             change_requests: ProviderSet::new(),
             issue_trackers: ProviderSet::new(),
@@ -198,6 +200,7 @@ impl ProviderRegistry {
             }
         }
         collect(&mut infos, &self.vcs);
+        collect(&mut infos, &self.clone_provisioners);
         collect(&mut infos, &self.checkout_managers);
         collect(&mut infos, &self.change_requests);
         collect(&mut infos, &self.issue_trackers);
