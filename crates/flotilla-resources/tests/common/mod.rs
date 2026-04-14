@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use flotilla_resources::{
-    ApiPaths, InputDefinition, InputMeta, ProcessDefinition, ProcessSource, Resource, Selector, TaskDefinition, WorkflowTemplateSpec,
+    ApiPaths, InputDefinition, InputMeta, ProcessDefinition, ProcessSource, Resource, Selector, StatusPatch, TaskDefinition,
+    WorkflowTemplateSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -17,9 +18,18 @@ pub struct ConvoyStatus {
     pub phase: String,
 }
 
+pub enum ConvoyStatusPatch {}
+
+impl StatusPatch<ConvoyStatus> for ConvoyStatusPatch {
+    fn apply(&self, _: &mut ConvoyStatus) {
+        match *self {}
+    }
+}
+
 impl Resource for ConvoyResource {
     type Spec = ConvoySpec;
     type Status = ConvoyStatus;
+    type StatusPatch = ConvoyStatusPatch;
 
     const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "convoys", kind: "Convoy" };
 }

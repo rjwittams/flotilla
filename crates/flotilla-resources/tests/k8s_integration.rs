@@ -1,8 +1,8 @@
 use std::{env, path::PathBuf};
 
 use flotilla_resources::{
-    ensure_crd, ensure_namespace, validate, ApiPaths, HttpBackend, InputMeta, Resource, ResourceBackend, WatchEvent, WatchStart,
-    WorkflowTemplate, WorkflowTemplateSpec,
+    ensure_crd, ensure_namespace, validate, ApiPaths, HttpBackend, InputMeta, Resource, ResourceBackend, StatusPatch, WatchEvent,
+    WatchStart, WorkflowTemplate, WorkflowTemplateSpec,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -19,9 +19,18 @@ struct ConvoyStatus {
     phase: String,
 }
 
+enum ConvoyStatusPatch {}
+
+impl StatusPatch<ConvoyStatus> for ConvoyStatusPatch {
+    fn apply(&self, _: &mut ConvoyStatus) {
+        match *self {}
+    }
+}
+
 impl Resource for ConvoyResource {
     type Spec = ConvoySpec;
     type Status = ConvoyStatus;
+    type StatusPatch = ConvoyStatusPatch;
 
     const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "convoys", kind: "Convoy" };
 }
