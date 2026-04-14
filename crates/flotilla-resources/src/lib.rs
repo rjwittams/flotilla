@@ -1,4 +1,5 @@
 mod backend;
+mod convoy;
 mod error;
 mod http;
 mod in_memory;
@@ -8,6 +9,10 @@ mod watch;
 mod workflow_template;
 
 pub use backend::{ResourceBackend, TypedResolver};
+pub use convoy::{
+    controller_patches, external_patches, provisioning_patches, Convoy, ConvoyPhase, ConvoySpec, ConvoyStatus, ConvoyStatusPatch,
+    InputValue, PlacementStatus, SnapshotTask, TaskPhase, TaskState, WorkflowSnapshot,
+};
 pub use error::ResourceError;
 pub use http::{ensure_crd, ensure_namespace, HttpBackend};
 pub use in_memory::InMemoryBackend;
