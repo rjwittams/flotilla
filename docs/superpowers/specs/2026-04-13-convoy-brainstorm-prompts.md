@@ -276,7 +276,8 @@ See `docs/superpowers/specs/2026-04-14-task-provisioning-design.md` for the spec
 - **Multi-host placement** — SSH-reachable Hosts, mesh-aware Host resources, label-selector host targeting.
 - **Bosun-style automatic restart / repair / cleanup** — restart policies, terminal-session restarts on inner-command crash, cleanup on terminal task transitions.
 - **Convoy launched against an existing Checkout** — workflow flexibility for "use this existing tree as the work area," constrains compatible environments.
-- **Repository extensions** — Stage 4a's Repository carries URL + env_ref + path. Future additions: per-repo workspace.yaml location, per-repo provider configuration, credentials, badge metadata. Each is an additive field.
+- **Logical `Repository` resource** — Stage 4a only has `Clone` (one per URL+env). A future `Repository` would be the URL-level identity: canonical URL + aliases/mirrors, declared default branch (distinct from observed), GitHub/GitLab owner+slug anchor for ChangeRequestTracker/IssueProvider config, the anchor for cross-env "show me all clones of this repo" queries. When it lands, `ConvoySpec.repository: { url }` becomes `ConvoySpec.repository_ref: <name>` and `Clone` gains a `repository_ref` back-pointer.
+- **Clone extensions** — Stage 4a's Clone carries URL + env_ref + path + default_branch. Future additions: credentials, per-clone workspace.yaml location, badge metadata, default-checkout tracking (the working tree from a non-bare clone vs. explicit Checkout resources). Each is an additive field.
 - **Detached-head / sha / tag refs on Checkout** — useful for agent-driven bisect workflows and pinned-version provisioning.
 - **Shared Docker environments as a placement variant** — needs the shared-env-plus-per-task-checkout composability question solved.
 - **Meta-policy variant** for PlacementPolicy — delegate to a Quartermaster agent that picks among other policies. Sits on top of `PersistentAgent` (which is its own deferred item).
@@ -284,7 +285,7 @@ See `docs/superpowers/specs/2026-04-14-task-provisioning-design.md` for the spec
 - **Per-task restart policies / explicit retry UX** — a way to say "retry this failed task" without manually deleting resources.
 - **Auto-cleanup of stopped sessions on terminal task transitions** — opt-in policy field; today TerminalSessions stay alive until the TaskWorkspace cascades on Convoy deletion.
 - **Vessel / Crew / Shipment naming pass** — convoy-themed renames once the abstractions settle: TaskWorkspace → Vessel, processes → Crew, artifacts → Shipment.
-- **VCS abstraction in resource shape** — Repository and Checkout are git-shaped in v1; future `vcs:` discriminator for hg / fossil / etc.
+- **VCS abstraction in resource shape** — Clone and Checkout are git-shaped in v1; future `vcs:` discriminator for hg / fossil / etc.
 - **Cross-env mounts** — Stage 4a's Environment mounts use a `source_path` field implicitly resolved against the env's host. A future cross-env mount story (mounting paths from one Environment into another) would add `from_env` alongside; existing entries default to "same host's host_direct env."
 - **Exit-code-as-completion opt-in** — tasks where a designated "progress-bearing" process (e.g. one-shot `cargo test`) should drive task completion. Requires extending `TerminalPool` to surface inner-command exit events. Watcher-kind processes (test runners, dev servers, log tails) opt out.
 - **CLI shortcutting** — env-var-derived context propagated into terminal sessions so processes can issue short-form CLI commands (`flotilla complete` instead of `flotilla convoy <name> task <task> complete`). Part of a wider "how CLI infers context" story.

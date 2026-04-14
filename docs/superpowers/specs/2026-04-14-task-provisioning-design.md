@@ -22,13 +22,13 @@ The scoping is honest about the work involved: a "productive" k8s Pod backend ne
 
 ### In scope
 
-- Six new resources (`Host`, `Environment`, `Repository`, `Checkout`, `TerminalSession`, `TaskWorkspace`) plus an orthogonal `PlacementPolicy` resource.
+- Six new resources (`Host`, `Environment`, `Clone`, `Checkout`, `TerminalSession`, `TaskWorkspace`) plus an orthogonal `PlacementPolicy` resource.
 - A small controller framework added to `flotilla-resources` (the same crate Stage 3 lives in).
-- A new `flotilla-controllers` crate containing five reconcilers (TaskWorkspace, Environment, Repository, Checkout, TerminalSession) and three actuators wrapping existing flotilla-core providers (Docker, CheckoutManager, TerminalPool).
-- Daemon startup: self-registration as a `Host`, creation of a host-direct `Environment`, discovery of existing `Repository` resources from flotilla-core's repo registry, creation of default `PlacementPolicy` resources.
+- A new `flotilla-controllers` crate containing five reconcilers (TaskWorkspace, Environment, Clone, Checkout, TerminalSession) and three actuators wrapping existing flotilla-core providers (Docker, CheckoutManager, TerminalPool).
+- Daemon startup: self-registration as a `Host`, creation of a host-direct `Environment`, discovery of existing `Clone` resources from flotilla-core's repo registry, creation of default `PlacementPolicy` resources.
 - A new `flotillad` binary in the `flotilla-daemon` crate. The existing `flotilla` TUI binary's embedded-daemon mode is removed entirely — Stage 4a is the cut. Tests that need everything-in-one-process compose `InProcessDaemon` + controllers via a small test-support helper.
 - Two `PlacementPolicy` variants: `host_direct` and `docker_per_task`.
-- **Env-relative model**: every persistent on-disk thing (Repository, Checkout, TerminalSession) lives in an `Environment`. The host's bare filesystem is the `host_direct` Environment; docker is another Environment kind; future k8s_pod likewise. Repository and Checkout reference `env_ref`, never `host_ref`.
+- **Env-relative model**: every persistent on-disk thing (Clone, Checkout, TerminalSession) lives in an `Environment`. The host's bare filesystem is the `host_direct` Environment; docker is another Environment kind; future k8s_pod likewise. Clone and Checkout reference `env_ref`, never `host_ref`.
 - Tests at every layer: pure reconcile, status patch, framework, actuator, in-memory end-to-end, minikube integration.
 
 ### Out of scope (Stage 4a)
@@ -72,13 +72,15 @@ For navigators landing in this spec without the brainstorm context:
 - **`PersistentAgent`** — single resource type with k8s-style labels/selectors; conventionally-labeled instances are Quartermaster, Yeoman, custom SDLC agents. Future.
 - **`Host`** — daemon identity, heartbeat, capabilities. New in Stage 4a; self-registered.
 - **`Environment`** — a runtime + filesystem. The host's bare filesystem is the `host_direct` Environment; docker is another kind; future k8s-pod likewise. New in Stage 4a.
-- **`Repository`** — a persistent on-disk clone in some Environment's filesystem. New in Stage 4a.
+- **`Clone`** — a specific on-disk git clone in some Environment's filesystem. Identity is (URL, env). New in Stage 4a. (A future logical `Repository` resource — representing the URL-level identity across clones — is deferred; see deferred list.)
 - **`Checkout`** — a working tree in some Environment's filesystem. New in Stage 4a.
 - **`TerminalSession`** — an individual process session in an Environment. New in Stage 4a.
 - **`TaskWorkspace`** — the per-task bundle tying a Convoy task to its concrete Environment + Checkout + TerminalSessions. New in Stage 4a.
 - **`PresentationManager`** — surface for user interaction with workspaces. Stage 5.
 
-**Env-relative principle**: Repository, Checkout, and TerminalSession all carry `env_ref` rather than `host_ref`. The host's filesystem is just one kind of Environment (the `host_direct` one). When env-internal cases arrive (k8s_pod with its own writable layer), nothing in the schema needs to change — they just point `env_ref` at a non-host_direct env.
+**Env-relative principle**: Clone, Checkout, and TerminalSession all carry `env_ref` rather than `host_ref`. The host's filesystem is just one kind of Environment (the `host_direct` one). When env-internal cases arrive (k8s_pod with its own writable layer), nothing in the schema needs to change — they just point `env_ref` at a non-host_direct env.
+
+**Clone vs. logical "Repository"**: what Stage 4a calls `Clone` is intentionally the physical-clone concept — one per (URL, env) pair. The convoy names the logical repo (by URL) and the provisioning layer materializes Clones in whichever envs tasks need them. If we later want a queryable "logical Repository" resource (canonical URL, aliases, default-branch declared vs observed, GitHub/GitLab slug for ChangeRequestTracker/IssueProvider config, the anchor for cross-env "show all clones" queries), that becomes a separate `Repository` resource in a future stage. The `Clone` name is precise about what we have now and leaves the word "Repository" available for the logical layer later.
 
 ## Resources
 
@@ -111,7 +113,7 @@ status:
 
 One CRD with a tagged-by-presence variant — same pattern as `ProcessSource` in `WorkflowTemplate`. Each variant carries a `host_ref` *if applicable* (some future variants like RunPod or `meta_policy` won't).
 
-The host's bare filesystem is itself an Environment (`host_direct` kind). This is the env-relative model: every persistent on-disk thing (Repository, Checkout) lives in an Environment by `env_ref`; the host filesystem is just a special-named Environment.
+The host's bare filesystem is itself an Environment (`host_direct` kind). This is the env-relative model: every persistent on-disk thing (Clone, Checkout) lives in an Environment by `env_ref`; the host filesystem is just a special-named Environment.
 
 ```yaml
 apiVersion: flotilla.work/v1
@@ -124,7 +126,7 @@ spec:
   # Exactly one variant populated.
   host_direct:
     host_ref: 01HXYZ...
-    repo_default_dir: /Users/alice/dev/flotilla-repos    # where new Repositories clone to
+    repo_default_dir: /Users/alice/dev/flotilla-repos    # where new Clones land
   # docker:
   #   host_ref: 01HXYZ...
   #   image: ghcr.io/flotilla/dev:latest
@@ -144,25 +146,27 @@ status:
 
 - **Mounts live on `Environment.spec`** as static fields, written at creation by the `TaskWorkspaceReconciler` (which is the only thing that creates per-task Environments). The Environment controller never touches them; it reads its own spec and actuates.
 - **Mount `source_path` is implicit "from the env's host's filesystem"** in Stage 4a — the docker env's `host_ref` tells you which host. A future cross-env mount story would add an explicit `from_env` field; the name `source_path` (vs `host_path`) keeps it forward-compatible. Joined-up summary views (TUI, CLI) show the resolved mount picture; the spec stays minimal.
-- **`host_direct` Environments are auto-created by the daemon** (one per host, at startup). Not owned by any TaskWorkspace; persist for the daemon's life. The `repo_default_dir` here governs where new Repositories clone to on this host.
+- **`host_direct` Environments are auto-created by the daemon** (one per host, at startup). Not owned by any TaskWorkspace; persist for the daemon's life. The `repo_default_dir` here governs where new Clones land on this host.
 - **`docker_per_task` Environments** are owned by their TaskWorkspace via `ownerReferences` and GC-cascade on TaskWorkspace deletion.
 - **Finalizer** `flotilla.work/environment-teardown` on `docker_per_task` Environments runs `docker rm -f` before deletion completes. `host_direct` Environments carry no finalizer — there is no per-env state to tear down (the host filesystem outlives them).
 
-### `Repository`
+### `Clone`
 
-A persistent on-disk clone in some Environment's filesystem. The home of the `.git` directory; the parent for worktree-strategy Checkouts.
+A specific on-disk git clone in some Environment's filesystem. The home of the `.git` directory; the parent for worktree-strategy Checkouts. Identity is (URL, env): at most one Clone per `(spec.url, spec.env_ref)` pair (enforced by deterministic naming + controller reuse logic).
 
 ```yaml
 apiVersion: flotilla.work/v1
-kind: Repository
+kind: Clone
 metadata:
-  name: flotilla-flotilla-org
+  name: flotilla-flotilla-org-host-direct-01HXYZ    # derived from url-slug + env_ref
   labels:
-    flotilla.work/discovered: "true"      # set when auto-created via discovery
+    flotilla.work/discovered: "true"                # set when auto-created via discovery
+    flotilla.work/env: host-direct-01HXYZ
+    flotilla.work/url-slug: flotilla-flotilla-org
 spec:
-  url: https://github.com/flotilla-org/flotilla    # canonical git URL
-  env_ref: host-direct-01HXYZ                       # env that owns the filesystem
-  path: /Users/alice/dev/flotilla                   # path within env_ref's filesystem
+  url: https://github.com/flotilla-org/flotilla     # canonical git URL
+  env_ref: host-direct-01HXYZ                        # env that owns the filesystem
+  path: /Users/alice/dev/flotilla                    # path within env_ref's filesystem
 status:
   phase: Ready                                       # Pending | Cloning | Ready | Failed
   default_branch: main
@@ -170,12 +174,13 @@ status:
 ```
 
 - **Git-shaped in v1.** The "VCS abstraction" is notional in flotilla today (provider trait exists, no real consumer); we don't expose it as a CRD field. Future: a `vcs:` discriminator (`git | hg | fossil | …`) if we add other backends.
-- **Three creation paths:**
-  1. **Auto-discovery on daemon startup** — daemon scans flotilla-core's repo registry (`~/.config/flotilla/repos/*.toml`) and creates Repository resources for what it finds. Marked with `flotilla.work/discovered: "true"`. Lifecycle is out-of-band — these persist regardless of any TaskWorkspace.
-  2. **User-authored** — `kubectl apply` of a Repository spec. Daemon's Repository controller actuates the clone if not already present.
-  3. **On-demand auto-clone** — when a worktree-strategy Checkout references a Repository that doesn't exist, the TaskWorkspaceReconciler creates one with a derived path (`<env's repo_default_dir>/<repo-name>`) and waits for it to clone.
-- **Not owned** by any TaskWorkspace. Repositories outlive the tasks that use them — that's the point.
-- **Finalizer** `flotilla.work/repository-cleanup` only runs on explicit delete. Stage 4a default: don't auto-delete discovered or auto-cloned Repositories.
+- **Three creation paths in Stage 4a:**
+  1. **Auto-discovery on daemon startup** — daemon scans flotilla-core's repo registry (`~/.config/flotilla/repos/*.toml`) and creates Clone resources for what it finds (env_ref = host-direct env of this daemon). Marked with `flotilla.work/discovered: "true"`. Lifecycle is out-of-band — these persist regardless of any TaskWorkspace.
+  2. **User-authored** — `kubectl apply` of a Clone spec. The `CloneReconciler` actuates the clone if not already present; the resource exists in `phase: Pending` until the clone completes.
+  3. **On-demand by `TaskWorkspaceReconciler`** — when a task needs a Clone (for worktree strategies) in some env and no matching Clone exists for `(url, env)`, the reconciler emits a `CreateClone` actuation. URL comes from `convoy.spec.repository.url` (see ConvoySpec extensions); env comes from the resolved PlacementPolicy. Deterministic naming means concurrent tasks converge on the same Clone.
+- **Not owned** by any TaskWorkspace — Clones outlive the tasks that use them. Multiple tasks (possibly across multiple convoys) share a Clone by URL+env.
+- **Deterministic naming**: `name = <url-slug>-<env_ref>`. Stable across restarts and across concurrent reconciles; `AlreadyExists` on `CreateClone` is success.
+- **Finalizer** `flotilla.work/clone-cleanup` only runs on explicit delete. Stage 4a default: don't auto-delete the on-disk clone (deleting the resource removes the resource only). Explicit-delete-with-cleanup is a future opt-in.
 
 ### `Checkout`
 
@@ -200,7 +205,7 @@ spec:
 
   # Exactly one strategy variant populated:
   worktree:
-    repository_ref: flotilla-flotilla-org
+    clone_ref: flotilla-flotilla-org-host-direct-01HXYZ
   # fresh_clone:
   #   url: https://github.com/...
 
@@ -212,11 +217,11 @@ status:
 ```
 
 - **Strategy variants:**
-  - `worktree { repository_ref }` — `git worktree add` from a Repository in the same Environment. Lightweight; default for typical use.
-  - `fresh_clone { url }` — `git clone <url> <target_path>` directly. No Repository needed. Used for env-internal cases (k8s_pod future) and standalone clones.
-  - `local_clone` deferred — copy from a local Repository (separate clone, not a worktree). Rare; can be added without disturbing existing variants.
+  - `worktree { clone_ref }` — `git worktree add` from a Clone in the same Environment. Lightweight; default for typical use.
+  - `fresh_clone { url }` — `git clone <url> <target_path>` directly. No Clone resource needed. Used for env-internal cases (k8s_pod future, or docker `fresh_clone_in_container`) and standalone clones.
+  - `local_clone` deferred — copy from a local Clone (separate clone on disk, not a worktree). Rare; can be added without disturbing existing variants.
 - **Validation rules:**
-  - Worktree's `repository_ref` must reference a Repository with the same `env_ref`. Cross-env worktrees are not possible (`git worktree add` needs the parent on the same filesystem).
+  - Worktree's `clone_ref` must reference a Clone with the same `env_ref`. Cross-env worktrees are not possible (`git worktree add` needs the parent on the same filesystem).
   - Branch refs only in v1; sha/tag/detached-head deferred.
 - Default ownership: per-task (owned by TaskWorkspace, GC-cascades). Shared persistent checkouts are deferred.
 - **Finalizer** `flotilla.work/checkout-cleanup` runs `git worktree remove` (worktree variant) or `rm -rf target_path` (fresh_clone) before deletion.
@@ -334,13 +339,13 @@ spec:
 - Two variants in Stage 4a: `host_direct` and `docker_per_task`. Future variants (`docker_shared`, `k8s_pod`, `runpod`, `meta_policy` delegating to a Quartermaster) are deferred.
 - **`host_ref` lives per-variant**, not at top level — some future variants (RunPod, meta-policy) don't bind to a specific host.
 - **`pool` is at top level** because it applies uniformly to anything that creates terminal sessions.
-- **`checkout` lives per-variant** because the strategies that make sense depend on the placement shape. `host_direct` only permits `worktree` in v1 (fresh clone onto the host is possible but pointless when the host already has the Repository). `docker_per_task` offers two sub-variants: `worktree_on_host_and_mount` (cheap, shares fetch state; requires Repository on the host) and `fresh_clone_in_container` (isolated, no host dependency; slower). `local_clone` is deferred.
+- **`checkout` lives per-variant** because the strategies that make sense depend on the placement shape. `host_direct` only permits `worktree` in v1 (fresh clone onto the host is possible but pointless when the host already has a Clone). `docker_per_task` offers two sub-variants: `worktree_on_host_and_mount` (cheap, shares fetch state; requires a Clone on the host) and `fresh_clone_in_container` (isolated, no host dependency; slower). `local_clone` is deferred.
 - **No status, no controller for PlacementPolicy itself** — pure data, like WorkflowTemplate. The `TaskWorkspaceReconciler` consults it during reconciliation.
 - **Daemon-created defaults** at startup (see Daemon Startup section): one `host-direct-<host>` policy and (if docker is available) one `docker-on-<host>` policy (defaulting to `worktree_on_host_and_mount`). User can edit, replace, or add custom ones.
 
 ### `ConvoySpec` extensions (Stage 4a)
 
-Stage 4a extends Stage 3's `ConvoySpec` with two new required fields — the "what repo, what branch" pair that every convoy needs once provisioning is real:
+Stage 4a extends Stage 3's `ConvoySpec` with two new fields — a logical repo identity and a branch. The convoy names the *logical* repo (by URL); the provisioning layer materializes per-env Clones as tasks need them. The convoy never references a specific Clone resource, because that would bake a placement decision into the caller.
 
 ```yaml
 spec:
@@ -348,14 +353,15 @@ spec:
   inputs: { … }                        # existing (Stage 3)
   placement_policy: …                  # existing (Stage 3)
 
-  repository_ref: flotilla-flotilla-org   # NEW: Repository resource this convoy operates on
-  ref: feat/convoy-resource               # NEW: branch (v1); sha/tag deferred
+  repository:                          # NEW: logical repo identity (URL-only in Stage 4a)
+    url: https://github.com/flotilla-org/flotilla
+  ref: feat/convoy-resource            # NEW: branch (v1); sha/tag deferred
 ```
 
-- **`repository_ref`** names a `Repository` resource in the same namespace. The TaskWorkspaceReconciler uses it directly instead of looking up by URL — this avoids forcing Stage 4a to invent a URL-based resolution path. Users who want to run a convoy against a not-yet-registered repo must create the Repository first (on-demand auto-clone by a worktree Checkout still works: the Repository resource can exist with `phase: Pending` and the Checkout will wait for it).
-- **`ref`** is the branch the convoy's Checkouts use. Convoy-level rather than per-task because every task in a Stage 4a convoy works the same branch. Per-task branch overrides, sha/tag refs, and detached-head are all deferred.
+- **`repository`** is inline, not a resource reference. In Stage 4a it only carries `url`. This is the invariant identity of the repo across any clones that materialize in any envs. A future logical `Repository` resource would move this into a reference (`repository_ref: foo-bar`), with `url` living on the Repository. The nested-object shape (`repository: { … }`) is forward-compatible: adding a `ref` (resource-name) field or moving fields out later doesn't reshape callers.
+- **`ref`** is the branch used by the convoy's Checkouts. Convoy-level rather than per-task because every task in a Stage 4a convoy works the same branch. Per-task overrides, sha/tag refs, detached-head, and shared-branch coordination are deferred.
 - Both fields are immutable after create (CEL validation), matching Stage 3's immutability story for `workflow_ref`.
-- The TaskWorkspaceReconciler passes `convoy.spec.ref` into `CheckoutSpec.ref` and resolves `convoy.spec.repository_ref` against the host-direct Environment of the policy's host.
+- The TaskWorkspaceReconciler consumes both: `convoy.spec.ref` flows into `CheckoutSpec.ref`; `convoy.spec.repository.url` flows into per-env Clone materialization (see reconcile flow).
 
 ### Resource interactions and ownership summary
 
@@ -364,7 +370,7 @@ spec:
 | Host | nobody | none | daemon (self via heartbeat task) |
 | Environment (host_direct) | nobody | none | daemon (auto-created at startup) |
 | Environment (docker_per_task) | TaskWorkspace | docker-teardown | TaskWorkspaceReconciler |
-| Repository | nobody | repository-cleanup (rare; explicit delete only) | daemon (discovery) or user or TaskWorkspaceReconciler (auto-clone) |
+| Clone | nobody | clone-cleanup (rare; explicit delete only) | daemon (discovery), user, or TaskWorkspaceReconciler (on-demand per-env) |
 | Checkout | TaskWorkspace | checkout-cleanup | TaskWorkspaceReconciler |
 | TerminalSession | TaskWorkspace | terminal-teardown | TaskWorkspaceReconciler |
 | TaskWorkspace | Convoy | none (children carry finalizers) | Convoy reconciler (extended in Stage 4a) |
@@ -415,12 +421,15 @@ pub struct ObjectMeta {
 
 pub enum Actuation {
     CreateEnvironment     { meta: ObjectMeta, spec: EnvironmentSpec },
-    CreateRepository      { meta: ObjectMeta, spec: RepositorySpec },
+    CreateClone           { meta: ObjectMeta, spec: CloneSpec },
     CreateCheckout        { meta: ObjectMeta, spec: CheckoutSpec },
     CreateTerminalSession { meta: ObjectMeta, spec: TerminalSessionSpec },
     CreateTaskWorkspace   { meta: ObjectMeta, spec: TaskWorkspaceSpec },
     DeleteResource        { kind: ResourceKind, name: String },
 }
+// CreateClone is safe because URL comes from convoy.spec.repository.url (one
+// authoritative source) and naming is deterministic `<url-slug>-<env>`, so
+// concurrent tasks converge on the same Clone via AlreadyExists-is-success.
 
 /// A secondary watch is spawned alongside the primary watch and feeds primary
 /// keys into the shared reconcile channel. Each impl handles one Watched
@@ -462,7 +471,7 @@ impl<R: Reconciler> ControllerLoop<R> {
 
 - **Primary watch**: `list()` → reconcile each → `watch(WatchStart::FromVersion(rv))`. Standard Stage 3 list-then-watch.
 - **Secondary watches**: one task per secondary spawned alongside the primary watch. Each watched event maps via `SecondaryWatch::map_to_primary_keys` (typically reading a label) to a list of primary keys to enqueue.
-- **`ObjectMeta` on `Create*` actuations**: every create carries a full `ObjectMeta { name, owner_ref, labels, annotations }`, not just a name. Labels drive secondary-watch routing (e.g. `flotilla.work/convoy`, `flotilla.work/task_workspace`, `flotilla.work/role`, `flotilla.work/auto_clone_for`), so they must flow through actuation rather than being bolted on after creation. Keeping the metadata bundle in one struct means future additions (e.g. annotations for observability) don't require widening every variant.
+- **`ObjectMeta` on `Create*` actuations**: every create carries a full `ObjectMeta { name, owner_ref, labels, annotations }`, not just a name. Labels drive secondary-watch routing (e.g. `flotilla.work/convoy`, `flotilla.work/task_workspace`, `flotilla.work/role`), so they must flow through actuation rather than being bolted on after creation. Keeping the metadata bundle in one struct means future additions (e.g. annotations for observability) don't require widening every variant.
 - **Shared reconcile channel**: all watches push primary keys into one mpsc channel. A worker dequeues, dedupes consecutive entries for the same key, fetches the primary by name, calls `reconcile`, then enacts each `Actuation` first and applies the typed patch via `apply_status_patch` afterwards.
 - **Actuate-then-patch ordering, with idempotent actuations.** The framework enacts actuations *before* applying the status patch. If an actuation fails, no patch lands and the task stays in its previous phase, so the next reconcile pass retries cleanly. All actuations are idempotent: `Create*` is name-keyed (`AlreadyExists` is success); `DeleteResource` treats `NotFound` as success. Reconcilers should not rely on single-pass atomicity; they must be written to converge over multiple passes.
 - **No cross-resource status patches as actuations.** Every reconciler patches only its own resource's status. State propagation between resources happens via observation: a reconciler watches sibling/parent resources (as secondaries) and reacts to their status changes during its own reconcile pass. This eliminates a whole class of cross-resource ordering hazards (the parent advancing ahead of the child) and keeps single-writer-per-status discipline.
@@ -500,17 +509,17 @@ Watches Environment resources (primary). No secondaries. Branches on `spec.<kind
 
 Finalizer: `flotilla.work/environment-teardown` on `docker_per_task` only (runs `docker rm -f`). `host_direct` Environments carry no finalizer.
 
-### `RepositoryReconciler`
+### `CloneReconciler`
 
-Watches Repository resources (primary). No secondaries. On a Repository whose `status.phase` is `Pending`: calls flotilla-core's git layer to clone `spec.url` into `spec.env_ref`'s filesystem at `spec.path`. Updates `status.default_branch` once the clone completes; transitions to `Ready`. On a discovery-marked Repository whose path already exists, just verifies and transitions to `Ready` without re-cloning.
+Watches Clone resources (primary). No secondaries. On a Clone whose `status.phase` is `Pending`: calls flotilla-core's git layer to clone `spec.url` into `spec.env_ref`'s filesystem at `spec.path`. Updates `status.default_branch` once the clone completes; transitions to `Ready`. On a discovery-marked Clone whose path already exists, just verifies and transitions to `Ready` without re-cloning.
 
-Finalizer: `flotilla.work/repository-cleanup`. Stage 4a default for the cleanup itself: do nothing (Repositories are persistent; deleting the resource doesn't remove the on-disk clone). Explicit-delete-with-cleanup is a future opt-in.
+Finalizer: `flotilla.work/clone-cleanup`. Stage 4a default for the cleanup itself: do nothing (Clones are persistent; deleting the resource doesn't remove the on-disk clone). Explicit-delete-with-cleanup is a future opt-in.
 
 ### `CheckoutReconciler`
 
 Watches Checkout resources (primary). No secondaries. Branches on strategy variant:
 
-- `worktree`: looks up the referenced Repository (must be `Ready`, must have matching `env_ref`), runs `git worktree add` to `spec.target_path`.
+- `worktree`: looks up the referenced Clone (must be `Ready`, must have matching `env_ref`), runs `git worktree add` to `spec.target_path`.
 - `fresh_clone`: runs `git clone <spec.fresh_clone.url> <spec.target_path>` directly.
 
 Updates `status.path`, `status.commit`, transitions phases.
@@ -527,25 +536,36 @@ Finalizer: `flotilla.work/terminal-teardown`. Stops the session and releases the
 
 ### `TaskWorkspaceReconciler`
 
-Watches TaskWorkspace (primary) plus Environment, Repository, Checkout, TerminalSession as secondaries. Each child secondary maps back to its `flotilla.work/task_workspace` label. Repository is a special case: it is *not* owned by TaskWorkspace, but a TaskWorkspace that auto-cloned a Repository labels it `flotilla.work/auto_clone_for: <task_workspace>` so the secondary watch can map back during cloning. Once a Repository is `Ready`, subsequent Checkouts referencing it don't need this label.
+Watches TaskWorkspace (primary) plus Environment, Checkout, TerminalSession as owned-child secondaries (mapped via `flotilla.work/task_workspace`). Clone is also watched as a secondary, mapped via `flotilla.work/url-slug`: each task's target Clone carries a url-slug label that matches the slug derivable from `convoy.spec.repository.url`, so Clone status changes wake the right TaskWorkspaces without requiring the reconciler to rescan on every tick.
 
-Reconcile flow:
+**Reconcile flow — ordering depends on the policy's checkout strategy.** The three supported strategies produce three dependency chains:
 
-1. **Resolve PlacementPolicy** via `placement_policy_ref`. Missing → `Failed` + propagate to Convoy via `MarkTaskFailed`.
-2. **Read parent Convoy's `status.workflow_snapshot`** for the task's process definitions and inputs (used in interpolation downstream).
-3. **Ensure Repository.** The policy's checkout strategy determines whether a Repository is needed:
-   - `worktree` / `worktree_on_host_and_mount` → required. Fetch the Repository named by `convoy.spec.repository_ref` in the host-direct Environment of the policy's host. If not present, emit `CreateRepository` actuation (env_ref = host-direct env, url from `convoy.spec.repository_ref`'s existing spec if the resource exists in `Pending`, or path derived from `host_direct_env.spec.host_direct.repo_default_dir + repository_ref`). Wait until `Ready`.
-   - `fresh_clone_in_container` → skipped; the Checkout clones directly from URL.
-4. **Ensure Checkout.** If `status.checkout_ref` unset, emit a `CreateCheckout` actuation (owned by this TaskWorkspace) with:
-   - `env_ref`: the host-direct env for `worktree_on_host_and_mount`, the docker env for `fresh_clone_in_container`.
+- **`host_direct` + `worktree`**: Clone (host-direct env) → Checkout (host-direct env) → Environment (no-op: reuse host-direct env) → TerminalSessions.
+- **`docker_per_task` + `worktree_on_host_and_mount`**: Clone (host-direct env of the policy's host) → Checkout (host-direct env) → Environment (docker env, mounts the Checkout path) → TerminalSessions.
+- **`docker_per_task` + `fresh_clone_in_container`**: Environment (docker env) → Checkout (in the docker env, `fresh_clone` strategy, URL from `convoy.spec.repository.url`) → TerminalSessions. No Clone resource is created — the clone happens *inside the container* via the Checkout's `fresh_clone` strategy.
+
+The reconciler computes the dependency order from the strategy and drives the per-pass ensure logic accordingly. Written declaratively, every pass:
+
+1. **Resolve PlacementPolicy** via `placement_policy_ref`. Missing → `Failed`; the Convoy reconciler observes and propagates.
+2. **Read parent Convoy's `spec` and `status.workflow_snapshot`** for `repository.url`, `ref`, process definitions, and inputs.
+3. **Ensure Clone** (when strategy needs one — skipped for `fresh_clone_in_container`). Compute the clone env (the host-direct env of the policy's host) and the deterministic Clone name: `<url-slug(convoy.spec.repository.url)>-<clone_env_ref>`. Look it up:
+   - Not found → emit `CreateClone` actuation with `spec.url = convoy.spec.repository.url`, `spec.env_ref = clone_env_ref`, `spec.path = <clone_env.spec.host_direct.repo_default_dir>/<url-slug>`. Labels include `flotilla.work/url-slug` so the secondary watch maps back here. On `AlreadyExists` (a peer task got there first), treat as success and proceed.
+   - Found → reuse. Clone is shared by URL+env across all tasks and all convoys.
+   Then wait for `phase: Ready`.
+4. **Ensure Environment** (only before Checkout for `fresh_clone_in_container`; otherwise after Checkout). Branch on policy variant:
+   - `host_direct` → reuse the shared host-direct Environment for the host; write `status.environment_ref`. No creation.
+   - `docker_per_task` + `fresh_clone_in_container` → if `status.environment_ref` unset, emit `CreateEnvironment` with no checkout mount (the clone happens inside the container). Wait until `Ready`.
+   - `docker_per_task` + `worktree_on_host_and_mount` → deferred until after the Checkout is Ready (see step 6).
+5. **Ensure Checkout.** If `status.checkout_ref` unset, emit `CreateCheckout` (owned by this TaskWorkspace) with:
+   - `env_ref`: the clone env for both worktree strategies; the just-created docker env for `fresh_clone_in_container`.
    - `ref`: `convoy.spec.ref`.
-   - Strategy variant: `worktree { repository_ref: convoy.spec.repository_ref }` for worktree strategies; `fresh_clone { url: <resolved from convoy.spec.repository_ref's Repository> }` for fresh-clone strategies.
+   - Strategy variant: `worktree { clone_ref: <Clone name from step 3> }` for both worktree strategies; `fresh_clone { url: convoy.spec.repository.url }` for `fresh_clone_in_container`.
    Wait until the Checkout reaches `Ready`.
-5. **Ensure Environment.** Branch on policy variant:
-   - `host_direct`: look up the shared host-direct Environment for the host. Set `status.environment_ref`. No creation.
-   - `docker_per_task`: if `status.environment_ref` unset, emit `CreateEnvironment` with mounts derived from `Checkout.status.path` (mount source_path = checkout path; target_path = policy's `checkout_mount_path`). Wait until `Ready`.
-6. **Ensure TerminalSessions**, one per process. If a session for a given role is missing, emit `CreateTerminalSession` with `env_ref` = the chosen Environment, `cwd` derived from policy + Environment (e.g. `default_cwd: /workspace` for docker_per_task; checkout path for host_direct), `pool` from policy.
-7. **All Ready** → patch own `status.phase = Ready`. The Convoy reconciler observes this change via its TaskWorkspace secondary watch and patches the convoy task to `Running` as part of its own next reconcile pass.
+6. **Ensure Environment (worktree-and-mount only).** For `docker_per_task` + `worktree_on_host_and_mount`: if `status.environment_ref` unset, emit `CreateEnvironment` with mounts derived from `Checkout.status.path` (mount `source_path = Checkout.status.path`; `target_path = policy.docker_per_task.checkout.worktree_on_host_and_mount.mount_path`). Wait until `Ready`. Skipped for the other two strategies (Environment already resolved).
+7. **Ensure TerminalSessions**, one per process in the task's snapshot. If a session for a given role is missing, emit `CreateTerminalSession` with `env_ref` = the chosen Environment, `cwd` derived from policy + Environment (for `host_direct`: `Checkout.status.path`; for `worktree_on_host_and_mount`: `policy.docker_per_task.checkout.worktree_on_host_and_mount.mount_path`; for `fresh_clone_in_container`: `policy.docker_per_task.checkout.fresh_clone_in_container.clone_path`; further overridden by `policy.docker_per_task.default_cwd` if set), `pool` from policy.
+8. **All Ready** → patch own `status.phase = Ready`. The Convoy reconciler observes this change via its TaskWorkspace secondary watch and patches the convoy task to `Running` as part of its own next reconcile pass.
+
+**Multi-host / cross-env placement.** Because Clone materialization is keyed on (URL, env), a future multi-host PlacementPolicy (e.g. Task 1 on host A, Task 2 on host B) "just works": each task's `TaskWorkspaceReconciler` pass computes its own clone env, looks up or creates the Clone there, and proceeds. Host A and Host B each end up with their own Clone of the same logical repo; they converge independently. The convoy's `repository.url` is the single point of truth; no placement information leaks into the convoy itself.
 
 Failure at any step: own `status.phase = Failed` with a clear message. The Convoy reconciler observes Failed TaskWorkspace status and patches the convoy task to `Failed` as part of its own reconcile. No automatic retry.
 
@@ -587,12 +607,12 @@ The daemon at startup, after connecting to the resource backend:
 
 1. **Self-register as Host**: create-or-update a Host resource for itself (using the existing persistent host id as the resource name). Spawn a periodic heartbeat task that updates `Host.status.heartbeat_at` every ~30s.
 2. **Create the host-direct Environment** for itself if not present. Includes `repo_default_dir` from existing flotilla-core config or a sensible default. Idempotent.
-3. **Discover Repositories**: scan flotilla-core's repo registry (`~/.config/flotilla/repos/*.toml`); for each entry, create-or-update a Repository resource (env_ref = host-direct env, path from the registry, label `flotilla.work/discovered: "true"`). Idempotent.
+3. **Discover Clones**: scan flotilla-core's repo registry (`~/.config/flotilla/repos/*.toml`); for each entry, create-or-update a Clone resource (env_ref = host-direct env, url/path from the registry, labels `flotilla.work/discovered: "true"` + `flotilla.work/url-slug: <slug>`). Idempotent; deterministic naming means reruns don't duplicate.
 4. **Create default PlacementPolicies**:
    - Always: `host-direct-<host-id>` (variant: `host_direct`).
    - If `Host.status.capabilities.docker == true`: `docker-on-<host-id>` (variant: `docker_per_task`, with a sensible default image).
 5. **Spawn the `HostHeartbeatTask`** (per-daemon background task; not a controller).
-6. **Spawn all controller loops**: EnvironmentReconciler, RepositoryReconciler, CheckoutReconciler, TerminalSessionReconciler, TaskWorkspaceReconciler, ConvoyReconciler (refactored from Stage 3, extended to ensure TaskWorkspaces and observe their status as described above; declarative per-pass).
+6. **Spawn all controller loops**: EnvironmentReconciler, CloneReconciler, CheckoutReconciler, TerminalSessionReconciler, TaskWorkspaceReconciler, ConvoyReconciler (refactored from Stage 3, extended to ensure TaskWorkspaces and observe their status as described above; declarative per-pass).
 
 This is the "discovered resources" pattern in its simplest form: the daemon creates the resources that describe its own capabilities, and they lifecycle out of band from user interaction. User can edit or replace any of them; the daemon doesn't keep regenerating.
 
@@ -664,12 +684,12 @@ For each resource that carries a finalizer: verify cleanup runs, finalizer entry
 ### Stage 4a proper
 
 4. New crate `flotilla-controllers`.
-5. Seven new CRDs: `Host`, `Environment`, `Repository`, `Checkout`, `TerminalSession`, `TaskWorkspace`, `PlacementPolicy`. CEL immutability where applicable.
-6. Rust types for each + `StatusPatch` enums + per-resource reconcilers (five reconcilers: Environment, Repository, Checkout, TerminalSession, TaskWorkspace) plus a `HostHeartbeatTask` (not a reconciler).
-7. Three actuators wrapping existing flotilla-core providers: Docker (Environment), CheckoutManager (Repository + Checkout), TerminalPool (TerminalSession).
-8. **`ConvoySpec` extensions**: add `repository_ref: String` and `ref: String` fields, immutable after create (CEL). Update serde types, Stage 3 bootstrap, and tests.
-9. **Convoy reconciler extension** (Plan A2 or A3): per-task declarative logic that ensures a TaskWorkspace exists and propagates TaskWorkspace status into convoy task phase via observation (no cross-resource patches). Adds TaskWorkspace as a secondary watch with the `flotilla.work/convoy` label mapping. Grow the `Actuation` enum with `CreateRepository` + `CreateTaskWorkspace`. Bootstrap rejects workflows containing `ProcessSource::Agent` with `FailInit` until Stage 4b ships selector resolution.
-10. Daemon startup logic: self-register as Host, create host-direct Environment, discover existing Repositories from flotilla-core registry, create default PlacementPolicies, spawn the heartbeat task and all controller loops.
+5. Seven new CRDs: `Host`, `Environment`, `Clone`, `Checkout`, `TerminalSession`, `TaskWorkspace`, `PlacementPolicy`. CEL immutability where applicable.
+6. Rust types for each + `StatusPatch` enums + per-resource reconcilers (five reconcilers: Environment, Clone, Checkout, TerminalSession, TaskWorkspace) plus a `HostHeartbeatTask` (not a reconciler).
+7. Three actuators wrapping existing flotilla-core providers: Docker (Environment), CheckoutManager (Clone + Checkout), TerminalPool (TerminalSession).
+8. **`ConvoySpec` extensions**: add `repository: { url: String }` (inline logical identity) and `ref: String` fields, immutable after create (CEL). Update serde types, Stage 3 bootstrap, and tests.
+9. **Convoy reconciler extension** (Plan A2 or A3): per-task declarative logic that ensures a TaskWorkspace exists and propagates TaskWorkspace status into convoy task phase via observation (no cross-resource patches). Adds TaskWorkspace as a secondary watch with the `flotilla.work/convoy` label mapping. Grow the `Actuation` enum with `CreateTaskWorkspace` + `CreateClone`. Bootstrap rejects workflows containing `ProcessSource::Agent` with `FailInit` until Stage 4b ships selector resolution.
+10. Daemon startup logic: self-register as Host, create host-direct Environment, discover existing Clones from flotilla-core registry, create default PlacementPolicies, spawn the heartbeat task and all controller loops.
 11. **CLI completion path** (touches several crates, extending the existing `Command`/`CommandAction` vocabulary):
     - `flotilla-protocol` — new `CommandAction::MarkConvoyTaskComplete { namespace, convoy, task }` variant on the existing `CommandAction` enum (sent through the existing `Request::Execute { command }` flow). Matching success/error shape on the existing result type.
     - `flotilla-core` — extend the daemon-level command handling path so `CommandAction::MarkConvoyTaskComplete` is recognized as a daemon-scoped action rather than a per-repo executor plan step. `InProcessDaemon` / the core executor boundary needs to route it to the resource patching path cleanly.
@@ -690,13 +710,17 @@ A "productive" k8s Pod backend needs a runnable image, a checkout mechanism for 
 
 ### Per-layer resources, not a single bundled resource
 
-Six resources (Host, Environment, Repository, Checkout, TerminalSession, TaskWorkspace) instead of one bundled `Workspace` resource. Each existing flotilla provider concept gets its own resource shape with its own lifecycle, finalizer, and visibility. Costs more upfront than a single resource but pays off for: independent inspection and labelling (`kubectl get terminalsessions -l role=coder`), clear ownership boundaries, future per-resource controllers, and the agent-era model where a Yeoman or Bosun watches per-resource events. Underspecifying the cuts now would force a much larger disaggregation transition later.
+Six resources (Host, Environment, Clone, Checkout, TerminalSession, TaskWorkspace) instead of one bundled `Workspace` resource. Each existing flotilla provider concept gets its own resource shape with its own lifecycle, finalizer, and visibility. Costs more upfront than a single resource but pays off for: independent inspection and labelling (`kubectl get terminalsessions -l role=coder`), clear ownership boundaries, future per-resource controllers, and the agent-era model where a Yeoman or Bosun watches per-resource events. Underspecifying the cuts now would force a much larger disaggregation transition later.
 
 ### Env-relative model (everything has `env_ref`, not `host_ref`)
 
-Repository, Checkout, and TerminalSession all carry `env_ref` rather than `host_ref`. The host's bare filesystem is just one kind of Environment (`host_direct`). Cloning into a k8s pod is the same act as cloning anywhere else — the pod's filesystem is just another Environment kind.
+Clone, Checkout, and TerminalSession all carry `env_ref` rather than `host_ref`. The host's bare filesystem is just one kind of Environment (`host_direct`). Cloning into a k8s pod is the same act as cloning anywhere else — the pod's filesystem is just another Environment kind.
 
 Treating the host as a special case of Environment, rather than a peer concept, removes a discriminator that would otherwise ossify in every related resource. When env-internal cases arrive (k8s_pod, future runpod), the schema doesn't need to change; new resources just point `env_ref` at the new Environment kind. Mounts are minimal (`source_path + target_path + mode`) — the source is implicitly the env's host's filesystem, and a future cross-env mount story would add `from_env` then. Joined-up summary views show the resolved picture; the spec stays minimal.
+
+### Convoy names the logical repo by URL; per-env Clones materialize under placement
+
+The convoy carries `repository: { url }` inline, not a reference to a specific Clone resource. This matters because placement decides which env(s) a convoy's tasks run in — and a convoy tied to "the Clone on host A" would break the moment placement picked host B, or split tasks across both. The `TaskWorkspaceReconciler` materializes (or reuses) a Clone per `(url, env)` pair as each task is placed. The URL lives in exactly one place (on the convoy); every Clone's `spec.url` matches that URL. Deterministic Clone naming (`<url-slug>-<env>`) makes the lookup a keyed read, and `AlreadyExists` on `CreateClone` is success — so concurrent tasks targeting the same env-clone converge cleanly. A future logical `Repository` resource (carrying URL, aliases, default-branch declared, ChangeRequestTracker/IssueProvider config anchor, queryable "all clones of this repo") would turn the inline field into a `repository_ref` without rewriting any of this flow.
 
 ### One CRD per concept, kind-discriminator inside
 
@@ -744,7 +768,8 @@ To capture in the brainstorm-prompts master deferred list under "From Stage 4a":
 - **Multi-host placement** — SSH-reachable Hosts, mesh-aware Host resources, label-selector host targeting.
 - **Bosun-style automatic restart / repair / cleanup** — restart policies, terminal-session restarts on inner-command crash, cleanup on terminal task transitions.
 - **Convoy launched against an existing Checkout** — workflow flexibility for "use this existing tree as the work area."
-- **Repository extensions** — Stage 4a's Repository carries URL + env_ref + path. Future additions: per-repo workspace.yaml location, per-repo provider configuration, credentials, badge metadata. Each is an additive field.
+- **Logical `Repository` resource** — Stage 4a only has `Clone` (one per URL+env). A future `Repository` would be the URL-level identity: canonical URL + aliases/mirrors, declared default branch (distinct from observed), GitHub/GitLab owner+slug for the existing ChangeRequestTracker/IssueProvider config to hang off, the anchor for cross-env "show me all clones of this repo" queries. When it lands, `ConvoySpec.repository: { url }` becomes `ConvoySpec.repository_ref: <name>` and `Clone` gains a `repository_ref` back-pointer.
+- **Clone extensions** — Stage 4a's Clone carries URL + env_ref + path + default_branch. Future additions: credentials, per-clone workspace.yaml location, badge metadata, default-checkout tracking (the working tree you get from a non-bare clone vs. explicit Checkout resources). Each is an additive field.
 - **Detached-head / sha / tag refs on Checkout** — useful for agent-driven bisect workflows and pinned-version provisioning.
 - **Shared Docker environments** as a placement variant — needs the shared-env-plus-per-task-checkout composability question solved.
 - **Meta-policy variant** for PlacementPolicy — delegate to a Quartermaster agent that picks among other policies.
@@ -753,7 +778,7 @@ To capture in the brainstorm-prompts master deferred list under "From Stage 4a":
 - **Per-task restart policies / explicit retry UX** — a way to say "retry this failed task" without manually deleting resources.
 - **Auto-cleanup of stopped sessions on terminal task transitions** — opt-in policy field.
 - **Vessel / Crew / Shipment naming pass** — convoy-themed renames once the abstractions settle (TaskWorkspace → Vessel, processes → Crew, artifacts → Shipment).
-- **VCS abstraction in resource shape** — Repository and Checkout are git-shaped in v1; future `vcs:` discriminator for hg / fossil / etc.
+- **VCS abstraction in resource shape** — Clone and Checkout are git-shaped in v1; future `vcs:` discriminator for hg / fossil / etc.
 - **Exit-code-as-completion opt-in** — for tasks whose configured "progress-bearing" process should drive task completion (e.g. a one-shot `cargo test`). Requires extending `TerminalPool` to surface inner-command exit events plus a per-task / per-process opt-in flag. Watcher-kind processes (test runners, dev servers, log tails) explicitly opt out — they're informational and never complete by design.
 - **CLI shortcutting for task completion** — env-var-derived context (`FLOTILLA_CONVOY`, `FLOTILLA_TASK`, `FLOTILLA_ROLE`) propagated into terminal sessions so a process can call `flotilla complete` without the long form. Part of a wider story about how `flotilla` CLI infers context from the calling environment.
 - **Per-task retry / convoy-task reset** — once richer workflows are in flight, we'll want to mark a failed task for retry without recreating the whole convoy. Today's Stage 3 fail-fast + Stage 4a's "no in-place retry" forces convoy recreation. Likely needs a new convoy-controller patch variant (`ResetTaskToPending` or similar) plus a corresponding CLI affordance.
@@ -778,7 +803,7 @@ After this lands: the resources exist, individual reconcilers work against the i
 
 ### Plan A3 — Daemon wiring + binary split
 
-Daemon startup (Host self-register, host-direct Environment auto-create, Repository discovery, default PlacementPolicies, controller-loop spawning), heartbeat task, new `flotillad` binary in `flotilla-daemon`, removal of `flotilla` TUI binary's embedded-daemon mode, test-support helper for InProcessDaemon-everything setups, in-memory backend end-to-end test, HTTP backend integration test against minikube.
+Daemon startup (Host self-register, host-direct Environment auto-create, Clone discovery, default PlacementPolicies, controller-loop spawning), heartbeat task, new `flotillad` binary in `flotilla-daemon`, removal of `flotilla` TUI binary's embedded-daemon mode, test-support helper for InProcessDaemon-everything setups, in-memory backend end-to-end test, HTTP backend integration test against minikube.
 
 After this lands: end-to-end flow lights up.
 
