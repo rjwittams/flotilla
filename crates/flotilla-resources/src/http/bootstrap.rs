@@ -44,6 +44,8 @@ pub async fn ensure_crd(backend: &HttpBackend, crd_yaml: &str) -> Result<(), Res
         {
             body["metadata"]["resourceVersion"] = Value::String(resource_version.to_string());
         }
+        // This intentionally replaces the CRD spec with the checked-in YAML rather than
+        // issuing a merge patch. The helper is aimed at deterministic local/bootstrap flows.
         let response =
             backend.http.put(&object_url).json(&body).send().await.map_err(|err| ResourceError::other(format!("UPDATE CRD: {err}")))?;
         if response.status().is_success() {

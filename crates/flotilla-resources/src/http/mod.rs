@@ -158,7 +158,10 @@ impl HttpBackend {
             loop {
                 if let Some(position) = state.buffer.iter().position(|byte| *byte == b'\n') {
                     let line = state.buffer.drain(..=position).collect::<Vec<_>>();
-                    let line = &line[..line.len().saturating_sub(1)];
+                    let mut line = &line[..line.len().saturating_sub(1)];
+                    if line.last() == Some(&b'\r') {
+                        line = &line[..line.len().saturating_sub(1)];
+                    }
                     if line.iter().all(|byte| byte.is_ascii_whitespace()) {
                         continue;
                     }

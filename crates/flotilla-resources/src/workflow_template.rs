@@ -185,8 +185,9 @@ fn visit_task(
     errors: &mut Vec<ValidationError>,
 ) {
     match states.get(task_name) {
-        Some(VisitState::Visiting) | Some(VisitState::Visited) => return,
+        Some(VisitState::Visited) => return,
         None => {}
+        Some(VisitState::Visiting) => unreachable!("cycle detection handles visiting dependencies before recursion"),
     }
 
     states.insert(task_name.to_string(), VisitState::Visiting);

@@ -39,8 +39,7 @@ async fn update_requires_current_resource_version_for_workflow_templates() {
     let conflict = resolver
         .update(&workflow_template_meta("review-and-fix"), "0", &updated_workflow_template_spec())
         .await
-        .err()
-        .expect("stale update should conflict");
+        .expect_err("stale update should conflict");
     match conflict {
         flotilla_resources::ResourceError::Conflict { .. } => {}
         other => panic!("expected conflict, got {other}"),

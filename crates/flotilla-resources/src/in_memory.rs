@@ -23,6 +23,7 @@ struct ResourceStore {
     objects: HashMap<String, Value>,
     next_version: u64,
     watchers: Vec<mpsc::UnboundedSender<StoredEvent>>,
+    // TODO: compact the event log if this backend starts serving long-lived scenarios.
     event_log: Vec<StoredEvent>,
 }
 

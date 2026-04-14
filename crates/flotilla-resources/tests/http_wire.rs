@@ -154,6 +154,23 @@ async fn watch_decodes_kubernetes_watch_events() {
 }
 
 #[tokio::test]
+async fn watch_decodes_crlf_terminated_events() {
+    let body =
+        "{\"type\":\"ADDED\",\"object\":{\"apiVersion\":\"flotilla.work/v1\",\"kind\":\"Convoy\",\"metadata\":{\"name\":\"alpha\",\"namespace\":\"flotilla\",\"resourceVersion\":\"7\",\"labels\":{},\"annotations\":{},\"creationTimestamp\":\"2026-04-13T12:00:00Z\"},\"spec\":{\"template\":\"review\"},\"status\":{\"phase\":\"Pending\"}}}\r\n";
+    let (base_url, _request_rx) = spawn_one_shot_server(response("200 OK", body)).await;
+    let backend = ResourceBackend::Http(HttpBackend::new(reqwest::Client::new(), base_url));
+    let resolver = backend.using::<ConvoyResource>("flotilla");
+
+    let mut watch = resolver.watch(WatchStart::Now).await.expect("watch should succeed");
+    let event =
+        timeout(Duration::from_secs(1), watch.next()).await.expect("watch should yield event").expect("stream item").expect("event decode");
+    match event {
+        WatchEvent::Added(object) => assert_eq!(object.metadata.resource_version, "7"),
+        _ => panic!("expected added event"),
+    }
+}
+
+#[tokio::test]
 async fn status_errors_map_to_resource_errors() {
     let body = serde_json::json!({ "message": "resource version conflict" }).to_string();
     let (base_url, _request_rx) = spawn_one_shot_server(response("409 Conflict", &body)).await;

@@ -50,6 +50,9 @@ struct NamedUser {
 
 #[derive(Debug, Deserialize)]
 struct User {
+    token: Option<String>,
+    #[serde(rename = "token-file")]
+    token_file: Option<String>,
     #[serde(rename = "client-certificate")]
     client_certificate: Option<String>,
     #[serde(rename = "client-certificate-data")]
@@ -94,10 +97,18 @@ pub fn from_kubeconfig(path: impl AsRef<Path>) -> Result<HttpBackend, ResourceEr
         // platform verifier, which can reject otherwise-valid Kubernetes certs.
         builder = builder.tls_certs_only(cas);
     }
+    if user.user.token.is_some() || user.user.token_file.is_some() {
+        return Err(ResourceError::invalid("kubeconfig uses token authentication, which flotilla-resources does not support yet"));
+    }
     let cert_bytes = read_pem_bytes(path, user.user.client_certificate.as_deref(), user.user.client_certificate_data.as_deref())?
-        .ok_or_else(|| ResourceError::invalid("kubeconfig user missing client certificate"))?;
-    let key_bytes = read_pem_bytes(path, user.user.client_key.as_deref(), user.user.client_key_data.as_deref())?
-        .ok_or_else(|| ResourceError::invalid("kubeconfig user missing client key"))?;
+        .ok_or_else(|| {
+            ResourceError::invalid(
+                "kubeconfig user missing client certificate; only client certificate authentication is supported right now",
+            )
+        })?;
+    let key_bytes = read_pem_bytes(path, user.user.client_key.as_deref(), user.user.client_key_data.as_deref())?.ok_or_else(|| {
+        ResourceError::invalid("kubeconfig user missing client key; only client certificate authentication is supported right now")
+    })?;
     let mut identity_pem = cert_bytes;
     if !identity_pem.ends_with(b"\n") {
         identity_pem.push(b'\n');
