@@ -276,7 +276,7 @@ See `docs/superpowers/specs/2026-04-14-task-provisioning-design.md` for the spec
 - **Multi-host placement** — SSH-reachable Hosts, mesh-aware Host resources, label-selector host targeting.
 - **Bosun-style automatic restart / repair / cleanup** — restart policies, terminal-session restarts on inner-command crash, cleanup on terminal task transitions.
 - **Convoy launched against an existing Checkout** — workflow flexibility for "use this existing tree as the work area," constrains compatible environments.
-- **Repository as a resource** — currently URL on `Checkout.spec`; a Repository resource would let URL → name indirection and per-repo configuration.
+- **Repository extensions** — Stage 4a's Repository carries URL + env_ref + path. Future additions: per-repo workspace.yaml location, per-repo provider configuration, credentials, badge metadata. Each is an additive field.
 - **Detached-head / sha / tag refs on Checkout** — useful for agent-driven bisect workflows and pinned-version provisioning.
 - **Shared Docker environments as a placement variant** — needs the shared-env-plus-per-task-checkout composability question solved.
 - **Meta-policy variant** for PlacementPolicy — delegate to a Quartermaster agent that picks among other policies. Sits on top of `PersistentAgent` (which is its own deferred item).
@@ -284,4 +284,5 @@ See `docs/superpowers/specs/2026-04-14-task-provisioning-design.md` for the spec
 - **Per-task restart policies / explicit retry UX** — a way to say "retry this failed task" without manually deleting resources.
 - **Auto-cleanup of stopped sessions on terminal task transitions** — opt-in policy field; today TerminalSessions stay alive until the TaskWorkspace cascades on Convoy deletion.
 - **Vessel / Crew / Shipment naming pass** — convoy-themed renames once the abstractions settle: TaskWorkspace → Vessel, processes → Crew, artifacts → Shipment.
-- **VCS abstraction in resource shape** — Checkout is git-shaped in v1; future `vcs:` discriminator for hg / fossil / etc.
+- **VCS abstraction in resource shape** — Repository and Checkout are git-shaped in v1; future `vcs:` discriminator for hg / fossil / etc.
+- **Cross-env mounts** — Stage 4a's Environment mounts use a `source_path` field implicitly resolved against the env's host. A future cross-env mount story (mounting paths from one Environment into another) would add `from_env` alongside; existing entries default to "same host's host_direct env."
