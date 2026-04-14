@@ -119,10 +119,7 @@ async fn update_status_uses_status_subresource_path_and_body() {
     let backend = ResourceBackend::Http(HttpBackend::new(reqwest::Client::new(), base_url));
     let resolver = backend.using::<Convoy>("flotilla");
 
-    let updated = resolver
-        .update_status("alpha", "7", &convoy_status(ConvoyPhase::Active))
-        .await
-        .expect("status update should succeed");
+    let updated = resolver.update_status("alpha", "7", &convoy_status(ConvoyPhase::Active)).await.expect("status update should succeed");
     assert_eq!(updated.metadata.resource_version, "8");
 
     let request = request_rx.await.expect("captured request");
@@ -189,7 +186,7 @@ async fn status_errors_map_to_resource_errors() {
     let backend = ResourceBackend::Http(HttpBackend::new(reqwest::Client::new(), base_url));
     let resolver = backend.using::<Convoy>("flotilla");
 
-    let err = resolver.update(&convoy_meta("alpha"), "7", &convoy_spec("review")).await.err().expect("update should conflict");
+    let err = resolver.update(&convoy_meta("alpha"), "7", &convoy_spec("review")).await.expect_err("update should conflict");
     match err {
         ResourceError::Conflict { name, message } => {
             assert_eq!(name, "alpha");
@@ -206,7 +203,7 @@ async fn not_found_errors_preserve_requested_name() {
     let backend = ResourceBackend::Http(HttpBackend::new(reqwest::Client::new(), base_url));
     let resolver = backend.using::<Convoy>("flotilla");
 
-    let err = resolver.get("alpha").await.err().expect("get should fail");
+    let err = resolver.get("alpha").await.expect_err("get should fail");
     match err {
         ResourceError::NotFound { name } => assert_eq!(name, "alpha"),
         other => panic!("expected not found, got {other}"),

@@ -24,10 +24,7 @@ fn sample_snapshot() -> WorkflowSnapshot {
                             prompt: Some("Implement {{inputs.feature}}".to_string()),
                         },
                     },
-                    ProcessDefinition {
-                        role: "build".to_string(),
-                        source: ProcessSource::Tool { command: "cargo test".to_string() },
-                    },
+                    ProcessDefinition { role: "build".to_string(), source: ProcessSource::Tool { command: "cargo test".to_string() } },
                 ],
             },
             SnapshotTask {
@@ -84,17 +81,14 @@ fn advance_tasks_to_ready_updates_only_selected_tasks() {
         workflow_snapshot: Some(sample_snapshot()),
         tasks: BTreeMap::from([
             ("implement".to_string(), pending_task()),
-            (
-                "review".to_string(),
-                TaskState {
-                    phase: TaskPhase::Completed,
-                    ready_at: Some(ts(5)),
-                    started_at: Some(ts(6)),
-                    finished_at: Some(ts(7)),
-                    message: Some("done".to_string()),
-                    placement: None,
-                },
-            ),
+            ("review".to_string(), TaskState {
+                phase: TaskPhase::Completed,
+                ready_at: Some(ts(5)),
+                started_at: Some(ts(6)),
+                finished_at: Some(ts(7)),
+                message: Some("done".to_string()),
+                placement: None,
+            }),
         ]),
         message: Some("keep".to_string()),
         started_at: None,
@@ -118,28 +112,22 @@ fn fail_convoy_cancels_non_terminal_siblings_and_sets_convoy_failed() {
         phase: ConvoyPhase::Active,
         workflow_snapshot: Some(sample_snapshot()),
         tasks: BTreeMap::from([
-            (
-                "implement".to_string(),
-                TaskState {
-                    phase: TaskPhase::Failed,
-                    ready_at: Some(ts(10)),
-                    started_at: Some(ts(11)),
-                    finished_at: Some(ts(12)),
-                    message: Some("boom".to_string()),
-                    placement: None,
-                },
-            ),
-            (
-                "review".to_string(),
-                TaskState {
-                    phase: TaskPhase::Running,
-                    ready_at: Some(ts(20)),
-                    started_at: Some(ts(21)),
-                    finished_at: None,
-                    message: None,
-                    placement: None,
-                },
-            ),
+            ("implement".to_string(), TaskState {
+                phase: TaskPhase::Failed,
+                ready_at: Some(ts(10)),
+                started_at: Some(ts(11)),
+                finished_at: Some(ts(12)),
+                message: Some("boom".to_string()),
+                placement: None,
+            }),
+            ("review".to_string(), TaskState {
+                phase: TaskPhase::Running,
+                ready_at: Some(ts(20)),
+                started_at: Some(ts(21)),
+                finished_at: None,
+                message: None,
+                placement: None,
+            }),
         ]),
         message: None,
         started_at: Some(ts(1)),
@@ -148,11 +136,7 @@ fn fail_convoy_cancels_non_terminal_siblings_and_sets_convoy_failed() {
         observed_workflows: Some(BTreeMap::from([("review-and-fix".to_string(), "42".to_string())])),
     };
 
-    let patch = controller_patches::fail_convoy(
-        BTreeMap::from([("review".to_string(), ts(30))]),
-        ts(30),
-        Some("task failed".to_string()),
-    );
+    let patch = controller_patches::fail_convoy(BTreeMap::from([("review".to_string(), ts(30))]), ts(30), Some("task failed".to_string()));
     patch.apply(&mut status);
 
     assert_eq!(status.phase, ConvoyPhase::Failed);
@@ -198,17 +182,14 @@ fn external_completion_marks_task_complete_without_touching_convoy_phase() {
     let mut status = ConvoyStatus {
         phase: ConvoyPhase::Active,
         workflow_snapshot: Some(sample_snapshot()),
-        tasks: BTreeMap::from([(
-            "review".to_string(),
-            TaskState {
-                phase: TaskPhase::Running,
-                ready_at: Some(ts(10)),
-                started_at: Some(ts(11)),
-                finished_at: None,
-                message: None,
-                placement: None,
-            },
-        )]),
+        tasks: BTreeMap::from([("review".to_string(), TaskState {
+            phase: TaskPhase::Running,
+            ready_at: Some(ts(10)),
+            started_at: Some(ts(11)),
+            finished_at: None,
+            message: None,
+            placement: None,
+        })]),
         message: None,
         started_at: Some(ts(1)),
         finished_at: None,
@@ -216,11 +197,7 @@ fn external_completion_marks_task_complete_without_touching_convoy_phase() {
         observed_workflows: Some(BTreeMap::from([("review-and-fix".to_string(), "42".to_string())])),
     };
 
-    let patch = ConvoyStatusPatch::MarkTaskCompleted {
-        task: "review".to_string(),
-        finished_at: ts(50),
-        message: Some("done".to_string()),
-    };
+    let patch = ConvoyStatusPatch::MarkTaskCompleted { task: "review".to_string(), finished_at: ts(50), message: Some("done".to_string()) };
     patch.apply(&mut status);
 
     assert_eq!(status.phase, ConvoyPhase::Active);

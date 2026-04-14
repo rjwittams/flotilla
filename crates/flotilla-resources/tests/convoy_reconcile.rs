@@ -1,8 +1,6 @@
 mod common;
 
-use common::{
-    bootstrapped_convoy_status, convoy_object, pending_task_state, timestamp, valid_convoy_spec, valid_workflow_template_object,
-};
+use common::{bootstrapped_convoy_status, convoy_object, pending_task_state, timestamp, valid_convoy_spec, valid_workflow_template_object};
 use flotilla_resources::{
     controller_patches, reconcile, ConvoyEvent, ConvoyPhase, ConvoyStatusPatch, InputValue, TaskPhase, ValidationError,
 };
@@ -14,12 +12,8 @@ fn bootstrap_from_valid_template_returns_bootstrap_patch() {
 
     let outcome = reconcile(&convoy, Some(&template), timestamp(10));
 
-    let expected_tasks = [
-        ("implement".to_string(), pending_task_state()),
-        ("review".to_string(), pending_task_state()),
-    ]
-    .into_iter()
-    .collect();
+    let expected_tasks =
+        [("implement".to_string(), pending_task_state()), ("review".to_string(), pending_task_state())].into_iter().collect();
     let expected_patch = controller_patches::bootstrap(
         common::bootstrapped_convoy_status().workflow_snapshot.expect("snapshot"),
         "review-and-fix".to_string(),
@@ -39,10 +33,7 @@ fn missing_template_fails_init() {
 
     let outcome = reconcile(&convoy, None, timestamp(10));
 
-    assert!(matches!(
-        outcome.patch,
-        Some(ConvoyStatusPatch::FailInit { phase: ConvoyPhase::Failed, .. })
-    ));
+    assert!(matches!(outcome.patch, Some(ConvoyStatusPatch::FailInit { phase: ConvoyPhase::Failed, .. })));
     assert!(matches!(
         outcome.events.as_slice(),
         [ConvoyEvent::TemplateNotFound { name }] if name == "review-and-fix"
@@ -57,10 +48,7 @@ fn invalid_template_fails_init_with_validation_error_event() {
 
     let outcome = reconcile(&convoy, Some(&template), timestamp(10));
 
-    assert!(matches!(
-        outcome.patch,
-        Some(ConvoyStatusPatch::FailInit { phase: ConvoyPhase::Failed, .. })
-    ));
+    assert!(matches!(outcome.patch, Some(ConvoyStatusPatch::FailInit { phase: ConvoyPhase::Failed, .. })));
     assert!(matches!(
         outcome.events.as_slice(),
         [ConvoyEvent::TemplateInvalid { name, errors }]
@@ -78,10 +66,7 @@ fn missing_required_input_fails_init() {
 
     let outcome = reconcile(&convoy, Some(&template), timestamp(10));
 
-    assert!(matches!(
-        outcome.patch,
-        Some(ConvoyStatusPatch::FailInit { phase: ConvoyPhase::Failed, .. })
-    ));
+    assert!(matches!(outcome.patch, Some(ConvoyStatusPatch::FailInit { phase: ConvoyPhase::Failed, .. })));
     assert!(matches!(
         outcome.events.as_slice(),
         [ConvoyEvent::MissingInput { name }] if name == "branch"
@@ -112,13 +97,10 @@ fn fan_out_advances_all_newly_ready_tasks() {
             flotilla_resources::SnapshotTask { name: "c".to_string(), depends_on: Vec::new(), processes: Vec::new() },
         ],
     });
-    status.tasks = [
-        ("a".to_string(), pending_task_state()),
-        ("b".to_string(), pending_task_state()),
-        ("c".to_string(), pending_task_state()),
-    ]
-    .into_iter()
-    .collect();
+    status.tasks =
+        [("a".to_string(), pending_task_state()), ("b".to_string(), pending_task_state()), ("c".to_string(), pending_task_state())]
+            .into_iter()
+            .collect();
 
     let convoy = convoy_object("convoy-a", spec, Some(status));
     let outcome = reconcile(&convoy, None, timestamp(20));
@@ -126,13 +108,7 @@ fn fan_out_advances_all_newly_ready_tasks() {
     assert_eq!(
         outcome.patch,
         Some(controller_patches::advance_tasks_to_ready(
-            [
-                ("a".to_string(), timestamp(20)),
-                ("b".to_string(), timestamp(20)),
-                ("c".to_string(), timestamp(20)),
-            ]
-            .into_iter()
-            .collect()
+            [("a".to_string(), timestamp(20)), ("b".to_string(), timestamp(20)), ("c".to_string(), timestamp(20)),].into_iter().collect()
         ))
     );
 }
@@ -160,10 +136,7 @@ fn fan_in_waits_until_all_dependencies_complete() {
     let convoy = convoy_object("convoy-a", valid_convoy_spec(), Some(status.clone()));
 
     let first = reconcile(&convoy, None, timestamp(20));
-    assert_eq!(
-        first.patch,
-        Some(controller_patches::roll_up_phase(ConvoyPhase::Active, Some(timestamp(20)), None))
-    );
+    assert_eq!(first.patch, Some(controller_patches::roll_up_phase(ConvoyPhase::Active, Some(timestamp(20)), None)));
 
     status.tasks.get_mut("verify").expect("verify").phase = TaskPhase::Completed;
     status.tasks.get_mut("verify").expect("verify").finished_at = Some(timestamp(10));
@@ -174,9 +147,7 @@ fn fan_in_waits_until_all_dependencies_complete() {
 
     assert_eq!(
         second.patch,
-        Some(controller_patches::advance_tasks_to_ready(
-            [("review".to_string(), timestamp(21))].into_iter().collect()
-        ))
+        Some(controller_patches::advance_tasks_to_ready([("review".to_string(), timestamp(21))].into_iter().collect()))
     );
 }
 
@@ -214,10 +185,7 @@ fn all_completed_rolls_up_to_completed() {
 
     let outcome = reconcile(&convoy, None, timestamp(40));
 
-    assert_eq!(
-        outcome.patch,
-        Some(controller_patches::roll_up_phase(ConvoyPhase::Completed, None, Some(timestamp(40))))
-    );
+    assert_eq!(outcome.patch, Some(controller_patches::roll_up_phase(ConvoyPhase::Completed, None, Some(timestamp(40)))));
 }
 
 #[test]
@@ -228,10 +196,7 @@ fn workflow_ref_change_after_init_fails_defensively() {
 
     let outcome = reconcile(&convoy, None, timestamp(50));
 
-    assert!(matches!(
-        outcome.patch,
-        Some(ConvoyStatusPatch::FailInit { phase: ConvoyPhase::Failed, .. })
-    ));
+    assert!(matches!(outcome.patch, Some(ConvoyStatusPatch::FailInit { phase: ConvoyPhase::Failed, .. })));
     assert!(matches!(
         outcome.events.as_slice(),
         [ConvoyEvent::WorkflowRefChanged { from, to }] if from == "review-and-fix" && to == "new-template"
@@ -249,8 +214,6 @@ fn snapshot_state_allows_advancement_without_template() {
 
     assert_eq!(
         outcome.patch,
-        Some(controller_patches::advance_tasks_to_ready(
-            [("review".to_string(), timestamp(60))].into_iter().collect()
-        ))
+        Some(controller_patches::advance_tasks_to_ready([("review".to_string(), timestamp(60))].into_iter().collect()))
     );
 }

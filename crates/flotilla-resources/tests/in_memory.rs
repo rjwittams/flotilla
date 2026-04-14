@@ -36,7 +36,8 @@ async fn update_requires_current_resource_version() {
     let resolver = resolver("flotilla");
     let created = resolver.create(&convoy_meta("alpha"), &convoy_spec("template-a")).await.expect("create should succeed");
 
-    let conflict = resolver.update(&convoy_meta("alpha"), "0", &convoy_spec("template-b")).await.err().expect("stale version should conflict");
+    let conflict =
+        resolver.update(&convoy_meta("alpha"), "0", &convoy_spec("template-b")).await.expect_err("stale version should conflict");
     match conflict {
         flotilla_resources::ResourceError::Conflict { .. } => {}
         other => panic!("expected conflict, got {other}"),

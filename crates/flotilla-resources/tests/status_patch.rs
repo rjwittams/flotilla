@@ -54,9 +54,8 @@ async fn apply_status_patch_updates_existing_status() {
         .await
         .expect("seed status should succeed");
 
-    let updated = flotilla_resources::apply_status_patch(&resolver, "alpha", &CounterPatch::Increment)
-        .await
-        .expect("status patch should succeed");
+    let updated =
+        flotilla_resources::apply_status_patch(&resolver, "alpha", &CounterPatch::Increment).await.expect("status patch should succeed");
 
     assert_eq!(updated.status.expect("status"), CounterStatus { value: 2, note: None });
     assert_eq!(updated.metadata.resource_version, "3");

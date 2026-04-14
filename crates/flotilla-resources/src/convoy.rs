@@ -168,14 +168,7 @@ pub enum ConvoyStatusPatch {
 impl StatusPatch<ConvoyStatus> for ConvoyStatusPatch {
     fn apply(&self, status: &mut ConvoyStatus) {
         match self {
-            Self::Bootstrap {
-                workflow_snapshot,
-                observed_workflow_ref,
-                observed_workflows,
-                tasks,
-                phase,
-                started_at,
-            } => {
+            Self::Bootstrap { workflow_snapshot, observed_workflow_ref, observed_workflows, tasks, phase, started_at } => {
                 status.workflow_snapshot = Some(workflow_snapshot.clone());
                 status.observed_workflow_ref = Some(observed_workflow_ref.clone());
                 status.observed_workflows = Some(observed_workflows.clone());
@@ -282,11 +275,7 @@ pub mod controller_patches {
         ConvoyStatusPatch::FailConvoy { cancelled_tasks, finished_at, message }
     }
 
-    pub fn roll_up_phase(
-        phase: ConvoyPhase,
-        started_at: Option<DateTime<Utc>>,
-        finished_at: Option<DateTime<Utc>>,
-    ) -> ConvoyStatusPatch {
+    pub fn roll_up_phase(phase: ConvoyPhase, started_at: Option<DateTime<Utc>>, finished_at: Option<DateTime<Utc>>) -> ConvoyStatusPatch {
         ConvoyStatusPatch::RollUpPhase { phase, started_at, finished_at }
     }
 }

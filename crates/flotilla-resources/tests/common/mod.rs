@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
+use chrono::{TimeZone, Utc};
 use flotilla_resources::{
-    ApiPaths, Convoy as RealConvoy, ConvoySpec as RealConvoySpec, ConvoyStatus as RealConvoyStatus, InputDefinition, InputMeta,
-    ObjectMeta, ProcessDefinition, ProcessSource, Resource, ResourceObject, Selector, StatusPatch, TaskDefinition, TaskPhase,
-    TaskState, WorkflowTemplate, WorkflowTemplateSpec,
+    ApiPaths, Convoy as RealConvoy, ConvoySpec as RealConvoySpec, ConvoyStatus as RealConvoyStatus, InputDefinition, InputMeta, ObjectMeta,
+    ProcessDefinition, ProcessSource, Resource, ResourceObject, Selector, StatusPatch, TaskDefinition, TaskPhase, TaskState,
+    WorkflowTemplate, WorkflowTemplateSpec,
 };
 use serde::{Deserialize, Serialize};
-use chrono::{TimeZone, Utc};
 
 pub struct ConvoyResource;
 
@@ -175,11 +175,7 @@ pub fn pending_task_state() -> TaskState {
 }
 
 pub fn valid_workflow_template_object(name: &str) -> ResourceObject<WorkflowTemplate> {
-    ResourceObject {
-        metadata: object_meta(name, "flotilla", "42"),
-        spec: valid_workflow_template_spec(),
-        status: None,
-    }
+    ResourceObject { metadata: object_meta(name, "flotilla", "42"), spec: valid_workflow_template_spec(), status: None }
 }
 
 pub fn convoy_object(name: &str, spec: RealConvoySpec, status: Option<RealConvoyStatus>) -> ResourceObject<RealConvoy> {
@@ -191,19 +187,10 @@ pub fn bootstrapped_convoy_status() -> RealConvoyStatus {
         tasks: valid_workflow_template_spec()
             .tasks
             .into_iter()
-            .map(|task| flotilla_resources::SnapshotTask {
-                name: task.name,
-                depends_on: task.depends_on,
-                processes: task.processes,
-            })
+            .map(|task| flotilla_resources::SnapshotTask { name: task.name, depends_on: task.depends_on, processes: task.processes })
             .collect(),
     };
-    let tasks = [
-        ("implement".to_string(), pending_task_state()),
-        ("review".to_string(), pending_task_state()),
-    ]
-    .into_iter()
-    .collect();
+    let tasks = [("implement".to_string(), pending_task_state()), ("review".to_string(), pending_task_state())].into_iter().collect();
 
     RealConvoyStatus {
         phase: flotilla_resources::ConvoyPhase::Pending,

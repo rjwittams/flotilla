@@ -1,8 +1,8 @@
 use std::{env, path::PathBuf};
 
 use flotilla_resources::{
-    apply_status_patch, ensure_crd, ensure_namespace, external_patches, reconcile, validate, Convoy, ConvoyPhase, ConvoySpec,
-    HttpBackend, InputMeta, InputValue, ResourceBackend, ResourceError, WorkflowTemplate, WorkflowTemplateSpec,
+    apply_status_patch, ensure_crd, ensure_namespace, external_patches, reconcile, validate, Convoy, ConvoyPhase, ConvoySpec, HttpBackend,
+    InputMeta, InputValue, ResourceBackend, ResourceError, WorkflowTemplate, WorkflowTemplateSpec,
 };
 use serde::Deserialize;
 
@@ -85,11 +85,8 @@ async fn convoy_controller_roundtrip_and_cel_validation() -> Result<(), Box<dyn 
     validate(&workflow_spec).map_err(|errors| format!("fixture workflow failed validation: {errors:?}"))?;
     let _workflow = templates.create(&workflow_meta, &workflow_spec).await?;
 
-    let convoy_meta = InputMeta {
-        name: format!("convoy-{}", std::process::id()),
-        labels: Default::default(),
-        annotations: Default::default(),
-    };
+    let convoy_meta =
+        InputMeta { name: format!("convoy-{}", std::process::id()), labels: Default::default(), annotations: Default::default() };
     let created = convoys.create(&convoy_meta, &convoy_spec(&workflow_meta.name)).await?;
 
     let mut changed_workflow = convoy_spec(&workflow_meta.name);
@@ -119,10 +116,7 @@ async fn convoy_controller_roundtrip_and_cel_validation() -> Result<(), Box<dyn 
     )
     .await?;
     let ready_review = reconcile_once(&convoys, &templates, &created.metadata.name, chrono::Utc::now()).await?;
-    assert!(matches!(
-        ready_review,
-        Some(flotilla_resources::ConvoyStatusPatch::AdvanceTasksToReady { .. })
-    ));
+    assert!(matches!(ready_review, Some(flotilla_resources::ConvoyStatusPatch::AdvanceTasksToReady { .. })));
 
     apply_status_patch(
         &convoys,
@@ -131,10 +125,7 @@ async fn convoy_controller_roundtrip_and_cel_validation() -> Result<(), Box<dyn 
     )
     .await?;
     let completed = reconcile_once(&convoys, &templates, &created.metadata.name, chrono::Utc::now()).await?;
-    assert!(matches!(
-        completed,
-        Some(flotilla_resources::ConvoyStatusPatch::RollUpPhase { phase: ConvoyPhase::Completed, .. })
-    ));
+    assert!(matches!(completed, Some(flotilla_resources::ConvoyStatusPatch::RollUpPhase { phase: ConvoyPhase::Completed, .. })));
 
     let final_convoy = convoys.get(&created.metadata.name).await?;
     assert_eq!(final_convoy.status.expect("status").phase, ConvoyPhase::Completed);

@@ -91,9 +91,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("created workflow {} rv={}", created_workflow.metadata.name, created_workflow.metadata.resource_version);
 
     println!("updating workflow template");
-    let updated_workflow = workflow_resolver
-        .update(&workflow_meta, &created_workflow.metadata.resource_version, &updated_workflow_spec())
-        .await?;
+    let updated_workflow =
+        workflow_resolver.update(&workflow_meta, &created_workflow.metadata.resource_version, &updated_workflow_spec()).await?;
     println!("updated workflow rv={}", updated_workflow.metadata.resource_version);
 
     println!("creating convoy");
@@ -106,20 +105,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut watch = convoy_resolver.watch(WatchStart::FromVersion(listed.resource_version.clone())).await?;
     println!("updating convoy status");
     let updated_convoy = convoy_resolver
-        .update_status(
-            &created_convoy.metadata.name,
-            &created_convoy.metadata.resource_version,
-            &ConvoyStatus {
-                phase: ConvoyPhase::Active,
-                workflow_snapshot: None,
-                tasks: Default::default(),
-                message: None,
-                started_at: None,
-                finished_at: None,
-                observed_workflow_ref: None,
-                observed_workflows: None,
-            },
-        )
+        .update_status(&created_convoy.metadata.name, &created_convoy.metadata.resource_version, &ConvoyStatus {
+            phase: ConvoyPhase::Active,
+            workflow_snapshot: None,
+            tasks: Default::default(),
+            message: None,
+            started_at: None,
+            finished_at: None,
+            observed_workflow_ref: None,
+            observed_workflows: None,
+        })
         .await?;
     println!("updated convoy rv={}", updated_convoy.metadata.resource_version);
 

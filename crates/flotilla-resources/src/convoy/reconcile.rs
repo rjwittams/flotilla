@@ -2,12 +2,10 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
-use super::{
-    controller_patches, Convoy, ConvoyPhase, ConvoyStatusPatch, SnapshotTask, TaskPhase, TaskState, WorkflowSnapshot,
-};
+use super::{controller_patches, Convoy, ConvoyPhase, ConvoyStatusPatch, SnapshotTask, TaskPhase, TaskState, WorkflowSnapshot};
 use crate::{
     resource::ResourceObject,
-    workflow_template::{ValidationError, WorkflowTemplate, validate},
+    workflow_template::{validate, ValidationError, WorkflowTemplate},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,11 +93,7 @@ fn bootstrap_outcome(
     for input in &template.spec.inputs {
         if !convoy.spec.inputs.contains_key(&input.name) {
             return ReconcileOutcome {
-                patch: Some(controller_patches::fail_init(
-                    ConvoyPhase::Failed,
-                    format!("missing input '{}'", input.name),
-                    now,
-                )),
+                patch: Some(controller_patches::fail_init(ConvoyPhase::Failed, format!("missing input '{}'", input.name), now)),
                 events: vec![ConvoyEvent::MissingInput { name: input.name.clone() }],
             };
         }
@@ -118,10 +112,14 @@ fn bootstrap_outcome(
         .tasks
         .iter()
         .map(|task| {
-            (
-                task.name.clone(),
-                TaskState { phase: TaskPhase::Pending, ready_at: None, started_at: None, finished_at: None, message: None, placement: None },
-            )
+            (task.name.clone(), TaskState {
+                phase: TaskPhase::Pending,
+                ready_at: None,
+                started_at: None,
+                finished_at: None,
+                message: None,
+                placement: None,
+            })
         })
         .collect();
 

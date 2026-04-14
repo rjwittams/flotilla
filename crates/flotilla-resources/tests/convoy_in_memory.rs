@@ -34,20 +34,13 @@ async fn in_memory_controller_loop_drives_convoy_to_completion() {
     let convoys = backend.using::<Convoy>("flotilla");
 
     let template = valid_workflow_template_object("review-and-fix");
-    templates
-        .create(&workflow_template_meta(&template.metadata.name), &template.spec)
-        .await
-        .expect("template create should succeed");
-    convoys
-        .create(&convoy_meta("convoy-a"), &valid_convoy_spec())
-        .await
-        .expect("convoy create should succeed");
+    templates.create(&workflow_template_meta(&template.metadata.name), &template.spec).await.expect("template create should succeed");
+    convoys.create(&convoy_meta("convoy-a"), &valid_convoy_spec()).await.expect("convoy create should succeed");
 
     let bootstrap = reconcile_once(&convoys, &templates, "convoy-a", timestamp(10)).await.expect("bootstrap patch");
     assert!(matches!(bootstrap, flotilla_resources::ConvoyStatusPatch::Bootstrap { .. }));
 
-    let ready_implement =
-        reconcile_once(&convoys, &templates, "convoy-a", timestamp(11)).await.expect("ready patch after bootstrap");
+    let ready_implement = reconcile_once(&convoys, &templates, "convoy-a", timestamp(11)).await.expect("ready patch after bootstrap");
     assert!(matches!(ready_implement, flotilla_resources::ConvoyStatusPatch::AdvanceTasksToReady { .. }));
 
     apply_status_patch(
@@ -70,10 +63,7 @@ async fn in_memory_controller_loop_drives_convoy_to_completion() {
     .expect("review completion should succeed");
 
     let completed = reconcile_once(&convoys, &templates, "convoy-a", timestamp(15)).await.expect("completed roll-up patch");
-    assert!(matches!(
-        completed,
-        flotilla_resources::ConvoyStatusPatch::RollUpPhase { phase: ConvoyPhase::Completed, .. }
-    ));
+    assert!(matches!(completed, flotilla_resources::ConvoyStatusPatch::RollUpPhase { phase: ConvoyPhase::Completed, .. }));
 
     let final_convoy = convoys.get("convoy-a").await.expect("final convoy get should succeed");
     let final_status = final_convoy.status.expect("convoy status");
