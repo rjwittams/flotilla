@@ -1,26 +1,15 @@
 use std::{env, path::PathBuf};
 
-use flotilla_resources::{ensure_crd, ensure_namespace, ApiPaths, HttpBackend, InputMeta, Resource, WatchEvent, WatchStart};
+use flotilla_resources::{
+    ensure_crd, ensure_namespace, validate, HttpBackend, InputMeta, ResourceBackend, WatchEvent, WatchStart, WorkflowTemplate,
+    WorkflowTemplateSpec,
+};
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-struct ConvoyResource;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ConvoySpec {
-    template: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ConvoyStatus {
-    phase: String,
-}
-
-impl Resource for ConvoyResource {
-    type Spec = ConvoySpec;
-    type Status = ConvoyStatus;
-
-    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "convoys", kind: "Convoy" };
+#[derive(Debug, Deserialize)]
+struct WorkflowTemplateDocument {
+    spec: WorkflowTemplateSpec,
 }
 
 fn kubeconfig_path() -> PathBuf {
@@ -31,6 +20,24 @@ fn kubeconfig_path() -> PathBuf {
     PathBuf::from(home).join(".kube/config")
 }
 
+fn sample_workflow_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/review-and-fix.yaml")
+}
+
+fn load_workflow_spec() -> Result<WorkflowTemplateSpec, Box<dyn std::error::Error>> {
+    let yaml = std::fs::read_to_string(sample_workflow_path())?;
+    let document: WorkflowTemplateDocument = serde_yml::from_str(&yaml)?;
+    Ok(document.spec)
+}
+
+fn updated_workflow_spec() -> WorkflowTemplateSpec {
+    let mut spec = load_workflow_spec().expect("sample workflow should parse");
+    if let flotilla_resources::ProcessSource::Tool { command } = &mut spec.tasks[0].processes[1].source {
+        *command = "cargo check --all-targets".to_string();
+    }
+    spec
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kubeconfig = kubeconfig_path();
@@ -38,10 +45,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let namespace = "flotilla";
     ensure_namespace(&backend, namespace).await?;
     ensure_crd(&backend, include_str!("../src/crds/convoy.crd.yaml")).await?;
+    ensure_crd(&backend, include_str!("../src/crds/workflow_template.crd.yaml")).await?;
 
-    let resolver = flotilla_resources::ResourceBackend::Http(backend).using::<ConvoyResource>(namespace);
+    let resolver = ResourceBackend::Http(backend).using::<WorkflowTemplate>(namespace);
+    let spec = load_workflow_spec()?;
+    validate(&spec).map_err(|errors| format!("sample workflow failed validation: {errors:?}"))?;
     let meta = InputMeta {
-        name: "demo-convoy".to_string(),
+        name: format!("demo-workflow-template-{}", std::process::id()),
         labels: [("app".to_string(), "flotilla".to_string())].into_iter().collect(),
         annotations: Default::default(),
     };
@@ -52,24 +62,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("creating resource");
-    let created = resolver.create(&meta, &ConvoySpec { template: "review-and-fix".to_string() }).await?;
+    let created = resolver.create(&meta, &spec).await?;
     println!("created {} rv={}", created.metadata.name, created.metadata.resource_version);
 
     let listed = resolver.list().await?;
     println!("listed {} resources at rv={}", listed.items.len(), listed.resource_version);
 
     let mut watch = resolver.watch(WatchStart::FromVersion(listed.resource_version.clone())).await?;
-    println!("updating status");
-    let updated = resolver
-        .update_status(&created.metadata.name, &created.metadata.resource_version, &ConvoyStatus { phase: "Running".to_string() })
-        .await?;
-    println!("status rv={}", updated.metadata.resource_version);
+    println!("updating spec");
+    let updated = resolver.update(&meta, &created.metadata.resource_version, &updated_workflow_spec()).await?;
+    println!("updated rv={}", updated.metadata.resource_version);
 
     if let Some(event) = watch.next().await {
         match event? {
             WatchEvent::Modified(object) => {
-                let phase = object.status.map(|status| status.phase).unwrap_or_else(|| "unknown".to_string());
-                println!("watch saw modified phase={phase}");
+                println!("watch saw modified resource rv={}", object.metadata.resource_version);
             }
             WatchEvent::Added(_) | WatchEvent::Deleted(_) => println!("watch saw non-modified event"),
         }
@@ -77,5 +84,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("deleting resource");
     resolver.delete(&created.metadata.name).await?;
+    if let Some(event) = watch.next().await {
+        match event? {
+            WatchEvent::Deleted(object) => println!("watch saw deleted resource rv={}", object.metadata.resource_version),
+            WatchEvent::Added(_) | WatchEvent::Modified(_) => println!("watch saw non-deleted event"),
+        }
+    }
     Ok(())
 }

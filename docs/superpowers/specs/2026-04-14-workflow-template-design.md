@@ -19,7 +19,7 @@ Lives in the existing `crates/flotilla-resources` crate alongside the convoy CRD
 - `validate(spec) -> Result<(), Vec<ValidationError>>` library function covering DAG and schema-semantic rules.
 - Round-trip tests against in-memory and HTTP backends.
 - An example binary extension that applies the CRD and exercises CRUD + watch.
-- A small `validate <path>` CLI that runs validation without a cluster.
+- A dedicated `validate_workflow` example binary that runs validation without a cluster.
 
 ### Out of scope (for this stage)
 
@@ -237,10 +237,11 @@ pub enum ValidationError {
     DependencyCycle { cycle: Vec<String> },
     DuplicateInputName { name: String },
 
-    // Interpolation errors — raised only for tokens whose prefix is in
-    // the recognized allowlist. Tokens with foreign prefixes pass through
-    // without error (they are assumed to belong to downstream tooling
-    // such as kubectl/Go-templates, Helm, Jinja).
+    // Interpolation errors — raised only for tokens owned by flotilla's
+    // recognized prefixes. Foreign prefixes pass through without error
+    // (they are assumed to belong to downstream tooling such as
+    // kubectl/Go-templates, Helm, Jinja).
+    MalformedInterpolation { location: InterpolationLocation, text: String },
     UnknownInputReference { location: InterpolationLocation, name: String },
     UnknownWorkflowField { location: InterpolationLocation, name: String },
 }
@@ -261,7 +262,7 @@ pub enum InterpolationField { Prompt, Command }
 - Every `depends_on` entry resolves to an existing task name.
 - No cycles; reported with the cycle path (`[a, b, c, a]`).
 - Input names unique.
-- `{{...}}` tokens in any prompt or command whose prefix matches the allowlist (`inputs.`, `workflow.`) must resolve. Tokens with any other prefix are passed through verbatim and not validated (see Interpolation).
+- `{{...}}` tokens in any prompt or command whose prefix matches the allowlist (`inputs.`, `workflow.`) are flotilla-owned: they must be well-formed and resolve. Tokens with any other prefix are passed through verbatim and not validated (see Interpolation).
 
 ### Where validation runs
 
@@ -277,7 +278,8 @@ Prompts and commands may contain `{{path}}` tokens. Substitution happens at **ta
 
 - A token starts with `{{` and ends with `}}`.
 - The path between the braces is a dotted sequence of segments matching `[A-Za-z0-9_-]+`. No internal whitespace in v1 (Argo allows whitespace but documents interpolation bugs around it; stricter is simpler).
-- No escape for literal `{{` is needed because foreign tokens pass through unchanged — see below.
+- No escape is needed for foreign `{{...}}` tokens because unrecognized prefixes pass through unchanged — see below.
+- Literal recognized flotilla tokens such as `{{inputs.branch}}` or `{{workflow.name}}` are not representable in v1. An escape form is deferred until there is a concrete use case.
 
 ### Recognized prefix allowlist (v1)
 
@@ -289,6 +291,12 @@ Only tokens whose first segment is one of these scopes are subject to validation
 | `workflow.name` | `{{workflow.name}}` | Convoy name (set at launch). |
 | `workflow.namespace` | `{{workflow.namespace}}` | Convoy namespace. |
 
+Tokens starting with a recognized flotilla prefix are **not** eligible for passthrough. They must match one of the valid shapes above:
+
+- `{{inputs.<name>}}` is structurally valid and then resolves `<name>` against `spec.inputs[*].name`.
+- `{{workflow.name}}` and `{{workflow.namespace}}` are the only valid `workflow.*` references in v1.
+- Examples such as `{{inputs.}}`, `{{inputs.branch }}`, and `{{workflow.name.extra}}` raise `MalformedInterpolation`.
+
 ### Foreign-token passthrough
 
 Tokens whose first segment is **not** in the allowlist are left in place verbatim. The validator does not inspect them; the task-launch interpolator will not substitute them. They are assumed to be downstream-tool templates. Examples that pass through unchanged:
@@ -297,7 +305,7 @@ Tokens whose first segment is **not** in the allowlist are left in place verbati
 - `helm template . --set name={{ .Release.Name }}` (Helm template)
 - Jinja, Mustache, or other `{{...}}` based languages embedded in commands.
 
-This matches Argo's approach (`workflow/common/common.go#GlobalVarValidWorkflowVariablePrefix`, `workflow/validate/validate.go#checkValidWorkflowVariablePrefix`).
+This matches Argo's prefix-ownership approach (`workflow/common/common.go#GlobalVarValidWorkflowVariablePrefix`, `workflow/validate/validate.go#checkValidWorkflowVariablePrefix`).
 
 ### Tradeoff
 
@@ -312,17 +320,19 @@ All declared inputs in v1 are required — the convoy that instantiates a Workfl
 ### Unit tests
 
 - One validation fixture per `ValidationError` variant, verifying the right error is produced.
-- Parser round-trip: the sample YAML in this document deserialises into the expected Rust shape, then re-serialises to equivalent YAML.
+- Parser round-trip: the sample YAML in this document deserialises into the expected Rust shape, then serialises and deserialises back to an equivalent Rust value.
 
 ### In-memory backend tests
 
-Mirroring the existing convoy tests: create → get → list → watch → update → delete.
+Mirroring the existing convoy tests for the operations that still apply to a status-less resource: create → get → list → watch → update → delete.
+
+Because WorkflowTemplate has no status subresource, watch coverage comes from spec updates and deletes, not `update_status`.
 
 ### HTTP backend integration tests
 
-Against minikube, same pattern as convoy:
+Against minikube, same pattern as convoy for the supported operations:
 - Bootstrap: apply the WorkflowTemplate CRD via `ensure_crd`.
-- CRUD + watch round-trip.
+- CRUD + watch round-trip, with watch events driven by `update` and `delete`.
 - Run only when minikube is reachable (same gate as existing integration tests).
 
 ## Example Binary and CLI
@@ -334,7 +344,7 @@ Extend the existing `examples/k8s_crud.rs` to:
 3. Create the WorkflowTemplate in the cluster.
 4. List and re-read it.
 
-A small `cargo run --example validate_workflow -- <path>` (or a short binary target) loads a YAML file and runs `validate()` without touching a cluster. Exit code reflects success/failure; output lists all errors.
+A dedicated `cargo run --example validate_workflow -- <path>` command loads a YAML file and runs `validate()` without touching a cluster. Exit code reflects success/failure; output lists all errors.
 
 ## Deliverables
 
@@ -345,7 +355,7 @@ A small `cargo run --example validate_workflow -- <path>` (or a short binary tar
 5. Round-trip tests against in-memory and HTTP backends.
 6. Validation unit tests covering each error variant.
 7. Example binary extension exercising CRUD + watch against minikube.
-8. `validate <path>` CLI entry point that runs without a cluster.
+8. `validate_workflow` example binary that runs without a cluster.
 
 No controller. No selector resolution. No rendering. No convoy integration. Those land in Stage 3 and later.
 
@@ -367,7 +377,7 @@ The brainstorm prompt framed WorkflowTemplate as "pure data, no controller neede
 
 Collision with real commands (`jq '{name: .name}'`, brace expansion, etc.) ruled out single-brace `{var}`. `{{var}}` matches Argo's well-trodden convention, and scoping from day one (`inputs.<name>`, `workflow.name`) means future additions (`tasks.<name>.outputs.*`, `items.*`, expression form `{{=...}}`) slot in without a migration.
 
-The deeper collision — `{{.metadata.name}}` Go templates, Helm, Jinja — is handled by adopting Argo's **prefix allowlist** model (`workflow/common/common.go#GlobalVarValidWorkflowVariablePrefix`). Only tokens whose first segment is a recognized flotilla scope are validated and substituted; every other token is left alone. No escape character needed; natural interop with downstream template languages. The cost is that typos in our own scope names (`{{inptus.branch}}`) are not caught — an acceptable tradeoff for the interop benefit. Strict no-internal-whitespace in v1 avoids the interpolation bug Argo's own docs flag.
+The deeper collision — `{{.metadata.name}}` Go templates, Helm, Jinja — is handled by adopting Argo's **prefix allowlist** model (`workflow/common/common.go#GlobalVarValidWorkflowVariablePrefix`). Only tokens whose first segment is a recognized flotilla scope are validated and substituted; every other token is left alone. No escape is needed for those foreign syntaxes, which preserves natural interop with downstream template languages. Literal recognized flotilla tokens remain unsupported in v1. The cost is that typos in our own scope names (`{{inptus.branch}}`) are not caught — an acceptable tradeoff for the interop benefit. Strict no-internal-whitespace in v1 avoids the interpolation bug Argo's own docs flag.
 
 ### Parse vs. validate split
 
@@ -405,6 +415,7 @@ Captured in `docs/superpowers/specs/2026-04-13-convoy-brainstorm-prompts.md` und
 - One-shot agent processes (non-long-running agents that produce a value, e.g. haiku branch-namer).
 - Optional and multi-valued inputs (starting from 0+ issues, defaults, typed inputs). Runtime semantics likely follow Argo's "absent value ⇒ empty string."
 - Additional interpolation scopes (`tasks.<name>.outputs.*`, `items.*`, `workflow.creationTimestamp`, etc.) and the expression form `{{=...}}`.
+- Literal recognized-token escape form (for emitting `{{inputs.branch}}` or `{{workflow.name}}` verbatim).
 - Non-terminal content (port-forwarding for dev servers, background services, HTTP probes).
 - GitOps sync (templates authored in VCS, synced by an Argo CD / Flux style controller).
 - Status subresource + validator controller — likely the right end state once templates reference each other or shared-cluster authoring demands fast-feedback validity.

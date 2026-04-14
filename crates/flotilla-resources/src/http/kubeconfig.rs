@@ -86,11 +86,13 @@ pub fn from_kubeconfig(path: impl AsRef<Path>) -> Result<HttpBackend, ResourceEr
     if let Some(ca_bytes) =
         read_pem_bytes(path, cluster.cluster.certificate_authority.as_deref(), cluster.cluster.certificate_authority_data.as_deref())?
     {
-        let ca =
-            Certificate::from_pem(&ca_bytes).map_err(|err| ResourceError::invalid(format!("load kubeconfig CA certificate: {err}")))?;
-        // Kubeconfig-provided CAs should be authoritative for the cluster endpoint rather than
-        // treated as "extra" platform roots.
-        builder = builder.tls_certs_only([ca]);
+        let cas = Certificate::from_pem_bundle(&ca_bytes)
+            .or_else(|_| Certificate::from_pem(&ca_bytes).map(|cert| vec![cert]))
+            .map_err(|err| ResourceError::invalid(format!("load kubeconfig CA certificate bundle: {err}")))?;
+        // A kubeconfig-provided CA is authoritative for that cluster endpoint.
+        // Use only those roots so local clusters like minikube don't go through the
+        // platform verifier, which can reject otherwise-valid Kubernetes certs.
+        builder = builder.tls_certs_only(cas);
     }
     let cert_bytes = read_pem_bytes(path, user.user.client_certificate.as_deref(), user.user.client_certificate_data.as_deref())?
         .ok_or_else(|| ResourceError::invalid("kubeconfig user missing client certificate"))?;
