@@ -1,21 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    resource::{ApiPaths, Resource},
-    status_patch::StatusPatch,
-};
+use crate::{resource::define_resource, status_patch::StatusPatch};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalSession;
-
-impl Resource for TerminalSession {
-    type Spec = TerminalSessionSpec;
-    type Status = TerminalSessionStatus;
-    type StatusPatch = TerminalSessionStatusPatch;
-
-    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "terminalsessions", kind: "TerminalSession" };
-}
+define_resource!(TerminalSession, "terminalsessions", TerminalSessionSpec, TerminalSessionStatus, TerminalSessionStatusPatch);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSessionSpec {

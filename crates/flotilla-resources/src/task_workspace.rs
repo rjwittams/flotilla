@@ -1,21 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    resource::{ApiPaths, Resource},
-    status_patch::StatusPatch,
-};
+use crate::{resource::define_resource, status_patch::StatusPatch};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TaskWorkspace;
-
-impl Resource for TaskWorkspace {
-    type Spec = TaskWorkspaceSpec;
-    type Status = TaskWorkspaceStatus;
-    type StatusPatch = TaskWorkspaceStatusPatch;
-
-    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "taskworkspaces", kind: "TaskWorkspace" };
-}
+define_resource!(TaskWorkspace, "taskworkspaces", TaskWorkspaceSpec, TaskWorkspaceStatus, TaskWorkspaceStatusPatch);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskWorkspaceSpec {

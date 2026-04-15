@@ -1,66 +1,51 @@
-use std::collections::BTreeMap;
+mod common;
 
 use chrono::Utc;
+use common::{owner_reference, resource_meta};
 use flotilla_resources::{
     Checkout, CheckoutSpec, DockerCheckoutStrategy, DockerEnvironmentSpec, DockerPerTaskPlacementPolicySpec, Environment, EnvironmentMount,
     EnvironmentMountMode, EnvironmentSpec, FreshCloneCheckoutSpec, Host, HostDirectEnvironmentSpec, HostDirectPlacementPolicyCheckout,
-    HostDirectPlacementPolicySpec, InMemoryBackend, InputMeta, OwnerReference, PlacementPolicy, PlacementPolicySpec, ResourceBackend,
-    TaskWorkspace, TaskWorkspacePhase, TaskWorkspaceSpec, TaskWorkspaceStatus,
+    HostDirectPlacementPolicySpec, InMemoryBackend, PlacementPolicy, PlacementPolicySpec, ResourceBackend, TaskWorkspace,
+    TaskWorkspacePhase, TaskWorkspaceSpec, TaskWorkspaceStatus,
 };
 
-fn owner_reference(name: &str, kind: &str) -> OwnerReference {
-    OwnerReference { api_version: "flotilla.work/v1".to_string(), kind: kind.to_string(), name: name.to_string(), controller: true }
+fn placement_meta(name: &str) -> flotilla_resources::InputMeta {
+    resource_meta().name(name).call()
 }
 
-fn placement_meta(name: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: BTreeMap::new(),
-        annotations: BTreeMap::new(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
-    }
+fn task_workspace_meta(name: &str) -> flotilla_resources::InputMeta {
+    resource_meta()
+        .name(name)
+        .labels(
+            [("flotilla.work/convoy".to_string(), "fix-bug-123".to_string()), ("flotilla.work/task".to_string(), "implement".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .owner_references(vec![owner_reference("fix-bug-123", "Convoy")])
+        .finalizers(vec!["flotilla.work/example".to_string()])
+        .deletion_timestamp(Utc::now())
+        .call()
 }
 
-fn task_workspace_meta(name: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: [
-            ("flotilla.work/convoy".to_string(), "fix-bug-123".to_string()),
-            ("flotilla.work/task".to_string(), "implement".to_string()),
-        ]
-        .into_iter()
-        .collect(),
-        annotations: BTreeMap::new(),
-        owner_references: vec![owner_reference("fix-bug-123", "Convoy")],
-        finalizers: vec!["flotilla.work/example".to_string()],
-        deletion_timestamp: Some(Utc::now()),
-    }
-}
-
-fn docker_environment_meta(name: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: [("flotilla.work/host".to_string(), "01HXYZ".to_string())].into_iter().collect(),
-        annotations: BTreeMap::new(),
-        owner_references: vec![owner_reference("convoy-fix-bug-123-implement", "TaskWorkspace")],
-        finalizers: vec!["flotilla.work/environment-teardown".to_string()],
-        deletion_timestamp: None,
-    }
+fn docker_environment_meta(name: &str) -> flotilla_resources::InputMeta {
+    resource_meta()
+        .name(name)
+        .labels([("flotilla.work/host".to_string(), "01HXYZ".to_string())].into_iter().collect())
+        .owner_references(vec![owner_reference("convoy-fix-bug-123-implement", "TaskWorkspace")])
+        .finalizers(vec!["flotilla.work/environment-teardown".to_string()])
+        .call()
 }
 
 #[tokio::test]
 async fn placement_policy_roundtrips_without_status() {
     let resolver = ResourceBackend::InMemory(InMemoryBackend::default()).using::<PlacementPolicy>("flotilla");
-    let spec = PlacementPolicySpec {
-        pool: "cleat".to_string(),
-        host_direct: Some(HostDirectPlacementPolicySpec {
+    let spec = PlacementPolicySpec::builder()
+        .pool("cleat".to_string())
+        .host_direct(HostDirectPlacementPolicySpec {
             host_ref: "01HXYZ".to_string(),
             checkout: HostDirectPlacementPolicyCheckout::Worktree,
-        }),
-        docker_per_task: None,
-    };
+        })
+        .build();
 
     let created = resolver.create(&placement_meta("host-direct-01HXYZ"), &spec).await.expect("create should succeed");
     let fetched = resolver.get("host-direct-01HXYZ").await.expect("get should succeed");

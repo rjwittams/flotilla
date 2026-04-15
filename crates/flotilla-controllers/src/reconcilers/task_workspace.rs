@@ -3,10 +3,10 @@ use std::{collections::BTreeMap, marker::PhantomData};
 use chrono::{DateTime, Utc};
 use flotilla_resources::{
     canonicalize_repo_url, clone_key,
-    controller::{Actuation, ControllerObjectMeta, LabelJoinWatch, LabelMappedWatch, ReconcileOutcome, Reconciler, SecondaryWatch},
+    controller::{Actuation, LabelJoinWatch, LabelMappedWatch, ReconcileOutcome, Reconciler, SecondaryWatch},
     descriptive_repo_slug, repo_key, Checkout, CheckoutPhase, CheckoutSpec, CheckoutWorktreeSpec, Clone, ClonePhase, CloneSpec, Convoy,
     DockerCheckoutStrategy, DockerEnvironmentSpec, Environment, EnvironmentMount, EnvironmentMountMode, EnvironmentPhase, EnvironmentSpec,
-    FreshCloneCheckoutSpec, HostDirectPlacementPolicyCheckout, HostDirectPlacementPolicySpec, OwnerReference, PlacementPolicy,
+    FreshCloneCheckoutSpec, HostDirectPlacementPolicyCheckout, HostDirectPlacementPolicySpec, InputMeta, OwnerReference, PlacementPolicy,
     PlacementPolicySpec, ProcessSource, Resource, ResourceBackend, ResourceError, ResourceObject, TaskWorkspace, TaskWorkspacePhase,
     TaskWorkspaceStatusPatch, TerminalSession, TerminalSessionPhase, TerminalSessionSpec, TypedResolver,
 };
@@ -91,6 +91,18 @@ impl TaskWorkspaceDeps {
         Self { patch: PlannedPatch::None, actuations: Vec::new() }
     }
 
+    fn provisioning(
+        obj: &ResourceObject<TaskWorkspace>,
+        placement_policy: &ResourceObject<PlacementPolicy>,
+        actuations: Vec<Actuation>,
+    ) -> Self {
+        Self { patch: provisioning_patch(obj, placement_policy), actuations }
+    }
+
+    fn ready(environment_ref: String, checkout_ref: String, terminal_session_refs: Vec<String>, actuations: Vec<Actuation>) -> Self {
+        Self { patch: PlannedPatch::Ready { environment_ref, checkout_ref, terminal_session_refs }, actuations }
+    }
+
     fn failed(message: impl Into<String>) -> Self {
         Self { patch: PlannedPatch::Failed { message: message.into() }, actuations: Vec::new() }
     }
@@ -165,7 +177,7 @@ impl Reconciler for TaskWorkspaceReconciler {
                 None => return Ok(TaskWorkspaceDeps::failed(format!("environment {clone_env_ref} is not a host_direct environment"))),
             };
             if clone_env.status.as_ref().map(|status| status.phase) != Some(EnvironmentPhase::Ready) {
-                return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
             }
 
             let clone_name = format!("clone-{}", clone_key(&canonical_repo, &clone_env_ref));
@@ -188,24 +200,22 @@ impl Reconciler for TaskWorkspaceReconciler {
                         return Ok(TaskWorkspaceDeps::failed(message));
                     }
                     if existing.status.as_ref().map(|status| status.phase) != Some(ClonePhase::Ready) {
-                        return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                        return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
                     }
                 }
                 Err(ResourceError::NotFound { .. }) => {
                     actuations.push(Actuation::CreateClone {
-                        meta: ControllerObjectMeta {
-                            name: clone_name.clone(),
-                            labels: BTreeMap::from([
+                        meta: InputMeta::builder()
+                            .name(clone_name.clone())
+                            .labels(BTreeMap::from([
                                 (REPO_KEY_LABEL.to_string(), repo_key.clone()),
                                 (ENV_LABEL.to_string(), clone_env_ref.clone()),
                                 (REPO_LABEL.to_string(), repo_slug.clone()),
-                            ]),
-                            annotations: BTreeMap::new(),
-                            owner_references: Vec::new(),
-                        },
+                            ]))
+                            .build(),
                         spec: CloneSpec { url: repo_url.clone(), env_ref: clone_env_ref.clone(), path: clone_path },
                     });
-                    return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                    return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
                 }
                 Err(err) => return Err(err),
             }
@@ -229,7 +239,7 @@ impl Reconciler for TaskWorkspaceReconciler {
                             return Ok(TaskWorkspaceDeps::failed(message));
                         }
                         if existing.status.as_ref().map(|status| status.phase) != Some(EnvironmentPhase::Ready) {
-                            return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                            return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
                         }
                     }
                     Err(ResourceError::NotFound { .. }) => {
@@ -245,7 +255,7 @@ impl Reconciler for TaskWorkspaceReconciler {
                                 }),
                             },
                         });
-                        return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                        return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
                     }
                     Err(err) => return Err(err),
                 }
@@ -288,7 +298,7 @@ impl Reconciler for TaskWorkspaceReconciler {
                     checkout_ready_path =
                         existing.status.as_ref().and_then(|status| status.path.clone()).unwrap_or(existing.spec.target_path);
                 } else {
-                    return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                    return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
                 }
             }
             Err(ResourceError::NotFound { .. }) => {
@@ -314,7 +324,7 @@ impl Reconciler for TaskWorkspaceReconciler {
                     meta: owned_child_meta(&checkout_name, obj, BTreeMap::from([(ENV_LABEL.to_string(), spec.env_ref.clone())])),
                     spec,
                 });
-                return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
             }
             Err(err) => return Err(err),
         }
@@ -333,7 +343,7 @@ impl Reconciler for TaskWorkspaceReconciler {
                     return Ok(TaskWorkspaceDeps::failed(format!("environment {env_name} failed")));
                 }
                 if environment.status.as_ref().map(|status| status.phase) != Some(EnvironmentPhase::Ready) {
-                    return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                    return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
                 }
                 env_name
             }
@@ -350,7 +360,7 @@ impl Reconciler for TaskWorkspaceReconciler {
                             return Ok(TaskWorkspaceDeps::failed(message));
                         }
                         if existing.status.as_ref().map(|status| status.phase) != Some(EnvironmentPhase::Ready) {
-                            return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                            return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
                         }
                     }
                     Err(ResourceError::NotFound { .. }) => {
@@ -370,7 +380,7 @@ impl Reconciler for TaskWorkspaceReconciler {
                                 }),
                             },
                         });
-                        return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                        return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
                     }
                     Err(err) => return Err(err),
                 }
@@ -406,7 +416,7 @@ impl Reconciler for TaskWorkspaceReconciler {
                         return Ok(TaskWorkspaceDeps::failed(message));
                     }
                     if existing.status.as_ref().map(|status| status.phase) != Some(TerminalSessionPhase::Running) {
-                        return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                        return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
                     }
                 }
                 Err(ResourceError::NotFound { .. }) => {
@@ -420,20 +430,13 @@ impl Reconciler for TaskWorkspaceReconciler {
                             pool: strategy.pool().to_string(),
                         },
                     });
-                    return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
+                    return Ok(TaskWorkspaceDeps::provisioning(obj, &placement_policy, actuations));
                 }
                 Err(err) => return Err(err),
             }
         }
 
-        Ok(TaskWorkspaceDeps {
-            patch: PlannedPatch::Ready {
-                environment_ref: resolved_environment_ref,
-                checkout_ref: checkout_name,
-                terminal_session_refs: terminal_refs,
-            },
-            actuations,
-        })
+        Ok(TaskWorkspaceDeps::ready(resolved_environment_ref, checkout_name, terminal_refs, actuations))
     }
 
     fn reconcile(
@@ -460,7 +463,7 @@ impl Reconciler for TaskWorkspaceReconciler {
             PlannedPatch::Failed { message } => Some(TaskWorkspaceStatusPatch::MarkFailed { message: message.clone() }),
         };
 
-        ReconcileOutcome { patch, actuations: deps.actuations.clone(), events: Vec::new(), requeue_after: None }
+        ReconcileOutcome::with_actuations(patch, deps.actuations.clone())
     }
 
     async fn run_finalizer(&self, _obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {
@@ -532,23 +535,18 @@ fn checkout_target_path(repo_default_dir: &str, repo_slug: &str, task_workspace_
     format!("{}/{}.{}", repo_default_dir.trim_end_matches('/'), repo_slug, task_workspace_name)
 }
 
-fn owned_child_meta(
-    name: &str,
-    workspace: &ResourceObject<TaskWorkspace>,
-    mut extra_labels: BTreeMap<String, String>,
-) -> ControllerObjectMeta {
+fn owned_child_meta(name: &str, workspace: &ResourceObject<TaskWorkspace>, mut extra_labels: BTreeMap<String, String>) -> InputMeta {
     extra_labels.insert(TASK_WORKSPACE_LABEL.to_string(), workspace.metadata.name.clone());
-    ControllerObjectMeta {
-        name: name.to_string(),
-        labels: extra_labels,
-        annotations: BTreeMap::new(),
-        owner_references: vec![OwnerReference {
+    InputMeta::builder()
+        .name(name.to_string())
+        .labels(extra_labels)
+        .owner_references(vec![OwnerReference {
             api_version: format!("{}/{}", TaskWorkspace::API_PATHS.group, TaskWorkspace::API_PATHS.version),
             kind: TaskWorkspace::API_PATHS.kind.to_string(),
             name: workspace.metadata.name.clone(),
             controller: true,
-        }],
-    }
+        }])
+        .build()
 }
 
 impl PlacementStrategy {

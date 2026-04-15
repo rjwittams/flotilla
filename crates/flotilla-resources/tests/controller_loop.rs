@@ -1,5 +1,6 @@
+mod common;
+
 use std::{
-    collections::BTreeMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -7,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use common::{resource_meta, TestLoopHarness};
 use flotilla_resources::{
     controller::{ControllerLoop, LabelJoinWatch, LabelMappedWatch, ReconcileOutcome, Reconciler},
     ApiPaths, InMemoryBackend, InputMeta, NoStatusPatch, Resource, ResourceBackend, ResourceError, ResourceObject,
@@ -66,7 +68,7 @@ impl Reconciler for RecordingReconciler {
         _now: chrono::DateTime<chrono::Utc>,
     ) -> ReconcileOutcome<Self::Resource> {
         self.reconciled.lock().expect("reconciled lock").push(obj.metadata.name.clone());
-        ReconcileOutcome { patch: None, actuations: Vec::new(), events: Vec::new(), requeue_after: None }
+        ReconcileOutcome::new(None)
     }
 
     async fn run_finalizer(&self, _obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {
@@ -97,7 +99,7 @@ impl Reconciler for FinalizingReconciler {
         _deps: &Self::Dependencies,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> ReconcileOutcome<Self::Resource> {
-        ReconcileOutcome { patch: None, actuations: Vec::new(), events: Vec::new(), requeue_after: None }
+        ReconcileOutcome::new(None)
     }
 
     async fn run_finalizer(&self, obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {
@@ -136,47 +138,19 @@ impl flotilla_resources::controller::SecondaryWatch for RestartingSecondaryWatch
 }
 
 fn primary_meta(name: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: BTreeMap::new(),
-        annotations: BTreeMap::new(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
-    }
+    resource_meta().name(name).call()
 }
 
 fn secondary_meta(name: &str, primary: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: [("flotilla.work/primary".to_string(), primary.to_string())].into_iter().collect(),
-        annotations: BTreeMap::new(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
-    }
+    resource_meta().name(name).labels([("flotilla.work/primary".to_string(), primary.to_string())].into_iter().collect()).call()
 }
 
 fn grouped_primary_meta(name: &str, group: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: [("flotilla.work/group".to_string(), group.to_string())].into_iter().collect(),
-        annotations: BTreeMap::new(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
-    }
+    resource_meta().name(name).labels([("flotilla.work/group".to_string(), group.to_string())].into_iter().collect()).call()
 }
 
 fn grouped_secondary_meta(name: &str, group: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: [("flotilla.work/group".to_string(), group.to_string())].into_iter().collect(),
-        annotations: BTreeMap::new(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
-    }
+    resource_meta().name(name).labels([("flotilla.work/group".to_string(), group.to_string())].into_iter().collect()).call()
 }
 
 #[tokio::test]
@@ -186,7 +160,8 @@ async fn controller_loop_reconciles_existing_primary_objects_from_initial_list()
     primaries.create(&primary_meta("alpha"), &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
 
     let reconciled = Arc::new(Mutex::new(Vec::new()));
-    let loop_task = tokio::spawn(
+    let mut harness = TestLoopHarness::new();
+    harness.spawn(
         ControllerLoop {
             primary: primaries,
             secondaries: Vec::new(),
@@ -208,7 +183,7 @@ async fn controller_loop_reconciles_existing_primary_objects_from_initial_list()
     .await
     .expect("initial list should reconcile alpha");
 
-    loop_task.abort();
+    harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -219,7 +194,8 @@ async fn label_mapped_watch_enqueues_primary_named_in_secondary_label() {
     primaries.create(&primary_meta("alpha"), &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
 
     let reconciled = Arc::new(Mutex::new(Vec::new()));
-    let loop_task = tokio::spawn(
+    let mut harness = TestLoopHarness::new();
+    harness.spawn(
         ControllerLoop {
             primary: primaries,
             secondaries: vec![Box::new(LabelMappedWatch::<SecondaryResource, PrimaryResource> {
@@ -266,7 +242,7 @@ async fn label_mapped_watch_enqueues_primary_named_in_secondary_label() {
     .await
     .expect("secondary watch should enqueue alpha");
 
-    loop_task.abort();
+    harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -288,7 +264,8 @@ async fn label_join_watch_enqueues_each_primary_sharing_the_label_value() {
         .expect("gamma create should succeed");
 
     let reconciled = Arc::new(Mutex::new(Vec::new()));
-    let loop_task = tokio::spawn(
+    let mut harness = TestLoopHarness::new();
+    harness.spawn(
         ControllerLoop {
             primary: primaries,
             secondaries: vec![Box::new(LabelJoinWatch::<SecondaryResource, PrimaryResource> {
@@ -342,7 +319,7 @@ async fn label_join_watch_enqueues_each_primary_sharing_the_label_value() {
     .await
     .expect("join watch should wake both matching primaries and no non-matches");
 
-    loop_task.abort();
+    harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -353,7 +330,8 @@ async fn duplicate_secondary_events_for_the_same_primary_are_deduped_per_burst()
     primaries.create(&primary_meta("alpha"), &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
 
     let reconciled = Arc::new(Mutex::new(Vec::new()));
-    let loop_task = tokio::spawn(
+    let mut harness = TestLoopHarness::new();
+    harness.spawn(
         ControllerLoop {
             primary: primaries,
             secondaries: vec![Box::new(LabelMappedWatch::<SecondaryResource, PrimaryResource> {
@@ -405,25 +383,23 @@ async fn duplicate_secondary_events_for_the_same_primary_are_deduped_per_burst()
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(reconciled.lock().expect("reconciled lock").as_slice(), &["alpha".to_string()]);
 
-    loop_task.abort();
+    harness.shutdown().await;
 }
 
 #[tokio::test]
 async fn controller_loop_runs_finalizer_and_deletes_resource_after_finalizer_completion() {
     let backend = ResourceBackend::InMemory(InMemoryBackend::default());
     let primaries = backend.clone().using::<PrimaryResource>("flotilla");
-    let meta = InputMeta {
-        name: "alpha".to_string(),
-        labels: BTreeMap::new(),
-        annotations: BTreeMap::new(),
-        owner_references: Vec::new(),
-        finalizers: vec!["flotilla.work/test-finalizer".to_string()],
-        deletion_timestamp: Some(chrono::Utc::now()),
-    };
+    let meta = resource_meta()
+        .name("alpha")
+        .finalizers(vec!["flotilla.work/test-finalizer".to_string()])
+        .deletion_timestamp(chrono::Utc::now())
+        .call();
     primaries.create(&meta, &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
 
     let finalized = Arc::new(Mutex::new(Vec::new()));
-    let loop_task = tokio::spawn(
+    let mut harness = TestLoopHarness::new();
+    harness.spawn(
         ControllerLoop {
             primary: primaries.clone(),
             secondaries: Vec::new(),
@@ -448,7 +424,7 @@ async fn controller_loop_runs_finalizer_and_deletes_resource_after_finalizer_com
 
     assert!(matches!(primaries.get("alpha").await, Err(ResourceError::NotFound { .. })));
 
-    loop_task.abort();
+    harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -457,7 +433,8 @@ async fn controller_loop_adds_finalizer_to_managed_resources() {
     let primaries = backend.clone().using::<PrimaryResource>("flotilla");
     primaries.create(&primary_meta("alpha"), &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
 
-    let loop_task = tokio::spawn(
+    let mut harness = TestLoopHarness::new();
+    harness.spawn(
         ControllerLoop {
             primary: primaries.clone(),
             secondaries: Vec::new(),
@@ -480,7 +457,7 @@ async fn controller_loop_adds_finalizer_to_managed_resources() {
     .await
     .expect("controller should attach its finalizer");
 
-    loop_task.abort();
+    harness.shutdown().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -489,7 +466,8 @@ async fn secondary_watch_restart_is_backed_off() {
     let primaries = backend.clone().using::<PrimaryResource>("flotilla");
 
     let spawns = Arc::new(AtomicUsize::new(0));
-    let loop_task = tokio::spawn(
+    let mut harness = TestLoopHarness::new();
+    harness.spawn(
         ControllerLoop {
             primary: primaries,
             secondaries: vec![Box::new(RestartingSecondaryWatch { spawns: Arc::clone(&spawns) })],
@@ -519,5 +497,5 @@ async fn secondary_watch_restart_is_backed_off() {
     .await
     .expect("secondary watch should restart once the backoff elapses");
 
-    loop_task.abort();
+    harness.shutdown().await;
 }
