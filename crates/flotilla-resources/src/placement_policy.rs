@@ -18,7 +18,7 @@ impl Resource for PlacementPolicy {
     const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "placementpolicies", kind: "PlacementPolicy" };
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
 pub struct PlacementPolicySpec {
     pub pool: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

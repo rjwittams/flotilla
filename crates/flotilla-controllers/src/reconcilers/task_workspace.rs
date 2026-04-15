@@ -193,16 +193,14 @@ impl Reconciler for TaskWorkspaceReconciler {
                 }
                 Err(ResourceError::NotFound { .. }) => {
                     actuations.push(Actuation::CreateClone {
-                        meta: ControllerObjectMeta {
-                            name: clone_name.clone(),
-                            labels: BTreeMap::from([
+                        meta: ControllerObjectMeta::builder()
+                            .name(clone_name.clone())
+                            .labels(BTreeMap::from([
                                 (REPO_KEY_LABEL.to_string(), repo_key.clone()),
                                 (ENV_LABEL.to_string(), clone_env_ref.clone()),
                                 (REPO_LABEL.to_string(), repo_slug.clone()),
-                            ]),
-                            annotations: BTreeMap::new(),
-                            owner_references: Vec::new(),
-                        },
+                            ]))
+                            .build(),
                         spec: CloneSpec { url: repo_url.clone(), env_ref: clone_env_ref.clone(), path: clone_path },
                     });
                     return Ok(TaskWorkspaceDeps { patch: provisioning_patch(obj, &placement_policy), actuations });
@@ -538,17 +536,16 @@ fn owned_child_meta(
     mut extra_labels: BTreeMap<String, String>,
 ) -> ControllerObjectMeta {
     extra_labels.insert(TASK_WORKSPACE_LABEL.to_string(), workspace.metadata.name.clone());
-    ControllerObjectMeta {
-        name: name.to_string(),
-        labels: extra_labels,
-        annotations: BTreeMap::new(),
-        owner_references: vec![OwnerReference {
+    ControllerObjectMeta::builder()
+        .name(name.to_string())
+        .labels(extra_labels)
+        .owner_references(vec![OwnerReference {
             api_version: format!("{}/{}", TaskWorkspace::API_PATHS.group, TaskWorkspace::API_PATHS.version),
             kind: TaskWorkspace::API_PATHS.kind.to_string(),
             name: workspace.metadata.name.clone(),
             controller: true,
-        }],
-    }
+        }])
+        .build()
 }
 
 impl PlacementStrategy {

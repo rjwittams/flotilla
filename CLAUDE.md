@@ -151,6 +151,7 @@ Union-find over `CorrelationKey` values (`Branch`, `CheckoutPath`, `AttachableSe
 - **Adding dependencies is fine** when they solve a real problem — don't reinvent the wheel.
 - **`expect` over `unwrap`**: Prefer `.expect("reason")` over `.unwrap()` — it avoids having to reason about whether each `unwrap` is safe.
 - **Correctness first**: Always favour correct solutions over "pragmatic" shortcuts. Get the architecture right rather than patching around structural problems.
+- **Builders (`bon`)**: Use `#[derive(bon::Builder)]` on types with more than three fields, deep nesting, or many optional fields (e.g. `InputMeta`, `ControllerObjectMeta`, deep spec types). Use `#[builder]` on test-fixture functions instead of enumerating named variants (`meta_with_labels`, `meta_with_owner`). Struct literals remain fine for flat types with one or two required fields and no optionals.
 - **Tracing**: Use structured fields, not format-string interpolation. Fields go before the message: `debug!(repo = %path.display(), %since, "issue incremental")`. Use `%` for Display, `?` for Debug, and shorthand `%var` when the field name matches the variable name.
 
 ## Design and Substrate Work

@@ -18,8 +18,9 @@ impl Resource for WorkflowTemplate {
     const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "workflowtemplates", kind: "WorkflowTemplate" };
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
 pub struct WorkflowTemplateSpec {
+    #[builder(default)]
     #[serde(default)]
     pub inputs: Vec<InputDefinition>,
     pub tasks: Vec<TaskDefinition>,
@@ -32,15 +33,16 @@ pub struct InputDefinition {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
 pub struct TaskDefinition {
     pub name: String,
+    #[builder(default)]
     #[serde(default)]
     pub depends_on: Vec<String>,
     pub processes: Vec<ProcessDefinition>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
 pub struct ProcessDefinition {
     pub role: String,
     #[serde(flatten)]
@@ -304,36 +306,38 @@ mod tests {
     };
 
     fn valid_spec() -> WorkflowTemplateSpec {
-        WorkflowTemplateSpec {
-            inputs: vec![InputDefinition { name: "feature".to_string(), description: None }],
-            tasks: vec![
-                TaskDefinition {
-                    name: "implement".to_string(),
-                    depends_on: Vec::new(),
-                    processes: vec![
-                        ProcessDefinition {
-                            role: "coder".to_string(),
-                            source: ProcessSource::Agent {
+        WorkflowTemplateSpec::builder()
+            .inputs(vec![InputDefinition { name: "feature".to_string(), description: None }])
+            .tasks(vec![
+                TaskDefinition::builder()
+                    .name("implement".to_string())
+                    .processes(vec![
+                        ProcessDefinition::builder()
+                            .role("coder".to_string())
+                            .source(ProcessSource::Agent {
                                 selector: Selector { capability: "code".to_string() },
                                 prompt: Some("Implement {{inputs.feature}} for {{workflow.name}}".to_string()),
-                            },
-                        },
-                        ProcessDefinition { role: "build".to_string(), source: ProcessSource::Tool { command: "cargo check".to_string() } },
-                    ],
-                },
-                TaskDefinition {
-                    name: "review".to_string(),
-                    depends_on: vec!["implement".to_string()],
-                    processes: vec![ProcessDefinition {
-                        role: "reviewer".to_string(),
-                        source: ProcessSource::Agent {
+                            })
+                            .build(),
+                        ProcessDefinition::builder()
+                            .role("build".to_string())
+                            .source(ProcessSource::Tool { command: "cargo check".to_string() })
+                            .build(),
+                    ])
+                    .build(),
+                TaskDefinition::builder()
+                    .name("review".to_string())
+                    .depends_on(vec!["implement".to_string()])
+                    .processes(vec![ProcessDefinition::builder()
+                        .role("reviewer".to_string())
+                        .source(ProcessSource::Agent {
                             selector: Selector { capability: "code-review".to_string() },
                             prompt: Some("Review {{workflow.namespace}}".to_string()),
-                        },
-                    }],
-                },
-            ],
-        }
+                        })
+                        .build()])
+                    .build(),
+            ])
+            .build()
     }
 
     #[test]
@@ -348,9 +352,12 @@ mod tests {
     #[test]
     fn validate_rejects_duplicate_role_names_within_task() {
         let mut spec = valid_spec();
-        spec.tasks[0]
-            .processes
-            .push(ProcessDefinition { role: "coder".to_string(), source: ProcessSource::Tool { command: "cargo test".to_string() } });
+        spec.tasks[0].processes.push(
+            ProcessDefinition::builder()
+                .role("coder".to_string())
+                .source(ProcessSource::Tool { command: "cargo test".to_string() })
+                .build(),
+        );
 
         let errors = validate(&spec).expect_err("duplicate role names should fail");
         assert!(errors.contains(&ValidationError::DuplicateRoleInTask { task: "implement".to_string(), role: "coder".to_string() }));

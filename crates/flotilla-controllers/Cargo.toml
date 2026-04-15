@@ -15,3 +15,5 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+bon = { workspace = true }
+rstest = { workspace = true }

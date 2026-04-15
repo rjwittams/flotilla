@@ -347,14 +347,16 @@ async fn ensure_default_policies(backend: &ResourceBackend, namespace: &str, pro
     let host_direct_name = profile.host_direct_policy_name();
     if matches!(policies.get(&host_direct_name).await, Err(ResourceError::NotFound { .. })) {
         policies
-            .create(&empty_meta(&host_direct_name), &PlacementPolicySpec {
-                pool: profile.host_direct_pool.clone(),
-                host_direct: Some(HostDirectPlacementPolicySpec {
-                    host_ref: profile.host_id.clone(),
-                    checkout: HostDirectPlacementPolicyCheckout::Worktree,
-                }),
-                docker_per_task: None,
-            })
+            .create(
+                &empty_meta(&host_direct_name),
+                &PlacementPolicySpec::builder()
+                    .pool(profile.host_direct_pool.clone())
+                    .host_direct(HostDirectPlacementPolicySpec {
+                        host_ref: profile.host_id.clone(),
+                        checkout: HostDirectPlacementPolicyCheckout::Worktree,
+                    })
+                    .build(),
+            )
             .await
             .map_err(|err| err.to_string())?;
     }
@@ -363,17 +365,19 @@ async fn ensure_default_policies(backend: &ResourceBackend, namespace: &str, pro
         let docker_name = profile.docker_policy_name();
         if matches!(policies.get(&docker_name).await, Err(ResourceError::NotFound { .. })) {
             policies
-                .create(&empty_meta(&docker_name), &PlacementPolicySpec {
-                    pool: profile.docker_pool.clone(),
-                    host_direct: None,
-                    docker_per_task: Some(DockerPerTaskPlacementPolicySpec {
-                        host_ref: profile.host_id.clone(),
-                        image: DEFAULT_DOCKER_IMAGE.to_string(),
-                        default_cwd: Some("/workspace".to_string()),
-                        env: BTreeMap::new(),
-                        checkout: DockerCheckoutStrategy::WorktreeOnHostAndMount { mount_path: "/workspace".to_string() },
-                    }),
-                })
+                .create(
+                    &empty_meta(&docker_name),
+                    &PlacementPolicySpec::builder()
+                        .pool(profile.docker_pool.clone())
+                        .docker_per_task(DockerPerTaskPlacementPolicySpec {
+                            host_ref: profile.host_id.clone(),
+                            image: DEFAULT_DOCKER_IMAGE.to_string(),
+                            default_cwd: Some("/workspace".to_string()),
+                            env: BTreeMap::new(),
+                            checkout: DockerCheckoutStrategy::WorktreeOnHostAndMount { mount_path: "/workspace".to_string() },
+                        })
+                        .build(),
+                )
                 .await
                 .map_err(|err| err.to_string())?;
         }
@@ -771,25 +775,18 @@ fn empty_meta(name: &str) -> InputMeta {
 }
 
 fn empty_meta_with_labels(name: &str, labels: BTreeMap<String, String>) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels,
-        annotations: BTreeMap::new(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
-    }
+    InputMeta::builder().name(name.to_string()).labels(labels).build()
 }
 
 fn meta_from_existing<T: flotilla_resources::Resource>(existing: &ResourceObject<T>, labels: BTreeMap<String, String>) -> InputMeta {
-    InputMeta {
-        name: existing.metadata.name.clone(),
-        labels,
-        annotations: existing.metadata.annotations.clone(),
-        owner_references: existing.metadata.owner_references.clone(),
-        finalizers: existing.metadata.finalizers.clone(),
-        deletion_timestamp: existing.metadata.deletion_timestamp,
-    }
+    InputMeta::builder()
+        .name(existing.metadata.name.clone())
+        .labels(labels)
+        .annotations(existing.metadata.annotations.clone())
+        .owner_references(existing.metadata.owner_references.clone())
+        .finalizers(existing.metadata.finalizers.clone())
+        .maybe_deletion_timestamp(existing.metadata.deletion_timestamp)
+        .build()
 }
 
 fn merged_labels(existing: &BTreeMap<String, String>, expected: &BTreeMap<String, String>) -> BTreeMap<String, String> {
@@ -801,8 +798,11 @@ fn merged_labels(existing: &BTreeMap<String, String>, expected: &BTreeMap<String
 }
 
 #[cfg(test)]
+mod test_git_repo;
+
+#[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::sync::Arc;
 
     use flotilla_core::{
         config::ConfigStore,
@@ -816,7 +816,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use super::*;
+    use super::{test_git_repo::TestGitRepo, *};
 
     fn passthrough_registry() -> Arc<ProviderRegistry> {
         use flotilla_core::providers::{
@@ -915,25 +915,9 @@ mod tests {
     #[tokio::test]
     async fn startup_registration_is_idempotent_and_discovers_existing_clone() {
         let temp = TempDir::new().expect("tempdir");
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("repo dir");
-        let repo_str = repo.to_string_lossy().to_string();
-        std::process::Command::new("git").args(["init", "--initial-branch=main", &repo_str]).status().expect("git init should run");
-        std::process::Command::new("git")
-            .args(["-C", &repo_str, "config", "user.name", "Flotilla Tests"])
-            .status()
-            .expect("git user.name should run");
-        std::process::Command::new("git")
-            .args(["-C", &repo_str, "config", "user.email", "flotilla@example.com"])
-            .status()
-            .expect("git user.email should run");
-        fs::write(repo.join("README.md"), "hello\n").expect("write readme");
-        std::process::Command::new("git").args(["-C", &repo_str, "add", "README.md"]).status().expect("git add should run");
-        std::process::Command::new("git").args(["-C", &repo_str, "commit", "-m", "init"]).status().expect("git commit should run");
-        std::process::Command::new("git")
-            .args(["-C", &repo_str, "remote", "add", "origin", "git@github.com:flotilla-org/flotilla.git"])
-            .status()
-            .expect("git remote add should run");
+        let git_repo =
+            TestGitRepo::init(temp.path().join("repo")).with_initial_commit().with_origin("git@github.com:flotilla-org/flotilla.git");
+        let repo = git_repo.path().to_path_buf();
 
         let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
         config.save_repo(&ExecutionEnvironmentPath::new(&repo));
@@ -969,10 +953,8 @@ mod tests {
     #[tokio::test]
     async fn startup_registration_skips_repos_without_origin_and_gates_docker_policy() {
         let temp = TempDir::new().expect("tempdir");
-        let repo = temp.path().join("repo-no-origin");
-        fs::create_dir_all(&repo).expect("repo dir");
-        let repo_str = repo.to_string_lossy().to_string();
-        std::process::Command::new("git").args(["init", "--initial-branch=main", &repo_str]).status().expect("git init should run");
+        let git_repo = TestGitRepo::init(temp.path().join("repo-no-origin"));
+        let repo = git_repo.path().to_path_buf();
 
         let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
         config.save_repo(&ExecutionEnvironmentPath::new(&repo));
@@ -1010,30 +992,11 @@ mod tests {
     async fn in_memory_stage4a_flow_reaches_running_and_completes_convoy() {
         let temp = TempDir::new().expect("tempdir");
         let repo_default_dir = temp.path().join("flotilla-repos");
-        fs::create_dir_all(&repo_default_dir).expect("repo default dir");
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("repo dir");
-        let repo_str = repo.to_string_lossy().to_string();
-        std::process::Command::new("git").args(["init", "--initial-branch=main", &repo_str]).status().expect("git init should run");
-        std::process::Command::new("git")
-            .args(["-C", &repo_str, "config", "user.name", "Flotilla Tests"])
-            .status()
-            .expect("git user.name should run");
-        std::process::Command::new("git")
-            .args(["-C", &repo_str, "config", "user.email", "flotilla@example.com"])
-            .status()
-            .expect("git user.email should run");
-        fs::write(repo.join("README.md"), "hello\n").expect("write readme");
-        std::process::Command::new("git").args(["-C", &repo_str, "add", "README.md"]).status().expect("git add should run");
-        std::process::Command::new("git").args(["-C", &repo_str, "commit", "-m", "init"]).status().expect("git commit should run");
-        let commit =
-            std::process::Command::new("git").args(["-C", &repo_str, "rev-parse", "HEAD"]).output().expect("git rev-parse should run");
-        assert!(commit.status.success(), "git rev-parse should succeed");
-        let commit = String::from_utf8(commit.stdout).expect("rev-parse output should be utf8").trim().to_string();
-        std::process::Command::new("git")
-            .args(["-C", &repo_str, "remote", "add", "origin", "git@github.com:flotilla-org/flotilla.git"])
-            .status()
-            .expect("git remote add should run");
+        std::fs::create_dir_all(&repo_default_dir).expect("repo default dir");
+        let git_repo =
+            TestGitRepo::init(temp.path().join("repo")).with_initial_commit().with_origin("git@github.com:flotilla-org/flotilla.git");
+        let repo = git_repo.path().to_path_buf();
+        let commit = git_repo.head();
 
         let config = Arc::new(ConfigStore::with_base(temp.path().join("config")));
         config.save_repo(&ExecutionEnvironmentPath::new(&repo));
@@ -1058,17 +1021,19 @@ mod tests {
         backend
             .clone()
             .using::<WorkflowTemplate>(NAMESPACE)
-            .create(&empty_meta("wf-a"), &WorkflowTemplateSpec {
-                inputs: Vec::new(),
-                tasks: vec![TaskDefinition {
-                    name: "implement".to_string(),
-                    depends_on: Vec::new(),
-                    processes: vec![ProcessDefinition {
-                        role: "coder".to_string(),
-                        source: ProcessSource::Tool { command: "bash -lc 'echo stage4a'".to_string() },
-                    }],
-                }],
-            })
+            .create(
+                &empty_meta("wf-a"),
+                &WorkflowTemplateSpec::builder()
+                    .inputs(Vec::new())
+                    .tasks(vec![TaskDefinition::builder()
+                        .name("implement".to_string())
+                        .processes(vec![ProcessDefinition::builder()
+                            .role("coder".to_string())
+                            .source(ProcessSource::Tool { command: "bash -lc 'echo stage4a'".to_string() })
+                            .build()])
+                        .build()])
+                    .build(),
+            )
             .await
             .expect("workflow template create should succeed");
         backend

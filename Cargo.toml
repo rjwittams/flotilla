@@ -27,6 +27,8 @@ async-trait = "0.1"
 tracing = "0.1.44"
 indexmap = "2"
 color-eyre = "0.6"
+rstest = "0.23"
+bon = "3"
 
 [package]
 name = "flotilla"

@@ -55,11 +55,14 @@ pub struct ReconcileOutcome<T: Resource> {
     pub requeue_after: Option<Duration>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, bon::Builder)]
 pub struct ControllerObjectMeta {
     pub name: String,
+    #[builder(default)]
     pub labels: BTreeMap<String, String>,
+    #[builder(default)]
     pub annotations: BTreeMap<String, String>,
+    #[builder(default)]
     pub owner_references: Vec<crate::resource::OwnerReference>,
 }
 
@@ -254,14 +257,12 @@ impl<R: Reconciler> ControllerLoop<R> {
         meta: ControllerObjectMeta,
         spec: T::Spec,
     ) -> Result<(), ResourceError> {
-        let input = InputMeta {
-            name: meta.name,
-            labels: meta.labels,
-            annotations: meta.annotations,
-            owner_references: meta.owner_references,
-            finalizers: Vec::new(),
-            deletion_timestamp: None,
-        };
+        let input = InputMeta::builder()
+            .name(meta.name)
+            .labels(meta.labels)
+            .annotations(meta.annotations)
+            .owner_references(meta.owner_references)
+            .build();
         match resolver.create(&input, &spec).await {
             Ok(_) | Err(ResourceError::Conflict { .. }) => Ok(()),
             Err(err) => Err(err),
@@ -374,20 +375,16 @@ impl<R: Reconciler> ControllerLoop<R> {
                     if object.metadata.deletion_timestamp.is_none()
                         && object.metadata.finalizers.iter().all(|finalizer| finalizer != finalizer_name)
                     {
-                        let meta = InputMeta {
-                            name: object.metadata.name.clone(),
-                            labels: object.metadata.labels.clone(),
-                            annotations: object.metadata.annotations.clone(),
-                            owner_references: object.metadata.owner_references.clone(),
-                            finalizers: object
-                                .metadata
-                                .finalizers
-                                .iter()
-                                .cloned()
-                                .chain(std::iter::once(finalizer_name.to_string()))
-                                .collect(),
-                            deletion_timestamp: object.metadata.deletion_timestamp,
-                        };
+                        let meta = InputMeta::builder()
+                            .name(object.metadata.name.clone())
+                            .labels(object.metadata.labels.clone())
+                            .annotations(object.metadata.annotations.clone())
+                            .owner_references(object.metadata.owner_references.clone())
+                            .finalizers(
+                                object.metadata.finalizers.iter().cloned().chain(std::iter::once(finalizer_name.to_string())).collect(),
+                            )
+                            .maybe_deletion_timestamp(object.metadata.deletion_timestamp)
+                            .build();
                         // A racing writer may win between get() and update(); rely on the resulting
                         // watch event to requeue the object and retry finalizer attachment.
                         primary.update(&meta, &object.metadata.resource_version, &object.spec).await?;
@@ -397,20 +394,22 @@ impl<R: Reconciler> ControllerLoop<R> {
                         && object.metadata.finalizers.iter().any(|finalizer| finalizer == finalizer_name)
                     {
                         reconciler.run_finalizer(&object).await?;
-                        let meta = InputMeta {
-                            name: object.metadata.name.clone(),
-                            labels: object.metadata.labels.clone(),
-                            annotations: object.metadata.annotations.clone(),
-                            owner_references: object.metadata.owner_references.clone(),
-                            finalizers: object
-                                .metadata
-                                .finalizers
-                                .iter()
-                                .filter(|finalizer| finalizer.as_str() != finalizer_name)
-                                .cloned()
-                                .collect(),
-                            deletion_timestamp: object.metadata.deletion_timestamp,
-                        };
+                        let meta = InputMeta::builder()
+                            .name(object.metadata.name.clone())
+                            .labels(object.metadata.labels.clone())
+                            .annotations(object.metadata.annotations.clone())
+                            .owner_references(object.metadata.owner_references.clone())
+                            .finalizers(
+                                object
+                                    .metadata
+                                    .finalizers
+                                    .iter()
+                                    .filter(|finalizer| finalizer.as_str() != finalizer_name)
+                                    .cloned()
+                                    .collect(),
+                            )
+                            .maybe_deletion_timestamp(object.metadata.deletion_timestamp)
+                            .build();
                         primary.update(&meta, &object.metadata.resource_version, &object.spec).await?;
                         continue;
                     }

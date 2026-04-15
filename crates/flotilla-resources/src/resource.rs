@@ -30,15 +30,19 @@ pub struct OwnerReference {
     pub controller: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, bon::Builder)]
 pub struct InputMeta {
     pub name: String,
+    #[builder(default)]
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    #[builder(default)]
     #[serde(default)]
     pub annotations: BTreeMap<String, String>,
+    #[builder(default)]
     #[serde(default, rename = "ownerReferences", skip_serializing_if = "Vec::is_empty")]
     pub owner_references: Vec<OwnerReference>,
+    #[builder(default)]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub finalizers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

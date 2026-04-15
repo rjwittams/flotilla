@@ -1,12 +1,20 @@
 #![allow(dead_code)]
 
-use chrono::{TimeZone, Utc};
+pub mod contract;
+
+use std::{collections::BTreeMap, future::Future, time::Duration};
+
+use chrono::{DateTime, TimeZone, Utc};
 use flotilla_resources::{
     ApiPaths, Convoy as RealConvoy, ConvoySpec as RealConvoySpec, ConvoyStatus as RealConvoyStatus, InputDefinition, InputMeta, ObjectMeta,
-    ProcessDefinition, ProcessSource, Resource, ResourceObject, Selector, StatusPatch, TaskDefinition, TaskPhase, TaskState,
-    WorkflowTemplate, WorkflowTemplateSpec,
+    OwnerReference, ProcessDefinition, ProcessSource, Resource, ResourceObject, Selector, StatusPatch, TaskDefinition, TaskPhase,
+    TaskState, WorkflowTemplate, WorkflowTemplateSpec,
 };
 use serde::{Deserialize, Serialize};
+use tokio::{
+    task::JoinHandle,
+    time::{sleep, Instant},
+};
 
 pub struct ConvoyResource;
 
@@ -36,15 +44,35 @@ impl Resource for ConvoyResource {
     const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "convoys", kind: "Convoy" };
 }
 
+#[bon::builder]
+pub fn resource_meta(
+    name: &str,
+    #[builder(default)] labels: BTreeMap<String, String>,
+    #[builder(default)] annotations: BTreeMap<String, String>,
+    #[builder(default)] owner_references: Vec<OwnerReference>,
+    #[builder(default)] finalizers: Vec<String>,
+    deletion_timestamp: Option<DateTime<Utc>>,
+) -> InputMeta {
+    InputMeta::builder()
+        .name(name.to_string())
+        .labels(labels)
+        .annotations(annotations)
+        .owner_references(owner_references)
+        .finalizers(finalizers)
+        .maybe_deletion_timestamp(deletion_timestamp)
+        .build()
+}
+
+pub fn owner_reference(name: &str, kind: &str) -> OwnerReference {
+    OwnerReference { api_version: "flotilla.work/v1".to_string(), kind: kind.to_string(), name: name.to_string(), controller: true }
+}
+
 pub fn input_meta(name: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: [("app".to_string(), "flotilla".to_string())].into_iter().collect(),
-        annotations: [("note".to_string(), "test".to_string())].into_iter().collect(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
-    }
+    resource_meta()
+        .name(name)
+        .labels([("app".to_string(), "flotilla".to_string())].into_iter().collect())
+        .annotations([("note".to_string(), "test".to_string())].into_iter().collect())
+        .call()
 }
 
 pub fn spec(template: &str) -> ConvoySpec {
@@ -79,61 +107,57 @@ pub fn convoy_status(phase: flotilla_resources::ConvoyPhase) -> RealConvoyStatus
 }
 
 pub fn workflow_template_meta(name: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: [("app".to_string(), "flotilla".to_string())].into_iter().collect(),
-        annotations: [("note".to_string(), "workflow-template-test".to_string())].into_iter().collect(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
-    }
+    resource_meta()
+        .name(name)
+        .labels([("app".to_string(), "flotilla".to_string())].into_iter().collect())
+        .annotations([("note".to_string(), "workflow-template-test".to_string())].into_iter().collect())
+        .call()
 }
 
 pub fn valid_workflow_template_spec() -> WorkflowTemplateSpec {
-    WorkflowTemplateSpec {
-        inputs: vec![
+    WorkflowTemplateSpec::builder()
+        .inputs(vec![
             InputDefinition { name: "feature".to_string(), description: Some("Brief description of the feature to implement".to_string()) },
             InputDefinition { name: "branch".to_string(), description: Some("Target git branch".to_string()) },
-        ],
-        tasks: vec![
-            TaskDefinition {
-                name: "implement".to_string(),
-                depends_on: Vec::new(),
-                processes: vec![
-                    ProcessDefinition {
-                        role: "coder".to_string(),
-                        source: ProcessSource::Agent {
+        ])
+        .tasks(vec![
+            TaskDefinition::builder()
+                .name("implement".to_string())
+                .processes(vec![
+                    ProcessDefinition::builder()
+                        .role("coder".to_string())
+                        .source(ProcessSource::Agent {
                             selector: Selector { capability: "code".to_string() },
                             prompt: Some(
                                 "Convoy {{workflow.name}} - implement {{inputs.feature}} on branch {{inputs.branch}}.".to_string(),
                             ),
-                        },
-                    },
-                    ProcessDefinition {
-                        role: "build".to_string(),
-                        source: ProcessSource::Tool { command: "cargo watch -x check".to_string() },
-                    },
-                ],
-            },
-            TaskDefinition {
-                name: "review".to_string(),
-                depends_on: vec!["implement".to_string()],
-                processes: vec![
-                    ProcessDefinition {
-                        role: "reviewer".to_string(),
-                        source: ProcessSource::Agent {
+                        })
+                        .build(),
+                    ProcessDefinition::builder()
+                        .role("build".to_string())
+                        .source(ProcessSource::Tool { command: "cargo watch -x check".to_string() })
+                        .build(),
+                ])
+                .build(),
+            TaskDefinition::builder()
+                .name("review".to_string())
+                .depends_on(vec!["implement".to_string()])
+                .processes(vec![
+                    ProcessDefinition::builder()
+                        .role("reviewer".to_string())
+                        .source(ProcessSource::Agent {
                             selector: Selector { capability: "code-review".to_string() },
                             prompt: Some("Review branch {{inputs.branch}} for correctness and style.".to_string()),
-                        },
-                    },
-                    ProcessDefinition {
-                        role: "tests".to_string(),
-                        source: ProcessSource::Tool { command: "cargo test --watch".to_string() },
-                    },
-                ],
-            },
-        ],
-    }
+                        })
+                        .build(),
+                    ProcessDefinition::builder()
+                        .role("tests".to_string())
+                        .source(ProcessSource::Tool { command: "cargo test --watch".to_string() })
+                        .build(),
+                ])
+                .build(),
+        ])
+        .build()
 }
 
 pub fn updated_workflow_template_spec() -> WorkflowTemplateSpec {
@@ -201,36 +225,41 @@ pub fn convoy_object(name: &str, spec: RealConvoySpec, status: Option<RealConvoy
 }
 
 pub fn tool_only_workflow_template_spec() -> WorkflowTemplateSpec {
-    WorkflowTemplateSpec {
-        inputs: vec![
+    WorkflowTemplateSpec::builder()
+        .inputs(vec![
             InputDefinition { name: "feature".to_string(), description: Some("Brief description of the feature to implement".to_string()) },
             InputDefinition { name: "branch".to_string(), description: Some("Target git branch".to_string()) },
-        ],
-        tasks: vec![
-            TaskDefinition {
-                name: "implement".to_string(),
-                depends_on: Vec::new(),
-                processes: vec![
-                    ProcessDefinition { role: "coder".to_string(), source: ProcessSource::Tool { command: "cargo check".to_string() } },
-                    ProcessDefinition {
-                        role: "build".to_string(),
-                        source: ProcessSource::Tool { command: "cargo test --no-run".to_string() },
-                    },
-                ],
-            },
-            TaskDefinition {
-                name: "review".to_string(),
-                depends_on: vec!["implement".to_string()],
-                processes: vec![
-                    ProcessDefinition { role: "review".to_string(), source: ProcessSource::Tool { command: "cargo test".to_string() } },
-                    ProcessDefinition {
-                        role: "lint".to_string(),
-                        source: ProcessSource::Tool { command: "cargo clippy --no-deps".to_string() },
-                    },
-                ],
-            },
-        ],
-    }
+        ])
+        .tasks(vec![
+            TaskDefinition::builder()
+                .name("implement".to_string())
+                .processes(vec![
+                    ProcessDefinition::builder()
+                        .role("coder".to_string())
+                        .source(ProcessSource::Tool { command: "cargo check".to_string() })
+                        .build(),
+                    ProcessDefinition::builder()
+                        .role("build".to_string())
+                        .source(ProcessSource::Tool { command: "cargo test --no-run".to_string() })
+                        .build(),
+                ])
+                .build(),
+            TaskDefinition::builder()
+                .name("review".to_string())
+                .depends_on(vec!["implement".to_string()])
+                .processes(vec![
+                    ProcessDefinition::builder()
+                        .role("review".to_string())
+                        .source(ProcessSource::Tool { command: "cargo test".to_string() })
+                        .build(),
+                    ProcessDefinition::builder()
+                        .role("lint".to_string())
+                        .source(ProcessSource::Tool { command: "cargo clippy --no-deps".to_string() })
+                        .build(),
+                ])
+                .build(),
+        ])
+        .build()
 }
 
 pub fn tool_only_workflow_template_object(name: &str) -> ResourceObject<WorkflowTemplate> {
@@ -256,6 +285,56 @@ pub fn bootstrapped_convoy_status() -> RealConvoyStatus {
         finished_at: None,
         observed_workflow_ref: Some("review-and-fix".to_string()),
         observed_workflows: Some([("review-and-fix".to_string(), "42".to_string())].into_iter().collect()),
+    }
+}
+
+pub struct TestLoopHarness {
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl TestLoopHarness {
+    pub fn new() -> Self {
+        Self { handles: Vec::new() }
+    }
+
+    pub fn spawn<F>(&mut self, future: F)
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.handles.push(tokio::spawn(async move {
+            let _ = future.await;
+        }));
+    }
+
+    pub async fn wait_until<F, Fut>(&self, timeout: Duration, mut condition: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if condition().await {
+                return;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        panic!("condition was not satisfied within {:?}", timeout);
+    }
+
+    pub async fn shutdown(mut self) {
+        for handle in self.handles.drain(..) {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for TestLoopHarness {
+    fn drop(&mut self) {
+        for handle in self.handles.drain(..) {
+            handle.abort();
+        }
     }
 }
 

@@ -448,21 +448,20 @@ fn create_task_workspace_outcome(convoy: &ResourceObject<Convoy>, task: &str, no
     Some(InternalReconcileOutcome {
         patch: None,
         actuations: vec![Actuation::CreateTaskWorkspace {
-            meta: ControllerObjectMeta {
-                name: task_workspace_name(&convoy.metadata.name, task),
-                labels: BTreeMap::from([
+            meta: ControllerObjectMeta::builder()
+                .name(task_workspace_name(&convoy.metadata.name, task))
+                .labels(BTreeMap::from([
                     (CONVOY_LABEL.to_string(), convoy.metadata.name.clone()),
                     (TASK_LABEL.to_string(), task.to_string()),
                     (REPO_KEY_LABEL.to_string(), crate::repo_key(&canonical_repo)),
-                ]),
-                annotations: BTreeMap::new(),
-                owner_references: vec![OwnerReference {
+                ]))
+                .owner_references(vec![OwnerReference {
                     api_version: format!("{}/{}", Convoy::API_PATHS.group, Convoy::API_PATHS.version),
                     kind: Convoy::API_PATHS.kind.to_string(),
                     name: convoy.metadata.name.clone(),
                     controller: true,
-                }],
-            },
+                }])
+                .build(),
             spec: crate::TaskWorkspaceSpec { convoy_ref: convoy.metadata.name.clone(), task: task.to_string(), placement_policy_ref },
         }],
         events: Vec::new(),
