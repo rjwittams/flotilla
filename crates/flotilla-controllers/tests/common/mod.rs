@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{collections::BTreeMap, future::Future, time::Duration};
 
 use flotilla_resources::{canonicalize_repo_url, repo_key, InputMeta};

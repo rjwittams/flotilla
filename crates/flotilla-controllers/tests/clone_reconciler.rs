@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flotilla_controllers::reconcilers::{CloneReconciler, CloneRuntime};
-use flotilla_resources::{clone_key, controller::Reconciler, CloneSpec, InputMeta, ResourceBackend};
+use flotilla_resources::{clone_key, controller::Reconciler, CloneSpec, ResourceBackend};
+
+mod common;
+use common::meta;
 
 #[derive(Default)]
 struct FakeCloneRuntime;
@@ -15,17 +18,6 @@ impl CloneRuntime for FakeCloneRuntime {
 
     async fn inspect_existing(&self, _target_path: &str) -> Result<Option<String>, String> {
         Ok(Some("main".to_string()))
-    }
-}
-
-fn meta(name: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: Default::default(),
-        annotations: Default::default(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
     }
 }
 

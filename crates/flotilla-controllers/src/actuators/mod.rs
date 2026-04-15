@@ -26,24 +26,21 @@ impl CloneActuator {
 }
 
 pub struct DockerEnvironmentActuator {
-    provider: Arc<dyn EnvironmentProvider>,
-    repo_root: PathBuf,
     daemon_socket_path: DaemonHostPath,
     tokens: Vec<(String, String)>,
 }
 
 impl DockerEnvironmentActuator {
     pub fn new(
-        provider: Arc<dyn EnvironmentProvider>,
-        repo_root: PathBuf,
+        _provider: Arc<dyn EnvironmentProvider>,
+        _repo_root: PathBuf,
         daemon_socket_path: DaemonHostPath,
         tokens: Vec<(String, String)>,
     ) -> Self {
-        Self { provider, repo_root, daemon_socket_path, tokens }
+        Self { daemon_socket_path, tokens }
     }
 
     pub fn build_create_opts(&self, spec: &DockerEnvironmentSpec) -> CreateOpts {
-        let _ = (&self.provider, &self.repo_root);
         CreateOpts {
             tokens: self.tokens.clone(),
             daemon_socket_path: self.daemon_socket_path.clone(),

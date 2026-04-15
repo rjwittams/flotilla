@@ -70,7 +70,7 @@ where
         &self,
         obj: &ResourceObject<Self::Resource>,
         deps: &Self::Dependencies,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> ReconcileOutcome<Self::Resource> {
         let patch =
             if obj.status.as_ref().map(|status| status.phase).unwrap_or(TerminalSessionPhase::Starting) == TerminalSessionPhase::Starting {
@@ -81,7 +81,7 @@ where
                         started_at: state.started_at,
                     }),
                     TerminalDeps::Failed(message) => {
-                        Some(TerminalSessionStatusPatch::MarkFailed { message: message.clone(), stopped_at: Some(Utc::now()) })
+                        Some(TerminalSessionStatusPatch::MarkFailed { message: message.clone(), stopped_at: Some(now) })
                     }
                     TerminalDeps::Waiting | TerminalDeps::None => None,
                 }

@@ -609,7 +609,7 @@ async fn convoy_completion_command_updates_convoy_task_status() {
 
     let daemon =
         InProcessDaemon::new(vec![], Arc::new(ConfigStore::with_base(&config_base)), fake_discovery(false), HostName::local()).await;
-    let convoys = daemon.resource_backend_for_test().using::<Convoy>("flotilla");
+    let convoys = daemon.resource_backend().using::<Convoy>("flotilla");
     let created = convoys
         .create(&empty_input_meta("convoy-a"), &ConvoySpec {
             workflow_ref: "review-and-fix".to_string(),

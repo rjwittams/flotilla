@@ -2,9 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use flotilla_controllers::reconcilers::{CheckoutReconciler, CheckoutRuntime};
-use flotilla_resources::{
-    controller::Reconciler, CheckoutSpec, CheckoutWorktreeSpec, ClonePhase, CloneSpec, CloneStatus, InputMeta, ResourceBackend,
-};
+use flotilla_resources::{controller::Reconciler, CheckoutSpec, CheckoutWorktreeSpec, ClonePhase, CloneSpec, CloneStatus, ResourceBackend};
+
+mod common;
+use common::meta;
 
 #[derive(Default)]
 struct FakeCheckoutRuntime {
@@ -24,17 +25,6 @@ impl CheckoutRuntime for FakeCheckoutRuntime {
 
     async fn remove_checkout(&self, _target_path: &str) -> Result<(), String> {
         Ok(())
-    }
-}
-
-fn meta(name: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: Default::default(),
-        annotations: Default::default(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
     }
 }
 

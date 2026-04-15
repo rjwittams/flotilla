@@ -30,6 +30,10 @@ pub trait Reconciler: Send + Sync + 'static {
     type Resource: Resource;
     type Dependencies;
 
+    /// Gather or prepare the dependency state needed for `reconcile()`.
+    ///
+    /// Reconcilers may use this hook for idempotent preparation work when the
+    /// dependency result depends on performing that step first.
     async fn fetch_dependencies(&self, obj: &ResourceObject<Self::Resource>) -> Result<Self::Dependencies, ResourceError>;
 
     fn reconcile(

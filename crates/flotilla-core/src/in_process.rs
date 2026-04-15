@@ -727,11 +727,6 @@ impl InProcessDaemon {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn resource_backend_for_test(&self) -> ResourceBackend {
-        self.resource_backend()
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub fn register_direct_environment_for_test(
         &self,
         env_id: EnvironmentId,

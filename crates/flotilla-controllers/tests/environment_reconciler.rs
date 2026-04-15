@@ -4,8 +4,11 @@ use async_trait::async_trait;
 use flotilla_controllers::reconcilers::{DockerEnvironmentRuntime, EnvironmentReconciler};
 use flotilla_resources::{
     controller::Reconciler, DockerEnvironmentSpec, EnvironmentMount, EnvironmentMountMode, EnvironmentSpec, HostDirectEnvironmentSpec,
-    InputMeta, ResourceBackend,
+    ResourceBackend,
 };
+
+mod common;
+use common::meta;
 
 #[derive(Default)]
 struct FakeDockerRuntime {
@@ -21,17 +24,6 @@ impl DockerEnvironmentRuntime for FakeDockerRuntime {
     async fn destroy(&self, container_id: &str) -> Result<(), String> {
         self.destroyed.lock().expect("destroyed lock").push(container_id.to_string());
         Ok(())
-    }
-}
-
-fn meta(name: &str) -> InputMeta {
-    InputMeta {
-        name: name.to_string(),
-        labels: Default::default(),
-        annotations: Default::default(),
-        owner_references: Vec::new(),
-        finalizers: Vec::new(),
-        deletion_timestamp: None,
     }
 }
 
