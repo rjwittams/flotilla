@@ -222,8 +222,13 @@ impl InMemoryBackend {
             object.spec = Self::clone_through_serde(spec)?;
 
             let encoded = Self::encode_object(&object)?;
-            store.objects.insert(meta.name.clone(), encoded.clone());
-            store.push_event(StoredEvent { version, kind: StoredEventKind::Modified, object: encoded });
+            if object.metadata.deletion_timestamp.is_some() && object.metadata.finalizers.is_empty() {
+                store.objects.remove(&meta.name);
+                store.push_event(StoredEvent { version, kind: StoredEventKind::Deleted, object: encoded });
+            } else {
+                store.objects.insert(meta.name.clone(), encoded.clone());
+                store.push_event(StoredEvent { version, kind: StoredEventKind::Modified, object: encoded });
+            }
             Ok(object)
         })
         .await
@@ -257,11 +262,20 @@ impl InMemoryBackend {
 
     pub(crate) async fn delete_typed<T: Resource>(&self, namespace: &str, name: &str) -> Result<(), ResourceError> {
         self.with_store_mut::<T, _>(namespace, |store| {
-            let existing = store.objects.remove(name).ok_or_else(|| ResourceError::not_found(name))?;
+            let existing = store.objects.get(name).cloned().ok_or_else(|| ResourceError::not_found(name))?;
             let mut object = Self::decode_object::<T>(existing)?;
             let version = store.allocate_version();
             object.metadata.resource_version = version.to_string();
+            if !object.metadata.finalizers.is_empty() && object.metadata.deletion_timestamp.is_none() {
+                object.metadata.deletion_timestamp = Some(Utc::now());
+                let encoded = Self::encode_object(&object)?;
+                store.objects.insert(name.to_string(), encoded.clone());
+                store.push_event(StoredEvent { version, kind: StoredEventKind::Modified, object: encoded });
+                return Ok(());
+            }
+
             let encoded = Self::encode_object(&object)?;
+            store.objects.remove(name);
             store.push_event(StoredEvent { version, kind: StoredEventKind::Deleted, object: encoded });
             Ok(())
         })

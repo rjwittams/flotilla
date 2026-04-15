@@ -1,6 +1,9 @@
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -9,7 +12,7 @@ use flotilla_resources::{
     ApiPaths, InMemoryBackend, InputMeta, NoStatusPatch, Resource, ResourceBackend, ResourceError, ResourceObject,
 };
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
+use tokio::{sync::mpsc, time::timeout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PrimaryResource;
@@ -104,6 +107,31 @@ impl Reconciler for FinalizingReconciler {
 
     fn finalizer_name(&self) -> Option<&'static str> {
         Some("flotilla.work/test-finalizer")
+    }
+}
+
+#[derive(Clone)]
+struct RestartingSecondaryWatch {
+    spawns: Arc<AtomicUsize>,
+}
+
+impl flotilla_resources::controller::SecondaryWatch for RestartingSecondaryWatch {
+    type Primary = PrimaryResource;
+
+    fn clone_box(&self) -> Box<dyn flotilla_resources::controller::SecondaryWatch<Primary = Self::Primary>> {
+        Box::new(self.clone())
+    }
+
+    fn spawn(
+        self: Box<Self>,
+        _backend: ResourceBackend,
+        _namespace: String,
+        _sender: mpsc::Sender<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ResourceError>> + Send>> {
+        Box::pin(async move {
+            self.spawns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
     }
 }
 
@@ -381,7 +409,7 @@ async fn duplicate_secondary_events_for_the_same_primary_are_deduped_per_burst()
 }
 
 #[tokio::test]
-async fn controller_loop_runs_finalizer_and_removes_it_from_metadata() {
+async fn controller_loop_runs_finalizer_and_deletes_resource_after_finalizer_completion() {
     let backend = ResourceBackend::InMemory(InMemoryBackend::default());
     let primaries = backend.clone().using::<PrimaryResource>("flotilla");
     let meta = InputMeta {
@@ -408,20 +436,81 @@ async fn controller_loop_runs_finalizer_and_removes_it_from_metadata() {
 
     timeout(Duration::from_secs(1), async {
         loop {
-            let object = primaries.get("alpha").await.expect("primary get should succeed");
             let finalized_hits = finalized.lock().expect("finalized lock").iter().filter(|name| *name == "alpha").count();
-            if finalized_hits >= 1 && object.metadata.finalizers.is_empty() {
+            if finalized_hits >= 1 && matches!(primaries.get("alpha").await, Err(ResourceError::NotFound { .. })) {
                 break;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("finalizer should run and then be removed from metadata");
+    .expect("finalizer should run and then the deleting resource should disappear");
 
-    let object = primaries.get("alpha").await.expect("primary get should succeed");
-    assert!(object.metadata.finalizers.is_empty());
-    assert!(object.metadata.deletion_timestamp.is_some());
+    assert!(matches!(primaries.get("alpha").await, Err(ResourceError::NotFound { .. })));
+
+    loop_task.abort();
+}
+
+#[tokio::test]
+async fn controller_loop_adds_finalizer_to_managed_resources() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let primaries = backend.clone().using::<PrimaryResource>("flotilla");
+    primaries.create(&primary_meta("alpha"), &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
+
+    let loop_task = tokio::spawn(
+        ControllerLoop {
+            primary: primaries.clone(),
+            secondaries: Vec::new(),
+            reconciler: FinalizingReconciler { finalized: Arc::new(Mutex::new(Vec::new())) },
+            resync_interval: Duration::from_secs(60),
+            backend,
+        }
+        .run(),
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let object = primaries.get("alpha").await.expect("primary get should succeed");
+            if object.metadata.finalizers == vec!["flotilla.work/test-finalizer".to_string()] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("controller should attach its finalizer");
+
+    loop_task.abort();
+}
+
+#[tokio::test]
+async fn secondary_watch_is_restarted_after_clean_exit() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let primaries = backend.clone().using::<PrimaryResource>("flotilla");
+    primaries.create(&primary_meta("alpha"), &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
+
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let loop_task = tokio::spawn(
+        ControllerLoop {
+            primary: primaries,
+            secondaries: vec![Box::new(RestartingSecondaryWatch { spawns: Arc::clone(&spawns) })],
+            reconciler: RecordingReconciler { reconciled: Arc::new(Mutex::new(Vec::new())) },
+            resync_interval: Duration::from_secs(60),
+            backend,
+        }
+        .run(),
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if spawns.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("secondary watch should be restarted after exiting");
 
     loop_task.abort();
 }

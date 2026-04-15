@@ -71,6 +71,8 @@ pub enum Actuation {
 pub trait SecondaryWatch: Send + Sync {
     type Primary: Resource;
 
+    fn clone_box(&self) -> Box<dyn SecondaryWatch<Primary = Self::Primary>>;
+
     fn spawn(
         self: Box<Self>,
         backend: ResourceBackend,
@@ -79,6 +81,13 @@ pub trait SecondaryWatch: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), ResourceError>> + Send>>;
 }
 
+impl<P: Resource> Clone for Box<dyn SecondaryWatch<Primary = P>> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+#[derive(Clone)]
 pub struct LabelMappedWatch<W: Resource, P: Resource> {
     pub label_key: &'static str,
     pub _marker: PhantomData<(W, P)>,
@@ -102,6 +111,10 @@ impl<W: Resource, P: Resource> LabelMappedWatch<W, P> {
 
 impl<W: Resource, P: Resource> SecondaryWatch for LabelMappedWatch<W, P> {
     type Primary = P;
+
+    fn clone_box(&self) -> Box<dyn SecondaryWatch<Primary = Self::Primary>> {
+        Box::new(Self { label_key: self.label_key, _marker: PhantomData })
+    }
 
     fn spawn(
         self: Box<Self>,
@@ -129,6 +142,7 @@ impl<W: Resource, P: Resource> SecondaryWatch for LabelMappedWatch<W, P> {
     }
 }
 
+#[derive(Clone)]
 pub struct LabelJoinWatch<W: Resource, P: Resource> {
     pub label_key: &'static str,
     pub _marker: PhantomData<(W, P)>,
@@ -159,6 +173,10 @@ impl<W: Resource, P: Resource> LabelJoinWatch<W, P> {
 impl<W: Resource, P: Resource> SecondaryWatch for LabelJoinWatch<W, P> {
     type Primary = P;
 
+    fn clone_box(&self) -> Box<dyn SecondaryWatch<Primary = Self::Primary>> {
+        Box::new(Self { label_key: self.label_key, _marker: PhantomData })
+    }
+
     fn spawn(
         self: Box<Self>,
         backend: ResourceBackend,
@@ -184,6 +202,11 @@ impl<W: Resource, P: Resource> SecondaryWatch for LabelJoinWatch<W, P> {
             Ok(())
         })
     }
+}
+
+enum WatchExited {
+    Primary(Result<(), ResourceError>),
+    Secondary { index: usize, result: Result<(), ResourceError> },
 }
 
 pub struct ControllerLoop<R: Reconciler> {
@@ -239,46 +262,52 @@ impl<R: Reconciler> ControllerLoop<R> {
         }
     }
 
-    fn spawn_primary_watch(primary: TypedResolver<R::Resource>, sender: mpsc::Sender<String>) -> JoinHandle<Result<(), ResourceError>> {
+    fn spawn_primary_watch(
+        primary: TypedResolver<R::Resource>,
+        sender: mpsc::Sender<String>,
+        watch_exited: mpsc::UnboundedSender<WatchExited>,
+    ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let listed = primary.list().await?;
-            for object in &listed.items {
-                sender
-                    .send(object.metadata.name.clone())
-                    .await
-                    .map_err(|_| ResourceError::other("controller queue closed while forwarding initial primary list"))?;
-            }
+            let result = async {
+                let listed = primary.list().await?;
+                for object in &listed.items {
+                    sender
+                        .send(object.metadata.name.clone())
+                        .await
+                        .map_err(|_| ResourceError::other("controller queue closed while forwarding initial primary list"))?;
+                }
 
-            let mut watch = primary.watch(WatchStart::FromVersion(listed.resource_version)).await?;
-            while let Some(event) = watch.next().await {
-                match event? {
-                    WatchEvent::Added(object) | WatchEvent::Modified(object) | WatchEvent::Deleted(object) => {
-                        sender
-                            .send(object.metadata.name)
-                            .await
-                            .map_err(|_| ResourceError::other("controller queue closed while forwarding primary watch event"))?;
+                let mut watch = primary.watch(WatchStart::FromVersion(listed.resource_version)).await?;
+                while let Some(event) = watch.next().await {
+                    match event? {
+                        WatchEvent::Added(object) | WatchEvent::Modified(object) | WatchEvent::Deleted(object) => {
+                            sender
+                                .send(object.metadata.name)
+                                .await
+                                .map_err(|_| ResourceError::other("controller queue closed while forwarding primary watch event"))?;
+                        }
                     }
                 }
+                Ok(())
             }
-            Ok(())
+            .await;
+
+            let _ = watch_exited.send(WatchExited::Primary(result));
         })
     }
 
-    fn spawn_secondary_watches(
-        secondaries: Vec<Box<dyn SecondaryWatch<Primary = R::Resource>>>,
+    fn spawn_secondary_watch(
+        index: usize,
+        watch: Box<dyn SecondaryWatch<Primary = R::Resource>>,
         backend: ResourceBackend,
         namespace: String,
         sender: mpsc::Sender<String>,
-    ) -> Vec<JoinHandle<Result<(), ResourceError>>> {
-        secondaries
-            .into_iter()
-            .map(|watch| {
-                let backend = backend.clone();
-                let namespace = namespace.clone();
-                let sender = sender.clone();
-                tokio::spawn(async move { watch.spawn(backend, namespace, sender).await })
-            })
-            .collect()
+        watch_exited: mpsc::UnboundedSender<WatchExited>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let result = watch.spawn(backend, namespace, sender).await;
+            let _ = watch_exited.send(WatchExited::Secondary { index, result });
+        })
     }
 
     async fn resync_all(primary: &TypedResolver<R::Resource>, sender: &mpsc::Sender<String>) -> Result<(), ResourceError> {
@@ -298,8 +327,23 @@ impl<R: Reconciler> ControllerLoop<R> {
     {
         let ControllerLoop { primary, secondaries, reconciler, resync_interval, backend } = self;
         let (sender, mut receiver) = mpsc::channel::<String>(128);
-        let _primary_watch = Self::spawn_primary_watch(primary.clone(), sender.clone());
-        let _secondary_watches = Self::spawn_secondary_watches(secondaries, backend, primary.namespace.clone(), sender.clone());
+        let (watch_exited_tx, mut watch_exited_rx) = mpsc::unbounded_channel();
+        let _primary_watch = Self::spawn_primary_watch(primary.clone(), sender.clone(), watch_exited_tx.clone());
+        let secondary_templates = secondaries;
+        let _secondary_watches: Vec<JoinHandle<()>> = secondary_templates
+            .iter()
+            .enumerate()
+            .map(|(index, watch)| {
+                Self::spawn_secondary_watch(
+                    index,
+                    watch.clone(),
+                    backend.clone(),
+                    primary.namespace.clone(),
+                    sender.clone(),
+                    watch_exited_tx.clone(),
+                )
+            })
+            .collect();
         let mut resync = tokio::time::interval(resync_interval);
         resync.tick().await;
         let mut pending: VecDeque<String> = VecDeque::new();
@@ -312,6 +356,26 @@ impl<R: Reconciler> ControllerLoop<R> {
                     Err(err) => return Err(err),
                 };
                 if let Some(finalizer_name) = reconciler.finalizer_name() {
+                    if object.metadata.deletion_timestamp.is_none()
+                        && object.metadata.finalizers.iter().all(|finalizer| finalizer != finalizer_name)
+                    {
+                        let meta = InputMeta {
+                            name: object.metadata.name.clone(),
+                            labels: object.metadata.labels.clone(),
+                            annotations: object.metadata.annotations.clone(),
+                            owner_references: object.metadata.owner_references.clone(),
+                            finalizers: object
+                                .metadata
+                                .finalizers
+                                .iter()
+                                .cloned()
+                                .chain(std::iter::once(finalizer_name.to_string()))
+                                .collect(),
+                            deletion_timestamp: object.metadata.deletion_timestamp,
+                        };
+                        primary.update(&meta, &object.metadata.resource_version, &object.spec).await?;
+                        continue;
+                    }
                     if object.metadata.deletion_timestamp.is_some()
                         && object.metadata.finalizers.iter().any(|finalizer| finalizer == finalizer_name)
                     {
@@ -333,6 +397,9 @@ impl<R: Reconciler> ControllerLoop<R> {
                         primary.update(&meta, &object.metadata.resource_version, &object.spec).await?;
                         continue;
                     }
+                }
+                if object.metadata.deletion_timestamp.is_some() {
+                    continue;
                 }
                 let deps = reconciler.fetch_dependencies(&object).await?;
                 let outcome = reconciler.reconcile(&object, &deps, Utc::now());
@@ -359,6 +426,25 @@ impl<R: Reconciler> ControllerLoop<R> {
                 }
                 _ = resync.tick() => {
                     Self::resync_all(&primary, &sender).await?;
+                }
+                Some(exited) = watch_exited_rx.recv() => {
+                    match exited {
+                        WatchExited::Primary(result) => {
+                            result?;
+                            let _respawn = Self::spawn_primary_watch(primary.clone(), sender.clone(), watch_exited_tx.clone());
+                        }
+                        WatchExited::Secondary { index, result } => {
+                            result?;
+                            let _respawn = Self::spawn_secondary_watch(
+                                index,
+                                secondary_templates[index].clone(),
+                                backend.clone(),
+                                primary.namespace.clone(),
+                                sender.clone(),
+                                watch_exited_tx.clone(),
+                            );
+                        }
+                    }
                 }
             }
         }

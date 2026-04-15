@@ -26,7 +26,7 @@ The scoping is honest about the work involved: a "productive" k8s Pod backend ne
 - A small controller framework added to `flotilla-resources` (the same crate Stage 3 lives in).
 - A new `flotilla-controllers` crate containing five reconcilers (TaskWorkspace, Environment, Clone, Checkout, TerminalSession) and three actuators wrapping existing flotilla-core providers (Docker, CheckoutManager, TerminalPool).
 - Daemon startup: self-registration as a `Host`, creation of a host-direct `Environment`, discovery of existing `Clone` resources from flotilla-core's repo registry, creation of default `PlacementPolicy` resources.
-- A new `flotillad` binary in the `flotilla-daemon` crate. The existing `flotilla` TUI binary's embedded-daemon mode is removed entirely — Stage 4a is the cut. Tests that need everything-in-one-process compose `InProcessDaemon` + controllers via a small test-support helper.
+- A new dedicated `flotillad` binary backed by `flotilla-daemon`. The existing `flotilla` TUI binary's embedded-daemon mode is removed entirely — Stage 4a is the cut. Tests that need everything-in-one-process compose `InProcessDaemon` + controllers via a small test-support helper.
 - Two `PlacementPolicy` variants: `host_direct` and `docker_per_task`.
 - **Env-relative model**: every persistent on-disk thing (Clone, Checkout, TerminalSession) lives in an `Environment`. The host's bare filesystem is the `host_direct` Environment; docker is another Environment kind; future k8s_pod likewise. Clone and Checkout reference `env_ref`, never `host_ref`.
 - Tests at every layer: pure reconcile, status patch, framework, actuator, in-memory end-to-end, minikube integration.
@@ -52,10 +52,9 @@ flotilla-resources     (deps: protocol)              ← gains controller framew
 flotilla-core          (deps: protocol)
 flotilla-controllers   (deps: resources, core)       ← NEW
 flotilla-daemon        (deps: controllers, core, resources)
-  binary: flotillad                                  ← NEW
 flotilla-client        (deps: protocol)
 flotilla-tui           (deps: client)
-flotilla        binary (deps: client)                ← TUI/CLI only; embedded-daemon mode removed
+flotilla        binaries (deps: client, daemon)      ← TUI/CLI + dedicated daemon entrypoint; embedded-daemon mode removed
 ```
 
 No backwards dependencies. Each crate has one job. `flotilla-controllers` is the natural home for code that bridges resources and the existing provider system.
@@ -765,7 +764,7 @@ For each resource that carries a finalizer: verify cleanup runs, finalizer entry
     - `flotilla-client` — no new protocol shape is required beyond the existing `execute()` path. The CLI can build a `Command` with the new `CommandAction` and send it via `Request::Execute`; a small convenience helper is optional but not required at the `DaemonHandle` trait boundary.
     - `flotilla` binary — CLI subcommand `flotilla convoy <name> task <task> complete [--namespace <ns>]` building the new `CommandAction` and invoking `execute()`.
     Future short-form (`flotilla complete` driven by env-var context) is deferred.
-12. New `flotillad` binary target in `flotilla-daemon`.
+12. New `flotillad` binary target backed by `flotilla-daemon`.
 13. `flotilla` TUI binary's embedded-daemon mode removed entirely (Stage 4a cuts the cord).
 14. Tests at every layer (pure reconcile, StatusPatch::apply, framework, actuator, in-memory end-to-end, minikube integration, docker actuator integration, finalizer behavior).
 15. CRD bootstrap via `ensure_crd` for example/integration paths.
@@ -871,7 +870,7 @@ After this lands: the resources exist, individual reconcilers work against the i
 
 ### Plan A3 — Daemon wiring + binary split
 
-Daemon startup (Host self-register, host-direct Environment auto-create, Clone discovery, default PlacementPolicies, controller-loop spawning), heartbeat task, new `flotillad` binary in `flotilla-daemon`, removal of `flotilla` TUI binary's embedded-daemon mode, test-support helper for InProcessDaemon-everything setups, in-memory backend end-to-end test, HTTP backend integration test against minikube.
+Daemon startup (Host self-register, host-direct Environment auto-create, Clone discovery, default PlacementPolicies, controller-loop spawning), heartbeat task, new dedicated `flotillad` binary backed by `flotilla-daemon`, removal of `flotilla` TUI binary's embedded-daemon mode, test-support helper for InProcessDaemon-everything setups, in-memory backend end-to-end test, HTTP backend integration test against minikube.
 
 After this lands: end-to-end flow lights up.
 

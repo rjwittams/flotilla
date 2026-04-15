@@ -3,7 +3,7 @@ mod common;
 use std::{collections::BTreeMap, time::Duration};
 
 use common::{convoy_meta, convoy_spec, convoy_status};
-use flotilla_resources::{Convoy, ConvoyPhase, InMemoryBackend, ResourceBackend, WatchEvent, WatchStart};
+use flotilla_resources::{Convoy, ConvoyPhase, InMemoryBackend, InputMeta, ResourceBackend, WatchEvent, WatchStart};
 use futures::StreamExt;
 use tokio::time::timeout;
 
@@ -86,6 +86,32 @@ async fn delete_emits_deleted_event() {
         }
         _ => panic!("expected deleted event"),
     }
+}
+
+#[tokio::test]
+async fn delete_with_finalizers_marks_object_for_deletion_instead_of_removing_it() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let resolver = backend.clone().using::<Convoy>("default");
+    resolver
+        .create(
+            &InputMeta {
+                name: "alpha".to_string(),
+                labels: BTreeMap::new(),
+                annotations: BTreeMap::new(),
+                owner_references: Vec::new(),
+                finalizers: vec!["flotilla.work/test-finalizer".to_string()],
+                deletion_timestamp: None,
+            },
+            &convoy_spec("template-a"),
+        )
+        .await
+        .expect("create should succeed");
+
+    resolver.delete("alpha").await.expect("delete should succeed");
+
+    let object = resolver.get("alpha").await.expect("object should remain until finalizers are removed");
+    assert_eq!(object.metadata.finalizers, vec!["flotilla.work/test-finalizer".to_string()]);
+    assert!(object.metadata.deletion_timestamp.is_some(), "delete should set deletion timestamp");
 }
 
 #[tokio::test]
