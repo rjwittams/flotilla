@@ -6,7 +6,9 @@ Stages 1–4a established the resource-oriented convoy stack: `WorkflowTemplate`
 
 What's missing is the **presentation side**. A convoy can be created, tasks can provision Environments/Checkouts/TerminalSessions, but the live multiplexer workspace the user interacts with is still wired through the pre-resource `WorkspaceOrchestrator` / `AttachableSet` machinery. Nothing in the convoy stack talks to `WorkspaceManager`.
 
-Stage 5 closes that gap. It renames `WorkspaceManager` to `PresentationManager`, introduces a `Presentation` resource that declares "a slice of the convoy graph is being shown, governed by this policy," and adds a reconciler that keeps a live workspace aligned with the current set of Ready `TaskWorkspace`s and their `TerminalSession`s.
+Stage 5 closes that gap. It renames `WorkspaceManager` to `PresentationManager`, introduces a `Presentation` resource that declares "a slice of the convoy graph is being shown, governed by this policy," and adds a reconciler that keeps a live workspace aligned with the current set of live `TerminalSession`s for the convoy.
+
+It also changes one stage-4a decision: `TaskWorkspace` lifecycle is tied to task lifecycle — the convoy controller deletes a `TaskWorkspace` when its task reaches a terminal phase, and the `TaskWorkspace` finalizer cascades to `TerminalSession` deletion. This replaces the "persist until convoy deletion" model, which was incompatible with passthrough terminal pools anyway (tearing down the workspace kills passthrough processes regardless).
 
 ## Design Decisions
 
@@ -16,9 +18,9 @@ Each convoy gets one `Presentation` resource. The alternative — one Presentati
 
 ### Declarative subscription, not active task list
 
-`Presentation.spec` is stable day-to-day. It carries a selector that matches `TerminalSession`s by convoy. The convoy controller does not rewrite the spec as tasks transition. Instead, reconciliation is driven by label-based watches on `TerminalSession` (membership) and `TaskWorkspace` (liveness).
+`Presentation.spec` is stable day-to-day. It carries a selector that matches `TerminalSession`s by convoy. The convoy controller does not rewrite the spec as tasks transition. Instead, reconciliation is driven by a single label-based watch on `TerminalSession` — membership changes (sessions appear when tasks launch, disappear when tasks complete and their TaskWorkspace cascades) are the only signal the reconciler needs.
 
-This is the k8s-Deployment analogy: a Deployment spec says "I want N replicas of image X"; it doesn't get rewritten every time a Pod comes up. Similarly, a Presentation spec says "present the sessions for this convoy using this policy"; the world (session graph, task phases) changes, the reconciler responds.
+This is the k8s-Deployment analogy: a Deployment spec says "I want N replicas of image X"; it doesn't get rewritten every time a Pod comes up. Similarly, a Presentation spec says "present the sessions for this convoy using this policy"; the world (session graph) changes, the reconciler responds.
 
 ### Replace-on-change for v1
 
@@ -56,27 +58,35 @@ Convoy reconciler emits CreatePresentation actuation
 Presentation resource exists (selector-only spec)
   │
   │  task_workspace reconciler stamps labels on TerminalSessions:
-  │    flotilla.work/convoy, task, task_workspace, role, + user labels
+  │    flotilla.work/convoy, task, task_workspace, role,
+  │    task_ordinal, process_ordinal, + user labels
   │
   ▼
 Presentation reconciler watches:
   - Presentation
   - TerminalSession matching selector
-  - TaskWorkspace by convoy label
   │
   ▼  fetch_dependencies:
-  │   list sessions via selector → filter to Ready TaskWorkspaces
+  │   list sessions via selector
   │   walk Environment / Host / Checkout → hop-chain resolve attach commands
+  │   sort by (task_ordinal, process_ordinal, session_name)
   │   compute spec_hash → compare to observed
   │
-  ▼  if hash differs:
-  PresentationRuntime.apply(PresentationPlan { previous, ... })
-    ├─ PresentationPolicy.render → WorkspaceAttachRequest
-    ├─ PresentationManager.delete_workspace(previous)   ← replace-on-change
-    └─ PresentationManager.create_workspace(req)
+  ▼  if sessions non-empty AND hash differs:
+  │     runtime.apply(PresentationPlan { previous, ... })
+  │       ├─ PresentationPolicy.render → WorkspaceAttachRequest
+  │       ├─ prev_mgr.delete_workspace(previous.ws_ref)   ← via prev's manager
+  │       └─ current_mgr.create_workspace(req)
+  │     status → Active
   │
-  ▼  reconcile:
-  PresentationStatusPatch::MarkActive { manager, ws_ref, spec_hash, ready_at }
+  ▼  if sessions empty AND observed_workspace is Some:
+  │     runtime.tear_down(observed_manager, observed_ws_ref)
+  │     status → TornDown
+
+Convoy task → Completed/Failed/Cancelled:
+  Convoy reconciler deletes the TaskWorkspace (new extension)
+  TaskWorkspace finalizer cascades to TerminalSession deletion
+  → selector watch fires → reconciler recomputes → replace/tear down
 ```
 
 ## Rename
@@ -133,8 +143,7 @@ pub enum PresentationPhase {
     #[default]
     Pending,
     Active,
-    Reconfiguring,
-    TornDown,
+    TornDown,   // no live processes right now; may transition back to Active when sessions reappear
     Failed,
 }
 
@@ -155,15 +164,14 @@ pub struct PresentationStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresentationStatusPatch {
-    BeginReplace,
     MarkActive {
         presentation_manager: String,
         workspace_ref: String,
         spec_hash: String,
         ready_at: DateTime<Utc>,
     },
+    MarkTornDown,                       // workspace deleted; no observed_workspace_ref/manager/hash
     MarkFailed { message: String },
-    MarkTornDown,
 }
 ```
 
@@ -173,16 +181,38 @@ pub enum PresentationStatusPatch {
 
 ## Labels
 
-New shared module `crates/flotilla-resources/src/labels.rs` exports the well-known keys:
+### Reserved namespace
+
+The `flotilla.work/` label prefix is **reserved for system use**. User-authored labels on `ProcessDefinition` (or any future workflow-template field) must not use it. Two-layer enforcement:
+
+1. **Validation.** `WorkflowTemplate::validate` adds a `ReservedLabelKey { task, role, key }` error variant that fires when any `ProcessDefinition.labels` key starts with `flotilla.work/`. Templates carrying reserved keys are rejected at validation time (mirrors existing validation errors).
+2. **Runtime guard.** `build_session_labels` applies user labels first, then system labels, so even if validation is bypassed the system labels win deterministically.
+
+### Well-known keys
+
+New shared module `crates/flotilla-resources/src/labels.rs` exports the constants:
 
 ```rust
 pub const CONVOY_LABEL: &str = "flotilla.work/convoy";
 pub const TASK_LABEL: &str = "flotilla.work/task";
-pub const TASK_WORKSPACE_LABEL: &str = "flotilla.work/task_workspace";  // already used by task_workspace reconciler
+pub const TASK_WORKSPACE_LABEL: &str = "flotilla.work/task_workspace";  // already used
 pub const ROLE_LABEL: &str = "flotilla.work/role";                       // already used
+pub const TASK_ORDINAL_LABEL: &str = "flotilla.work/task_ordinal";       // NEW
+pub const PROCESS_ORDINAL_LABEL: &str = "flotilla.work/process_ordinal"; // NEW
+
+pub const RESERVED_PREFIX: &str = "flotilla.work/";
 ```
 
-(Note the inconsistency with existing `task_workspace` / `repo-key` delimiters — leave as-is for existing labels; new ones follow underscore convention.)
+(Delimiter note: existing labels mix underscores and hyphens — new labels use underscores; existing ones stay as-is.)
+
+### Ordinals drive layout ordering
+
+`TASK_ORDINAL_LABEL` and `PROCESS_ORDINAL_LABEL` carry the task's position in `WorkflowTemplateSpec.tasks` and the process's position in `TaskDefinition.processes`, zero-padded to fixed width so lexicographic sort matches numeric:
+
+- `TASK_ORDINAL_LABEL: "003"` — third task in the workflow template
+- `PROCESS_ORDINAL_LABEL: "001"` — second process in that task
+
+The presentation reconciler sorts by `(task_ordinal, process_ordinal, session_name)`. The `DefaultPolicy` consumes that same sorted list. Both `spec_hash` and visible layout key off author-intent ordering — no dependence on backend list order.
 
 ### `ProcessDefinition` schema change
 
@@ -192,7 +222,7 @@ pub struct ProcessDefinition {
     #[serde(flatten)]
     pub source: ProcessSource,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,   // NEW
+    pub labels: BTreeMap<String, String>,   // NEW — user labels; reserved prefix forbidden
 }
 ```
 
@@ -200,15 +230,17 @@ Optional, defaults empty. No existing templates need to change.
 
 ### Label propagation in `task_workspace` reconciler
 
-Extend the existing `TerminalSession` creation site to stamp:
+Extend the existing `TerminalSession` creation site to stamp (system labels applied LAST so they override any stray user value):
 
-- `CONVOY_LABEL: <TaskWorkspace.spec.convoy_ref>`
-- `TASK_LABEL: <TaskWorkspace.spec.task>`
 - `TASK_WORKSPACE_LABEL: <TaskWorkspace.metadata.name>` *(already present)*
 - `ROLE_LABEL: <ProcessDefinition.role>` *(already present)*
-- Plus all entries from `ProcessDefinition.labels`
+- `CONVOY_LABEL: <TaskWorkspace.spec.convoy_ref>`
+- `TASK_LABEL: <TaskWorkspace.spec.task>`
+- `TASK_ORDINAL_LABEL: <zero-padded task index>`
+- `PROCESS_ORDINAL_LABEL: <zero-padded process index>`
+- Plus all entries from `ProcessDefinition.labels` (applied first, overwritten by system labels above)
 
-A single helper (`build_session_labels` in `flotilla-controllers::reconcilers::task_workspace`) consolidates this so no caller forgets a key.
+A single helper (`build_session_labels` in `flotilla-controllers::reconcilers::task_workspace`) consolidates this so no caller forgets a key and the precedence order is guaranteed.
 
 ## `PresentationPolicy` (code-level)
 
@@ -245,14 +277,14 @@ impl PresentationPolicyRegistry {
 
 ### `DefaultPolicy`
 
-Replicates today's `default_template()` behaviour:
+Replicates today's `default_template()` behaviour over the **sorted** process list (already ordered by the reconciler):
 
-1. Group processes by `role` (first-seen order).
+1. Group processes by `role`, preserving the input order — i.e., ordered by the first appearance of each role in the sorted list.
 2. One pane per role. Multiple processes for the same role → tabs inside the pane (overflow=tab, matching `build_pane_layout`).
 3. First role → main pane; later roles → split right.
 4. Emits `WorkspaceAttachRequest { template_yaml: None, attach_commands: Vec<(role, attach_command)>, working_directory, name }`. `PresentationManager.create_workspace` then walks its existing `resolve_template` → `build_pane_layout` path.
 
-Effect: a single-task convoy with one agent role and one build role renders identically to today's `.flotilla/workspace.yaml` default.
+Because the reconciler sorts by `(task_ordinal, process_ordinal, session_name)` before the policy sees the list, the "first appearance" in step 1 is deterministic and backend-independent. A single-task convoy renders identically to today's `.flotilla/workspace.yaml` default.
 
 ### Unknown policy name
 
@@ -291,7 +323,6 @@ pub struct AppliedPresentation {
 
 pub struct PresentationReconciler<R> {
     runtime: Arc<R>,
-    task_workspaces: TypedResolver<TaskWorkspace>,
     terminal_sessions: TypedResolver<TerminalSession>,
     environments: TypedResolver<Environment>,
     checkouts: TypedResolver<Checkout>,
@@ -300,8 +331,9 @@ pub struct PresentationReconciler<R> {
 }
 
 pub enum PresentationDeps {
-    InSync,
+    InSync,                      // sessions match observed_spec_hash; no action
     Applied(AppliedPresentation),
+    TornDown,                    // sessions empty; tear_down succeeded (or there was nothing to tear down)
     Failed(String),
     UnknownPolicy(String),
 }
@@ -309,19 +341,23 @@ pub enum PresentationDeps {
 
 ### `fetch_dependencies`
 
-1. `terminal_sessions.list_matching_labels(&spec.process_selector)`.
-2. Group sessions by `TASK_WORKSPACE_LABEL`. For each distinct ref, `task_workspaces.get(...)` and keep only Ready ones.
-3. For each surviving session, resolve routing:
+1. `terminal_sessions.list_matching_labels(&spec.process_selector)`. No TaskWorkspace or Convoy read — session existence is the liveness signal (since the task_workspace cascade removes sessions when tasks complete).
+2. For each matched session, resolve routing:
    - `environments.get(&session.spec.env_ref)` → host_ref + docker_container_id
    - `hosts.get(host_ref)` → HostName
-   - `checkouts.get(...)` via the TaskWorkspace's `checkout_ref` → path
-4. Build hop-chain plan per session → resolve to attach command string via `flotilla-core::hop_chain` (same machinery `WorkspaceOrchestrator::resolve_prepared_commands_via_hop_chain` uses today). The `HopChainContext` bundles the SSH config base path, local `HostName`, and environment/terminal resolver construction. Details are implementation-stage concerns; the shape is "given session + env + host + checkout, produce a fully-qualified attach command."
-5. Compute `spec_hash = hash((policy_ref, sorted_session_refs, sorted_attach_commands, sorted_labels))`.
-6. If `status.observed_spec_hash == spec_hash` → `Deps::InSync`.
-7. Else `runtime.apply(PresentationPlan { previous: status_derived, ... }).await`:
-   - `Ok(applied)` → `Deps::Applied(applied)`.
-   - `Err(msg)` if unknown policy → `Deps::UnknownPolicy(name)`.
-   - `Err(msg)` otherwise → `Deps::Failed(msg)`.
+   - `checkouts.get(checkout_ref_from_session_label)` → path
+3. Build hop-chain plan per session → resolve to attach command string via `flotilla-core::hop_chain` (same machinery `WorkspaceOrchestrator::resolve_prepared_commands_via_hop_chain` uses today). The `HopChainContext` bundles the SSH config base path, local `HostName`, and environment/terminal resolver construction.
+4. Sort the resolved process list by `(task_ordinal_label, process_ordinal_label, session_name)` — deterministic regardless of backend list order.
+5. Compute `spec_hash = hash((policy_ref, sorted_process_list))` over the sorted list (role, command, labels).
+6. **If the sorted process list is empty:**
+   - If `status.observed_workspace_ref` is `Some` → `runtime.tear_down(manager, ws_ref)` → `Deps::TornDown`.
+   - Else → `Deps::InSync` (nothing live, nothing to tear down).
+7. **Else:**
+   - If `status.observed_spec_hash == spec_hash` → `Deps::InSync`.
+   - Else `runtime.apply(PresentationPlan { previous: status_derived, ... }).await`:
+     - `Ok(applied)` → `Deps::Applied(applied)`.
+     - `Err(msg)` if unknown policy → `Deps::UnknownPolicy(name)`.
+     - `Err(msg)` otherwise → `Deps::Failed(msg)`.
 
 ### `reconcile`
 
@@ -329,6 +365,7 @@ Pure. Deps → status patch:
 
 - `Deps::InSync` → `None`.
 - `Deps::Applied(a)` → `Some(MarkActive { ... })`.
+- `Deps::TornDown` → `Some(MarkTornDown)`.
 - `Deps::Failed(msg)` → `Some(MarkFailed { message: msg })`.
 - `Deps::UnknownPolicy(name)` → `Some(MarkFailed { message: format!("unknown presentation policy '{name}'") })`.
 
@@ -355,13 +392,12 @@ fn finalizer_name(&self) -> Option<&'static str> { Some("flotilla.work/presentat
 ```rust
 pub fn secondary_watches() -> Vec<Box<dyn SecondaryWatch<Primary = Presentation>>> {
     vec![
-        Box::new(LabelJoinWatch::<TerminalSession, Presentation>  { label_key: CONVOY_LABEL, _marker: PhantomData }),
-        Box::new(LabelJoinWatch::<TaskWorkspace, Presentation>    { label_key: CONVOY_LABEL, _marker: PhantomData }),
+        Box::new(LabelJoinWatch::<TerminalSession, Presentation> { label_key: CONVOY_LABEL, _marker: PhantomData }),
     ]
 }
 ```
 
-`TerminalSession` events fire on membership changes; `TaskWorkspace` events fire on phase transitions. Both route to Presentations carrying the same convoy label.
+One watch. `TerminalSession` appearance, deletion, or label change fires the reconciler. Task completion shows up as session deletion (via the task_workspace cascade) — no separate TaskWorkspace or Convoy watch needed.
 
 ## `PresentationRuntime` Implementation
 
@@ -378,22 +414,30 @@ impl PresentationRuntime for ProviderPresentationRuntime {
     async fn apply(&self, plan: &PresentationPlan) -> Result<AppliedPresentation, String> {
         let policy = self.policies.resolve(&plan.policy)
             .ok_or_else(|| format!("unknown presentation policy '{}'", plan.policy))?;
-        let (manager_name, manager) = self.registry.presentation_managers.preferred_with_desc()
-            .ok_or_else(|| "no presentation manager configured".to_string())?;
 
+        // Delete the old workspace via the manager that CREATED it — not the current preferred.
+        // If the preferred manager changed between apply() calls, a cross-manager replace is correct:
+        // old teardown happens via old manager, new creation via current preferred.
         if let Some(prev) = &plan.previous {
-            // best-effort delete; failure to delete the old workspace shouldn't block re-create
-            let _ = manager.delete_workspace(&prev.workspace_ref).await;
+            if let Some(old_mgr) = self.registry.presentation_managers.get(&prev.presentation_manager) {
+                let _ = old_mgr.delete_workspace(&prev.workspace_ref).await;
+            } else {
+                // Old manager no longer configured. Log; the workspace is effectively leaked on that backend.
+                tracing::warn!(manager = %prev.presentation_manager, ws = %prev.workspace_ref,
+                    "previous presentation manager unavailable; old workspace may be leaked");
+            }
         }
 
+        let (new_manager_name, new_manager) = self.registry.presentation_managers.preferred_with_desc()
+            .ok_or_else(|| "no presentation manager configured".to_string())?;
         let RenderedWorkspace { attach_request } = policy.render(&plan.processes, &PolicyContext {
             name: plan.name.clone(),
             working_directory: plan.working_directory.clone(),
         });
-        let (ws_ref, _) = manager.create_workspace(&attach_request).await?;
+        let (ws_ref, _) = new_manager.create_workspace(&attach_request).await?;
 
         Ok(AppliedPresentation {
-            presentation_manager: manager_name.to_string(),
+            presentation_manager: new_manager_name.to_string(),
             workspace_ref: ws_ref,
             spec_hash: plan.spec_hash.clone(),
         })
@@ -407,7 +451,7 @@ impl PresentationRuntime for ProviderPresentationRuntime {
 }
 ```
 
-Best-effort delete for the previous workspace means a partial failure (delete ok, create fails) leaves the Presentation in `Reconfiguring` with no live workspace — next reconcile retries with `previous: None` and eventually converges. Documented as an accepted v1 limitation.
+Best-effort delete for the previous workspace means a partial failure (delete ok, create fails) leaves the Presentation without a live workspace but with the old `observed_*` fields cleared; next reconcile sees no observed workspace and attempts apply with `previous: None`. Documented as an accepted v1 limitation.
 
 ## Convoy Reconciler Extension
 
@@ -416,10 +460,11 @@ pub enum Actuation {
     // ... existing variants
     CreatePresentation { meta: InputMeta, spec: PresentationSpec },
     DeletePresentation { name: String },
+    DeleteTaskWorkspace { name: String },          // NEW — per-task lifecycle tie-in
 }
 ```
 
-In the existing convoy reconcile function:
+### Presentation creation/deletion
 
 - Convoy transitions to `Active` with no existing Presentation (checked via label-indexed read or one-shot list) → emit `CreatePresentation` actuation with:
   - `meta.name = format!("{}-presentation", convoy.metadata.name)` (or similar — single deterministic derivation)
@@ -431,7 +476,27 @@ In the existing convoy reconcile function:
   - `spec.process_selector = { CONVOY_LABEL: convoy.metadata.name }`
 - Convoy transitions to `Completed` / `Failed` / `Cancelled` → emit `DeletePresentation { name }`.
 
-This is the single swap point for future explicit-trigger creation policies.
+The presentation creation site is the single swap point for future explicit-trigger creation policies.
+
+### Per-task TaskWorkspace lifecycle (stage 4a semantics change)
+
+When the convoy reconciler observes a task transition to `Completed`, `Failed`, or `Cancelled`, it emits `DeleteTaskWorkspace { name }` for that task's TaskWorkspace.
+
+### TaskWorkspace finalizer
+
+Today `TaskWorkspaceReconciler::run_finalizer` is a no-op (`finalizer_name` returns `None`). Stage 5 adds:
+
+- `finalizer_name` returns `Some("flotilla.work/task-workspace-teardown")`.
+- `run_finalizer` deletes:
+  - All `TerminalSession`s labelled `TASK_WORKSPACE_LABEL == name`
+  - The referenced `Checkout` (if `status.checkout_ref` is set)
+  - The referenced `Environment` (if `status.environment_ref` is set)
+
+Stage 4a's per-task placement model means each TaskWorkspace has its own Environment/Checkout/TerminalSessions, so blanket deletion is safe. The shared-environment placement variant (deferred from stage 4a) will need owner-list / reference-count semantics when it lands; stage 5's cleanup is explicitly scoped to per-task placement.
+
+The disappearing sessions fire the presentation reconciler's selector watch, which recomputes membership and either replaces the workspace (new set of active-task sessions) or tears it down (no active tasks left).
+
+This revises the stage 4a deferred item "Auto-cleanup of stopped sessions on terminal task transitions" — it's now partially resolved. Cleanup of sessions whose *inner command* crashed while the task is still Running remains deferred (that requires process-restart semantics).
 
 ## Testing
 
@@ -442,10 +507,15 @@ This is the single swap point for future explicit-trigger creation policies.
 
 ### Reconciler tests (in-memory backend)
 
-- Presentation with no matching sessions → `Pending`, no `runtime.apply` calls.
-- Presentation with matching sessions, all TaskWorkspaces Ready → `apply` called once, status `Active` with recorded hash.
-- Second reconcile, unchanged world → no `apply` call, status unchanged.
-- TaskWorkspace transitions Ready→Completed → next reconcile recomputes, new hash, `apply` called with `previous` populated, status updates.
+- Presentation with no matching sessions, no observed workspace → `Deps::InSync`, stays `Pending`, no runtime calls.
+- Presentation with matching sessions → `apply` called once, status → `Active` with recorded hash, manager, ws_ref.
+- Second reconcile, unchanged world → `Deps::InSync`, no runtime call, status unchanged.
+- Session deleted (task completed → cascade) leaving some remaining → next reconcile recomputes, new hash, `apply` called with `previous` populated from current status, status updates.
+- **All sessions deleted, observed workspace present** → `tear_down` called with observed manager + ws_ref, status → `TornDown` with `observed_*` cleared.
+- From `TornDown`, sessions reappear → `apply` called with `previous: None`, status → `Active`.
+- **Cross-manager replace**: simulate `prev.presentation_manager` differs from current preferred → `delete_workspace` goes to prev's manager, `create_workspace` goes to current preferred.
+- **Previous manager no longer configured**: `apply` logs a warning, proceeds with create via current preferred (old workspace leaked on absent backend — asserted via recorded call list).
+- **Deterministic ordering**: two sessions with `(task_ordinal=0, process_ordinal=1)` and `(task_ordinal=0, process_ordinal=0)` — regardless of list order, `apply` receives them sorted by process_ordinal.
 - Unknown policy → `Failed`, no runtime call.
 - Finalizer on Presentation delete → `tear_down` called with recorded manager + ws_ref.
 
@@ -454,10 +524,15 @@ This is the single swap point for future explicit-trigger creation policies.
 - Convoy → Active → `CreatePresentation` actuation emitted.
 - Convoy → Active twice (re-reconcile) → only one Presentation created (idempotent).
 - Convoy → Completed → `DeletePresentation { name }` emitted.
+- **Per-task lifecycle**: task transitions to Completed → `DeleteTaskWorkspace { name }` emitted for that task's workspace; sibling tasks still Running do not have their workspaces deleted.
 
 ### Label propagation tests
 
-Extension to existing `task_workspace_reconciler.rs`: created TerminalSessions carry `CONVOY_LABEL`, `TASK_LABEL`, `TASK_WORKSPACE_LABEL`, `ROLE_LABEL`, plus propagated `ProcessDefinition.labels`.
+Extension to existing `task_workspace_reconciler.rs`: created TerminalSessions carry `CONVOY_LABEL`, `TASK_LABEL`, `TASK_WORKSPACE_LABEL`, `ROLE_LABEL`, `TASK_ORDINAL_LABEL`, `PROCESS_ORDINAL_LABEL`, plus propagated `ProcessDefinition.labels`. A user label that collides with a reserved key gets overwritten by the system value (runtime guard).
+
+### Validation tests
+
+`WorkflowTemplate::validate` rejects `ProcessDefinition.labels` with a key starting with `flotilla.work/` — new `ReservedLabelKey` variant in `ValidationError`.
 
 ### Integration (optional, non-blocking)
 
@@ -467,11 +542,24 @@ Extension to existing `task_workspace_reconciler.rs`: created TerminalSessions c
 
 Deferred. The new `delete_workspace` method gets a focused replay-style test per implementation (cmux, tmux, zellij). Existing `create_workspace` replay coverage is unchanged.
 
+## Scope Summary
+
+Stage 5 ships:
+
+1. Rename: `WorkspaceManager` → `PresentationManager` (trait + module + config key + registry field + impls).
+2. `delete_workspace` method on `PresentationManager` trait + impl per multiplexer.
+3. `Presentation` resource + reconciler + `PresentationRuntime` trait + `ProviderPresentationRuntime` impl + `PresentationPolicyRegistry` with `DefaultPolicy`.
+4. `labels: BTreeMap<String, String>` on `ProcessDefinition`; reserved `flotilla.work/` prefix with `WorkflowTemplate::validate` enforcement.
+5. `build_session_labels` helper in the task_workspace reconciler; `TASK_ORDINAL_LABEL` / `PROCESS_ORDINAL_LABEL` + existing labels.
+6. Convoy reconciler extensions: `CreatePresentation` / `DeletePresentation` / `DeleteTaskWorkspace` actuations.
+7. TaskWorkspace finalizer: deletes TerminalSessions / Environment / Checkout for its task.
+8. Test coverage above.
+
 ## Out of Scope
 
 - **Reconfigure-in-place** (stage boundary: PresentationPolicy variant + new trait methods).
 - **`PresentationPolicy` as a CRD** (reify when Yeoman / multi-policy demand arrives).
-- **Multiple presentation managers per Presentation** (registry still returns one preferred).
+- **Multiple presentation managers per Presentation** (registry still returns one preferred; cross-manager replace during `apply` works but a single Presentation doesn't span multiple managers simultaneously).
 - **Convoy TUI pane** (stage 6).
 - **TUI convoy view** (stage 6).
 - **AttachableSet removal** (stage 7).
@@ -479,10 +567,13 @@ Deferred. The new `delete_workspace` method gets a focused replay-style test per
 - **Artifact resource** (future — selector shape extends naturally when it lands).
 - **User-facing terminology changes** (TUI still says "workspace").
 - **Explicit presentation-trigger UX** (auto-present-on-Active stays; single swap point in convoy reconciler).
+- **Vessel lifecycle beyond existence** — the option-2 model ties TaskWorkspace existence to "task is active and presentable." Future workflows that bounce between states (e.g., dev → GPU runner → iOS tester) will want an independent "presentable" bit distinct from existence, so a task can be alive but hidden and later re-shown without losing state. Not addressed here.
 
 ## Open Risks
 
-1. **Visible gap during replace.** Task transitions cause a brief workspace disappearance. In practice stage 4a agent processes can't run end-to-end yet, so only hand-written multi-task tool workflows hit this during testing.
-2. **Silent selector breakage.** A missed well-known label on a TerminalSession silently excludes it from the Presentation. Mitigation: `flotilla-resources::labels` constants + `build_session_labels` helper used uniformly by the task_workspace reconciler.
-3. **Non-atomic replace.** Delete succeeds then create fails → `Reconfiguring` with no live workspace. Next reconcile retries with `previous: None`. Acceptable for v1, documented.
+1. **Visible gap during replace.** Task transitions cause a brief workspace disappearance. For single-task convoys (all stage 4a can run end-to-end), the workspace is only replaced on task completion anyway, so the gap is invisible. Multi-task tool workflows will see it; acceptable for v1.
+2. **Passthrough + multi-task is incompatible.** Passthrough terminal pools run processes inside the attached workspace; replace-on-change kills them on every task transition. Fine for single-task convoys. Multi-task passthrough compatibility arrives with reconfigure-in-place (no workspace teardown during transitions).
+3. **Silent selector breakage.** A missed well-known label on a TerminalSession silently excludes it from the Presentation. Mitigation: `flotilla-resources::labels` constants + `build_session_labels` helper used uniformly by the task_workspace reconciler.
+4. **Non-atomic replace.** Delete succeeds then create fails → Presentation has no live workspace but `observed_*` are cleared. Next reconcile sees no observed workspace and retries `apply` with `previous: None`. Acceptable for v1.
+5. **Cross-manager replace in flight.** If a user changes the preferred presentation manager mid-flight, the next `apply` tears down the old via the old manager and creates new via current preferred — correct but briefly disorienting. If the old manager was removed from config entirely, the old workspace is leaked on that backend (logged). Rare, and no-backcompat phase tolerates it.
 
