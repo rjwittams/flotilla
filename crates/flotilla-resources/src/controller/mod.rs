@@ -218,6 +218,8 @@ pub struct ControllerLoop<R: Reconciler> {
 }
 
 impl<R: Reconciler> ControllerLoop<R> {
+    const WATCH_RESTART_BACKOFF: Duration = Duration::from_millis(100);
+
     async fn apply_actuation(backend: &ResourceBackend, namespace: &str, actuation: Actuation) -> Result<(), ResourceError> {
         match actuation {
             Actuation::CreateEnvironment { meta, spec } => {
@@ -266,8 +268,12 @@ impl<R: Reconciler> ControllerLoop<R> {
         primary: TypedResolver<R::Resource>,
         sender: mpsc::Sender<String>,
         watch_exited: mpsc::UnboundedSender<WatchExited>,
+        restart_backoff: Option<Duration>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
+            if let Some(backoff) = restart_backoff {
+                tokio::time::sleep(backoff).await;
+            }
             let result = async {
                 let listed = primary.list().await?;
                 for object in &listed.items {
@@ -303,8 +309,12 @@ impl<R: Reconciler> ControllerLoop<R> {
         namespace: String,
         sender: mpsc::Sender<String>,
         watch_exited: mpsc::UnboundedSender<WatchExited>,
+        restart_backoff: Option<Duration>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
+            if let Some(backoff) = restart_backoff {
+                tokio::time::sleep(backoff).await;
+            }
             let result = watch.spawn(backend, namespace, sender).await;
             let _ = watch_exited.send(WatchExited::Secondary { index, result });
         })
@@ -328,7 +338,7 @@ impl<R: Reconciler> ControllerLoop<R> {
         let ControllerLoop { primary, secondaries, reconciler, resync_interval, backend } = self;
         let (sender, mut receiver) = mpsc::channel::<String>(128);
         let (watch_exited_tx, mut watch_exited_rx) = mpsc::unbounded_channel();
-        let _primary_watch = Self::spawn_primary_watch(primary.clone(), sender.clone(), watch_exited_tx.clone());
+        let _primary_watch = Self::spawn_primary_watch(primary.clone(), sender.clone(), watch_exited_tx.clone(), None);
         let secondary_templates = secondaries;
         let _secondary_watches: Vec<JoinHandle<()>> = secondary_templates
             .iter()
@@ -341,6 +351,7 @@ impl<R: Reconciler> ControllerLoop<R> {
                     primary.namespace.clone(),
                     sender.clone(),
                     watch_exited_tx.clone(),
+                    None,
                 )
             })
             .collect();
@@ -373,6 +384,8 @@ impl<R: Reconciler> ControllerLoop<R> {
                                 .collect(),
                             deletion_timestamp: object.metadata.deletion_timestamp,
                         };
+                        // A racing writer may win between get() and update(); rely on the resulting
+                        // watch event to requeue the object and retry finalizer attachment.
                         primary.update(&meta, &object.metadata.resource_version, &object.spec).await?;
                         continue;
                     }
@@ -431,7 +444,12 @@ impl<R: Reconciler> ControllerLoop<R> {
                     match exited {
                         WatchExited::Primary(result) => {
                             result?;
-                            let _respawn = Self::spawn_primary_watch(primary.clone(), sender.clone(), watch_exited_tx.clone());
+                            let _respawn = Self::spawn_primary_watch(
+                                primary.clone(),
+                                sender.clone(),
+                                watch_exited_tx.clone(),
+                                Some(Self::WATCH_RESTART_BACKOFF),
+                            );
                         }
                         WatchExited::Secondary { index, result } => {
                             result?;
@@ -442,6 +460,7 @@ impl<R: Reconciler> ControllerLoop<R> {
                                 primary.namespace.clone(),
                                 sender.clone(),
                                 watch_exited_tx.clone(),
+                                Some(Self::WATCH_RESTART_BACKOFF),
                             );
                         }
                     }

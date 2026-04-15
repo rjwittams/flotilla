@@ -483,11 +483,10 @@ async fn controller_loop_adds_finalizer_to_managed_resources() {
     loop_task.abort();
 }
 
-#[tokio::test]
-async fn secondary_watch_is_restarted_after_clean_exit() {
+#[tokio::test(start_paused = true)]
+async fn secondary_watch_restart_is_backed_off() {
     let backend = ResourceBackend::InMemory(InMemoryBackend::default());
     let primaries = backend.clone().using::<PrimaryResource>("flotilla");
-    primaries.create(&primary_meta("alpha"), &PrimarySpec { value: "one".to_string() }).await.expect("primary create should succeed");
 
     let spawns = Arc::new(AtomicUsize::new(0));
     let loop_task = tokio::spawn(
@@ -501,6 +500,14 @@ async fn secondary_watch_is_restarted_after_clean_exit() {
         .run(),
     );
 
+    tokio::task::yield_now().await;
+    assert_eq!(spawns.load(Ordering::SeqCst), 1, "watch should start immediately");
+
+    tokio::time::advance(Duration::from_millis(99)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(spawns.load(Ordering::SeqCst), 1, "watch should not restart before the backoff elapses");
+
+    tokio::time::advance(Duration::from_millis(1)).await;
     timeout(Duration::from_secs(1), async {
         loop {
             if spawns.load(Ordering::SeqCst) >= 2 {
@@ -510,7 +517,7 @@ async fn secondary_watch_is_restarted_after_clean_exit() {
         }
     })
     .await
-    .expect("secondary watch should be restarted after exiting");
+    .expect("secondary watch should restart once the backoff elapses");
 
     loop_task.abort();
 }
