@@ -2,21 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    resource::{ApiPaths, Resource},
-    status_patch::NoStatusPatch,
-};
+use crate::{resource::define_resource, status_patch::NoStatusPatch};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WorkflowTemplate;
-
-impl Resource for WorkflowTemplate {
-    type Spec = WorkflowTemplateSpec;
-    type Status = ();
-    type StatusPatch = NoStatusPatch;
-
-    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "workflowtemplates", kind: "WorkflowTemplate" };
-}
+define_resource!(WorkflowTemplate, "workflowtemplates", WorkflowTemplateSpec, (), NoStatusPatch);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
 pub struct WorkflowTemplateSpec {

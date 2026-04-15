@@ -1,20 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    resource::{ApiPaths, Resource},
-    status_patch::StatusPatch,
-};
+use crate::{resource::define_resource, status_patch::StatusPatch};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Checkout;
-
-impl Resource for Checkout {
-    type Spec = CheckoutSpec;
-    type Status = CheckoutStatus;
-    type StatusPatch = CheckoutStatusPatch;
-
-    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "checkouts", kind: "Checkout" };
-}
+define_resource!(Checkout, "checkouts", CheckoutSpec, CheckoutStatus, CheckoutStatusPatch);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutSpec {

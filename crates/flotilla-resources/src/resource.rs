@@ -5,6 +5,28 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::status_patch::StatusPatch;
 
+macro_rules! define_resource {
+    ($name:ident, $plural:literal, $spec:ty, $status:ty, $patch:ty) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct $name;
+
+        impl $crate::resource::Resource for $name {
+            type Spec = $spec;
+            type Status = $status;
+            type StatusPatch = $patch;
+
+            const API_PATHS: $crate::resource::ApiPaths = $crate::resource::ApiPaths {
+                group: "flotilla.work",
+                version: "v1",
+                plural: $plural,
+                kind: stringify!($name),
+            };
+        }
+    };
+}
+
+pub(crate) use define_resource;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApiPaths {
     pub group: &'static str,

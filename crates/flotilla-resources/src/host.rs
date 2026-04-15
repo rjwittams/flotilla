@@ -3,21 +3,9 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    resource::{ApiPaths, Resource},
-    status_patch::StatusPatch,
-};
+use crate::{resource::define_resource, status_patch::StatusPatch};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Host;
-
-impl Resource for Host {
-    type Spec = HostSpec;
-    type Status = HostStatus;
-    type StatusPatch = HostStatusPatch;
-
-    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "hosts", kind: "Host" };
-}
+define_resource!(Host, "hosts", HostSpec, HostStatus, HostStatusPatch);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostSpec {}

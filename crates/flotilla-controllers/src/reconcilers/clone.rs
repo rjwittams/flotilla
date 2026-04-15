@@ -76,7 +76,7 @@ where
             Err(err) => Some(CloneStatusPatch::MarkFailed { message: err }),
         };
 
-        ReconcileOutcome { patch, actuations: Vec::new(), events: Vec::new(), requeue_after: None }
+        ReconcileOutcome::new(patch)
     }
 
     async fn run_finalizer(&self, _obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {

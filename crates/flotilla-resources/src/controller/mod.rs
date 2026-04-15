@@ -55,6 +55,16 @@ pub struct ReconcileOutcome<T: Resource> {
     pub requeue_after: Option<Duration>,
 }
 
+impl<T: Resource> ReconcileOutcome<T> {
+    pub fn new(patch: Option<T::StatusPatch>) -> Self {
+        Self { patch, actuations: Vec::new(), events: Vec::new(), requeue_after: None }
+    }
+
+    pub fn with_actuations(patch: Option<T::StatusPatch>, actuations: Vec<Actuation>) -> Self {
+        Self { patch, actuations, events: Vec::new(), requeue_after: None }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Actuation {
     CreateEnvironment { meta: InputMeta, spec: EnvironmentSpec },

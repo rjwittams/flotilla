@@ -2,21 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    resource::{ApiPaths, Resource},
-    status_patch::NoStatusPatch,
-};
+use crate::{resource::define_resource, status_patch::NoStatusPatch};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlacementPolicy;
-
-impl Resource for PlacementPolicy {
-    type Spec = PlacementPolicySpec;
-    type Status = ();
-    type StatusPatch = NoStatusPatch;
-
-    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "placementpolicies", kind: "PlacementPolicy" };
-}
+define_resource!(PlacementPolicy, "placementpolicies", PlacementPolicySpec, (), NoStatusPatch);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bon::Builder)]
 pub struct PlacementPolicySpec {

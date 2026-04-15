@@ -8,6 +8,15 @@ use crate::{
     watch::{ResourceList, WatchStart, WatchStream},
 };
 
+macro_rules! dispatch_backend {
+    ($self:expr, $method:ident $(, $args:expr)*) => {
+        match &$self.backend {
+            ResourceBackend::InMemory(backend) => backend.$method::<T>(&$self.namespace $(, $args)*).await,
+            ResourceBackend::Http(backend) => backend.$method::<T>(&$self.namespace $(, $args)*).await,
+        }
+    };
+}
+
 #[derive(Debug, Clone)]
 pub enum ResourceBackend {
     InMemory(InMemoryBackend),
@@ -35,58 +44,34 @@ impl<T: Resource> Clone for TypedResolver<T> {
 
 impl<T: Resource> TypedResolver<T> {
     pub async fn get(&self, name: &str) -> Result<ResourceObject<T>, ResourceError> {
-        match &self.backend {
-            ResourceBackend::InMemory(backend) => backend.get_typed::<T>(&self.namespace, name).await,
-            ResourceBackend::Http(backend) => backend.get_typed::<T>(&self.namespace, name).await,
-        }
+        dispatch_backend!(self, get_typed, name)
     }
 
     pub async fn list(&self) -> Result<ResourceList<T>, ResourceError> {
-        match &self.backend {
-            ResourceBackend::InMemory(backend) => backend.list_typed::<T>(&self.namespace).await,
-            ResourceBackend::Http(backend) => backend.list_typed::<T>(&self.namespace).await,
-        }
+        dispatch_backend!(self, list_typed)
     }
 
     pub async fn list_matching_labels(&self, required: &BTreeMap<String, String>) -> Result<ResourceList<T>, ResourceError> {
-        match &self.backend {
-            ResourceBackend::InMemory(backend) => backend.list_typed_matching_labels::<T>(&self.namespace, required).await,
-            ResourceBackend::Http(backend) => backend.list_typed_matching_labels::<T>(&self.namespace, required).await,
-        }
+        dispatch_backend!(self, list_typed_matching_labels, required)
     }
 
     pub async fn create(&self, meta: &InputMeta, spec: &T::Spec) -> Result<ResourceObject<T>, ResourceError> {
-        match &self.backend {
-            ResourceBackend::InMemory(backend) => backend.create_typed::<T>(&self.namespace, meta, spec).await,
-            ResourceBackend::Http(backend) => backend.create_typed::<T>(&self.namespace, meta, spec).await,
-        }
+        dispatch_backend!(self, create_typed, meta, spec)
     }
 
     pub async fn update(&self, meta: &InputMeta, resource_version: &str, spec: &T::Spec) -> Result<ResourceObject<T>, ResourceError> {
-        match &self.backend {
-            ResourceBackend::InMemory(backend) => backend.update_typed::<T>(&self.namespace, meta, resource_version, spec).await,
-            ResourceBackend::Http(backend) => backend.update_typed::<T>(&self.namespace, meta, resource_version, spec).await,
-        }
+        dispatch_backend!(self, update_typed, meta, resource_version, spec)
     }
 
     pub async fn update_status(&self, name: &str, resource_version: &str, status: &T::Status) -> Result<ResourceObject<T>, ResourceError> {
-        match &self.backend {
-            ResourceBackend::InMemory(backend) => backend.update_status_typed::<T>(&self.namespace, name, resource_version, status).await,
-            ResourceBackend::Http(backend) => backend.update_status_typed::<T>(&self.namespace, name, resource_version, status).await,
-        }
+        dispatch_backend!(self, update_status_typed, name, resource_version, status)
     }
 
     pub async fn delete(&self, name: &str) -> Result<(), ResourceError> {
-        match &self.backend {
-            ResourceBackend::InMemory(backend) => backend.delete_typed::<T>(&self.namespace, name).await,
-            ResourceBackend::Http(backend) => backend.delete_typed::<T>(&self.namespace, name).await,
-        }
+        dispatch_backend!(self, delete_typed, name)
     }
 
     pub async fn watch(&self, start: WatchStart) -> Result<WatchStream<T>, ResourceError> {
-        match &self.backend {
-            ResourceBackend::InMemory(backend) => backend.watch_typed::<T>(&self.namespace, start).await,
-            ResourceBackend::Http(backend) => backend.watch_typed::<T>(&self.namespace, start).await,
-        }
+        dispatch_backend!(self, watch_typed, start)
     }
 }

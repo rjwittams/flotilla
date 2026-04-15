@@ -68,7 +68,7 @@ impl Reconciler for RecordingReconciler {
         _now: chrono::DateTime<chrono::Utc>,
     ) -> ReconcileOutcome<Self::Resource> {
         self.reconciled.lock().expect("reconciled lock").push(obj.metadata.name.clone());
-        ReconcileOutcome { patch: None, actuations: Vec::new(), events: Vec::new(), requeue_after: None }
+        ReconcileOutcome::new(None)
     }
 
     async fn run_finalizer(&self, _obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {
@@ -99,7 +99,7 @@ impl Reconciler for FinalizingReconciler {
         _deps: &Self::Dependencies,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> ReconcileOutcome<Self::Resource> {
-        ReconcileOutcome { patch: None, actuations: Vec::new(), events: Vec::new(), requeue_after: None }
+        ReconcileOutcome::new(None)
     }
 
     async fn run_finalizer(&self, obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {

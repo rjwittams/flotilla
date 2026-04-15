@@ -1,20 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    resource::{ApiPaths, Resource},
-    status_patch::StatusPatch,
-};
+use crate::{resource::define_resource, status_patch::StatusPatch};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Clone;
-
-impl Resource for Clone {
-    type Spec = CloneSpec;
-    type Status = CloneStatus;
-    type StatusPatch = CloneStatusPatch;
-
-    const API_PATHS: ApiPaths = ApiPaths { group: "flotilla.work", version: "v1", plural: "clones", kind: "Clone" };
-}
+define_resource!(Clone, "clones", CloneSpec, CloneStatus, CloneStatusPatch);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloneSpec {
