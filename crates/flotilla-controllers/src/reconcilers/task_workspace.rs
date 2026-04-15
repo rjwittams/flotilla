@@ -3,10 +3,10 @@ use std::{collections::BTreeMap, marker::PhantomData};
 use chrono::{DateTime, Utc};
 use flotilla_resources::{
     canonicalize_repo_url, clone_key,
-    controller::{Actuation, ControllerObjectMeta, LabelJoinWatch, LabelMappedWatch, ReconcileOutcome, Reconciler, SecondaryWatch},
+    controller::{Actuation, LabelJoinWatch, LabelMappedWatch, ReconcileOutcome, Reconciler, SecondaryWatch},
     descriptive_repo_slug, repo_key, Checkout, CheckoutPhase, CheckoutSpec, CheckoutWorktreeSpec, Clone, ClonePhase, CloneSpec, Convoy,
     DockerCheckoutStrategy, DockerEnvironmentSpec, Environment, EnvironmentMount, EnvironmentMountMode, EnvironmentPhase, EnvironmentSpec,
-    FreshCloneCheckoutSpec, HostDirectPlacementPolicyCheckout, HostDirectPlacementPolicySpec, OwnerReference, PlacementPolicy,
+    FreshCloneCheckoutSpec, HostDirectPlacementPolicyCheckout, HostDirectPlacementPolicySpec, InputMeta, OwnerReference, PlacementPolicy,
     PlacementPolicySpec, ProcessSource, Resource, ResourceBackend, ResourceError, ResourceObject, TaskWorkspace, TaskWorkspacePhase,
     TaskWorkspaceStatusPatch, TerminalSession, TerminalSessionPhase, TerminalSessionSpec, TypedResolver,
 };
@@ -193,7 +193,7 @@ impl Reconciler for TaskWorkspaceReconciler {
                 }
                 Err(ResourceError::NotFound { .. }) => {
                     actuations.push(Actuation::CreateClone {
-                        meta: ControllerObjectMeta::builder()
+                        meta: InputMeta::builder()
                             .name(clone_name.clone())
                             .labels(BTreeMap::from([
                                 (REPO_KEY_LABEL.to_string(), repo_key.clone()),
@@ -530,13 +530,9 @@ fn checkout_target_path(repo_default_dir: &str, repo_slug: &str, task_workspace_
     format!("{}/{}.{}", repo_default_dir.trim_end_matches('/'), repo_slug, task_workspace_name)
 }
 
-fn owned_child_meta(
-    name: &str,
-    workspace: &ResourceObject<TaskWorkspace>,
-    mut extra_labels: BTreeMap<String, String>,
-) -> ControllerObjectMeta {
+fn owned_child_meta(name: &str, workspace: &ResourceObject<TaskWorkspace>, mut extra_labels: BTreeMap<String, String>) -> InputMeta {
     extra_labels.insert(TASK_WORKSPACE_LABEL.to_string(), workspace.metadata.name.clone());
-    ControllerObjectMeta::builder()
+    InputMeta::builder()
         .name(name.to_string())
         .labels(extra_labels)
         .owner_references(vec![OwnerReference {

@@ -49,6 +49,26 @@ pub struct InputMeta {
     pub deletion_timestamp: Option<DateTime<Utc>>,
 }
 
+impl InputMeta {
+    pub fn with_finalizers(mut self, finalizers: Vec<String>) -> Self {
+        self.finalizers = finalizers;
+        self
+    }
+
+    pub fn with_added_finalizer(mut self, finalizer: impl Into<String>) -> Self {
+        let finalizer = finalizer.into();
+        if self.finalizers.iter().all(|existing| existing != &finalizer) {
+            self.finalizers.push(finalizer);
+        }
+        self
+    }
+
+    pub fn without_finalizer(mut self, finalizer: &str) -> Self {
+        self.finalizers.retain(|existing| existing != finalizer);
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMeta {
     pub name: String,
@@ -75,4 +95,17 @@ pub struct ResourceObject<T: Resource> {
     pub spec: T::Spec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<T::Status>,
+}
+
+impl From<&ObjectMeta> for InputMeta {
+    fn from(value: &ObjectMeta) -> Self {
+        Self {
+            name: value.name.clone(),
+            labels: value.labels.clone(),
+            annotations: value.annotations.clone(),
+            owner_references: value.owner_references.clone(),
+            finalizers: value.finalizers.clone(),
+            deletion_timestamp: value.deletion_timestamp,
+        }
+    }
 }

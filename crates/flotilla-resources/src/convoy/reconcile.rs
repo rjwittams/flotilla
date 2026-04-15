@@ -8,9 +8,7 @@ use super::{
 };
 use crate::{
     canonicalize_repo_url,
-    controller::{
-        Actuation, ControllerObjectMeta, LabelMappedWatch, ReconcileOutcome as ControllerReconcileOutcome, Reconciler, SecondaryWatch,
-    },
+    controller::{Actuation, LabelMappedWatch, ReconcileOutcome as ControllerReconcileOutcome, Reconciler, SecondaryWatch},
     resource::ResourceObject,
     task_workspace::{TaskWorkspace, TaskWorkspacePhase},
     workflow_template::{validate, ValidationError, WorkflowTemplate},
@@ -448,7 +446,7 @@ fn create_task_workspace_outcome(convoy: &ResourceObject<Convoy>, task: &str, no
     Some(InternalReconcileOutcome {
         patch: None,
         actuations: vec![Actuation::CreateTaskWorkspace {
-            meta: ControllerObjectMeta::builder()
+            meta: crate::InputMeta::builder()
                 .name(task_workspace_name(&convoy.metadata.name, task))
                 .labels(BTreeMap::from([
                     (CONVOY_LABEL.to_string(), convoy.metadata.name.clone()),
