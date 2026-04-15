@@ -495,11 +495,44 @@ pub struct PlacementPolicySpec {
 }
 ```
 
-- [ ] **Step 2: Find and migrate one call site**
+- [ ] **Step 2: Migrate the two production call sites in `runtime.rs`**
 
-Run: `rg -n 'PlacementPolicySpec \{' crates`
+The real production construction sites live in `crates/flotilla-daemon/src/runtime.rs` in the `ensure_default_policies` function:
 
-Pick the most representative call site (likely in `crates/flotilla-daemon/src/runtime.rs` — the `register_startup_resources` path). Convert from struct literal to `PlacementPolicySpec::builder()...build()`.
+- `runtime.rs:350` — the host-direct policy creation
+- `runtime.rs:366` — the docker-per-task policy creation
+
+Convert each from struct literal to `PlacementPolicySpec::builder()...build()`. Example for the host-direct site:
+
+Before:
+```rust
+.create(&empty_meta(&host_direct_name), &PlacementPolicySpec {
+    pool: profile.host_direct_pool.clone(),
+    host_direct: Some(HostDirectPlacementPolicySpec {
+        host_ref: profile.host_id.clone(),
+        checkout: HostDirectPlacementPolicyCheckout::Worktree,
+    }),
+    docker_per_task: None,
+})
+```
+
+After:
+```rust
+.create(
+    &empty_meta(&host_direct_name),
+    &PlacementPolicySpec::builder()
+        .pool(profile.host_direct_pool.clone())
+        .host_direct(HostDirectPlacementPolicySpec {
+            host_ref: profile.host_id.clone(),
+            checkout: HostDirectPlacementPolicyCheckout::Worktree,
+        })
+        .build(),
+)
+```
+
+Apply the same pattern to the docker-per-task site at line 366. Note `host_direct` / `docker_per_task` are `Option<_>`; bon exposes them as optional setters — only set the variant that applies and omit the `None`s.
+
+Leave `HostDirectPlacementPolicySpec` and `DockerPerTaskPlacementPolicySpec` as struct literals for now. They aren't on the Phase 1 derive list.
 
 - [ ] **Step 3: Run the tests**
 
@@ -773,7 +806,7 @@ At the end of execution, verify these spec clauses are met:
 - Phase 0: CLAUDE.md builder guidance added — Task 2
 - Phase 1: `#[derive(bon::Builder)]` on `InputMeta`, `ControllerObjectMeta`, `WorkflowTemplateSpec`, `TaskDefinition`, `ProcessDefinition`, `PlacementPolicySpec` — Tasks 3, 6, 7, 9
 - Phase 1: at least five inline `InputMeta { ... }` call sites converted — Tasks 4, 5 (2 + 3)
-- Phase 1: at least one production call site migrated per deep spec type — Tasks 6 (two sites), 7 (one site), 8 (TaskDefinition + ProcessDefinition), 9 (one site)
+- Phase 1: at least one call site migrated per deep spec type — Tasks 6 (two `ControllerObjectMeta` production sites), 7 (one `WorkflowTemplateSpec` test-fixture site), 8 (`TaskDefinition` + `ProcessDefinition` test-fixture sites), 9 (two `PlacementPolicySpec` production sites). `WorkflowTemplateSpec`, `TaskDefinition`, and `ProcessDefinition` have no non-test construction sites in `src/` because they are deserialised from YAML in production — the spec's acceptance note acknowledges this explicitly.
 - Task E: `TestGitRepo` helper with `init`, `with_initial_commit`, `with_origin`, `head`, `path` — Task 10
 - Task E: no runtime test contains the full raw git init/config/add/commit sequence inline — Task 11
 - Quantitative metrics captured — Tasks 0 and 12

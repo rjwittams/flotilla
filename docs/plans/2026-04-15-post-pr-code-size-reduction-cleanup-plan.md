@@ -70,7 +70,7 @@ Derive `bon::Builder` on the types that drive most of the verbose construction i
 - `bon` added to the workspace
 - CLAUDE.md builder guidance added
 - at least five inline `InputMeta { ... }` call sites converted to builder calls
-- deep spec types derive `Builder` and at least one production call site per type is migrated
+- deep spec types derive `Builder` and at least one call site per type is migrated — prefer production sites where they exist (`PlacementPolicySpec` has two in `flotilla-daemon/src/runtime.rs::ensure_default_policies`; `WorkflowTemplateSpec`, `TaskDefinition`, and `ProcessDefinition` have no non-test construction sites because they are deserialised from YAML in production, so their migration targets are inevitably test fixtures)
 - the remaining phases rely on these derives instead of hand-written constructors
 
 ## Phase 2: Independent test wins

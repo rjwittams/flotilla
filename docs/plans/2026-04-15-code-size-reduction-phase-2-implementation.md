@@ -211,39 +211,61 @@ git commit -m "test: add seeded-resource creation builders"
 
 ---
 
-## Task 5: Migrate three high-duplication test files to the new helpers
+## Task 5: Migrate all five spec-named target files to the new helpers
 
-The spec's acceptance criteria require removing duplicated local helpers from at least three test files.
+The spec's Task A lists five primary target files. The acceptance criterion requires at least three migrated; this plan covers all five so the spec's file list is fully honoured.
 
-Pick the three files identified in Task 1 that had the most local helpers. Candidates (confirmed by Task 1):
+Migration targets (in order of expected payoff):
 
-- `crates/flotilla-controllers/tests/task_workspace_reconciler.rs`
-- `crates/flotilla-controllers/tests/provisioning_in_memory.rs`
-- `crates/flotilla-resources/tests/controller_loop.rs`
+1. `crates/flotilla-controllers/tests/task_workspace_reconciler.rs`
+2. `crates/flotilla-controllers/tests/provisioning_in_memory.rs`
+3. `crates/flotilla-resources/tests/controller_loop.rs`
+4. `crates/flotilla-resources/tests/provisioning_resources_in_memory.rs`
+5. daemon runtime test fixtures (`crates/flotilla-daemon/src/runtime.rs` test module)
 
-- [ ] **Step 1: Migrate `task_workspace_reconciler.rs`**
-
-In the target file:
+For each file, the pattern is the same:
 1. Identify local helpers that duplicate the new `common` builders.
 2. Replace all call sites with the shared helpers.
 3. Delete the local duplicates.
-4. Run `cargo test -p flotilla-controllers --locked --test task_workspace_reconciler` — expect pass.
-5. Commit.
+4. Run the file's tests.
+5. Commit separately.
 
-```bash
-git add -u
-git commit -m "test: migrate task_workspace_reconciler tests to shared fixtures"
-```
+- [ ] **Step 1: Migrate `task_workspace_reconciler.rs`**
+
+Apply the pattern. Run: `cargo test -p flotilla-controllers --locked --test task_workspace_reconciler`
+Commit: `test: migrate task_workspace_reconciler tests to shared fixtures`
 
 - [ ] **Step 2: Migrate `provisioning_in_memory.rs`**
 
-Same process. Commit separately with message `test: migrate provisioning_in_memory tests to shared fixtures`.
+Run: `cargo test -p flotilla-controllers --locked --test provisioning_in_memory`
+Commit: `test: migrate provisioning_in_memory tests to shared fixtures`
 
 - [ ] **Step 3: Migrate `controller_loop.rs`**
 
-Same process. Commit separately with message `test: migrate controller_loop tests to shared fixtures`.
+Run: `cargo test -p flotilla-resources --locked --test controller_loop`
+Commit: `test: migrate controller_loop tests to shared fixtures`
 
-- [ ] **Step 4: Full verify**
+- [ ] **Step 4: Migrate `provisioning_resources_in_memory.rs`**
+
+This file holds direct struct-literal constructions of resources like `PlacementPolicySpec` (confirmed at line 56 and `DockerPerTaskPlacementPolicySpec` at line 146 — see Task 1 audit). Beyond fixture migration, expect some sites to also benefit from the Phase 1 `PlacementPolicySpec` builder.
+
+Run: `cargo test -p flotilla-resources --locked --test provisioning_resources_in_memory`
+Commit: `test: migrate provisioning_resources_in_memory tests to shared fixtures`
+
+- [ ] **Step 5: Migrate daemon runtime test fixtures**
+
+`crates/flotilla-daemon/src/runtime.rs` has a `#[cfg(test)] mod tests` module around line 803. It constructs `InputMeta` and resource specs inline — e.g. the `WorkflowTemplateSpec { ... }` at line 1061 and `PlacementPolicySpec` sites in tests.
+
+Two constraints:
+- The daemon crate does not currently depend on `flotilla-resources/tests/common/mod.rs` (test helpers from another crate's integration tests are not normally accessible). Check whether the daemon test module already imports from `flotilla_resources` directly or has its own helpers. If not, prefer duplicating the minimal helper surface you need over building a new inter-crate test-helper dependency.
+- The `TestGitRepo` helper (from Phase 1 Task 10) already lives in this file's test tree — colocate new helpers with it if needed.
+
+Migration scope: replace inline `InputMeta { ... }`, `WorkflowTemplateSpec { ... }`, `PlacementPolicySpec { ... }` blocks inside `#[cfg(test)]` with the Phase 1 builders.
+
+Run: `cargo test -p flotilla-daemon --locked`
+Commit: `test: migrate daemon runtime test fixtures to builders`
+
+- [ ] **Step 6: Full verify**
 
 ```bash
 cargo test --workspace --locked
@@ -258,6 +280,7 @@ Expected: all clean.
 ## Acceptance check against the spec
 
 - Shared helpers exist in both `common/mod.rs` files — Tasks 2, 3, 4
-- Duplicated local helper functions removed from at least three test files — Task 5
+- Duplicated local helper functions removed from at least three test files (spec minimum) — Task 5 exceeds this by migrating all five of the spec's primary target files
 - New tests can use shared helpers by default — established by the shape in Tasks 2-4
 - Metadata fixtures use bon's `#[builder]` rather than named variants — Tasks 2, 3
+- All five spec-named primary target files for Task A touched — Task 5 Steps 1-5
