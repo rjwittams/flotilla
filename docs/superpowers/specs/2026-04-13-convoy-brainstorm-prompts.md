@@ -262,6 +262,33 @@ See `docs/superpowers/specs/2026-04-14-convoy-resource-design.md` for the spec.
   - (c) Cluster-native deployments schedule N flotilla daemon pods into the cluster, all competing for the same leases — standard k8s HA.
   - (d) Open problem: leader election for flotilla-cp *itself* when embedded across multiple daemons. Leases depend on the API server, which is what needs electing — a separate (consensus / external coordinator / static leader) mechanism, not a convoy-controller concern.
 
-### From Stage 4 (Task provisioning / policy)
+### From Stage 4a (Task provisioning via flotilla-daemon placement)
 
-*(To be filled in when Stage 4 is designed.)*
+See `docs/superpowers/specs/2026-04-14-task-provisioning-design.md` for the spec. Stage 4a is scoped to the flotilla-daemon placement column of the state×placement matrix; cluster-native placement is Stage 4k.
+
+- **Stage 4k**: k8s cluster-native placement backend (Pods). Requires image-as-resource, cross-cluster checkout, selector resolution, per-tool config preparation. Each is a real design problem; deserves its own brainstorm.
+- **Image as a cluster resource** — declarative spec with availability guarantees ("make this image accessible from this provider"), on-demand vs pre-fetched, registry policy. Likely a CRD authored in source control like workflows.
+- **Selector resolution** (capability → concrete agent command). Carried over from Stage 2; agent processes still cannot run end-to-end until this lands. Tool processes work in Stage 4a.
+- **Auto-discovery of additional policies / discovered resources pattern** — controller for "found lying around" resources with explicit out-of-band lifecycle metadata.
+- **Agent-side completion CLI** — agents marking their own task complete via a CLI command that issues a status patch.
+- **Per-tool config preparation** in environments (`~/.claude` shuttling, auth tokens, etc.). Carried forward as a known gap for the Docker variant.
+- **Step-plan retirement** — `StepPlan` → convoy-driven coordination throughout flotilla-core. Bigger refactor; not Stage 4a.
+- **Multi-host placement** — SSH-reachable Hosts, mesh-aware Host resources, label-selector host targeting.
+- **Bosun-style automatic restart / repair / cleanup** — restart policies, terminal-session restarts on inner-command crash, cleanup on terminal task transitions.
+- **Convoy launched against an existing Checkout** — workflow flexibility for "use this existing tree as the work area," constrains compatible environments.
+- **Logical `Repository` resource** — Stage 4a only has `Clone` (one per URL+env). A future `Repository` would be the URL-level identity: canonical URL + aliases/mirrors, declared default branch (distinct from observed), GitHub/GitLab owner+slug anchor for ChangeRequestTracker/IssueProvider config, the anchor for cross-env "show me all clones of this repo" queries. When it lands, `ConvoySpec.repository: { url }` becomes `ConvoySpec.repository_ref: <name>` and `Clone` gains a `repository_ref` back-pointer.
+- **Clone extensions** — Stage 4a's Clone carries URL + env_ref + path + default_branch. Future additions: credentials, per-clone workspace.yaml location, badge metadata, default-checkout tracking (the working tree from a non-bare clone vs. explicit Checkout resources). Each is an additive field.
+- **Detached-head / sha / tag refs on Checkout** — useful for agent-driven bisect workflows and pinned-version provisioning.
+- **Shared Docker environments as a placement variant** — needs the shared-env-plus-per-task-checkout composability question solved.
+- **Meta-policy variant** for PlacementPolicy — delegate to a Quartermaster agent that picks among other policies. Sits on top of `PersistentAgent` (which is its own deferred item).
+- **TUI/CLI binary split** — separate the TUI from the CLI in `flotilla` as the next structural cleanup. Stage 4a creates `flotillad`; the user-facing `flotilla` binary still bundles TUI and CLI.
+- **Per-task restart policies / explicit retry UX** — a way to say "retry this failed task" without manually deleting resources.
+- **Auto-cleanup of stopped sessions on terminal task transitions** — opt-in policy field; today TerminalSessions stay alive until the TaskWorkspace cascades on Convoy deletion.
+- **Vessel / Crew / Shipment naming pass** — convoy-themed renames once the abstractions settle: TaskWorkspace → Vessel, processes → Crew, artifacts → Shipment.
+- **VCS abstraction in resource shape** — Clone and Checkout are git-shaped in v1; future `vcs:` discriminator for hg / fossil / etc.
+- **Cross-env mounts** — Stage 4a's Environment mounts use a `source_path` field implicitly resolved against the env's host. A future cross-env mount story (mounting paths from one Environment into another) would add `from_env` alongside; existing entries default to "same host's host_direct env."
+- **Exit-code-as-completion opt-in** — tasks where a designated "progress-bearing" process (e.g. one-shot `cargo test`) should drive task completion. Requires extending `TerminalPool` to surface inner-command exit events. Watcher-kind processes (test runners, dev servers, log tails) opt out.
+- **CLI shortcutting** — env-var-derived context propagated into terminal sessions so processes can issue short-form CLI commands (`flotilla complete` instead of `flotilla convoy <name> task <task> complete`). Part of a wider "how CLI infers context" story.
+- **Per-task retry / convoy-task reset** — Stage 3's fail-fast plus Stage 4a's "no in-place retry" means a failed task forces a fresh convoy. Future work: a `ResetTaskToPending` (or similar) convoy-controller patch and CLI affordance to re-attempt without recreating everything.
+- **Richer convoy CLI surface** — Stage 4a ships exactly one CLI verb (`task complete`). Future verbs (create, list, inspect, cancel, mark-failed, kill-session, reset-task) each currently require their own `CommandAction` variant + client method + daemon handler.
+- **Client/daemon protocol convergence with resource-management protocol** — the long-term direction: client/daemon protocol becomes essentially HTTP-over-UDS, mirroring the resource-management protocol controllers already speak. Eliminates per-verb mapping; naturally supports remote-HTTP daemons. Stage 4a is the hybrid middle. Once the one-task-convoy flow works end-to-end, safe cruft-cutting on the protocol layer becomes possible.

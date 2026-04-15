@@ -11,8 +11,10 @@ test-support = ["flotilla-protocol/test-support", "dep:flotilla-client"]
 
 [dependencies]
 flotilla-client = { path = "../flotilla-client", optional = true }
+flotilla-controllers = { path = "../flotilla-controllers" }
 flotilla-core = { path = "../flotilla-core" }
 flotilla-protocol = { path = "../flotilla-protocol" }
+flotilla-resources = { path = "../flotilla-resources" }
 flotilla-transport = { path = "../flotilla-transport" }
 tokio = { workspace = true }
 tokio-util = "0.7"
@@ -20,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tracing-appender = "0.2.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }

@@ -21,6 +21,15 @@ pub trait Resource: Send + Sync + 'static {
     const API_PATHS: ApiPaths;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerReference {
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    pub kind: String,
+    pub name: String,
+    pub controller: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct InputMeta {
     pub name: String,
@@ -28,6 +37,12 @@ pub struct InputMeta {
     pub labels: BTreeMap<String, String>,
     #[serde(default)]
     pub annotations: BTreeMap<String, String>,
+    #[serde(default, rename = "ownerReferences", skip_serializing_if = "Vec::is_empty")]
+    pub owner_references: Vec<OwnerReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finalizers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_timestamp: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +52,12 @@ pub struct ObjectMeta {
     pub resource_version: String,
     pub labels: BTreeMap<String, String>,
     pub annotations: BTreeMap<String, String>,
+    #[serde(default, rename = "ownerReferences", skip_serializing_if = "Vec::is_empty")]
+    pub owner_references: Vec<OwnerReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finalizers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_timestamp: Option<DateTime<Utc>>,
     pub creation_timestamp: DateTime<Utc>,
 }
 

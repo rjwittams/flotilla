@@ -1,7 +1,7 @@
 mod bootstrap;
 mod kubeconfig;
 
-use std::{borrow::Cow, pin::Pin};
+use std::{borrow::Cow, collections::BTreeMap, pin::Pin};
 
 pub use bootstrap::{ensure_crd, ensure_namespace};
 use bytes::Bytes;
@@ -78,6 +78,28 @@ impl HttpBackend {
     pub(crate) async fn list_typed<T: Resource>(&self, namespace: &str) -> Result<ResourceList<T>, ResourceError> {
         let url = self.namespaced_url(T::API_PATHS, namespace, None, false);
         let response = self.http.get(url).send().await.map_err(|err| ResourceError::other(format!("LIST resources: {err}")))?;
+        let wire: WireList<T> = Self::decode_response(response, None).await?;
+        wire.into_public()
+    }
+
+    pub(crate) async fn list_typed_matching_labels<T: Resource>(
+        &self,
+        namespace: &str,
+        required: &BTreeMap<String, String>,
+    ) -> Result<ResourceList<T>, ResourceError> {
+        if required.is_empty() {
+            return self.list_typed::<T>(namespace).await;
+        }
+
+        let url = self.namespaced_url(T::API_PATHS, namespace, None, false);
+        let label_selector = required.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join(",");
+        let response = self
+            .http
+            .get(url)
+            .query(&[("labelSelector", label_selector)])
+            .send()
+            .await
+            .map_err(|err| ResourceError::other(format!("LIST resources: {err}")))?;
         let wire: WireList<T> = Self::decode_response(response, None).await?;
         wire.into_public()
     }
@@ -309,6 +331,12 @@ struct WireObjectMeta {
     labels: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     annotations: std::collections::BTreeMap<String, String>,
+    #[serde(default, rename = "ownerReferences")]
+    owner_references: Vec<crate::resource::OwnerReference>,
+    #[serde(default)]
+    finalizers: Vec<String>,
+    #[serde(rename = "deletionTimestamp")]
+    deletion_timestamp: Option<DateTime<Utc>>,
     #[serde(rename = "creationTimestamp")]
     creation_timestamp: Option<DateTime<Utc>>,
 }
@@ -321,6 +349,9 @@ impl WireObjectMeta {
             resource_version: self.resource_version.ok_or_else(|| ResourceError::decode("missing metadata.resourceVersion"))?,
             labels: self.labels,
             annotations: self.annotations,
+            owner_references: self.owner_references,
+            finalizers: self.finalizers,
+            deletion_timestamp: self.deletion_timestamp,
             creation_timestamp: self.creation_timestamp.ok_or_else(|| ResourceError::decode("missing metadata.creationTimestamp"))?,
         })
     }
@@ -333,6 +364,12 @@ struct OutgoingMetadata<'a> {
     labels: &'a std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     annotations: &'a std::collections::BTreeMap<String, String>,
+    #[serde(default, rename = "ownerReferences", skip_serializing_if = "Vec::is_empty")]
+    owner_references: &'a Vec<crate::resource::OwnerReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    finalizers: &'a Vec<String>,
+    #[serde(rename = "deletionTimestamp", skip_serializing_if = "Option::is_none")]
+    deletion_timestamp: &'a Option<DateTime<Utc>>,
     #[serde(rename = "resourceVersion", skip_serializing_if = "Option::is_none")]
     resource_version: Option<&'a str>,
 }
@@ -352,7 +389,15 @@ impl<'a, T: Resource> OutgoingResource<'a, T> {
         Ok(Self {
             api_version: api_version(T::API_PATHS),
             kind: T::API_PATHS.kind,
-            metadata: OutgoingMetadata { name: &meta.name, labels: &meta.labels, annotations: &meta.annotations, resource_version },
+            metadata: OutgoingMetadata {
+                name: &meta.name,
+                labels: &meta.labels,
+                annotations: &meta.annotations,
+                owner_references: &meta.owner_references,
+                finalizers: &meta.finalizers,
+                deletion_timestamp: &meta.deletion_timestamp,
+                resource_version,
+            },
             spec,
         })
     }

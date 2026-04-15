@@ -41,6 +41,9 @@ pub fn input_meta(name: &str) -> InputMeta {
         name: name.to_string(),
         labels: [("app".to_string(), "flotilla".to_string())].into_iter().collect(),
         annotations: [("note".to_string(), "test".to_string())].into_iter().collect(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
     }
 }
 
@@ -80,6 +83,9 @@ pub fn workflow_template_meta(name: &str) -> InputMeta {
         name: name.to_string(),
         labels: [("app".to_string(), "flotilla".to_string())].into_iter().collect(),
         annotations: [("note".to_string(), "workflow-template-test".to_string())].into_iter().collect(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
     }
 }
 
@@ -153,6 +159,9 @@ pub fn object_meta(name: &str, namespace: &str, resource_version: &str) -> Objec
         resource_version: resource_version.to_string(),
         labels: Default::default(),
         annotations: Default::default(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
         creation_timestamp: timestamp(1),
     }
 }
@@ -167,7 +176,16 @@ pub fn valid_convoy_spec() -> RealConvoySpec {
         .into_iter()
         .collect(),
         placement_policy: Some("laptop-docker".to_string()),
+        repository: None,
+        r#ref: None,
     }
+}
+
+pub fn task_provisioning_convoy_spec() -> RealConvoySpec {
+    let mut spec = valid_convoy_spec();
+    spec.repository = Some(flotilla_resources::ConvoyRepositorySpec { url: "git@github.com:flotilla-org/flotilla.git".to_string() });
+    spec.r#ref = Some("feat/task-provisioning".to_string());
+    spec
 }
 
 pub fn pending_task_state() -> TaskState {
@@ -182,9 +200,68 @@ pub fn convoy_object(name: &str, spec: RealConvoySpec, status: Option<RealConvoy
     ResourceObject { metadata: object_meta(name, "flotilla", "7"), spec, status }
 }
 
+pub fn tool_only_workflow_template_spec() -> WorkflowTemplateSpec {
+    WorkflowTemplateSpec {
+        inputs: vec![
+            InputDefinition { name: "feature".to_string(), description: Some("Brief description of the feature to implement".to_string()) },
+            InputDefinition { name: "branch".to_string(), description: Some("Target git branch".to_string()) },
+        ],
+        tasks: vec![
+            TaskDefinition {
+                name: "implement".to_string(),
+                depends_on: Vec::new(),
+                processes: vec![
+                    ProcessDefinition { role: "coder".to_string(), source: ProcessSource::Tool { command: "cargo check".to_string() } },
+                    ProcessDefinition {
+                        role: "build".to_string(),
+                        source: ProcessSource::Tool { command: "cargo test --no-run".to_string() },
+                    },
+                ],
+            },
+            TaskDefinition {
+                name: "review".to_string(),
+                depends_on: vec!["implement".to_string()],
+                processes: vec![
+                    ProcessDefinition { role: "review".to_string(), source: ProcessSource::Tool { command: "cargo test".to_string() } },
+                    ProcessDefinition {
+                        role: "lint".to_string(),
+                        source: ProcessSource::Tool { command: "cargo clippy --no-deps".to_string() },
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+pub fn tool_only_workflow_template_object(name: &str) -> ResourceObject<WorkflowTemplate> {
+    ResourceObject { metadata: object_meta(name, "flotilla", "42"), spec: tool_only_workflow_template_spec(), status: None }
+}
+
 pub fn bootstrapped_convoy_status() -> RealConvoyStatus {
     let snapshot = flotilla_resources::WorkflowSnapshot {
         tasks: valid_workflow_template_spec()
+            .tasks
+            .into_iter()
+            .map(|task| flotilla_resources::SnapshotTask { name: task.name, depends_on: task.depends_on, processes: task.processes })
+            .collect(),
+    };
+    let tasks = [("implement".to_string(), pending_task_state()), ("review".to_string(), pending_task_state())].into_iter().collect();
+
+    RealConvoyStatus {
+        phase: flotilla_resources::ConvoyPhase::Pending,
+        workflow_snapshot: Some(snapshot),
+        tasks,
+        message: None,
+        started_at: None,
+        finished_at: None,
+        observed_workflow_ref: Some("review-and-fix".to_string()),
+        observed_workflows: Some([("review-and-fix".to_string(), "42".to_string())].into_iter().collect()),
+    }
+}
+
+pub fn bootstrapped_tool_only_convoy_status() -> RealConvoyStatus {
+    let snapshot = flotilla_resources::WorkflowSnapshot {
+        tasks: tool_only_workflow_template_spec()
             .tasks
             .into_iter()
             .map(|task| flotilla_resources::SnapshotTask { name: task.name, depends_on: task.depends_on, processes: task.processes })

@@ -255,10 +255,29 @@ fn acquire_spawn_lock(lock_path: &std::path::Path) -> Result<Option<std::fs::Fil
     Ok(None)
 }
 
+fn resolve_flotillad_binary() -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("FLOTILLAD_BIN") {
+        return Ok(PathBuf::from(path));
+    }
+
+    let current = std::env::current_exe().map_err(|e| format!("can't find self: {e}"))?;
+    let parent = current.parent().ok_or_else(|| "current executable has no parent directory".to_string())?;
+    let mut candidates = vec![parent.join("flotillad")];
+    if parent.file_name().is_some_and(|name| name == "deps") {
+        if let Some(grandparent) = parent.parent() {
+            candidates.push(grandparent.join("flotillad"));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .ok_or_else(|| format!("failed to locate flotillad next to {}", current.display()))
+}
+
 fn spawn_daemon(config_dir: &Path, config_dir_override: Option<&Path>, socket_override: Option<&Path>) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("can't find self: {e}"))?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("daemon");
+    let daemon_binary = resolve_flotillad_binary()?;
+    let mut cmd = std::process::Command::new(&daemon_binary);
     if let Some(dir) = config_dir_override {
         cmd.arg("--config-dir").arg(dir);
     }

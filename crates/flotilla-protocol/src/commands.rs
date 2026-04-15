@@ -143,6 +143,12 @@ pub enum CommandAction {
     GenerateBranchName {
         issue_keys: Vec<String>,
     },
+    ConvoyTaskComplete {
+        convoy: String,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     TeleportSession {
         session_id: String,
         branch: Option<String>,
@@ -227,6 +233,7 @@ impl Command {
             CommandAction::LinkIssuesToChangeRequest { .. } => "Linking issues...",
             CommandAction::ArchiveSession { .. } => "Archiving session...",
             CommandAction::GenerateBranchName { .. } => "Generating branch name...",
+            CommandAction::ConvoyTaskComplete { .. } => "Completing convoy task...",
             CommandAction::TeleportSession { .. } => "Teleporting session...",
             CommandAction::TrackRepoPath { .. } => "Tracking repository...",
             CommandAction::UntrackRepo { .. } => "Untracking repository...",
@@ -468,6 +475,16 @@ mod tests {
                 provisioning_target: None,
                 context_repo: Some(RepoSelector::Query("owner/repo".into())),
                 action: CommandAction::GenerateBranchName { issue_keys: vec!["ISSUE-1".into(), "ISSUE-2".into()] },
+            },
+            Command {
+                node_id: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: CommandAction::ConvoyTaskComplete {
+                    convoy: "convoy-a".into(),
+                    task: "implement".into(),
+                    message: Some("done".into()),
+                },
             },
             Command {
                 node_id: Some(NodeId::new("feta")),

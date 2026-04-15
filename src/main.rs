@@ -2,9 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use color_eyre::Result;
-use flotilla_core::{
-    agents, config::ConfigStore, daemon::DaemonHandle, in_process::InProcessDaemon, path_context::DaemonHostPath, path_policy::PathPolicy,
-};
+use flotilla_core::{agents, config::ConfigStore, daemon::DaemonHandle, path_context::DaemonHostPath, path_policy::PathPolicy};
 use flotilla_protocol::{
     commands::CommandValue, output::OutputFormat, AgentHookEvent, AttachableId, Command, CommandAction, EnvironmentId, HostName,
     RepoSelector,
@@ -27,10 +25,6 @@ struct Cli {
     /// Socket path (default: ${config_dir}/flotilla.sock)
     #[arg(long)]
     socket: Option<PathBuf>,
-
-    /// Run in embedded mode (no daemon, in-process)
-    #[arg(long)]
-    embedded: bool,
 
     /// Theme name (catppuccin-mocha, classic)
     #[arg(long)]
@@ -82,6 +76,8 @@ enum SubCommand {
     Environment(flotilla_commands::commands::environment::EnvironmentNoun),
     /// Manage checkouts
     Checkout(flotilla_commands::commands::checkout::CheckoutNoun),
+    /// Manage convoys
+    Convoy(flotilla_commands::commands::convoy::ConvoyNoun),
     /// Code review (alias on CrNoun itself, not duplicated here)
     Cr(flotilla_commands::commands::cr::CrNoun),
     /// Issues
@@ -180,6 +176,7 @@ async fn main() -> Result<()> {
         Some(SubCommand::Repo(noun)) => dispatch(noun.resolve().map_err(|e| color_eyre::eyre::eyre!(e))?, &cli, format).await,
         Some(SubCommand::Environment(noun)) => dispatch(noun.resolve().map_err(|e| color_eyre::eyre::eyre!(e))?, &cli, format).await,
         Some(SubCommand::Checkout(noun)) => dispatch(noun.resolve().map_err(|e| color_eyre::eyre::eyre!(e))?, &cli, format).await,
+        Some(SubCommand::Convoy(noun)) => dispatch(noun.resolve().map_err(|e| color_eyre::eyre::eyre!(e))?, &cli, format).await,
         Some(SubCommand::Cr(noun)) => dispatch(noun.resolve().map_err(|e| color_eyre::eyre::eyre!(e))?, &cli, format).await,
         Some(SubCommand::Issue(noun)) => dispatch(noun.resolve().map_err(|e| color_eyre::eyre::eyre!(e))?, &cli, format).await,
         Some(SubCommand::Agent(noun)) => dispatch(noun.resolve().map_err(|e| color_eyre::eyre::eyre!(e))?, &cli, format).await,
@@ -216,25 +213,6 @@ async fn run_tui(cli: Cli) -> Result<()> {
     #[cfg(unix)]
     flotilla_tui::terminal::install_sigterm_handler();
 
-    // Resolve repos before splash (fast — just reads config files).
-    let embedded = cli.embedded;
-    let repo_roots = if embedded {
-        let roots = flotilla_core::config::resolve_repo_roots(&cli.repo_root, &config).await;
-        if roots.is_empty() {
-            flotilla_tui::terminal::restore_terminal();
-            eprintln!("Error: no git repositories found (use --repo-root to specify)");
-            std::process::exit(1);
-        }
-        info!(
-            repo_count = roots.len(),
-            elapsed = ?startup.elapsed(),
-            "config loaded"
-        );
-        roots
-    } else {
-        vec![]
-    };
-
     let cli_repo_roots = cli.repo_root.clone();
     let cli_theme = cli.theme.clone();
 
@@ -242,32 +220,11 @@ async fn run_tui(cli: Cli) -> Result<()> {
     // (show_splash uses blocking crossterm::event::poll calls).
     let daemon_log_path = paths.state_dir.as_path().join("daemon.log");
     let daemon_panic_log_path = resolved_config_dir.join("daemon-panic.log");
-    let config_clone = Arc::clone(&config);
     let daemon_task = tokio::spawn(async move {
-        let daemon: Result<Arc<dyn DaemonHandle>, String> = if embedded {
-            let daemon_config = config_clone.load_daemon_config()?;
-            let host_name = daemon_config.host_name.map(HostName::new).unwrap_or_else(HostName::local);
-            let discovery = flotilla_core::providers::discovery::DiscoveryRuntime::for_process(daemon_config.follower);
-            let repo_root_paths = repo_roots.into_iter().map(|p| p.into_path_buf()).collect();
-            let d = InProcessDaemon::new(repo_root_paths, Arc::clone(&config_clone), discovery, host_name).await;
-
-            match flotilla_daemon::server::spawn_embedded_peer_networking(Arc::clone(&d), &config_clone) {
-                Ok(_peer_networking) => {
-                    // Detached background task; the TUI owns the daemon handle.
-                }
-                Err(e) => {
-                    tracing::warn!(err = %e, "peer networking not started in embedded mode");
-                }
-            }
-
-            Ok(d as Arc<dyn DaemonHandle>)
-        } else {
-            let socket_path = cli.socket_path();
-            flotilla_tui::socket::connect_or_spawn(&socket_path, &resolved_config_dir, cli.config_dir.as_deref(), cli.socket.as_deref())
-                .await
-                .map(|d| d as Arc<dyn DaemonHandle>)
-        };
-        daemon
+        let socket_path = cli.socket_path();
+        flotilla_tui::socket::connect_or_spawn(&socket_path, &resolved_config_dir, cli.config_dir.as_deref(), cli.socket.as_deref())
+            .await
+            .map(|d| d as Arc<dyn DaemonHandle>)
     });
 
     flotilla_tui::splash::show_splash(&mut terminal).await?;
@@ -290,22 +247,18 @@ async fn run_tui(cli: Cli) -> Result<()> {
         }
     };
 
-    // Forward --repo-root paths to the daemon (socket mode only;
-    // in-process mode already received them via InProcessDaemon::new).
-    if !embedded {
-        for root in &cli_repo_roots {
-            let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-            if let Err(e) = daemon
-                .execute(flotilla_protocol::Command {
-                    node_id: None,
-                    provisioning_target: None,
-                    context_repo: None,
-                    action: flotilla_protocol::CommandAction::TrackRepoPath { path: canonical.clone() },
-                })
-                .await
-            {
-                info!(repo = %canonical.display(), err = %e, "failed to add repo");
-            }
+    for root in &cli_repo_roots {
+        let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        if let Err(e) = daemon
+            .execute(flotilla_protocol::Command {
+                node_id: None,
+                provisioning_target: None,
+                context_repo: None,
+                action: flotilla_protocol::CommandAction::TrackRepoPath { path: canonical.clone() },
+            })
+            .await
+        {
+            info!(repo = %canonical.display(), err = %e, "failed to add repo");
         }
     }
 
@@ -322,10 +275,44 @@ async fn run_tui(cli: Cli) -> Result<()> {
 }
 
 async fn run_daemon(cli: &Cli, timeout_secs: u64) -> Result<()> {
-    let paths = PathPolicy::from_process_env();
-    flotilla_daemon::cli::run(&cli.socket_path(), &cli.config_dir(), paths.state_dir.as_path(), timeout_secs)
-        .await
-        .map_err(|e| color_eyre::eyre::eyre!(e))
+    let daemon_binary = resolve_flotillad_binary()?;
+    let mut command = tokio::process::Command::new(&daemon_binary);
+    command.arg("--timeout").arg(timeout_secs.to_string());
+    if let Some(config_dir) = cli.config_dir.as_ref() {
+        command.arg("--config-dir").arg(config_dir);
+    }
+    if let Some(socket) = cli.socket.as_ref() {
+        command.arg("--socket").arg(socket);
+    }
+    let status = command.status().await?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(color_eyre::eyre::eyre!(
+            "flotillad exited with status {}",
+            status.code().map(|code| code.to_string()).unwrap_or_else(|| "signal".to_string())
+        ))
+    }
+}
+
+fn resolve_flotillad_binary() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("FLOTILLAD_BIN") {
+        return Ok(PathBuf::from(path));
+    }
+
+    let current = std::env::current_exe()?;
+    let parent = current.parent().ok_or_else(|| color_eyre::eyre::eyre!("current executable has no parent directory"))?;
+    let mut candidates = vec![parent.join("flotillad")];
+    if parent.file_name().is_some_and(|name| name == "deps") {
+        if let Some(grandparent) = parent.parent() {
+            candidates.push(grandparent.join("flotillad"));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .ok_or_else(|| color_eyre::eyre::eyre!("failed to locate flotillad next to {}", current.display()))
 }
 
 /// Reset SIGPIPE so piped CLI commands (e.g. `watch | head`) exit cleanly.
@@ -862,6 +849,13 @@ mod tests {
     fn cli_parses_checkout_noun() {
         let cli = Cli::try_parse_from(["flotilla", "checkout", "my-feature", "remove"]).expect("checkout cli should parse");
         assert!(matches!(cli.command, Some(SubCommand::Checkout(_))));
+    }
+
+    #[test]
+    fn cli_parses_convoy_noun() {
+        let cli =
+            Cli::try_parse_from(["flotilla", "convoy", "convoy-a", "task", "implement", "complete"]).expect("convoy cli should parse");
+        assert!(matches!(cli.command, Some(SubCommand::Convoy(_))));
     }
 
     #[test]

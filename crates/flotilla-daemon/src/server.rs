@@ -213,6 +213,10 @@ impl DaemonServer {
         self.peer_data_rx.take()
     }
 
+    pub fn daemon(&self) -> Arc<InProcessDaemon> {
+        Arc::clone(&self.daemon)
+    }
+
     /// Run the server, accepting connections until idle timeout or shutdown signal.
     pub async fn run(mut self) -> Result<(), String> {
         // Clean up stale socket file before binding

@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use flotilla_core::{config::ConfigStore, path_context::DaemonHostPath, providers::discovery::DiscoveryRuntime};
 use tracing::info;
 
-use crate::server::DaemonServer;
+use crate::{runtime::DaemonRuntime, server::DaemonServer};
 
 pub async fn run(socket_path: &Path, config_dir: &Path, state_dir: &Path, timeout_secs: u64) -> Result<(), String> {
     // Hardcoded directives are appended after RUST_LOG and take precedence,
@@ -27,7 +27,9 @@ pub async fn run(socket_path: &Path, config_dir: &Path, state_dir: &Path, timeou
     let daemon_config = config.load_daemon_config()?;
     let discovery = DiscoveryRuntime::for_process(daemon_config.follower);
     let repo_root_paths = repo_roots.into_iter().map(|p| p.into_path_buf()).collect();
-    let server = DaemonServer::new(repo_root_paths, config, discovery, socket_path.to_path_buf(), timeout).await?;
+    let server = DaemonServer::new(repo_root_paths, Arc::clone(&config), discovery, socket_path.to_path_buf(), timeout).await?;
+    let daemon = server.daemon();
+    let _runtime = DaemonRuntime::start(daemon, Arc::clone(&config), Some(socket_path.to_path_buf())).await?;
 
     server.run().await
 }

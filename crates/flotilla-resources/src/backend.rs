@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{collections::BTreeMap, marker::PhantomData};
 
 use crate::{
     error::ResourceError,
@@ -20,11 +20,17 @@ impl ResourceBackend {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TypedResolver<T: Resource> {
     pub(crate) backend: ResourceBackend,
     pub(crate) namespace: String,
     pub(crate) _marker: PhantomData<T>,
+}
+
+impl<T: Resource> Clone for TypedResolver<T> {
+    fn clone(&self) -> Self {
+        Self { backend: self.backend.clone(), namespace: self.namespace.clone(), _marker: PhantomData }
+    }
 }
 
 impl<T: Resource> TypedResolver<T> {
@@ -39,6 +45,13 @@ impl<T: Resource> TypedResolver<T> {
         match &self.backend {
             ResourceBackend::InMemory(backend) => backend.list_typed::<T>(&self.namespace).await,
             ResourceBackend::Http(backend) => backend.list_typed::<T>(&self.namespace).await,
+        }
+    }
+
+    pub async fn list_matching_labels(&self, required: &BTreeMap<String, String>) -> Result<ResourceList<T>, ResourceError> {
+        match &self.backend {
+            ResourceBackend::InMemory(backend) => backend.list_typed_matching_labels::<T>(&self.namespace, required).await,
+            ResourceBackend::Http(backend) => backend.list_typed_matching_labels::<T>(&self.namespace, required).await,
         }
     }
 

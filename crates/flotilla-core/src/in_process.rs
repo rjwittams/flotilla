@@ -20,6 +20,10 @@ use flotilla_protocol::{
     RepoDetailResponse, RepoInfo, RepoProvidersResponse, RepoSnapshot, RepoSummary, RepoWorkResponse, StatusResponse, StreamKey,
     SystemInfo, ToolInventory, TopologyResponse, TopologyRoute,
 };
+use flotilla_resources::{
+    apply_status_patch as apply_resource_status_patch, external_patches as convoy_external_patches, Convoy as ResourceConvoy,
+    ResourceBackend,
+};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -485,6 +489,7 @@ pub struct InProcessDaemon {
     /// Socket path for the daemon server — set by the daemon after startup.
     /// Used to inject FLOTILLA_DAEMON_SOCKET into managed terminal sessions.
     daemon_socket_path: RwLock<Option<PathBuf>>,
+    resource_backend: ResourceBackend,
 }
 
 impl InProcessDaemon {
@@ -494,6 +499,16 @@ impl InProcessDaemon {
     /// holds a reference. The poll loop checks every 100ms for new refresh
     /// snapshots and broadcasts delta or full events for each change.
     pub async fn new(repo_paths: Vec<PathBuf>, config: Arc<ConfigStore>, discovery: DiscoveryRuntime, host_name: HostName) -> Arc<Self> {
+        Self::new_with_resource_backend(repo_paths, config, discovery, host_name, ResourceBackend::InMemory(Default::default())).await
+    }
+
+    pub async fn new_with_resource_backend(
+        repo_paths: Vec<PathBuf>,
+        config: Arc<ConfigStore>,
+        discovery: DiscoveryRuntime,
+        host_name: HostName,
+        resource_backend: ResourceBackend,
+    ) -> Arc<Self> {
         use crate::providers::discovery::DiscoveryResult;
 
         let follower = discovery.is_follower();
@@ -596,6 +611,7 @@ impl InProcessDaemon {
             session_id: uuid::Uuid::new_v4(),
             agent_state_store,
             daemon_socket_path: RwLock::new(None),
+            resource_backend,
         });
 
         // Spawn self-driving poll loop with a Weak reference.
@@ -641,6 +657,51 @@ impl InProcessDaemon {
         &self.local_environment_id
     }
 
+    pub fn local_command_runner(&self) -> Option<Arc<dyn CommandRunner>> {
+        self.environment_manager.environment_runner(&self.local_environment_id)
+    }
+
+    pub fn local_environment_bag(&self) -> Option<EnvironmentBag> {
+        self.environment_manager.environment_bag(&self.local_environment_id)
+    }
+
+    pub fn command_runner_for_environment(&self, env_id: &EnvironmentId) -> Option<Arc<dyn CommandRunner>> {
+        self.environment_manager.environment_runner(env_id)
+    }
+
+    pub fn environment_bag_for_environment(&self, env_id: &EnvironmentId) -> Option<EnvironmentBag> {
+        self.environment_manager.environment_bag(env_id)
+    }
+
+    pub fn environment_registry_for_environment(
+        &self,
+        env_id: &EnvironmentId,
+    ) -> Option<Arc<crate::providers::registry::ProviderRegistry>> {
+        self.environment_manager.environment_registry(env_id)
+    }
+
+    pub fn environment_container_name(&self, env_id: &EnvironmentId) -> Option<String> {
+        self.environment_manager.environment_container_name(env_id)
+    }
+
+    pub fn register_provisioned_environment(
+        &self,
+        env_id: EnvironmentId,
+        handle: crate::providers::environment::EnvironmentHandle,
+        env_bag: EnvironmentBag,
+        registry: Option<Arc<crate::providers::registry::ProviderRegistry>>,
+    ) -> Result<(), String> {
+        self.environment_manager.register_provisioned_environment(env_id, handle, env_bag, registry)
+    }
+
+    pub fn remove_provisioned_environment(&self, env_id: &EnvironmentId) -> bool {
+        self.environment_manager.remove_provisioned_environment(env_id).is_some()
+    }
+
+    pub fn discovery_runtime(&self) -> &DiscoveryRuntime {
+        &self.discovery
+    }
+
     pub fn local_host_id(&self) -> Option<flotilla_protocol::qualified_path::HostId> {
         self.environment_manager.host_id_for_environment(&self.local_environment_id)
     }
@@ -659,6 +720,10 @@ impl InProcessDaemon {
 
     pub async fn daemon_socket_path(&self) -> Option<PathBuf> {
         self.daemon_socket_path.read().await.clone()
+    }
+
+    pub fn resource_backend(&self) -> ResourceBackend {
+        self.resource_backend.clone()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1845,6 +1910,47 @@ impl InProcessDaemon {
                 node_id: self.node_id.clone(),
                 repo_identity,
                 repo: Some(repo_path),
+                result,
+            });
+            return Ok(id);
+        }
+
+        if let flotilla_protocol::CommandAction::ConvoyTaskComplete { convoy, task, message } = &command.action {
+            let empty_identity = flotilla_protocol::RepoIdentity { authority: String::new(), path: String::new() };
+            let _ = self.event_tx.send(DaemonEvent::CommandStarted {
+                command_id: id,
+                node_id: self.node_id.clone(),
+                repo_identity: empty_identity.clone(),
+                repo: None,
+                description: command.description().to_string(),
+            });
+            let convoys = self.resource_backend.clone().using::<ResourceConvoy>("flotilla");
+            let result = match convoys.get(convoy).await {
+                Ok(current) => match current.status.as_ref() {
+                    None => flotilla_protocol::CommandValue::Error { message: format!("convoy {convoy} has no status") },
+                    Some(status) if !status.tasks.contains_key(task) => {
+                        flotilla_protocol::CommandValue::Error { message: format!("convoy {convoy} does not contain task {task}") }
+                    }
+                    Some(_) => {
+                        match apply_resource_status_patch(
+                            &convoys,
+                            convoy,
+                            &convoy_external_patches::mark_task_completed(task.clone(), chrono::Utc::now(), message.clone()),
+                        )
+                        .await
+                        {
+                            Ok(_) => flotilla_protocol::CommandValue::Ok,
+                            Err(err) => flotilla_protocol::CommandValue::Error { message: err.to_string() },
+                        }
+                    }
+                },
+                Err(err) => flotilla_protocol::CommandValue::Error { message: err.to_string() },
+            };
+            let _ = self.event_tx.send(DaemonEvent::CommandFinished {
+                command_id: id,
+                node_id: self.node_id.clone(),
+                repo_identity: empty_identity,
+                repo: None,
                 result,
             });
             return Ok(id);

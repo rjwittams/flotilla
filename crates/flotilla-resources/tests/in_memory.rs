@@ -1,9 +1,9 @@
 mod common;
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use common::{convoy_meta, convoy_spec, convoy_status};
-use flotilla_resources::{Convoy, ConvoyPhase, InMemoryBackend, ResourceBackend, WatchEvent, WatchStart};
+use flotilla_resources::{Convoy, ConvoyPhase, InMemoryBackend, InputMeta, ResourceBackend, WatchEvent, WatchStart};
 use futures::StreamExt;
 use tokio::time::timeout;
 
@@ -89,6 +89,32 @@ async fn delete_emits_deleted_event() {
 }
 
 #[tokio::test]
+async fn delete_with_finalizers_marks_object_for_deletion_instead_of_removing_it() {
+    let backend = ResourceBackend::InMemory(InMemoryBackend::default());
+    let resolver = backend.clone().using::<Convoy>("default");
+    resolver
+        .create(
+            &InputMeta {
+                name: "alpha".to_string(),
+                labels: BTreeMap::new(),
+                annotations: BTreeMap::new(),
+                owner_references: Vec::new(),
+                finalizers: vec!["flotilla.work/test-finalizer".to_string()],
+                deletion_timestamp: None,
+            },
+            &convoy_spec("template-a"),
+        )
+        .await
+        .expect("create should succeed");
+
+    resolver.delete("alpha").await.expect("delete should succeed");
+
+    let object = resolver.get("alpha").await.expect("object should remain until finalizers are removed");
+    assert_eq!(object.metadata.finalizers, vec!["flotilla.work/test-finalizer".to_string()]);
+    assert!(object.metadata.deletion_timestamp.is_some(), "delete should set deletion timestamp");
+}
+
+#[tokio::test]
 async fn watch_from_version_replays_gaplessly_after_list() {
     let resolver = resolver("flotilla");
     resolver.create(&convoy_meta("alpha"), &convoy_spec("template-a")).await.expect("create should succeed");
@@ -163,4 +189,51 @@ async fn namespaces_are_isolated() {
     assert_eq!(beta_item.metadata.namespace, "beta");
     assert_eq!(alpha_item.spec.workflow_ref, "template-a");
     assert_eq!(beta_item.spec.workflow_ref, "template-b");
+}
+
+#[tokio::test]
+async fn list_matching_labels_returns_only_exact_matches() {
+    let resolver = resolver("flotilla");
+
+    let mut alpha_meta = convoy_meta("alpha");
+    alpha_meta.labels.insert("flotilla.work/convoy".to_string(), "convoy-a".to_string());
+    alpha_meta.labels.insert("flotilla.work/task".to_string(), "implement".to_string());
+    resolver.create(&alpha_meta, &convoy_spec("template-a")).await.expect("alpha create should succeed");
+
+    let mut beta_meta = convoy_meta("beta");
+    beta_meta.labels.insert("flotilla.work/convoy".to_string(), "convoy-a".to_string());
+    resolver.create(&beta_meta, &convoy_spec("template-b")).await.expect("beta create should succeed");
+
+    let mut gamma_meta = convoy_meta("gamma");
+    gamma_meta.labels.insert("flotilla.work/convoy".to_string(), "convoy-b".to_string());
+    gamma_meta.labels.insert("flotilla.work/task".to_string(), "implement".to_string());
+    resolver.create(&gamma_meta, &convoy_spec("template-c")).await.expect("gamma create should succeed");
+
+    let selector = BTreeMap::from([
+        ("flotilla.work/convoy".to_string(), "convoy-a".to_string()),
+        ("flotilla.work/task".to_string(), "implement".to_string()),
+    ]);
+
+    let listed = resolver.list_matching_labels(&selector).await.expect("filtered list should succeed");
+
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].metadata.name, "alpha");
+}
+
+#[tokio::test]
+async fn owner_references_roundtrip_through_in_memory_backend() {
+    let resolver = resolver("flotilla");
+    let mut meta = convoy_meta("alpha");
+    meta.owner_references = vec![flotilla_resources::OwnerReference {
+        api_version: "flotilla.work/v1".to_string(),
+        kind: "TaskWorkspace".to_string(),
+        name: "alpha-implement".to_string(),
+        controller: true,
+    }];
+
+    let created = resolver.create(&meta, &convoy_spec("template-a")).await.expect("create should succeed");
+    let fetched = resolver.get("alpha").await.expect("get should succeed");
+
+    assert_eq!(created.metadata.owner_references, meta.owner_references);
+    assert_eq!(fetched.metadata.owner_references, meta.owner_references);
 }

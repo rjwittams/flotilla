@@ -48,6 +48,8 @@ fn convoy_spec(workflow_ref: &str) -> ConvoySpec {
         .into_iter()
         .collect(),
         placement_policy: Some("laptop-docker".to_string()),
+        repository: None,
+        r#ref: None,
     }
 }
 
@@ -69,6 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: format!("demo-workflow-template-{}", std::process::id()),
         labels: [("app".to_string(), "flotilla".to_string())].into_iter().collect(),
         annotations: Default::default(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
     };
     if let Err(err) = workflow_resolver.delete(&workflow_meta.name).await {
         if !matches!(err, flotilla_resources::ResourceError::NotFound { .. }) {
@@ -79,6 +84,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: format!("demo-convoy-{}", std::process::id()),
         labels: [("app".to_string(), "flotilla".to_string())].into_iter().collect(),
         annotations: Default::default(),
+        owner_references: Vec::new(),
+        finalizers: Vec::new(),
+        deletion_timestamp: None,
     };
     if let Err(err) = convoy_resolver.delete(&convoy_meta.name).await {
         if !matches!(err, flotilla_resources::ResourceError::NotFound { .. }) {
