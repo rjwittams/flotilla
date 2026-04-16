@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt::Write,
     marker::PhantomData,
     sync::Arc,
 };
@@ -363,6 +364,9 @@ where
             spec_hash,
         };
 
+        // This dependency fetch intentionally performs the runtime apply. The apply result is the
+        // authoritative observed workspace state we need to patch into PresentationStatus, and the
+        // controller loop processes a given primary object serially through fetch/reconcile/patch.
         Ok(match self.runtime.apply(&plan).await {
             Ok(applied) => PresentationDeps::Applied(applied),
             Err(ApplyPresentationError::UnknownPolicy(name)) => PresentationDeps::UnknownPolicy(name),
@@ -501,8 +505,23 @@ fn default_policy_template_yaml(roles: &[String]) -> String {
 }
 
 fn yaml_string(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => {
+                write!(&mut escaped, "\\u{:04x}", c as u32).expect("writing to string should not fail");
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 fn presentation_spec_hash(policy: &str, processes: &[ResolvedProcess]) -> String {
@@ -555,4 +574,14 @@ fn session_sort_key(session: &ResourceObject<TerminalSession>) -> (&str, &str, &
         session.metadata.labels.get(flotilla_resources::PROCESS_ORDINAL_LABEL).map(String::as_str).unwrap_or(""),
         session.metadata.name.as_str(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::yaml_string;
+
+    #[test]
+    fn yaml_string_escapes_control_characters() {
+        assert_eq!(yaml_string("role\n\r\t\"\\\u{7}"), "\"role\\n\\r\\t\\\"\\\\\\u0007\"");
+    }
 }

@@ -465,8 +465,8 @@ impl Reconciler for TaskWorkspaceReconciler {
         ReconcileOutcome::with_actuations(patch, deps.actuations.clone())
     }
 
-    async fn run_finalizer(&self, _obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {
-        let selector = BTreeMap::from([(TASK_WORKSPACE_LABEL.to_string(), _obj.metadata.name.clone())]);
+    async fn run_finalizer(&self, obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {
+        let selector = BTreeMap::from([(TASK_WORKSPACE_LABEL.to_string(), obj.metadata.name.clone())]);
 
         delete_matching(&self.terminal_sessions, &selector).await?;
         delete_matching(&self.checkouts, &selector).await?;

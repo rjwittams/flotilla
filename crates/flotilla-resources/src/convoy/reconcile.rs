@@ -567,6 +567,8 @@ fn create_presentation_actuation(convoy: &ResourceObject<Convoy>) -> Actuation {
             .build(),
         spec: PresentationSpec {
             convoy_ref: convoy.metadata.name.clone(),
+            // Stage 4a always uses the built-in default policy. Threading a policy ref through
+            // ConvoySpec remains follow-up work once convoys can choose among multiple layouts.
             presentation_policy_ref: "default".to_string(),
             name: convoy.metadata.name.clone(),
             process_selector: BTreeMap::from([(CONVOY_LABEL.to_string(), convoy.metadata.name.clone())]),

@@ -104,6 +104,7 @@ impl TerminalRuntime for FakeTerminalRuntime {
 #[derive(Default)]
 struct FakePresentationManager {
     created: Mutex<Vec<WorkspaceAttachRequest>>,
+    deleted: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -125,7 +126,8 @@ impl PresentationManager for FakePresentationManager {
         Ok(())
     }
 
-    async fn delete_workspace(&self, _ws_ref: &str) -> Result<(), String> {
+    async fn delete_workspace(&self, ws_ref: &str) -> Result<(), String> {
+        self.deleted.lock().expect("deleted lock").push(ws_ref.to_string());
         Ok(())
     }
 
