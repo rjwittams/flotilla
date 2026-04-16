@@ -180,6 +180,8 @@ impl HopChainContext {
         if let Some(home) = dirs::home_dir() {
             return ExecutionEnvironmentPath::new(home);
         }
+        // This only fires in degenerate environments where neither an injected repo root nor a
+        // home directory is available, so the process cwd is our last meaningful local fallback.
         if let Ok(cwd) = std::env::current_dir() {
             return ExecutionEnvironmentPath::new(cwd);
         }
