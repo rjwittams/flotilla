@@ -16,9 +16,10 @@ use flotilla_controllers::reconcilers::{
     TaskWorkspaceReconciler, TerminalRuntime, TerminalRuntimeState, TerminalSessionReconciler,
 };
 use flotilla_resources::{
-    clone_key, controller::ControllerLoop, Checkout, CheckoutPhase, CheckoutWorktreeSpec, Clone, ClonePhase, CloneSpec,
-    DockerEnvironmentSpec, Environment, EnvironmentMount, EnvironmentMountMode, EnvironmentPhase, EnvironmentSpec, Host, HostSpec,
-    HostStatus, ResourceBackend, TaskWorkspace, TaskWorkspacePhase, TerminalSession, TerminalSessionPhase,
+    clone_key, controller::ControllerLoop, Checkout, CheckoutPhase, CheckoutSpec, CheckoutWorktreeSpec, Clone, ClonePhase, CloneSpec,
+    DockerEnvironmentSpec, Environment, EnvironmentMount, EnvironmentMountMode, EnvironmentPhase, EnvironmentSpec, Host,
+    HostDirectEnvironmentSpec, HostSpec, HostStatus, ResourceBackend, ResourceError, TaskWorkspace, TaskWorkspacePhase,
+    TerminalSession, TerminalSessionPhase, TASK_WORKSPACE_LABEL,
 };
 
 const NAMESPACE: &str = "flotilla";
@@ -277,6 +278,123 @@ async fn terminal_session_controller_marks_session_running() {
                             && status.session_id.as_deref() == Some("session-term-a")
                             && status.pid == Some(42)
                 )
+            }
+        })
+        .await;
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn task_workspace_controller_finalizer_deletes_labeled_children_on_delete() {
+    let backend = ResourceBackend::InMemory(Default::default());
+    create_workspace(
+        &backend,
+        NAMESPACE,
+        "workspace-delete",
+        "convoy-delete",
+        "implement",
+        "policy-delete",
+        "git@github.com:flotilla-org/flotilla.git",
+    )
+    .await;
+
+    backend
+        .clone()
+        .using::<Environment>(NAMESPACE)
+        .create(
+            &controller_meta()
+                .name("env-workspace-delete")
+                .labels([(TASK_WORKSPACE_LABEL.to_string(), "workspace-delete".to_string())].into_iter().collect())
+                .call(),
+            &EnvironmentSpec {
+                host_direct: Some(HostDirectEnvironmentSpec {
+                    host_ref: "01HXYZ".to_string(),
+                    repo_default_dir: "/Users/alice/dev/flotilla-repos".to_string(),
+                }),
+                docker: None,
+            },
+        )
+        .await
+        .expect("environment create should succeed");
+    backend
+        .clone()
+        .using::<Checkout>(NAMESPACE)
+        .create(
+            &controller_meta()
+                .name("checkout-workspace-delete")
+                .labels([(TASK_WORKSPACE_LABEL.to_string(), "workspace-delete".to_string())].into_iter().collect())
+                .call(),
+            &CheckoutSpec {
+                env_ref: "host-direct-01HXYZ".to_string(),
+                r#ref: "feat/task-provisioning".to_string(),
+                target_path: "/Users/alice/dev/flotilla-repos/workspace-delete".to_string(),
+                worktree: Some(CheckoutWorktreeSpec { clone_ref: "clone-a".to_string() }),
+                fresh_clone: None,
+            },
+        )
+        .await
+        .expect("checkout create should succeed");
+    backend
+        .clone()
+        .using::<TerminalSession>(NAMESPACE)
+        .create(
+            &controller_meta()
+                .name("terminal-workspace-delete-coder")
+                .labels([(TASK_WORKSPACE_LABEL.to_string(), "workspace-delete".to_string())].into_iter().collect())
+                .call(),
+            &flotilla_resources::TerminalSessionSpec {
+                env_ref: "host-direct-01HXYZ".to_string(),
+                role: "coder".to_string(),
+                command: "cargo test".to_string(),
+                cwd: "/Users/alice/dev/flotilla-repos/workspace-delete".to_string(),
+                pool: "cleat".to_string(),
+            },
+        )
+        .await
+        .expect("terminal create should succeed");
+
+    let workspaces = backend.clone().using::<TaskWorkspace>(NAMESPACE);
+    let environments = backend.clone().using::<Environment>(NAMESPACE);
+    let checkouts = backend.clone().using::<Checkout>(NAMESPACE);
+    let terminals = backend.clone().using::<TerminalSession>(NAMESPACE);
+    let mut harness = ControllerLoopHarness::new(backend.clone());
+    harness.spawn(
+        ControllerLoop {
+            primary: workspaces.clone(),
+            secondaries: TaskWorkspaceReconciler::secondary_watches(),
+            reconciler: TaskWorkspaceReconciler::new(backend.clone(), NAMESPACE),
+            resync_interval: Duration::from_millis(50),
+            backend: backend.clone(),
+        }
+        .run(),
+    );
+
+    harness
+        .wait_until(Duration::from_secs(1), || {
+            let workspaces = workspaces.clone();
+            async move {
+                matches!(
+                    workspaces.get("workspace-delete").await,
+                    Ok(workspace) if workspace.metadata.finalizers == vec!["flotilla.work/task-workspace-teardown".to_string()]
+                )
+            }
+        })
+        .await;
+
+    workspaces.delete("workspace-delete").await.expect("workspace delete should succeed");
+
+    harness
+        .wait_until(Duration::from_secs(1), || {
+            let workspaces = workspaces.clone();
+            let environments = environments.clone();
+            let checkouts = checkouts.clone();
+            let terminals = terminals.clone();
+            async move {
+                matches!(workspaces.get("workspace-delete").await, Err(ResourceError::NotFound { .. }))
+                    && matches!(environments.get("env-workspace-delete").await, Err(ResourceError::NotFound { .. }))
+                    && matches!(checkouts.get("checkout-workspace-delete").await, Err(ResourceError::NotFound { .. }))
+                    && matches!(terminals.get("terminal-workspace-delete-coder").await, Err(ResourceError::NotFound { .. }))
             }
         })
         .await;

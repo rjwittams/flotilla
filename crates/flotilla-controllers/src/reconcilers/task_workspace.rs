@@ -476,11 +476,17 @@ impl Reconciler for TaskWorkspaceReconciler {
     }
 
     async fn run_finalizer(&self, _obj: &ResourceObject<Self::Resource>) -> Result<(), ResourceError> {
+        let selector = BTreeMap::from([(TASK_WORKSPACE_LABEL.to_string(), _obj.metadata.name.clone())]);
+
+        delete_matching(&self.terminal_sessions, &selector).await?;
+        delete_matching(&self.checkouts, &selector).await?;
+        delete_matching(&self.environments, &selector).await?;
+
         Ok(())
     }
 
     fn finalizer_name(&self) -> Option<&'static str> {
-        None
+        Some("flotilla.work/task-workspace-teardown")
     }
 }
 
@@ -572,6 +578,17 @@ fn build_session_labels(
     labels.insert(TASK_ORDINAL_LABEL.to_string(), format!("{task_index:03}"));
     labels.insert(PROCESS_ORDINAL_LABEL.to_string(), format!("{process_index:03}"));
     labels
+}
+
+async fn delete_matching<T: Resource>(resolver: &TypedResolver<T>, selector: &BTreeMap<String, String>) -> Result<(), ResourceError> {
+    let listed = resolver.list_matching_labels(selector).await?;
+    for object in listed.items {
+        match resolver.delete(&object.metadata.name).await {
+            Ok(()) | Err(ResourceError::NotFound { .. }) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
 }
 
 impl PlacementStrategy {

@@ -6,17 +6,18 @@ use chrono::Utc;
 use common::{
     create_convoy_with_single_task, create_docker_worktree_policy, create_host_direct_policy, create_policy, create_ready_checkout,
     create_ready_clone, create_ready_docker_environment, create_ready_host_direct_environment, create_stopped_terminal, create_workspace,
-    meta, DockerWorktreePolicyFixture, ReadyCheckoutFixture, StoppedTerminalFixture,
+    labeled_meta, meta, DockerWorktreePolicyFixture, ReadyCheckoutFixture, StoppedTerminalFixture,
 };
 use flotilla_controllers::reconcilers::TaskWorkspaceReconciler;
 use flotilla_resources::{
     canonicalize_repo_url, clone_key,
     controller::{Actuation, Reconciler},
-    CheckoutWorktreeSpec, Convoy, ConvoyRepositorySpec, ConvoySpec, ConvoyStatus, DockerCheckoutStrategy, DockerEnvironmentSpec,
-    DockerPerTaskPlacementPolicySpec, HostDirectPlacementPolicyCheckout, HostDirectPlacementPolicySpec, InnerCommandStatus,
-    PlacementPolicySpec, ProcessDefinition, ProcessSource, ResourceBackend, SnapshotTask, TaskWorkspace, TerminalSession,
-    TerminalSessionPhase, TerminalSessionSpec, TerminalSessionStatus, WorkflowSnapshot, CONVOY_LABEL, PROCESS_ORDINAL_LABEL, ROLE_LABEL,
-    TASK_LABEL, TASK_ORDINAL_LABEL, TASK_WORKSPACE_LABEL,
+    Checkout, CheckoutSpec, CheckoutWorktreeSpec, Convoy, ConvoyRepositorySpec, ConvoySpec, ConvoyStatus, DockerCheckoutStrategy,
+    DockerEnvironmentSpec, DockerPerTaskPlacementPolicySpec, Environment, EnvironmentSpec, HostDirectEnvironmentSpec,
+    HostDirectPlacementPolicyCheckout, HostDirectPlacementPolicySpec, InnerCommandStatus, PlacementPolicySpec, ProcessDefinition,
+    ProcessSource, ResourceBackend, ResourceError, SnapshotTask, TaskWorkspace, TerminalSession, TerminalSessionPhase,
+    TerminalSessionSpec, TerminalSessionStatus, WorkflowSnapshot, CONVOY_LABEL, PROCESS_ORDINAL_LABEL, ROLE_LABEL, TASK_LABEL,
+    TASK_ORDINAL_LABEL, TASK_WORKSPACE_LABEL,
 };
 use rstest::rstest;
 
@@ -246,6 +247,46 @@ async fn child_failure_propagates_to_workspace_failure() {
 }
 
 #[tokio::test]
+async fn run_finalizer_deletes_all_labeled_children() {
+    let backend = ResourceBackend::InMemory(Default::default());
+    let workspace = create_workspace(&backend, NAMESPACE, "workspace-finalize", "convoy-a", "implement", "policy-a", REPO_URL).await;
+
+    create_labeled_environment(&backend, NAMESPACE, "env-workspace-finalize", "workspace-finalize").await;
+    create_labeled_checkout(&backend, NAMESPACE, "checkout-workspace-finalize", "workspace-finalize").await;
+    create_labeled_terminal(&backend, NAMESPACE, "terminal-workspace-finalize-coder", "workspace-finalize").await;
+
+    let reconciler = TaskWorkspaceReconciler::new(backend.clone(), NAMESPACE);
+    reconciler.run_finalizer(&workspace).await.expect("finalizer should succeed");
+
+    assert!(matches!(backend.clone().using::<Environment>(NAMESPACE).get("env-workspace-finalize").await, Err(ResourceError::NotFound { .. })));
+    assert!(matches!(
+        backend.clone().using::<Checkout>(NAMESPACE).get("checkout-workspace-finalize").await,
+        Err(ResourceError::NotFound { .. })
+    ));
+    assert!(matches!(
+        backend
+            .clone()
+            .using::<TerminalSession>(NAMESPACE)
+            .get("terminal-workspace-finalize-coder")
+            .await,
+        Err(ResourceError::NotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn run_finalizer_ignores_missing_children_and_cleans_partial_workspace() {
+    let backend = ResourceBackend::InMemory(Default::default());
+    let workspace = create_workspace(&backend, NAMESPACE, "workspace-partial", "convoy-a", "implement", "policy-a", REPO_URL).await;
+
+    create_labeled_environment(&backend, NAMESPACE, "env-workspace-partial", "workspace-partial").await;
+
+    let reconciler = TaskWorkspaceReconciler::new(backend.clone(), NAMESPACE);
+    reconciler.run_finalizer(&workspace).await.expect("finalizer should succeed");
+
+    assert!(matches!(backend.clone().using::<Environment>(NAMESPACE).get("env-workspace-partial").await, Err(ResourceError::NotFound { .. })));
+}
+
+#[tokio::test]
 async fn terminal_session_actuation_includes_system_and_user_labels() {
     let backend = ResourceBackend::InMemory(Default::default());
     create_convoy_with_labeled_processes(&backend, NAMESPACE, "convoy-labels", REPO_URL, GIT_REF).await;
@@ -470,4 +511,58 @@ async fn create_running_terminal(
         .await
         .expect("terminal status update should succeed");
     sessions.get(name).await.expect("terminal get should succeed")
+}
+
+async fn create_labeled_environment(backend: &ResourceBackend, namespace: &str, name: &str, workspace_name: &str) {
+    backend
+        .clone()
+        .using::<Environment>(namespace)
+        .create(
+            &labeled_meta(name, [(TASK_WORKSPACE_LABEL.to_string(), workspace_name.to_string())]),
+            &EnvironmentSpec {
+                host_direct: Some(HostDirectEnvironmentSpec {
+                    host_ref: HOST_REF.to_string(),
+                    repo_default_dir: "/Users/alice/dev/flotilla-repos".to_string(),
+                }),
+                docker: None,
+            },
+        )
+        .await
+        .expect("environment create should succeed");
+}
+
+async fn create_labeled_checkout(backend: &ResourceBackend, namespace: &str, name: &str, workspace_name: &str) {
+    backend
+        .clone()
+        .using::<Checkout>(namespace)
+        .create(
+            &labeled_meta(name, [(TASK_WORKSPACE_LABEL.to_string(), workspace_name.to_string())]),
+            &CheckoutSpec {
+                env_ref: host_direct_env_name(),
+                r#ref: GIT_REF.to_string(),
+                target_path: format!("/Users/alice/dev/flotilla-repos/{workspace_name}"),
+                worktree: Some(CheckoutWorktreeSpec { clone_ref: "clone-placeholder".to_string() }),
+                fresh_clone: None,
+            },
+        )
+        .await
+        .expect("checkout create should succeed");
+}
+
+async fn create_labeled_terminal(backend: &ResourceBackend, namespace: &str, name: &str, workspace_name: &str) {
+    backend
+        .clone()
+        .using::<TerminalSession>(namespace)
+        .create(
+            &labeled_meta(name, [(TASK_WORKSPACE_LABEL.to_string(), workspace_name.to_string())]),
+            &TerminalSessionSpec {
+                env_ref: host_direct_env_name(),
+                role: "coder".to_string(),
+                command: "cargo test".to_string(),
+                cwd: format!("/Users/alice/dev/flotilla-repos/{workspace_name}"),
+                pool: "cleat".to_string(),
+            },
+        )
+        .await
+        .expect("terminal create should succeed");
 }
