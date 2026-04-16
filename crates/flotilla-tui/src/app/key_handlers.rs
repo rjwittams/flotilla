@@ -42,11 +42,7 @@ impl App {
                     self.open_file_picker_from_active_repo_parent();
                 }
             }
-            Action::Dispatch(intent) => {
-                if !self.ui.is_config {
-                    self.dispatch_if_available(intent);
-                }
-            }
+            Action::Dispatch(intent) if !self.ui.is_config => self.dispatch_if_available(intent),
             // Handled by the widget stack (page widgets or modals) or
             // pre-dispatched as global actions. No-op if they reach here.
             _ => {}
