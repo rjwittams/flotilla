@@ -5,7 +5,10 @@
 //! fields rather than introducing a new vocabulary — easier to replace when
 //! the wire protocol shifts k8s-shape.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::{host::HostName, snapshot::CheckoutRef};
 
 /// Stable identifier for a convoy resource: `"namespace/name"`.
 /// Opaque string; parsing validates the `/` separator. No rename support.
@@ -66,6 +69,37 @@ pub enum TaskPhase {
     Cancelled,
 }
 
+pub type Timestamp = DateTime<Utc>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessSummary {
+    pub role: String,
+    /// Short human-readable preview of what the process runs. Derived from the
+    /// frozen `ProcessDefinition` in the convoy's workflow snapshot. No process
+    /// exit / live terminal status on this type — that is deferred (spec §Deferred).
+    pub command_preview: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSummary {
+    pub name: String,
+    pub depends_on: Vec<String>,
+    pub phase: TaskPhase,
+    pub processes: Vec<ProcessSummary>,
+    /// Host placement, when resolved by Stage 4. None while Pending/Ready.
+    pub host: Option<HostName>,
+    /// Checkout placement, when resolved by Stage 4.
+    pub checkout: Option<CheckoutRef>,
+    /// Attach target resolved from the task's matching Presentation.
+    /// None until the per-task Presentation addendum lands
+    /// (docs/superpowers/specs/2026-04-22-per-task-presentation-design.md).
+    pub workspace_ref: Option<String>,
+    pub ready_at: Option<Timestamp>,
+    pub started_at: Option<Timestamp>,
+    pub finished_at: Option<Timestamp>,
+    pub message: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,13 +119,7 @@ mod tests {
 
     #[test]
     fn convoy_phase_serde_round_trips() {
-        for phase in [
-            ConvoyPhase::Pending,
-            ConvoyPhase::Active,
-            ConvoyPhase::Completed,
-            ConvoyPhase::Failed,
-            ConvoyPhase::Cancelled,
-        ] {
+        for phase in [ConvoyPhase::Pending, ConvoyPhase::Active, ConvoyPhase::Completed, ConvoyPhase::Failed, ConvoyPhase::Cancelled] {
             let encoded = serde_json::to_string(&phase).unwrap();
             let decoded: ConvoyPhase = serde_json::from_str(&encoded).unwrap();
             assert_eq!(decoded, phase);
@@ -113,5 +141,25 @@ mod tests {
             let decoded: TaskPhase = serde_json::from_str(&encoded).unwrap();
             assert_eq!(decoded, phase);
         }
+    }
+
+    #[test]
+    fn task_summary_round_trips() {
+        let task = TaskSummary {
+            name: "implement".into(),
+            depends_on: vec!["setup".into()],
+            phase: TaskPhase::Running,
+            processes: vec![ProcessSummary { role: "coder".into(), command_preview: "claude".into() }],
+            host: None,
+            checkout: None,
+            workspace_ref: None,
+            ready_at: None,
+            started_at: None,
+            finished_at: None,
+            message: None,
+        };
+        let encoded = serde_json::to_string(&task).unwrap();
+        let decoded: TaskSummary = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, task);
     }
 }

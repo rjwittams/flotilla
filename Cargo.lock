@@ -1306,6 +1306,7 @@ dependencies = [
 name = "flotilla-protocol"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "gethostname",
  "indexmap",
  "serde",
@@ -1776,7 +1777,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
