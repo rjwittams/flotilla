@@ -1104,6 +1104,12 @@ impl App {
                     self.ui.provisioning_target = ProvisioningTarget::Host { host: HostName::local() };
                 }
             }
+            DaemonEvent::NamespaceSnapshot(_) => {
+                // TODO: namespace stream support — follow-up tasks
+            }
+            DaemonEvent::NamespaceDelta(_) => {
+                // TODO: namespace stream support — follow-up tasks
+            }
         }
     }
 

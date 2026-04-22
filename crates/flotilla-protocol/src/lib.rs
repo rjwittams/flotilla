@@ -271,6 +271,13 @@ pub enum DaemonEvent {
     /// Node stream tombstone — sent when a previously visible node disappears.
     #[serde(rename = "host_removed")]
     HostRemoved { environment_id: EnvironmentId, seq: u64 },
+    /// Full snapshot for a namespace (convoy) stream — sent on initial connect,
+    /// after seq gaps, or when a delta would exceed the full snapshot size.
+    #[serde(rename = "namespace_snapshot")]
+    NamespaceSnapshot(Box<crate::namespace::NamespaceSnapshot>),
+    /// Incremental delta for a namespace (convoy) stream.
+    #[serde(rename = "namespace_delta")]
+    NamespaceDelta(Box<crate::namespace::NamespaceDelta>),
 }
 
 /// Peer connection state as seen by the TUI.

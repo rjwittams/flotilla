@@ -550,6 +550,16 @@ fn handle_event(
             local_seqs.write().unwrap().insert(stream_key, snap.seq);
             let _ = event_tx.send(event);
         }
+        DaemonEvent::NamespaceSnapshot(snap) => {
+            // TODO: namespace stream support — follow-up tasks
+            local_seqs.write().unwrap().insert(StreamKey::Namespace { name: snap.namespace.clone() }, snap.seq);
+            let _ = event_tx.send(event);
+        }
+        DaemonEvent::NamespaceDelta(delta) => {
+            // TODO: namespace stream support — follow-up tasks
+            local_seqs.write().unwrap().insert(StreamKey::Namespace { name: delta.namespace.clone() }, delta.seq);
+            let _ = event_tx.send(event);
+        }
         DaemonEvent::RepoTracked(_)
         | DaemonEvent::CommandStarted { .. }
         | DaemonEvent::CommandFinished { .. }
@@ -615,7 +625,28 @@ async fn recover_from_gap(
                                     seqs.insert(key, *seq);
                                 }
                             }
-                            _ => {}
+                            DaemonEvent::NamespaceSnapshot(snap) => {
+                                // TODO: namespace stream support — follow-up tasks
+                                let key = StreamKey::Namespace { name: snap.namespace.clone() };
+                                let current = seqs.get(&key).copied().unwrap_or(0);
+                                if snap.seq >= current {
+                                    seqs.insert(key, snap.seq);
+                                }
+                            }
+                            DaemonEvent::NamespaceDelta(delta) => {
+                                // TODO: namespace stream support — follow-up tasks
+                                let key = StreamKey::Namespace { name: delta.namespace.clone() };
+                                let current = seqs.get(&key).copied().unwrap_or(0);
+                                if delta.seq >= current {
+                                    seqs.insert(key, delta.seq);
+                                }
+                            }
+                            DaemonEvent::RepoTracked(_)
+                            | DaemonEvent::RepoUntracked { .. }
+                            | DaemonEvent::CommandStarted { .. }
+                            | DaemonEvent::CommandFinished { .. }
+                            | DaemonEvent::CommandStepUpdate { .. }
+                            | DaemonEvent::PeerStatusChanged { .. } => {}
                         }
                     }
                 }
@@ -709,7 +740,15 @@ impl DaemonHandle for SocketDaemon {
                     DaemonEvent::RepoDelta(delta) => (StreamKey::Repo { identity: delta.repo_identity.clone() }, delta.seq),
                     DaemonEvent::HostSnapshot(snap) => (StreamKey::Host { environment_id: snap.environment_id.clone() }, snap.seq),
                     DaemonEvent::HostRemoved { environment_id, seq } => (StreamKey::Host { environment_id: environment_id.clone() }, *seq),
-                    _ => continue,
+                    // TODO: namespace stream support — follow-up tasks
+                    DaemonEvent::NamespaceSnapshot(snap) => (StreamKey::Namespace { name: snap.namespace.clone() }, snap.seq),
+                    DaemonEvent::NamespaceDelta(delta) => (StreamKey::Namespace { name: delta.namespace.clone() }, delta.seq),
+                    DaemonEvent::RepoTracked(_)
+                    | DaemonEvent::RepoUntracked { .. }
+                    | DaemonEvent::CommandStarted { .. }
+                    | DaemonEvent::CommandFinished { .. }
+                    | DaemonEvent::CommandStepUpdate { .. }
+                    | DaemonEvent::PeerStatusChanged { .. } => continue,
                 };
                 seqs.entry(stream_key).and_modify(|s| *s = (*s).max(seq)).or_insert(seq);
             }

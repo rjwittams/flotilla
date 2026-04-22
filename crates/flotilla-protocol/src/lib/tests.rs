@@ -549,3 +549,23 @@ fn stream_key_namespace_round_trips() {
     let decoded: StreamKey = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, key);
 }
+
+#[test]
+fn daemon_event_namespace_snapshot_round_trips() {
+    use crate::namespace::NamespaceSnapshot;
+
+    let event = DaemonEvent::NamespaceSnapshot(Box::new(NamespaceSnapshot {
+        seq: 1,
+        namespace: "flotilla".into(),
+        convoys: vec![],
+    }));
+    let encoded = serde_json::to_string(&event).unwrap();
+    let decoded: DaemonEvent = serde_json::from_str(&encoded).unwrap();
+    match decoded {
+        DaemonEvent::NamespaceSnapshot(snap) => {
+            assert_eq!(snap.namespace, "flotilla");
+            assert_eq!(snap.seq, 1);
+        }
+        other => panic!("expected NamespaceSnapshot, got {other:?}"),
+    }
+}
