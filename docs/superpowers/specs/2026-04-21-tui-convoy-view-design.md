@@ -6,10 +6,9 @@ Design spec for stage 6 of the convoy implementation plan. See `2026-04-13-convo
 
 Stages 1–5 have landed: ResourceClient trait, WorkflowTemplate + Convoy resources, task provisioning runtime, and the first cut of the presentation controller runtime. Convoys can be created and progressed via resource APIs today, but they are invisible in the flotilla TUI. Stage 6 makes them visible and interactable.
 
-The convoy TUI view is also the driver for two adjacent concerns:
+The convoy TUI view is also the driver for the mutation path (TUI → daemon → resource client PATCH) becoming load-bearing for the first time outside tests. Completing a task from the TUI proves the full round-trip.
 
-1. The mutation path (TUI → daemon → resource client PATCH) becomes load-bearing for the first time outside tests. Completing a task from the TUI proves the full round-trip.
-2. The stage-5 pane-mode concept (`flotilla tui --convoy <namespace>/<name>` running inside a convoy's own presentation workspace) needs a widget to run. Stage 6 builds that widget in a shape that supports the pane-mode re-use.
+The stage-5 design mentioned a focused pane-mode (`flotilla tui --convoy <id>` running inside a convoy's own presentation workspace). That concept is deferred out of stage 6: it required a convoy-overview Presentation that the per-task Presentation addendum (`2026-04-22-per-task-presentation-design.md`) explicitly leaves for future work, and the arbitrary-tabs model ([#589](https://github.com/flotilla-org/flotilla/issues/589)) is the general mechanism for "break out any tab into a focused TUI that can sit in your presentation manager." Stage 6's Convoys tab already covers every interactive need (see/mark-complete/attach) without a dedicated pane mode.
 
 ## Source of Truth
 
@@ -27,7 +26,6 @@ A convoy in `Pending` phase may have no `workflow_snapshot` yet; the projection 
 - Global `Convoys` tab showing a list of convoys + detail view with task DAG, alongside the existing `Overview` tab.
 - Task-level completion from the TUI (wires the mutation path end-to-end).
 - Task-level attach reuses the existing terminal-attach flow.
-- Same widget reused (with scoping) for the `flotilla tui --convoy <namespace>/<name>` pane mode from stage 5.
 - DAG visualization via `tui-tree-widget` — linear chains and fan-outs render as indented trees with status glyphs. Multi-parent DAGs are rendered as trees with duplicated nodes for now; a proper Sugiyama-layered renderer (`ascii-dag`) is a future upgrade and does not block this stage.
 
 ## Non-Goals
@@ -201,13 +199,13 @@ ConvoysPage { scope: ConvoyScope }
 pub enum ConvoyScope {
     All,
     Repo(RepoKey),
-    Single(ConvoyId),
 }
 ```
 
 - `All` — global default; every convoy across all namespace streams the client is subscribed to.
 - `Repo(RepoKey)` — filter state within the global tab, matching against `ConvoySummary.repo_hint`; also the scope applied automatically when entering the tab from a repo context.
-- `Single(ConvoyId)` — pane-mode invocation (`flotilla tui --convoy <namespace>/<name>`); `<namespace>/<name>` is the stable pane-mode contract and matches `ConvoyId`. Auto-focuses `ConvoyDetail`, hides the list, skips tab chrome.
+
+A `Single(ConvoyId)` variant is not in stage 6 — focused single-convoy views will come through the arbitrary-tabs mechanism ([#589](https://github.com/flotilla-org/flotilla/issues/589)) where any tab can be broken out into a dedicated TUI instance.
 
 **Filtering:** the existing `/` search binding mode is reused to filter the list by repo name, convoy name, or phase substring. Filter state is held on the widget, not in `UiState` globally.
 
@@ -255,16 +253,16 @@ When a convoy's `initializing` flag is true (no `workflow_snapshot` yet), the DA
 
 ## Slicing — PR Sequence
 
-Four PRs off `feat/tui-convoy-view`, each independently mergeable.
+Three PRs off `feat/tui-convoy-view`, each independently mergeable.
 
 ### PR 1 — Read-only convoy view (core of stage 6)
 
 - `flotilla-protocol`: `ConvoyId`, `ConvoySummary`, `TaskSummary`, `ProcessSummary`, `ConvoyPhase`, `TaskPhase`, `NamespaceSnapshot`, `NamespaceDelta`; `StreamKey::Namespace { name }`; `DaemonEvent::{NamespaceSnapshot, NamespaceDelta}`.
 - `flotilla-daemon`: `ConvoyProjection` watching `Convoy` and `Presentation` resources, producing per-namespace snapshots + deltas. Maintains `convoy/task → workspace_ref` index from Presentation status (empty until the per-task Presentation addendum lands). Initial-sync and gap-recovery paths mirror the existing `RepoSnapshot` machinery. Unit tested against the in-memory resource client.
 - `flotilla-client`: extend replay-cursor and gap-recovery handling for the new `StreamKey::Namespace` variant (`crates/flotilla-client/src/lib.rs` around 454/563/693 currently hard-codes repo+host stream types). Track per-namespace seq and include it in `ReplaySince` cursors.
-- `flotilla-tui`: global `Convoys` tab, `ConvoysPage`, `ConvoyList`, `ConvoyDetail`, `TaskTree` (tui-tree-widget), `TaskProcesses`; `BindingModeId::Convoys` with navigation-only keys; `/` filter; `initializing…` placeholder for pre-snapshot convoys.
+- `flotilla-tui`: generic `watch` CLI path in `crates/flotilla-tui/src/cli.rs` (currently hard-coded to repo+host streams around 381/516/539) updated to handle namespace events in its replay dedupe and formatting — otherwise `flotilla watch` double-prints replayed namespace events. Plus: global `Convoys` tab, `ConvoysPage`, `ConvoyList`, `ConvoyDetail`, `TaskTree` (tui-tree-widget), `TaskProcesses`; `BindingModeId::Convoys` with navigation-only keys; `/` filter; `initializing…` placeholder for pre-snapshot convoys.
 - Empty state, status glyphs for both phase enums, tab reachable via `[` / `]`.
-- No mutations. Integration tests with scripted convoy resource fixtures validate display. Client tests cover namespace-stream replay with simulated seq gaps.
+- No mutations. Integration tests with scripted convoy resource fixtures validate display. Client tests cover namespace-stream replay with simulated seq gaps. CLI watch tests cover dedupe of replayed namespace events.
 
 ### PR 2 — Task completion
 
@@ -280,13 +278,9 @@ Four PRs off `feat/tui-convoy-view`, each independently mergeable.
 - No new command or attach machinery.
 - Tests: integration test covering select-task → `a` → existing `SelectWorkspace` dispatched with the correct `ws_ref`; test for the no-workspace case; two-task convoy test asserting different `workspace_ref` per task.
 
-### PR 4 — `flotilla tui --convoy <namespace>/<name>` pane mode
+**Dependencies:** PR 2 depends on PR 1. PR 3 depends on PR 1 and the per-task Presentation addendum. PR 2 and PR 3 can otherwise overlap.
 
-- New CLI flag on `flotilla tui` parsing `<namespace>/<name>` into `ConvoyId` and setting initial `ConvoyScope::Single(id)`.
-- TUI skips tab chrome and auto-focuses `ConvoyDetail`.
-- Small; mostly CLI plumbing and a "single-convoy mode" branch in the app state.
-
-**Dependencies:** PR 2 and PR 3 depend on PR 1; PR 4 depends on PR 1 only. PR 2 and PR 3 can overlap.
+Focused single-convoy pane mode is not in stage 6 — it will come through the arbitrary-tabs mechanism ([#589](https://github.com/flotilla-org/flotilla/issues/589)) as a general break-out-a-tab feature that benefits convoys and every other future tab type.
 
 ## Testing Strategy
 
@@ -305,7 +299,6 @@ PR 2 (task completion) depends on the same foundation — marking a task complet
 
 PR 3 (task attach) depends on the per-task Presentation addendum (`2026-04-22-per-task-presentation-design.md`) being landed, so per-task `workspace_ref` values are actually produced by the reconciler chain.
 
-PR 4 (pane mode) is CLI + widget scoping only; no new runtime dependencies beyond PR 1.
 
 **Deferred to later stages:**
 
