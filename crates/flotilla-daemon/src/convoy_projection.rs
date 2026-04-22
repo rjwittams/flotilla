@@ -13,8 +13,8 @@ use flotilla_protocol::{
     DaemonEvent,
 };
 use flotilla_resources::{
-    ConvoyPhase as ResConvoyPhase, ProcessSource, ResourceObject, SnapshotTask, TaskPhase as ResTaskPhase, TaskState,
-    Convoy,
+    Convoy, ConvoyPhase as ResConvoyPhase, Presentation, ProcessSource, ResourceObject, SnapshotTask,
+    TaskPhase as ResTaskPhase, TaskState, CONVOY_LABEL, TASK_LABEL,
 };
 use tokio::sync::mpsc;
 
@@ -26,16 +26,47 @@ struct NamespaceView {
     seq: u64,
 }
 
+/// Key: `(namespace, convoy_name, task_name)`.
+type PresentationKey = (String, String, String);
+
 #[allow(dead_code)]
 pub struct ConvoyProjection {
     namespaces: HashMap<String, NamespaceView>,
+    presentation_workspaces: HashMap<PresentationKey, String>,
     /// Emitter for events going to connected clients.
     event_tx: mpsc::Sender<DaemonEvent>,
 }
 
 impl ConvoyProjection {
     pub fn new(event_tx: mpsc::Sender<DaemonEvent>) -> Self {
-        Self { namespaces: HashMap::new(), event_tx }
+        Self { namespaces: HashMap::new(), presentation_workspaces: HashMap::new(), event_tx }
+    }
+
+    pub fn apply_presentation(&mut self, p: &ResourceObject<Presentation>) {
+        let namespace = p.metadata.namespace.clone();
+        let convoy = match p.metadata.labels.get(CONVOY_LABEL) {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        let task = match p.metadata.labels.get(TASK_LABEL) {
+            Some(v) => v.clone(),
+            None => return, // convoy-level presentation; per-task index ignores it
+        };
+        let observed = p.status.as_ref().and_then(|s| s.observed_workspace_ref.clone());
+        match observed {
+            Some(ws_ref) => {
+                self.presentation_workspaces.insert((namespace, convoy, task), ws_ref);
+            }
+            None => {
+                self.presentation_workspaces.remove(&(namespace, convoy, task));
+            }
+        }
+    }
+
+    pub fn workspace_ref_for(&self, namespace: &str, convoy: &str, task: &str) -> Option<String> {
+        self.presentation_workspaces
+            .get(&(namespace.to_owned(), convoy.to_owned(), task.to_owned()))
+            .cloned()
     }
 }
 
@@ -135,11 +166,38 @@ mod tests {
 
     use chrono::Utc;
     use flotilla_resources::{
-        ConvoyPhase as ResConvoyPhase, ConvoySpec, ConvoyStatus, ObjectMeta, ProcessDefinition, ProcessSource, ResourceObject,
-        SnapshotTask, TaskPhase as ResTaskPhase, TaskState, WorkflowSnapshot,
+        ConvoyPhase as ResConvoyPhase, ConvoySpec, ConvoyStatus, ObjectMeta, ProcessDefinition, ProcessSource,
+        Presentation, PresentationSpec, PresentationStatus, ResourceObject, SnapshotTask, TaskPhase as ResTaskPhase, TaskState,
+        WorkflowSnapshot, CONVOY_LABEL, TASK_LABEL,
     };
+    use tokio::sync::mpsc;
 
     use super::*;
+
+    fn presentation_obj(convoy_name: &str, task_name: &str, ws_ref: Option<&str>) -> ResourceObject<Presentation> {
+        let mut labels = BTreeMap::new();
+        labels.insert(CONVOY_LABEL.into(), convoy_name.into());
+        labels.insert(TASK_LABEL.into(), task_name.into());
+        let metadata = ObjectMeta {
+            name: format!("{convoy_name}-{task_name}"),
+            namespace: "flotilla".into(),
+            resource_version: "1".into(),
+            labels,
+            annotations: BTreeMap::new(),
+            owner_references: vec![],
+            finalizers: vec![],
+            deletion_timestamp: None,
+            creation_timestamp: Utc::now(),
+        };
+        let spec = PresentationSpec {
+            convoy_ref: convoy_name.into(),
+            presentation_policy_ref: "default".into(),
+            name: task_name.into(),
+            process_selector: BTreeMap::new(),
+        };
+        let status = PresentationStatus { observed_workspace_ref: ws_ref.map(str::to_string), ..Default::default() };
+        ResourceObject { metadata, spec, status: Some(status) }
+    }
 
     fn meta(ns: &str, name: &str) -> ObjectMeta {
         ObjectMeta {
@@ -220,5 +278,36 @@ mod tests {
         let summary = summarize_convoy(&convoy);
         assert!(summary.initializing);
         assert!(summary.tasks.is_empty());
+    }
+
+    #[test]
+    fn presentation_index_resolves_workspace_ref_per_task() {
+        let (tx, _rx) = mpsc::channel(16);
+        let mut projection = ConvoyProjection::new(tx);
+        projection.apply_presentation(&presentation_obj("fix-bug-123", "implement", Some("ws-1")));
+        projection.apply_presentation(&presentation_obj("fix-bug-123", "review", Some("ws-2")));
+
+        assert_eq!(
+            projection.workspace_ref_for("flotilla", "fix-bug-123", "implement"),
+            Some("ws-1".to_string())
+        );
+        assert_eq!(
+            projection.workspace_ref_for("flotilla", "fix-bug-123", "review"),
+            Some("ws-2".to_string())
+        );
+    }
+
+    #[test]
+    fn presentation_without_task_label_is_ignored() {
+        let (tx, _rx) = mpsc::channel(16);
+        let mut projection = ConvoyProjection::new(tx);
+        let mut p = presentation_obj("fix-bug-123", "implement", Some("ws-1"));
+        p.metadata.labels.remove(TASK_LABEL);
+        projection.apply_presentation(&p);
+        assert_eq!(
+            projection.workspace_ref_for("flotilla", "fix-bug-123", "implement"),
+            None,
+            "convoy-level Presentations do not resolve per-task — addendum prerequisite"
+        );
     }
 }
