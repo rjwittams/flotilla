@@ -67,6 +67,7 @@ pub enum AppAction {
     StatusBarKeyPress { code: crossterm::event::KeyCode, modifiers: crossterm::event::KeyModifiers },
     ClearError(usize),
     SwitchToConfig,
+    SwitchToConvoys,
     SwitchToRepo(usize),
     SaveTabOrder,
     OpenFilePicker,

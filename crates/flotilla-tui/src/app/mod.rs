@@ -933,6 +933,10 @@ impl App {
                     self.dismiss_modals();
                     self.ui.is_config = true;
                 }
+                AppAction::SwitchToConvoys => {
+                    // TODO(convoys): navigate to the convoys tab when the widget lands (Tasks 22-25).
+                    // For now this is a no-op placeholder so the tab bar click compiles and routes.
+                }
                 AppAction::SwitchToRepo(i) => {
                     self.dismiss_modals();
                     self.switch_tab(i);

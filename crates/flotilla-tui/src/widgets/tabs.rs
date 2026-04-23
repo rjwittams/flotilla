@@ -17,6 +17,8 @@ use crate::{
 pub enum TabBarAction {
     /// Switch to the flotilla config screen.
     SwitchToConfig,
+    /// Switch to the global convoys view.
+    SwitchToConvoys,
     /// Switch to a repo tab and start a potential drag.
     SwitchToRepo(usize),
     /// Open the file picker to add a new repo.
@@ -63,6 +65,16 @@ impl Tabs {
             style_override: Some(flotilla_style),
         });
         tab_ids.push(TabId::Flotilla);
+
+        // Convoys global tab
+        items.push(segment_bar::SegmentItem {
+            label: TabId::CONVOYS_LABEL.to_string(),
+            key_hint: None,
+            active: false,
+            dragging: false,
+            style_override: None,
+        });
+        tab_ids.push(TabId::Convoys);
 
         // Repo tabs
         for (i, repo_identity) in model.repo_order.iter().enumerate() {
@@ -124,9 +136,10 @@ impl Tabs {
 
         match hit {
             Some(TabId::Flotilla) => TabBarAction::SwitchToConfig,
+            Some(TabId::Convoys) => TabBarAction::SwitchToConvoys,
             Some(TabId::Repo(i)) => TabBarAction::SwitchToRepo(i),
             Some(TabId::Add) => TabBarAction::OpenFilePicker,
-            _ => TabBarAction::None,
+            None => TabBarAction::None,
         }
     }
 
@@ -178,6 +191,10 @@ impl Tabs {
                     TabBarAction::SwitchToConfig => {
                         self.drag.dragging_tab = None;
                         actions.push(AppAction::SwitchToConfig);
+                    }
+                    TabBarAction::SwitchToConvoys => {
+                        self.drag.dragging_tab = None;
+                        actions.push(AppAction::SwitchToConvoys);
                     }
                     TabBarAction::SwitchToRepo(i) => {
                         actions.push(AppAction::SwitchToRepo(i));

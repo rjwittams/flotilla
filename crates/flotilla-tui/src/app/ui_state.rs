@@ -56,6 +56,8 @@ pub struct PendingActionContext {
 pub enum TabId {
     /// The main flotilla app tab (config/home).
     Flotilla,
+    /// Global convoy view — always present, shows all convoys across repos.
+    Convoys,
     /// A repository tab, identified by index in repo_order.
     Repo(usize),
     /// The [+] button for adding repos.
@@ -67,6 +69,11 @@ impl TabId {
     pub const FLOTILLA_LABEL: &str = " ⚓ flotilla ";
     /// Display width of the label (⚓ is 1 column, not 3 bytes).
     pub const FLOTILLA_LABEL_WIDTH: u16 = 13;
+
+    /// Label for the convoys global tab.
+    pub const CONVOYS_LABEL: &str = " 🚢 convoys ";
+    /// Display width of the label (🚢 is 2 columns wide; space+🚢+space+convoys+space = 1+2+1+7+1 = 12).
+    pub const CONVOYS_LABEL_WIDTH: u16 = 12;
 }
 
 #[derive(Default)]
