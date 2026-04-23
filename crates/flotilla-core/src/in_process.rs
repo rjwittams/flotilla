@@ -1423,6 +1423,12 @@ impl InProcessDaemon {
         self.host_registry.apply_event(&event);
         let _ = self.event_tx.send(event);
     }
+
+    /// Return a clone of the broadcast sender so background tasks (e.g.
+    /// `ConvoyProjection`) can emit events into the daemon-wide event bus.
+    pub fn event_sender(&self) -> broadcast::Sender<DaemonEvent> {
+        self.event_tx.clone()
+    }
 }
 
 /// Non-trait methods that are called directly on the concrete `InProcessDaemon`

@@ -23,11 +23,7 @@ async fn main() -> Result<()> {
 }
 
 fn forced_protocol_type_from_env() -> Option<ProtocolType> {
-    match std::env::var("FLOTILLA_SPLASH_PROTOCOL")
-        .ok()
-        .map(|value| value.to_ascii_lowercase())
-        .as_deref()
-    {
+    match std::env::var("FLOTILLA_SPLASH_PROTOCOL").ok().map(|value| value.to_ascii_lowercase()).as_deref() {
         Some("halfblocks") => Some(ProtocolType::Halfblocks),
         Some("sixel") => Some(ProtocolType::Sixel),
         Some("kitty") => Some(ProtocolType::Kitty),
@@ -49,8 +45,7 @@ async fn show_splash_with_report(terminal: &mut ratatui::DefaultTerminal) -> Res
     query_options.timeout = Duration::from_millis(query_timeout_ms);
 
     let query_started = Instant::now();
-    let mut picker = Picker::from_query_stdio_with_options(query_options)
-        .unwrap_or_else(|_| Picker::halfblocks());
+    let mut picker = Picker::from_query_stdio_with_options(query_options).unwrap_or_else(|_| Picker::halfblocks());
     let query_elapsed = query_started.elapsed();
     let detected_protocol_type = picker.protocol_type();
     let forced_protocol_type = forced_protocol_type_from_env();

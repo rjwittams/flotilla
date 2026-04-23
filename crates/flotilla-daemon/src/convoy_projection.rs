@@ -14,11 +14,11 @@ use flotilla_protocol::{
     DaemonEvent,
 };
 use flotilla_resources::{
-    Convoy, ConvoyPhase as ResConvoyPhase, Presentation, ProcessSource, ResourceObject, SnapshotTask,
-    TaskPhase as ResTaskPhase, TaskState, TypedResolver, WatchEvent, WatchStart, CONVOY_LABEL, TASK_LABEL,
+    Convoy, ConvoyPhase as ResConvoyPhase, Presentation, ProcessSource, ResourceObject, SnapshotTask, TaskPhase as ResTaskPhase, TaskState,
+    TypedResolver, WatchEvent, WatchStart, CONVOY_LABEL, TASK_LABEL,
 };
 use futures::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 /// In-memory view of one namespace's convoys, owned by the projection.
 #[derive(Default)]
@@ -35,11 +35,11 @@ pub struct ConvoyProjection {
     namespaces: HashMap<String, NamespaceView>,
     presentation_workspaces: HashMap<PresentationKey, String>,
     /// Emitter for events going to connected clients.
-    event_tx: mpsc::Sender<DaemonEvent>,
+    event_tx: broadcast::Sender<DaemonEvent>,
 }
 
 impl ConvoyProjection {
-    pub fn new(event_tx: mpsc::Sender<DaemonEvent>) -> Self {
+    pub fn new(event_tx: broadcast::Sender<DaemonEvent>) -> Self {
         Self { namespaces: HashMap::new(), presentation_workspaces: HashMap::new(), event_tx }
     }
 
@@ -165,11 +165,8 @@ impl ConvoyProjection {
         let Some(existing) = self.namespaces.get(&namespace).and_then(|v| v.convoys.get(&id)).cloned() else {
             return;
         };
-        let refreshed_refs: Vec<Option<String>> = existing
-            .tasks
-            .iter()
-            .map(|t| self.workspace_ref_for(&namespace, &convoy_name, &t.name))
-            .collect();
+        let refreshed_refs: Vec<Option<String>> =
+            existing.tasks.iter().map(|t| self.workspace_ref_for(&namespace, &convoy_name, &t.name)).collect();
 
         // Now take the mutable borrow and apply the refreshed refs.
         let view = self.namespaces.get_mut(&namespace).expect("namespace present; just read above");
@@ -181,21 +178,16 @@ impl ConvoyProjection {
         view.seq = view.seq.saturating_add(1);
         let seq = view.seq;
 
-        let _ = self
-            .event_tx
-            .send(DaemonEvent::NamespaceDelta(Box::new(NamespaceDelta {
-                seq,
-                namespace,
-                changed: vec![refreshed],
-                removed: Vec::new(),
-            })))
-            .await;
+        let _ = self.event_tx.send(DaemonEvent::NamespaceDelta(Box::new(NamespaceDelta {
+            seq,
+            namespace,
+            changed: vec![refreshed],
+            removed: Vec::new(),
+        })));
     }
 
     pub fn workspace_ref_for(&self, namespace: &str, convoy: &str, task: &str) -> Option<String> {
-        self.presentation_workspaces
-            .get(&(namespace.to_owned(), convoy.to_owned(), task.to_owned()))
-            .cloned()
+        self.presentation_workspaces.get(&(namespace.to_owned(), convoy.to_owned(), task.to_owned())).cloned()
     }
 
     pub fn summarize(&self, convoy: &ResourceObject<Convoy>) -> ConvoySummary {
@@ -234,7 +226,7 @@ impl ConvoyProjection {
                         removed: Vec::new(),
                     }))
                 };
-                let _ = self.event_tx.send(daemon_event).await;
+                let _ = self.event_tx.send(daemon_event);
             }
             WatchEvent::Deleted(convoy) => {
                 let namespace = convoy.metadata.namespace.clone();
@@ -249,7 +241,7 @@ impl ConvoyProjection {
                             changed: Vec::new(),
                             removed: vec![id],
                         }));
-                        let _ = self.event_tx.send(daemon_event).await;
+                        let _ = self.event_tx.send(daemon_event);
                     }
                 }
             }
@@ -294,9 +286,7 @@ fn summarize_task(def: &SnapshotTask, state: Option<&TaskState>) -> TaskSummary 
             .map(|p| {
                 let command_preview = match &p.source {
                     ProcessSource::Tool { command } => command.clone(),
-                    ProcessSource::Agent { selector, prompt } => {
-                        prompt.clone().unwrap_or_else(|| selector.capability.clone())
-                    }
+                    ProcessSource::Agent { selector, prompt } => prompt.clone().unwrap_or_else(|| selector.capability.clone()),
                 };
                 ProcessSummary { role: p.role.clone(), command_preview }
             })
@@ -321,12 +311,7 @@ fn summarize_convoy(convoy: &ResourceObject<Convoy>) -> ConvoySummary {
 
     let tasks: Vec<TaskSummary> = status
         .and_then(|s| s.workflow_snapshot.as_ref())
-        .map(|snap| {
-            snap.tasks
-                .iter()
-                .map(|t| summarize_task(t, status.and_then(|s| s.tasks.get(&t.name))))
-                .collect()
-        })
+        .map(|snap| snap.tasks.iter().map(|t| summarize_task(t, status.and_then(|s| s.tasks.get(&t.name)))).collect())
         .unwrap_or_default();
 
     let initializing = status.map(|s| s.workflow_snapshot.is_none()).unwrap_or(true);
@@ -353,11 +338,11 @@ mod tests {
 
     use chrono::Utc;
     use flotilla_resources::{
-        ConvoyPhase as ResConvoyPhase, ConvoySpec, ConvoyStatus, ObjectMeta, ProcessDefinition, ProcessSource,
-        Presentation, PresentationSpec, PresentationStatus, ResourceObject, SnapshotTask, TaskPhase as ResTaskPhase, TaskState,
-        WorkflowSnapshot, CONVOY_LABEL, TASK_LABEL,
+        ConvoyPhase as ResConvoyPhase, ConvoySpec, ConvoyStatus, ObjectMeta, Presentation, PresentationSpec, PresentationStatus,
+        ProcessDefinition, ProcessSource, ResourceObject, SnapshotTask, TaskPhase as ResTaskPhase, TaskState, WorkflowSnapshot,
+        CONVOY_LABEL, TASK_LABEL,
     };
-    use tokio::sync::mpsc;
+    use tokio::sync::broadcast;
 
     use super::*;
 
@@ -411,18 +396,10 @@ mod tests {
         phase: ResConvoyPhase,
         tasks: &[(&str, ResTaskPhase)],
     ) -> ResourceObject<Convoy> {
-        let snapshot_tasks: Vec<SnapshotTask> = tasks
-            .iter()
-            .map(|(task_name, _)| SnapshotTask {
-                name: (*task_name).into(),
-                depends_on: vec![],
-                processes: vec![],
-            })
-            .collect();
-        let task_states: BTreeMap<String, TaskState> = tasks
-            .iter()
-            .map(|(task_name, task_phase)| ((*task_name).into(), task_state(*task_phase)))
-            .collect();
+        let snapshot_tasks: Vec<SnapshotTask> =
+            tasks.iter().map(|(task_name, _)| SnapshotTask { name: (*task_name).into(), depends_on: vec![], processes: vec![] }).collect();
+        let task_states: BTreeMap<String, TaskState> =
+            tasks.iter().map(|(task_name, task_phase)| ((*task_name).into(), task_state(*task_phase))).collect();
         let workflow_snapshot = if snapshot_tasks.is_empty() { None } else { Some(WorkflowSnapshot { tasks: snapshot_tasks }) };
         ResourceObject {
             metadata: meta(ns, name),
@@ -461,13 +438,12 @@ mod tests {
                         }],
                     }],
                 }),
-                tasks: std::iter::once(("implement".into(), task_state(ResTaskPhase::Running)))
-                    .collect::<BTreeMap<_, _>>(),
+                tasks: std::iter::once(("implement".into(), task_state(ResTaskPhase::Running))).collect::<BTreeMap<_, _>>(),
                 observed_workflow_ref: Some("review-and-fix".into()),
                 ..Default::default()
             }),
         };
-        let summary = ConvoyProjection::new(mpsc::channel(16).0).summarize(&convoy);
+        let summary = ConvoyProjection::new(broadcast::channel(16).0).summarize(&convoy);
         assert_eq!(summary.namespace, "flotilla");
         assert_eq!(summary.name, "fix-bug-123");
         assert_eq!(summary.workflow_ref, "review-and-fix");
@@ -481,13 +457,7 @@ mod tests {
     fn summarize_convoy_marks_initializing_when_snapshot_absent() {
         let convoy = ResourceObject {
             metadata: meta("flotilla", "new-one"),
-            spec: ConvoySpec {
-                workflow_ref: "wf".into(),
-                inputs: BTreeMap::new(),
-                placement_policy: None,
-                repository: None,
-                r#ref: None,
-            },
+            spec: ConvoySpec { workflow_ref: "wf".into(), inputs: BTreeMap::new(), placement_policy: None, repository: None, r#ref: None },
             status: Some(ConvoyStatus {
                 phase: ResConvoyPhase::Pending,
                 workflow_snapshot: None,
@@ -495,20 +465,18 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let summary = ConvoyProjection::new(mpsc::channel(16).0).summarize(&convoy);
+        let summary = ConvoyProjection::new(broadcast::channel(16).0).summarize(&convoy);
         assert!(summary.initializing);
         assert!(summary.tasks.is_empty());
     }
 
     #[test]
     fn summarize_with_index_populates_workspace_ref() {
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, _rx) = broadcast::channel(16);
         let mut projection = ConvoyProjection::new(tx);
         projection.apply_presentation(&presentation_obj("fix-bug-123", "implement", Some("ws-1")));
 
-        let convoy = convoy_for_test("flotilla", "fix-bug-123", "wf", ResConvoyPhase::Active, &[
-            ("implement", ResTaskPhase::Running),
-        ]);
+        let convoy = convoy_for_test("flotilla", "fix-bug-123", "wf", ResConvoyPhase::Active, &[("implement", ResTaskPhase::Running)]);
 
         let summary = projection.summarize(&convoy);
         assert_eq!(summary.tasks[0].workspace_ref.as_deref(), Some("ws-1"));
@@ -518,7 +486,7 @@ mod tests {
     fn summarize_populates_repo_hint_from_label() {
         use flotilla_resources::REPO_LABEL;
 
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, _rx) = broadcast::channel(16);
         let projection = ConvoyProjection::new(tx);
 
         let mut convoy = convoy_for_test("flotilla", "x", "wf", ResConvoyPhase::Pending, &[]);
@@ -530,24 +498,18 @@ mod tests {
 
     #[test]
     fn presentation_index_resolves_workspace_ref_per_task() {
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, _rx) = broadcast::channel(16);
         let mut projection = ConvoyProjection::new(tx);
         projection.apply_presentation(&presentation_obj("fix-bug-123", "implement", Some("ws-1")));
         projection.apply_presentation(&presentation_obj("fix-bug-123", "review", Some("ws-2")));
 
-        assert_eq!(
-            projection.workspace_ref_for("flotilla", "fix-bug-123", "implement"),
-            Some("ws-1".to_string())
-        );
-        assert_eq!(
-            projection.workspace_ref_for("flotilla", "fix-bug-123", "review"),
-            Some("ws-2".to_string())
-        );
+        assert_eq!(projection.workspace_ref_for("flotilla", "fix-bug-123", "implement"), Some("ws-1".to_string()));
+        assert_eq!(projection.workspace_ref_for("flotilla", "fix-bug-123", "review"), Some("ws-2".to_string()));
     }
 
     #[test]
     fn presentation_without_task_label_is_ignored() {
-        let (tx, _rx) = mpsc::channel(16);
+        let (tx, _rx) = broadcast::channel(16);
         let mut projection = ConvoyProjection::new(tx);
         let mut p = presentation_obj("fix-bug-123", "implement", Some("ws-1"));
         p.metadata.labels.remove(TASK_LABEL);
@@ -563,7 +525,7 @@ mod tests {
         presentation_obj(convoy_name, task_name, ws_ref)
     }
 
-    async fn drain(rx: &mut mpsc::Receiver<DaemonEvent>) -> Vec<DaemonEvent> {
+    fn drain(rx: &mut broadcast::Receiver<DaemonEvent>) -> Vec<DaemonEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             out.push(event);
@@ -573,23 +535,17 @@ mod tests {
 
     #[tokio::test]
     async fn presentation_update_refreshes_workspace_ref_on_affected_convoy() {
-        let (tx, mut rx) = mpsc::channel(16);
+        let (tx, mut rx) = broadcast::channel(16);
         let mut projection = ConvoyProjection::new(tx);
 
-        let convoy = convoy_for_test(
-            "flotilla",
-            "fix-bug-123",
-            "wf",
-            ResConvoyPhase::Active,
-            &[("implement", ResTaskPhase::Running)],
-        );
+        let convoy = convoy_for_test("flotilla", "fix-bug-123", "wf", ResConvoyPhase::Active, &[("implement", ResTaskPhase::Running)]);
         projection.apply_convoy_event(WatchEvent::Added(convoy.clone())).await;
-        let _ = drain(&mut rx).await; // consume snapshot
+        let _ = drain(&mut rx); // consume snapshot
 
         let p = presentation("fix-bug-123", "implement", Some("ws-1"));
         projection.apply_presentation_event(WatchEvent::Added(p)).await;
 
-        let events = drain(&mut rx).await;
+        let events = drain(&mut rx);
         assert!(!events.is_empty(), "expected a delta");
         match &events[0] {
             DaemonEvent::NamespaceDelta(delta) => {
@@ -603,13 +559,13 @@ mod tests {
 
     #[tokio::test]
     async fn applying_convoy_added_emits_initial_snapshot_then_delta() {
-        let (tx, mut rx) = mpsc::channel(16);
+        let (tx, mut rx) = broadcast::channel(16);
         let mut projection = ConvoyProjection::new(tx);
 
         let convoy = convoy_for_test("flotilla", "x", "wf", ResConvoyPhase::Pending, &[]);
         projection.apply_convoy_event(WatchEvent::Added(convoy.clone())).await;
 
-        let events = drain(&mut rx).await;
+        let events = drain(&mut rx);
         assert_eq!(events.len(), 1, "first event per namespace emits a snapshot, got {events:?}");
         match &events[0] {
             DaemonEvent::NamespaceSnapshot(snap) => {
@@ -629,7 +585,7 @@ mod tests {
         }
         projection.apply_convoy_event(WatchEvent::Modified(modified)).await;
 
-        let events = drain(&mut rx).await;
+        let events = drain(&mut rx);
         assert_eq!(events.len(), 1);
         match &events[0] {
             DaemonEvent::NamespaceDelta(delta) => {
@@ -643,14 +599,14 @@ mod tests {
 
     #[tokio::test]
     async fn applying_convoy_deleted_emits_removal_delta() {
-        let (tx, mut rx) = mpsc::channel(16);
+        let (tx, mut rx) = broadcast::channel(16);
         let mut projection = ConvoyProjection::new(tx);
         let convoy = convoy_for_test("flotilla", "x", "wf", ResConvoyPhase::Pending, &[]);
         projection.apply_convoy_event(WatchEvent::Added(convoy.clone())).await;
-        let _ = drain(&mut rx).await; // consume snapshot
+        let _ = drain(&mut rx); // consume snapshot
 
         projection.apply_convoy_event(WatchEvent::Deleted(convoy)).await;
-        let events = drain(&mut rx).await;
+        let events = drain(&mut rx);
         assert!(!events.is_empty(), "expected a delta, got none");
         match &events[0] {
             DaemonEvent::NamespaceDelta(delta) => {
@@ -663,11 +619,11 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_consumes_in_memory_client_events() {
-        use flotilla_resources::{InputMeta, InMemoryBackend, ResourceBackend};
+        use flotilla_resources::{InMemoryBackend, InputMeta, ResourceBackend};
 
         let backend = ResourceBackend::InMemory(InMemoryBackend::default());
 
-        let (tx, mut rx) = mpsc::channel(16);
+        let (tx, mut rx) = broadcast::channel(16);
         let projection = ConvoyProjection::new(tx);
 
         let convoys = backend.clone().using::<Convoy>("flotilla");
@@ -684,21 +640,14 @@ mod tests {
             finalizers: convoy.metadata.finalizers.clone(),
             deletion_timestamp: convoy.metadata.deletion_timestamp,
         };
-        backend
-            .using::<Convoy>("flotilla")
-            .create(&meta, &convoy.spec)
-            .await
-            .expect("create convoy");
+        backend.using::<Convoy>("flotilla").create(&meta, &convoy.spec).await.expect("create convoy");
 
         // Expect a NamespaceSnapshot within a short timeout.
         let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
             .expect("timeout waiting for namespace snapshot event")
-            .expect("event channel closed before first event");
-        assert!(
-            matches!(event, DaemonEvent::NamespaceSnapshot(_)),
-            "expected NamespaceSnapshot, got {event:?}"
-        );
+            .expect("broadcast channel error before first event");
+        assert!(matches!(event, DaemonEvent::NamespaceSnapshot(_)), "expected NamespaceSnapshot, got {event:?}");
 
         handle.abort();
     }

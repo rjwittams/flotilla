@@ -380,7 +380,13 @@ pub(crate) fn format_event_human(event: &flotilla_protocol::DaemonEvent) -> Stri
         }
         DaemonEvent::NamespaceDelta(delta) => {
             // TODO: namespace stream support — follow-up tasks
-            format!("[namespace] {}: delta (seq {}, {} changed, {} removed)", delta.namespace, delta.seq, delta.changed.len(), delta.removed.len())
+            format!(
+                "[namespace] {}: delta (seq {}, {} changed, {} removed)",
+                delta.namespace,
+                delta.seq,
+                delta.changed.len(),
+                delta.removed.len()
+            )
         }
     }
 }

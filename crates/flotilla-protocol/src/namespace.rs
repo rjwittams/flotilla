@@ -8,7 +8,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{host::HostName, snapshot::CheckoutRef, snapshot::RepoKey};
+use crate::{
+    host::HostName,
+    snapshot::{CheckoutRef, RepoKey},
+};
 
 /// Stable identifier for a convoy resource: `"namespace/name"`.
 /// Opaque string; parsing validates the `/` separator. No rename support.
@@ -159,13 +162,7 @@ mod tests {
 
     #[test]
     fn convoy_phase_serde_round_trips() {
-        for phase in [
-            ConvoyPhase::Pending,
-            ConvoyPhase::Active,
-            ConvoyPhase::Completed,
-            ConvoyPhase::Failed,
-            ConvoyPhase::Cancelled,
-        ] {
+        for phase in [ConvoyPhase::Pending, ConvoyPhase::Active, ConvoyPhase::Completed, ConvoyPhase::Failed, ConvoyPhase::Cancelled] {
             let encoded = serde_json::to_string(&phase).unwrap();
             let decoded: ConvoyPhase = serde_json::from_str(&encoded).unwrap();
             assert_eq!(decoded, phase);
@@ -231,11 +228,7 @@ mod tests {
 
     #[test]
     fn namespace_snapshot_round_trips() {
-        let snap = NamespaceSnapshot {
-            seq: 17,
-            namespace: "flotilla".into(),
-            convoys: vec![],
-        };
+        let snap = NamespaceSnapshot { seq: 17, namespace: "flotilla".into(), convoys: vec![] };
         let encoded = serde_json::to_string(&snap).unwrap();
         let decoded: NamespaceSnapshot = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, snap);
