@@ -636,8 +636,9 @@ impl InProcessDaemon {
         });
 
         // Subscribe to the broadcast channel and mirror namespace events into
-        // `namespace_state` for replay.  Uses a Weak reference so the daemon
-        // can be dropped while the subscriber exits cleanly.
+        // `namespace_state` for replay.  The subscriber holds a strong Arc to
+        // `namespace_state` but exits cleanly when the daemon drops its broadcast
+        // sender (Err(Closed) breaks the loop).
         let namespace_state = Arc::clone(&daemon.namespace_state);
         let mut namespace_rx = daemon.event_tx.subscribe();
         tokio::spawn(async move {
@@ -667,7 +668,9 @@ impl InProcessDaemon {
                         entry.seq = delta.seq;
                     }
                     Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(lagged = n, "namespace_state subscriber lagged; retained state may be stale until next snapshot");
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
