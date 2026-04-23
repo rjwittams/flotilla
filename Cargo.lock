@@ -1369,6 +1369,7 @@ dependencies = [
  "flotilla-protocol",
  "futures",
  "image",
+ "indexmap",
  "insta",
  "libc",
  "ratatui",

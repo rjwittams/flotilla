@@ -32,6 +32,7 @@ futures = "0.3"
 comfy-table = "7.2.2"
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
+indexmap = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

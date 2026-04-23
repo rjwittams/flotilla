@@ -25,6 +25,7 @@ use flotilla_protocol::{
     ProviderError, ProvisioningTarget, RepoDelta, RepoIdentity, RepoInfo, RepoLabels, RepoSelector, RepoSnapshot, StepStatus, WorkItem,
     WorkItemIdentity,
 };
+use indexmap::IndexMap;
 pub use intent::Intent;
 use tokio::sync::mpsc;
 use tui_input::Input;
@@ -258,6 +259,19 @@ impl TuiModel {
     }
 }
 
+/// Per-namespace convoy state tracked by the TUI. Populated from
+/// `DaemonEvent::NamespaceSnapshot` and updated by `DaemonEvent::NamespaceDelta`.
+pub struct NamespaceModel {
+    pub convoys: IndexMap<flotilla_protocol::namespace::ConvoyId, flotilla_protocol::namespace::ConvoySummary>,
+    pub last_seq: u64,
+}
+
+impl Default for NamespaceModel {
+    fn default() -> Self {
+        Self { convoys: IndexMap::new(), last_seq: 0 }
+    }
+}
+
 /// A command that has been dispatched to the daemon and is awaiting completion.
 pub struct InFlightCommand {
     pub repo_identity: RepoIdentity,
@@ -349,6 +363,9 @@ pub struct App {
     pub issue_update_rx: mpsc::UnboundedReceiver<issue_view::IssueQueryUpdate>,
     /// Client session ID. Passed to `execute_query` for query dispatch.
     pub session_id: uuid::Uuid,
+    /// Per-namespace convoy state. Keyed by namespace string. Populated from
+    /// `DaemonEvent::NamespaceSnapshot` / `NamespaceDelta`.
+    pub namespaces: HashMap<String, NamespaceModel>,
 }
 
 impl App {
@@ -403,6 +420,7 @@ impl App {
             issue_update_tx,
             issue_update_rx,
             session_id: uuid::Uuid::new_v4(),
+            namespaces: HashMap::new(),
         }
     }
 
@@ -1108,11 +1126,23 @@ impl App {
                     self.ui.provisioning_target = ProvisioningTarget::Host { host: HostName::local() };
                 }
             }
-            DaemonEvent::NamespaceSnapshot(_) => {
-                // TODO: namespace stream support — follow-up tasks
+            DaemonEvent::NamespaceSnapshot(snap) => {
+                let entry = self.namespaces.entry(snap.namespace.clone()).or_default();
+                entry.convoys.clear();
+                for convoy in snap.convoys.iter() {
+                    entry.convoys.insert(convoy.id.clone(), convoy.clone());
+                }
+                entry.last_seq = snap.seq;
             }
-            DaemonEvent::NamespaceDelta(_) => {
-                // TODO: namespace stream support — follow-up tasks
+            DaemonEvent::NamespaceDelta(delta) => {
+                let entry = self.namespaces.entry(delta.namespace.clone()).or_default();
+                for convoy in delta.changed.iter() {
+                    entry.convoys.insert(convoy.id.clone(), convoy.clone());
+                }
+                for id in delta.removed.iter() {
+                    entry.convoys.shift_remove(id);
+                }
+                entry.last_seq = delta.seq;
             }
         }
     }
@@ -1355,6 +1385,11 @@ impl App {
     /// Build a repo command for an issue-row action (where no WorkItem context exists).
     pub(super) fn provider_repo_command_for_issue(&self, action: CommandAction) -> Command {
         self.repo_command(action)
+    }
+
+    /// Returns convoys for the given namespace in insertion order.
+    pub fn convoys(&self, namespace: &str) -> Vec<&flotilla_protocol::namespace::ConvoySummary> {
+        self.namespaces.get(namespace).map(|m| m.convoys.values().collect()).unwrap_or_default()
     }
 
     pub(super) fn open_file_picker_from_active_repo_parent(&mut self) {

@@ -1282,3 +1282,85 @@ fn resolve_environment_target_accepts_non_host_environment_identity_directly() {
     assert_eq!(node_id, NodeId::new("node-alpha"));
     assert_eq!(target, ProvisioningTarget::ExistingEnvironment { host: host_name, env_id: nested_env });
 }
+
+// -- Namespace snapshot / delta handling --
+
+fn test_convoy(
+    namespace: &str,
+    name: &str,
+    phase: flotilla_protocol::namespace::ConvoyPhase,
+    initializing: bool,
+) -> flotilla_protocol::namespace::ConvoySummary {
+    flotilla_protocol::namespace::ConvoySummary {
+        id: flotilla_protocol::namespace::ConvoyId::new(namespace, name),
+        namespace: namespace.into(),
+        name: name.into(),
+        workflow_ref: "wf".into(),
+        phase,
+        message: None,
+        repo_hint: None,
+        tasks: vec![],
+        started_at: None,
+        finished_at: None,
+        observed_workflow_ref: None,
+        initializing,
+    }
+}
+
+#[test]
+fn app_applies_namespace_snapshot() {
+    use flotilla_protocol::{
+        namespace::{ConvoyPhase, NamespaceSnapshot},
+        DaemonEvent,
+    };
+
+    let mut app = stub_app();
+    let convoy = test_convoy("flotilla", "x", ConvoyPhase::Active, false);
+
+    app.handle_daemon_event(DaemonEvent::NamespaceSnapshot(Box::new(NamespaceSnapshot {
+        seq: 1,
+        namespace: "flotilla".into(),
+        convoys: vec![convoy],
+    })));
+
+    assert_eq!(app.convoys("flotilla").len(), 1);
+    assert_eq!(app.convoys("flotilla")[0].name, "x");
+}
+
+#[test]
+fn app_applies_namespace_delta() {
+    use flotilla_protocol::{
+        namespace::{ConvoyPhase, NamespaceDelta, NamespaceSnapshot},
+        DaemonEvent,
+    };
+
+    let mut app = stub_app();
+    let convoy = test_convoy("flotilla", "x", ConvoyPhase::Pending, true);
+
+    app.handle_daemon_event(DaemonEvent::NamespaceSnapshot(Box::new(NamespaceSnapshot {
+        seq: 1,
+        namespace: "flotilla".into(),
+        convoys: vec![convoy.clone()],
+    })));
+
+    // Update phase via delta
+    let mut modified = convoy.clone();
+    modified.phase = ConvoyPhase::Active;
+    modified.initializing = false;
+    app.handle_daemon_event(DaemonEvent::NamespaceDelta(Box::new(NamespaceDelta {
+        seq: 2,
+        namespace: "flotilla".into(),
+        changed: vec![modified],
+        removed: vec![],
+    })));
+    assert_eq!(app.convoys("flotilla")[0].phase, ConvoyPhase::Active);
+
+    // Remove via delta
+    app.handle_daemon_event(DaemonEvent::NamespaceDelta(Box::new(NamespaceDelta {
+        seq: 3,
+        namespace: "flotilla".into(),
+        changed: vec![],
+        removed: vec![convoy.id.clone()],
+    })));
+    assert!(app.convoys("flotilla").is_empty());
+}
