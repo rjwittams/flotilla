@@ -109,6 +109,8 @@ pub struct WidgetContext<'a> {
     pub repo_order: &'a [RepoIdentity],
     pub commands: &'a mut CommandQueue,
     pub is_config: &'a mut bool,
+    /// Whether the Convoys tab is currently active.
+    pub is_convoys: bool,
     pub active_repo_is_remote_only: bool,
     pub app_actions: Vec<AppAction>,
 }
@@ -123,6 +125,12 @@ pub struct RenderContext<'a> {
     pub theme: &'a Theme,
     pub keymap: &'a Keymap,
     pub in_flight: &'a HashMap<u64, InFlightCommand>,
+    /// Per-namespace convoy model, keyed by namespace string.
+    pub namespaces: &'a crate::app::NamespaceMap,
+    /// Currently selected convoy id for the Convoys tab.
+    pub convoys_selected: Option<flotilla_protocol::namespace::ConvoyId>,
+    /// Active filter string for the Convoys tab.
+    pub convoy_filter: &'a str,
 }
 
 /// A self-contained interactive widget that handles events and renders itself.

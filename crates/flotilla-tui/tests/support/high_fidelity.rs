@@ -353,6 +353,8 @@ impl HighFidelityHarness {
         let backend = TestBackend::new(WIDTH, HEIGHT);
         let mut terminal = Terminal::new(backend).expect("create test terminal");
         let theme = self.app.theme.clone();
+        let convoys_selected = self.app.convoys_ui.selected.clone();
+        let convoy_filter_str = self.app.convoys_ui.filter.clone();
         terminal
             .draw(|frame| {
                 let area = frame.area();
@@ -362,6 +364,9 @@ impl HighFidelityHarness {
                     theme: &theme,
                     keymap: &self.app.keymap,
                     in_flight: &self.app.in_flight,
+                    namespaces: &self.app.namespaces,
+                    convoys_selected,
+                    convoy_filter: &convoy_filter_str,
                 };
                 self.app.screen.render(frame, area, &mut ctx);
             })

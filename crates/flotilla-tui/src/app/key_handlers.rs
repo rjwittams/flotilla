@@ -11,12 +11,19 @@ use crate::{
 impl App {
     // ── Key handling ──
 
-    /// Resolve a key event using the app-level config/normal distinction.
+    /// Resolve a key event using the app-level config/convoys/normal distinction.
     ///
     /// Called when the base layer widget (Normal mode_id) is on top, so that
-    /// config mode gets Overview bindings instead of Normal.
+    /// config mode gets Overview bindings, convoys mode gets Convoys bindings,
+    /// and normal mode gets Normal bindings.
     fn resolve_action(&self, key: KeyEvent) -> Option<Action> {
-        let mode_id = if self.ui.is_config { BindingModeId::Overview } else { BindingModeId::Normal };
+        let mode_id = if self.ui.is_config {
+            BindingModeId::Overview
+        } else if self.ui.is_convoys {
+            BindingModeId::Convoys
+        } else {
+            BindingModeId::Normal
+        };
         let mode: KeyBindingMode = mode_id.into();
         self.keymap.resolve(&mode, crokey::KeyCombination::from(key))
     }

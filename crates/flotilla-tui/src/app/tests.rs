@@ -1364,3 +1364,56 @@ fn app_applies_namespace_delta() {
     })));
     assert!(app.convoys("flotilla").is_empty());
 }
+
+// -- Convoys tab rendering --
+
+#[test]
+fn screen_renders_convoys_page_on_convoys_tab() {
+    use flotilla_protocol::{
+        namespace::{ConvoyPhase, NamespaceSnapshot},
+        DaemonEvent,
+    };
+    use ratatui::{backend::TestBackend, Terminal};
+
+    use crate::widgets::InteractiveWidget as _;
+
+    let mut app = stub_app();
+
+    // Feed a namespace snapshot with one convoy named "demo".
+    app.handle_daemon_event(DaemonEvent::NamespaceSnapshot(Box::new(NamespaceSnapshot {
+        seq: 1,
+        namespace: "flotilla".into(),
+        convoys: vec![test_convoy("flotilla", "demo", ConvoyPhase::Active, false)],
+    })));
+
+    // Switch to the Convoys tab.
+    app.ui.is_config = false;
+    app.ui.is_convoys = true;
+
+    // Render into a test terminal.
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    let convoys_selected = app.convoys_ui.selected.clone();
+    let convoy_filter = app.convoys_ui.filter.clone();
+    terminal
+        .draw(|f| {
+            let area = f.area();
+            let mut ctx = crate::widgets::RenderContext {
+                model: &app.model,
+                ui: &mut app.ui,
+                theme: &app.theme,
+                keymap: &app.keymap,
+                in_flight: &app.in_flight,
+                namespaces: &app.namespaces,
+                convoys_selected,
+                convoy_filter: &convoy_filter,
+            };
+            app.screen.render(f, area, &mut ctx);
+        })
+        .expect("draw");
+
+    let rendered: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+    assert!(rendered.contains("Convoys"), "expected 'Convoys' title, got: {rendered}");
+    assert!(rendered.contains("demo"), "expected convoy name 'demo' in rendered output, got: {rendered}");
+}

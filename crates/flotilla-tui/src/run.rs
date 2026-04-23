@@ -147,12 +147,17 @@ pub async fn run_event_loop(mut terminal: ratatui::DefaultTerminal, mut app: App
 fn render_frame(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
+        let convoys_selected = app.convoys_ui.selected.clone();
+        let convoy_filter = app.convoys_ui.filter.as_str();
         let mut ctx = crate::widgets::RenderContext {
             model: &app.model,
             ui: &mut app.ui,
             theme: &app.theme,
             keymap: &app.keymap,
             in_flight: &app.in_flight,
+            namespaces: &app.namespaces,
+            convoys_selected,
+            convoy_filter,
         };
         app.screen.render(f, area, &mut ctx);
     })?;

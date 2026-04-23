@@ -127,6 +127,8 @@ pub struct KeysConfig {
     #[serde(default)]
     pub config: HashMap<String, String>,
     #[serde(default)]
+    pub convoys: HashMap<String, String>,
+    #[serde(default)]
     pub action_menu: HashMap<String, String>,
     #[serde(default)]
     pub delete_confirm: HashMap<String, String>,

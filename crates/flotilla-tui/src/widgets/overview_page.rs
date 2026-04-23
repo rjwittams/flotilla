@@ -136,7 +136,17 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                let mut ctx = RenderContext { model: &harness.model, ui: &mut ui, theme: &theme, keymap: &keymap, in_flight: &in_flight };
+                let empty_namespaces = crate::app::NamespaceMap::new();
+                let mut ctx = RenderContext {
+                    model: &harness.model,
+                    ui: &mut ui,
+                    theme: &theme,
+                    keymap: &keymap,
+                    in_flight: &in_flight,
+                    namespaces: &empty_namespaces,
+                    convoys_selected: None,
+                    convoy_filter: "",
+                };
                 page.render(frame, frame.area(), &mut ctx);
             })
             .expect("draw should succeed");

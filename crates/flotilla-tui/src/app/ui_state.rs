@@ -113,6 +113,8 @@ pub struct DragState {
 
 pub struct UiState {
     pub is_config: bool,
+    /// Whether the global Convoys tab is the active tab.
+    pub is_convoys: bool,
     pub provisioning_target: ProvisioningTarget,
     pub view_layout: RepoViewLayout,
     pub status_bar: StatusBarUiState,
@@ -128,6 +130,7 @@ impl UiState {
     pub fn new(_repo_ids: &[RepoIdentity]) -> Self {
         Self {
             is_config: false,
+            is_convoys: false,
             provisioning_target: ProvisioningTarget::Host { host: HostName::local() },
             view_layout: RepoViewLayout::default(),
             status_bar: StatusBarUiState::default(),

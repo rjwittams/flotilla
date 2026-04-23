@@ -270,6 +270,7 @@ impl Keymap {
             (&config.normal, BindingModeId::Normal),
             (&config.help, BindingModeId::Help),
             (&config.config, BindingModeId::Overview),
+            (&config.convoys, BindingModeId::Convoys),
             (&config.action_menu, BindingModeId::ActionMenu),
             (&config.delete_confirm, BindingModeId::DeleteConfirm),
             (&config.close_confirm, BindingModeId::CloseConfirm),

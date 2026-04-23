@@ -8,6 +8,7 @@ use ratatui::{
 };
 
 use super::{
+    convoys_page::{ConvoyScope, ConvoysPage},
     overview_page::OverviewPage,
     repo_page::RepoPage,
     status_bar_widget::{self, StatusBarWidget},
@@ -94,10 +95,16 @@ impl Screen {
 
     /// Resolve the active repo identity from model state.
     ///
-    /// Returns `Some(identity)` when the UI is on a repo tab (not Config mode),
-    /// `None` when on the Flotilla (overview) tab.
-    fn active_repo_identity<'a>(&self, repo_order: &'a [RepoIdentity], active_repo: usize, is_config: bool) -> Option<&'a RepoIdentity> {
-        if is_config || repo_order.is_empty() {
+    /// Returns `Some(identity)` when the UI is on a repo tab (not Config or Convoys mode),
+    /// `None` when on the Flotilla (overview) or Convoys tab.
+    fn active_repo_identity<'a>(
+        &self,
+        repo_order: &'a [RepoIdentity],
+        active_repo: usize,
+        is_config: bool,
+        is_convoys: bool,
+    ) -> Option<&'a RepoIdentity> {
+        if is_config || is_convoys || repo_order.is_empty() {
             None
         } else {
             repo_order.get(active_repo)
@@ -160,10 +167,15 @@ impl InteractiveWidget for Screen {
             _ => {}
         }
 
-        // Phase 3: No modal — dispatch to overview page or repo page
+        // Phase 3: No modal — dispatch to convoys page, overview page, or repo page
         let is_config = *ctx.is_config;
-        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, is_config).cloned();
-        let outcome = if let Some(ref identity) = active_identity {
+        let is_convoys = ctx.is_convoys;
+        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, is_config, is_convoys).cloned();
+        let outcome = if is_convoys {
+            // Convoys page has no interactive widget yet — all non-global actions are ignored.
+            // Global actions (PrevTab, NextTab, etc.) were already handled in Phase 2.
+            Outcome::Ignored
+        } else if let Some(ref identity) = active_identity {
             if let Some(page) = self.repo_pages.get_mut(identity) {
                 page.handle_action(action, ctx)
             } else {
@@ -192,8 +204,11 @@ impl InteractiveWidget for Screen {
 
         // No modal — dispatch to overview page or repo page
         let is_config = *ctx.is_config;
-        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, is_config).cloned();
-        let outcome = if let Some(ref identity) = active_identity {
+        let is_convoys = ctx.is_convoys;
+        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, is_config, is_convoys).cloned();
+        let outcome = if is_convoys {
+            Outcome::Ignored
+        } else if let Some(ref identity) = active_identity {
             if let Some(page) = self.repo_pages.get_mut(identity) {
                 page.handle_raw_key(key, ctx)
             } else {
@@ -266,8 +281,11 @@ impl InteractiveWidget for Screen {
 
         // Dispatch to overview page or repo page for content area mouse events
         let is_config = *ctx.is_config;
-        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, is_config).cloned();
-        let outcome = if let Some(ref identity) = active_identity {
+        let is_convoys = ctx.is_convoys;
+        let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, is_config, is_convoys).cloned();
+        let outcome = if is_convoys {
+            Outcome::Ignored
+        } else if let Some(ref identity) = active_identity {
             if let Some(page) = self.repo_pages.get_mut(identity) {
                 page.handle_mouse(mouse, ctx)
             } else {
@@ -290,10 +308,17 @@ impl InteractiveWidget for Screen {
         // 1. Tab bar
         self.tabs.render(ctx.model, ctx.ui, ctx.theme, frame, chunks[0]);
 
-        // 2. Content: dispatch to repo page for repo tabs, overview page otherwise
+        // 2. Content: dispatch to convoys page, repo page, or overview page
         let is_config = ctx.ui.is_config;
-        let active_identity = self.active_repo_identity(&ctx.model.repo_order, ctx.model.active_repo, is_config).cloned();
-        if let Some(ref identity) = active_identity {
+        let is_convoys = ctx.ui.is_convoys;
+        let active_identity = self.active_repo_identity(&ctx.model.repo_order, ctx.model.active_repo, is_config, is_convoys).cloned();
+        if is_convoys {
+            // Render the Convoys page. Namespace is always "flotilla" for the global tab.
+            let convoys: Vec<&_> = ctx.namespaces.get("flotilla").map(|m| m.convoys.values().collect()).unwrap_or_default();
+            let selected = ctx.convoys_selected.as_ref();
+            let filter = ctx.convoy_filter;
+            ConvoysPage { convoys, scope: ConvoyScope::All, selected, filter }.render(frame, chunks[1]);
+        } else if let Some(ref identity) = active_identity {
             if let Some(page) = self.repo_pages.get_mut(identity) {
                 page.render(frame, chunks[1], ctx);
             } else {
@@ -311,6 +336,8 @@ impl InteractiveWidget for Screen {
             (modal.binding_mode(), modal.status_fragment())
         } else if is_config {
             (self.overview_page.binding_mode(), self.overview_page.status_fragment())
+        } else if is_convoys {
+            (BindingModeId::Convoys.into(), StatusFragment::default())
         } else if let Some(page) = active_identity.as_ref().and_then(|id| self.repo_pages.get(id)) {
             (page.binding_mode(), page.status_fragment())
         } else {

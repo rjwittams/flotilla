@@ -259,11 +259,24 @@ impl TuiModel {
     }
 }
 
+/// Alias for the per-namespace map stored on `App` and passed into `RenderContext`.
+pub type NamespaceMap = HashMap<String, NamespaceModel>;
+
 /// Per-namespace convoy state tracked by the TUI. Populated from
 /// `DaemonEvent::NamespaceSnapshot` and updated by `DaemonEvent::NamespaceDelta`.
 pub struct NamespaceModel {
     pub convoys: IndexMap<flotilla_protocol::namespace::ConvoyId, flotilla_protocol::namespace::ConvoySummary>,
     pub last_seq: u64,
+}
+
+/// UI state for the Convoys tab (selection, filter).
+///
+/// Minimal stub for Task 25; full selection wiring lands in Task 26,
+/// filter input in Task 27.
+#[derive(Default)]
+pub struct ConvoysUiState {
+    pub selected: Option<flotilla_protocol::namespace::ConvoyId>,
+    pub filter: String,
 }
 
 impl Default for NamespaceModel {
@@ -366,6 +379,8 @@ pub struct App {
     /// Per-namespace convoy state. Keyed by namespace string. Populated from
     /// `DaemonEvent::NamespaceSnapshot` / `NamespaceDelta`.
     pub namespaces: HashMap<String, NamespaceModel>,
+    /// Convoys tab UI state (selection, filter).
+    pub convoys_ui: ConvoysUiState,
 }
 
 impl App {
@@ -421,6 +436,7 @@ impl App {
             issue_update_rx,
             session_id: uuid::Uuid::new_v4(),
             namespaces: HashMap::new(),
+            convoys_ui: ConvoysUiState::default(),
         }
     }
 
@@ -812,6 +828,7 @@ impl App {
         let my_host = self.model.my_host().cloned();
         let my_node_id = self.model.my_node_id().cloned();
         let active_repo_is_remote_only = self.active_repo_is_remote_only();
+        let is_convoys = self.ui.is_convoys;
         crate::widgets::WidgetContext {
             model: &self.model,
             keymap: &self.keymap,
@@ -824,6 +841,7 @@ impl App {
             repo_order: &self.model.repo_order,
             commands: &mut self.proto_commands,
             is_config: &mut self.ui.is_config,
+            is_convoys,
             active_repo_is_remote_only,
             app_actions: Vec::new(),
         }
@@ -950,13 +968,16 @@ impl App {
                 AppAction::SwitchToConfig => {
                     self.dismiss_modals();
                     self.ui.is_config = true;
+                    self.ui.is_convoys = false;
                 }
                 AppAction::SwitchToConvoys => {
-                    // TODO(convoys): navigate to the convoys tab when the widget lands (Tasks 22-25).
-                    // For now this is a no-op placeholder so the tab bar click compiles and routes.
+                    self.dismiss_modals();
+                    self.ui.is_config = false;
+                    self.ui.is_convoys = true;
                 }
                 AppAction::SwitchToRepo(i) => {
                     self.dismiss_modals();
+                    self.ui.is_convoys = false;
                     self.switch_tab(i);
                 }
                 AppAction::SaveTabOrder => {
@@ -1127,15 +1148,18 @@ impl App {
                 }
             }
             DaemonEvent::NamespaceSnapshot(snap) => {
-                let entry = self.namespaces.entry(snap.namespace.clone()).or_default();
+                let namespace = snap.namespace.clone();
+                let entry = self.namespaces.entry(namespace.clone()).or_default();
                 entry.convoys.clear();
                 for convoy in snap.convoys.iter() {
                     entry.convoys.insert(convoy.id.clone(), convoy.clone());
                 }
                 entry.last_seq = snap.seq;
+                self.maybe_auto_select_convoy(&namespace);
             }
             DaemonEvent::NamespaceDelta(delta) => {
-                let entry = self.namespaces.entry(delta.namespace.clone()).or_default();
+                let namespace = delta.namespace.clone();
+                let entry = self.namespaces.entry(namespace.clone()).or_default();
                 for convoy in delta.changed.iter() {
                     entry.convoys.insert(convoy.id.clone(), convoy.clone());
                 }
@@ -1143,6 +1167,7 @@ impl App {
                     entry.convoys.shift_remove(id);
                 }
                 entry.last_seq = delta.seq;
+                self.maybe_auto_select_convoy(&namespace);
             }
         }
     }
@@ -1390,6 +1415,30 @@ impl App {
     /// Returns convoys for the given namespace in insertion order.
     pub fn convoys(&self, namespace: &str) -> Vec<&flotilla_protocol::namespace::ConvoySummary> {
         self.namespaces.get(namespace).map(|m| m.convoys.values().collect()).unwrap_or_default()
+    }
+
+    /// Returns the selected convoy id for the Convoys tab, if any.
+    pub fn selected_convoy_id(&self) -> Option<&flotilla_protocol::namespace::ConvoyId> {
+        self.convoys_ui.selected.as_ref()
+    }
+
+    /// Returns the convoy filter string for the Convoys tab.
+    pub fn convoy_filter_str(&self) -> &str {
+        &self.convoys_ui.filter
+    }
+
+    /// Ensure the Convoys tab has a selection when convoys are present.
+    ///
+    /// Called after namespace snapshots/deltas to default-select the first
+    /// convoy when no selection is set yet. Full prev/next navigation lands
+    /// in Task 26.
+    fn maybe_auto_select_convoy(&mut self, namespace: &str) {
+        if self.convoys_ui.selected.is_some() {
+            return;
+        }
+        if let Some(first_id) = self.namespaces.get(namespace).and_then(|m| m.convoys.keys().next()) {
+            self.convoys_ui.selected = Some(first_id.clone());
+        }
     }
 
     pub(super) fn open_file_picker_from_active_repo_parent(&mut self) {
