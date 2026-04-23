@@ -1,9 +1,9 @@
 pub mod action_menu;
-pub mod convoys_page;
 pub mod branch_input;
 pub mod close_confirm;
 pub mod columns;
 pub mod command_palette;
+pub mod convoys_page;
 pub mod delete_confirm;
 pub mod event_log;
 pub mod file_picker;

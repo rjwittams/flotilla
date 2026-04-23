@@ -5,12 +5,11 @@ mod glyphs;
 mod list;
 
 pub use detail::ConvoyDetail;
-pub use list::ConvoyList;
-
 use flotilla_protocol::{
     namespace::{ConvoyId, ConvoySummary},
     snapshot::RepoKey,
 };
+pub use list::ConvoyList;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     text::Line,
