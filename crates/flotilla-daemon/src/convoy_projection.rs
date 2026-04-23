@@ -8,28 +8,28 @@ use std::collections::HashMap;
 
 use flotilla_protocol::{
     namespace::{
-        ConvoyId, ConvoyPhase as WireConvoyPhase, ConvoySummary, ProcessSummary, TaskPhase as WireTaskPhase, TaskSummary,
+        ConvoyId, ConvoyPhase as WireConvoyPhase, ConvoySummary, NamespaceDelta, NamespaceSnapshot, ProcessSummary,
+        TaskPhase as WireTaskPhase, TaskSummary,
     },
     DaemonEvent,
 };
 use flotilla_resources::{
     Convoy, ConvoyPhase as ResConvoyPhase, Presentation, ProcessSource, ResourceObject, SnapshotTask,
-    TaskPhase as ResTaskPhase, TaskState, CONVOY_LABEL, TASK_LABEL,
+    TaskPhase as ResTaskPhase, TaskState, WatchEvent, CONVOY_LABEL, TASK_LABEL,
 };
 use tokio::sync::mpsc;
 
 /// In-memory view of one namespace's convoys, owned by the projection.
-#[allow(dead_code)]
 #[derive(Default)]
 struct NamespaceView {
     convoys: HashMap<ConvoyId, ConvoySummary>,
     seq: u64,
+    emitted_initial_snapshot: bool,
 }
 
 /// Key: `(namespace, convoy_name, task_name)`.
 type PresentationKey = (String, String, String);
 
-#[allow(dead_code)]
 pub struct ConvoyProjection {
     namespaces: HashMap<String, NamespaceView>,
     presentation_workspaces: HashMap<PresentationKey, String>,
@@ -78,6 +78,53 @@ impl ConvoyProjection {
             summary.repo_hint = Some(flotilla_protocol::snapshot::RepoKey(repo.clone()));
         }
         summary
+    }
+
+    pub async fn apply_convoy_event(&mut self, event: WatchEvent<Convoy>) {
+        match event {
+            WatchEvent::Added(convoy) | WatchEvent::Modified(convoy) => {
+                let summary = self.summarize(&convoy);
+                let namespace = summary.namespace.clone();
+                let id = summary.id.clone();
+                let view = self.namespaces.entry(namespace.clone()).or_default();
+                view.convoys.insert(id, summary.clone());
+                view.seq = view.seq.saturating_add(1);
+
+                let daemon_event = if !view.emitted_initial_snapshot {
+                    view.emitted_initial_snapshot = true;
+                    DaemonEvent::NamespaceSnapshot(Box::new(NamespaceSnapshot {
+                        seq: view.seq,
+                        namespace: namespace.clone(),
+                        convoys: view.convoys.values().cloned().collect(),
+                    }))
+                } else {
+                    DaemonEvent::NamespaceDelta(Box::new(NamespaceDelta {
+                        seq: view.seq,
+                        namespace,
+                        changed: vec![summary],
+                        removed: Vec::new(),
+                    }))
+                };
+                let _ = self.event_tx.send(daemon_event).await;
+            }
+            WatchEvent::Deleted(convoy) => {
+                let namespace = convoy.metadata.namespace.clone();
+                let name = convoy.metadata.name.clone();
+                let id = ConvoyId::new(&namespace, &name);
+                if let Some(view) = self.namespaces.get_mut(&namespace) {
+                    if view.convoys.remove(&id).is_some() {
+                        view.seq = view.seq.saturating_add(1);
+                        let daemon_event = DaemonEvent::NamespaceDelta(Box::new(NamespaceDelta {
+                            seq: view.seq,
+                            namespace,
+                            changed: Vec::new(),
+                            removed: vec![id],
+                        }));
+                        let _ = self.event_tx.send(daemon_event).await;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -381,5 +428,73 @@ mod tests {
             None,
             "convoy-level Presentations do not resolve per-task — addendum prerequisite"
         );
+    }
+
+    async fn drain(rx: &mut mpsc::Receiver<DaemonEvent>) -> Vec<DaemonEvent> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn applying_convoy_added_emits_initial_snapshot_then_delta() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut projection = ConvoyProjection::new(tx);
+
+        let convoy = convoy_for_test("flotilla", "x", "wf", ResConvoyPhase::Pending, &[]);
+        projection.apply_convoy_event(WatchEvent::Added(convoy.clone())).await;
+
+        let events = drain(&mut rx).await;
+        assert_eq!(events.len(), 1, "first event per namespace emits a snapshot, got {events:?}");
+        match &events[0] {
+            DaemonEvent::NamespaceSnapshot(snap) => {
+                assert_eq!(snap.namespace, "flotilla");
+                assert_eq!(snap.convoys.len(), 1);
+                assert_eq!(snap.seq, 1);
+            }
+            other => panic!("expected NamespaceSnapshot, got {other:?}"),
+        }
+
+        // Second apply (modification) emits a NamespaceDelta only.
+        let mut modified = convoy;
+        if let Some(status) = modified.status.as_mut() {
+            status.phase = ResConvoyPhase::Active;
+        } else {
+            panic!("test fixture must have status");
+        }
+        projection.apply_convoy_event(WatchEvent::Modified(modified)).await;
+
+        let events = drain(&mut rx).await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            DaemonEvent::NamespaceDelta(delta) => {
+                assert_eq!(delta.changed.len(), 1);
+                assert!(delta.removed.is_empty());
+                assert_eq!(delta.seq, 2);
+            }
+            other => panic!("expected NamespaceDelta, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn applying_convoy_deleted_emits_removal_delta() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut projection = ConvoyProjection::new(tx);
+        let convoy = convoy_for_test("flotilla", "x", "wf", ResConvoyPhase::Pending, &[]);
+        projection.apply_convoy_event(WatchEvent::Added(convoy.clone())).await;
+        let _ = drain(&mut rx).await; // consume snapshot
+
+        projection.apply_convoy_event(WatchEvent::Deleted(convoy)).await;
+        let events = drain(&mut rx).await;
+        assert!(!events.is_empty(), "expected a delta, got none");
+        match &events[0] {
+            DaemonEvent::NamespaceDelta(delta) => {
+                assert!(delta.changed.is_empty());
+                assert_eq!(delta.removed.len(), 1);
+            }
+            other => panic!("expected NamespaceDelta, got {other:?}"),
+        }
     }
 }
