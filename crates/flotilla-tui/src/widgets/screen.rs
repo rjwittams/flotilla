@@ -126,7 +126,8 @@ impl InteractiveWidget for Screen {
             return Outcome::Ignored;
         }
 
-        // Phase 2: Global actions (only when no modal is open)
+        // Phase 2: Global actions (only when no modal is open).
+        // These are the TabPage-level bindings that apply on every top-level tab.
         match action {
             Action::PrevTab => {
                 ctx.app_actions.push(AppAction::PrevTab);
@@ -172,9 +173,19 @@ impl InteractiveWidget for Screen {
         let is_convoys = ctx.is_convoys;
         let active_identity = self.active_repo_identity(ctx.repo_order, ctx.active_repo, is_config, is_convoys).cloned();
         let outcome = if is_convoys {
-            // Convoys page has no interactive widget yet — all non-global actions are ignored.
-            // Global actions (PrevTab, NextTab, etc.) were already handled in Phase 2.
-            Outcome::Ignored
+            // Convoys page has no interactive widget — handle TabPage globals here,
+            // ignore everything else (navigation, PrevTab, etc. were handled in Phase 2).
+            match action {
+                Action::Quit => {
+                    ctx.app_actions.push(AppAction::Quit);
+                    Outcome::Consumed
+                }
+                Action::ToggleHelp => Outcome::Push(Box::new(super::help::HelpWidget::new())),
+                Action::OpenCommandPalette | Action::OpenContextualPalette => {
+                    Outcome::Push(Box::new(super::command_palette::CommandPaletteWidget::new()))
+                }
+                _ => Outcome::Ignored,
+            }
         } else if let Some(ref identity) = active_identity {
             if let Some(page) = self.repo_pages.get_mut(identity) {
                 page.handle_action(action, ctx)
@@ -352,11 +363,11 @@ impl InteractiveWidget for Screen {
         } else if is_config {
             (self.overview_page.binding_mode(), self.overview_page.status_fragment())
         } else if is_convoys {
-            (BindingModeId::Convoys.into(), StatusFragment::default())
+            (KeyBindingMode::Composed(vec![BindingModeId::TabPage, BindingModeId::Convoys]), StatusFragment::default())
         } else if let Some(page) = active_identity.as_ref().and_then(|id| self.repo_pages.get(id)) {
             (page.binding_mode(), page.status_fragment())
         } else {
-            (BindingModeId::Normal.into(), StatusFragment::default())
+            (KeyBindingMode::Composed(vec![BindingModeId::TabPage, BindingModeId::Normal]), StatusFragment::default())
         };
 
         let active_mode = binding_mode.primary();
@@ -431,7 +442,10 @@ impl InteractiveWidget for Screen {
     }
 
     fn binding_mode(&self) -> KeyBindingMode {
-        self.modal_stack.last().map(|w| w.binding_mode()).unwrap_or_else(|| BindingModeId::Normal.into())
+        self.modal_stack
+            .last()
+            .map(|w| w.binding_mode())
+            .unwrap_or_else(|| KeyBindingMode::Composed(vec![BindingModeId::TabPage, BindingModeId::Normal]))
     }
 
     fn captures_raw_keys(&self) -> bool {

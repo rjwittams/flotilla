@@ -17,14 +17,13 @@ impl App {
     /// config mode gets Overview bindings, convoys mode gets Convoys bindings,
     /// and normal mode gets Normal bindings.
     fn resolve_action(&self, key: KeyEvent) -> Option<Action> {
-        let mode_id = if self.ui.is_config {
-            BindingModeId::Overview
+        let mode = if self.ui.is_config {
+            KeyBindingMode::Composed(vec![BindingModeId::TabPage, BindingModeId::Overview])
         } else if self.ui.is_convoys {
-            BindingModeId::Convoys
+            KeyBindingMode::Composed(vec![BindingModeId::TabPage, BindingModeId::Convoys])
         } else {
-            BindingModeId::Normal
+            KeyBindingMode::Composed(vec![BindingModeId::TabPage, BindingModeId::Normal])
         };
-        let mode: KeyBindingMode = mode_id.into();
         self.keymap.resolve(&mode, crokey::KeyCombination::from(key))
     }
 

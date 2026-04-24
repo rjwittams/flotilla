@@ -320,12 +320,16 @@ impl Keymap {
     /// Collects effective bindings (mode-specific + shared fallback), groups them
     /// by action, and organises into display sections with combined key names.
     pub fn help_sections(&self) -> Vec<HelpSection> {
-        // Build the effective Normal-mode binding map: start with shared, overlay
-        // mode-specific. This mirrors resolve() semantics so the help screen
-        // accurately reflects what each key does in Normal mode.
+        // Build the effective Normal-mode binding map: start with shared, then
+        // TabPage (app-global tab-level keys), then Normal (repo-tab specific).
+        // This mirrors the Composed([TabPage, Normal]) resolution order so the
+        // help screen accurately reflects what each key does in Normal mode.
         let mut effective: std::collections::HashMap<KeyCombination, Action> = std::collections::HashMap::new();
         if let Some(shared_bindings) = self.compiled.key_map.get(&BindingModeId::Shared) {
             effective.extend(shared_bindings);
+        }
+        if let Some(tab_page_bindings) = self.compiled.key_map.get(&BindingModeId::TabPage) {
+            effective.extend(tab_page_bindings);
         }
         if let Some(normal_bindings) = self.compiled.key_map.get(&BindingModeId::Normal) {
             effective.extend(normal_bindings);

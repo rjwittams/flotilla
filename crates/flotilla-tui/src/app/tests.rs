@@ -1718,3 +1718,63 @@ fn select_next_stays_within_filtered_set() {
     app.convoys_tab_select_delta(-1);
     assert_eq!(app.selected_convoy_id().map(|id| id.name()), Some("bravo"), "prev should clamp within filtered set");
 }
+
+// -- TabPage binding mode: app-global keys work on the Convoys tab --
+
+#[test]
+fn command_palette_opens_on_convoys_tab() {
+    // '/' is now in TabPage, which Convoys composes. Verify it opens the palette.
+    let mut app = stub_app();
+    app.ui.is_config = false;
+    app.ui.is_convoys = true;
+
+    app.handle_key(key(KeyCode::Char('/')));
+
+    assert!(app.screen.has_modal(), "pressing '/' on the Convoys tab should open the command palette modal");
+}
+
+#[test]
+fn tab_nav_works_on_convoys_tab() {
+    // ']' (NextTab) is in TabPage and composed with Convoys.
+    // With two repos, switching from Convoys to the next tab should land on a repo tab.
+    let mut app = stub_app_with_repos(2);
+    app.ui.is_config = false;
+    app.ui.is_convoys = true;
+
+    app.handle_key(key(KeyCode::Char(']')));
+
+    assert!(!app.ui.is_convoys, "pressing ']' on the Convoys tab should navigate to a repo tab");
+}
+
+#[test]
+fn quit_works_on_convoys_tab() {
+    // 'q' is in TabPage and composed with Convoys.
+    let mut app = stub_app();
+    app.ui.is_config = false;
+    app.ui.is_convoys = true;
+
+    app.handle_key(key(KeyCode::Char('q')));
+
+    assert!(app.should_quit, "pressing 'q' on the Convoys tab should quit the app");
+}
+
+#[test]
+fn action_menu_overlay_masks_tab_nav() {
+    // Overlay modes (ActionMenu) act as focus barriers — they should NOT let
+    // tab-page globals (like ']') fall through.
+    let mut app = stub_app_with_repos(2);
+    app.ui.is_config = false;
+    app.ui.is_convoys = false;
+
+    // Open an action menu by pushing the widget directly.
+    let items = Vec::new();
+    let dummy_item = checkout_item("feat", "/wt", false);
+    app.screen.modal_stack.push(Box::new(crate::widgets::action_menu::ActionMenuWidget::new(items, dummy_item)));
+    assert!(app.screen.has_modal());
+
+    let tab_before = app.model.active_repo;
+    app.handle_key(key(KeyCode::Char(']')));
+    let tab_after = app.model.active_repo;
+
+    assert_eq!(tab_before, tab_after, "tab navigation should be masked by the ActionMenu overlay");
+}
